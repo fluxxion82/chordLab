@@ -1,5 +1,6 @@
 #include "chordlab/scale.h"
 
+#include <cassert>
 #include <cstddef>
 
 namespace chordlab {
@@ -21,6 +22,7 @@ constexpr std::array<std::array<int, 7>, kNumModes> kModeIntervals{{
 }  // namespace
 
 const std::array<int, 7>& modeIntervals(Mode mode) {
+    assert(static_cast<int>(mode) >= 0 && static_cast<int>(mode) < kNumModes);
     return kModeIntervals[static_cast<std::size_t>(mode)];
 }
 

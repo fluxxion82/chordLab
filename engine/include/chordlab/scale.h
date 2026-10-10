@@ -8,6 +8,8 @@ namespace chordlab {
 using PitchClass = int;
 
 /// The seven diatonic modes plus harmonic and melodic (ascending) minor.
+/// A `Mode` passed to any engine function must be one of the declared enumerators; values
+/// outside 0..kNumModes-1 (e.g. from an unchecked cast) are a precondition violation.
 enum class Mode {
     Ionian,
     Dorian,
