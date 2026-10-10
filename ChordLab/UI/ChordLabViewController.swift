@@ -4,15 +4,17 @@ public typealias MIDINoteNumber = UInt8
 public typealias MIDIVelocity = UInt8
 
 @objc class ChordLabViewController: IPlugCocoaViewController {
+  // All callbacks capture `self` weakly: the controller owns the state, and the
+  // state owns these closures, so strong captures would form a retain cycle.
   lazy var state = ChordLabState(
-    beginEdit: self.beginInformHostOfParamChangeFromUI,
-    doEdit: self.sendParameterValueFromUI,
-    endEdit: self.endInformHostOfParamChangeFromUI,
-    sendMidi: { status, data1, data2 in
-      self.sendMidiMsgFromUI(status: status, data1: data1, data2: data2, offset: 0)
+    beginEdit: { [weak self] idx in self?.beginInformHostOfParamChangeFromUI(paramIdx: idx) },
+    doEdit: { [weak self] idx, value in self?.sendParameterValueFromUI(paramIdx: idx, normalizedValue: value) },
+    endEdit: { [weak self] idx in self?.endInformHostOfParamChangeFromUI(paramIdx: idx) },
+    sendMidi: { [weak self] status, data1, data2 in
+      self?.sendMidiMsgFromUI(status: status, data1: data1, data2: data2, offset: 0)
     },
-    sendCommand: { tag, data in
-      self.sendArbitraryMsgFromUI(msgTag: tag, ctrlTag: kNoCtrlTag, msg: data)
+    sendCommand: { [weak self] tag, data in
+      self?.sendArbitraryMsgFromUI(msgTag: tag, ctrlTag: kNoCtrlTag, msg: data)
     })
 
   override init(nibName nibNameOrNil: PlatformNibName?, bundle nibBundleOrNil: Bundle?) {

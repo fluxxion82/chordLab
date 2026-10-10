@@ -103,27 +103,41 @@ void ChordLab::RunSpikeArp(int nFrames)
   const double ppqPerSample = bpm / (60.0 * sr);
   const double ppqEnd = ppqStart + nFrames * ppqPerSample;
 
-  // Discontinuity (host loop wrap or seek): never leave a note hanging.
-  const bool jumped = mArpLastPpqEnd >= 0.0 && std::fabs(ppqStart - mArpLastPpqEnd) > 1.0 / 1024.0;
-  if (mArpSounding >= 0 && (jumped || mArpOffPpq < ppqStart))
-    noteOff(0);
+  // Sample offset of a ppq position relative to this block; may lie outside [0, nFrames).
+  auto offsetFor = [&](double ppq) { return (int) std::lround((ppq - ppqStart) / ppqPerSample); };
 
-  auto offsetFor = [&](double ppq) {
-    return std::clamp((int) std::lround((ppq - ppqStart) / ppqPerSample), 0, nFrames - 1);
-  };
-
-  if (mArpSounding >= 0 && mArpOffPpq < ppqEnd)
-    noteOff(offsetFor(mArpOffPpq));
-
-  for (double b = std::ceil(ppqStart - 1e-9); b < ppqEnd; b += 1.0)
+  // Boundary ownership is decided by sample offset, not by ppq interval membership, so a beat
+  // sitting on a block edge is emitted exactly once (float noise in ppqEnd caused duplicates).
+  const bool contiguous = mArpLastPpqEnd >= 0.0 && std::fabs(ppqStart - mArpLastPpqEnd) <= 1.0 / 1024.0;
+  if (!contiguous)
   {
-    if (b < 0.0) continue;
-    const int offset = offsetFor(b);
-    if (mArpSounding >= 0) noteOff(offset);                 // off before on at the same offset
-    const int pitch = 60 + ((int) b % 4);
-    IMidiMsg on; on.MakeNoteOnMsg(pitch, 100, offset); SendMidiMsg(on);
-    mArpSounding = pitch;
-    mArpOffPpq = b + 0.125;                                  // 1/8 beat long
+    if (mArpSounding >= 0) noteOff(0);                           // start / seek / host loop wrap: never hang a note
+    mArpNextBeat = std::ceil(ppqStart - 0.5 * ppqPerSample);     // a beat within half a sample before the start is ours
+  }
+
+  if (mArpSounding >= 0)                                          // note still sounding from an earlier block
+  {
+    const int off = offsetFor(mArpOffPpq);
+    if (off < nFrames) noteOff(std::max(off, 0));
+  }
+
+  for (;;)
+  {
+    const double b = mArpNextBeat;
+    const int onOffset = offsetFor(b);
+    if (onOffset >= nFrames) break;                                // belongs to a later block
+    if (b >= 0.0)
+    {
+      const int on = std::max(onOffset, 0);
+      if (mArpSounding >= 0) noteOff(on);                          // off before on at the same offset
+      const int pitch = 60 + ((int) b % 4);
+      IMidiMsg msg; msg.MakeNoteOnMsg(pitch, 100, on); SendMidiMsg(msg);
+      mArpSounding = pitch;
+      mArpOffPpq = b + 0.125;                                      // 1/8 beat long
+      const int off = offsetFor(mArpOffPpq);
+      if (off < nFrames) noteOff(std::max(off, on));               // ends inside this block: schedule it now
+    }
+    mArpNextBeat += 1.0;
   }
 
   mArpLastPpqEnd = ppqEnd;
@@ -180,34 +194,38 @@ void ChordLab::PushStateToUI()
 
 bool ChordLab::SerializeState(IByteChunk& chunk) const
 {
+  // Envelope, identical for every version: u8 version, i32 payloadLen, payload, then iPlug2 params.
   chunk.Put(&kStateVersion);
   const std::string json = StateJson();
   const int32_t len = (int32_t) json.size();
   chunk.Put(&len);
   chunk.PutBytes(json.data(), len);
-  return true;
+  return SerializeParams(chunk);
 }
 
 int ChordLab::UnserializeState(const IByteChunk& chunk, int startPos)
 {
   uint8_t version = 0;
-  startPos = chunk.Get(&version, startPos);
-  if (version != kStateVersion)
-    return startPos;   // unknown version: keep defaults
+  int pos = chunk.Get(&version, startPos);
+  if (pos < 0)
+    return -1;
 
   int32_t len = 0;
-  startPos = chunk.Get(&len, startPos);
-  if (len < 0 || len > 1 << 20 || startPos + len > chunk.Size())
-    return startPos;
+  pos = chunk.Get(&len, pos);
+  if (pos < 0 || len < 0 || len > chunk.Size() - pos)
+    return -1;                                                   // malformed: let the wrapper treat it as a failure
 
-  std::string json((const char*) chunk.GetData() + startPos, (size_t) len);
-  startPos += len;
+  if (version == kStateVersion)
+  {
+    const std::string json((const char*) chunk.GetData() + pos, (size_t) len);
+    const auto at = json.find("\"test\":");                     // minimal parse for the spike
+    if (at != std::string::npos)
+      mTestValue = atoi(json.c_str() + at + 7);
+  }
+  // Unknown payload version: keep defaults but skip the payload so the trailer still lines up.
+  pos += len;
 
-  // Minimal parse for the spike: find "test":<int>.
-  const auto pos = json.find("\"test\":");
-  if (pos != std::string::npos)
-    mTestValue = atoi(json.c_str() + pos + 7);
-
-  PushStateToUI();   // no-op if the editor is closed (nothing is listening)
-  return startPos;
+  pos = UnserializeParams(chunk, pos);
+  PushStateToUI();                                               // no listener when the editor is closed
+  return pos;
 }

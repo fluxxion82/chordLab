@@ -40,6 +40,7 @@ private:
   std::atomic<bool> mSpikeArp{false};
   int mArpSounding = -1;          // audio thread only
   double mArpOffPpq = 0.0;        // audio thread only
+  double mArpNextBeat = 0.0;      // audio thread only: next un-emitted integer beat
   double mArpLastPpqEnd = -1.0;   // audio thread only
   int mIdleCounter = 0;
 
