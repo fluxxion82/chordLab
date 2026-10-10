@@ -1,5 +1,6 @@
 #include "ChordLab.h"
 #include "IPlug_include_in_plug_src.h"
+#include <algorithm>
 
 #ifdef FRAMEWORK_BUILD
 #import <AUv3Framework/ChordLab-Swift.h>
@@ -8,7 +9,7 @@
 #import <ChordLab-Swift.h>
 #endif
 
-const NSInteger kScopeBufferSize = SCOPE_BUFFER_SIZE;
+const NSInteger kScopeBufferSize = 512; // legacy, UI scope removed in Task 0.3
 
 ChordLab::ChordLab(const InstanceInfo& info)
 : Plugin(info, MakeConfig(kNumParams, kNumPresets))
@@ -20,7 +21,6 @@ ChordLab::ChordLab(const InstanceInfo& info)
 
 void ChordLab::OnIdle()
 {
-  mScopeSender.TransmitData(*this);
 }
 
 void* ChordLab::OpenWindow(void* pParent)
@@ -55,16 +55,11 @@ bool ChordLab::OnHostRequestingSupportedViewConfiguration(int width, int height)
 
 void ChordLab::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
 {
-  const double gain = GetParam(kParamGain)->Value() / 100.;
-  const int nChans = NOutChansConnected();
-    
-  for (int s = 0; s < nFrames; s++) {
-    for (int c = 0; c < nChans; c++) {
-      outputs[c][s] = inputs[0][s] * gain;
-    }
-  }
-  
-  mScopeSender.ProcessBlock(outputs, nFrames, kCtrlTagScope);
+  // MIDI-only plugin: Live requires an audio bus, so keep the outputs silent.
+  // Not zeroing them leaves stale host buffers playing (iPlug2 Discourse, 2024).
+  const int nOut = NOutChansConnected();
+  for (int c = 0; c < nOut; ++c)
+    std::fill(outputs[c], outputs[c] + nFrames, 0.0);
 }
 
 bool ChordLab::OnMessage(int msgTag, int ctrlTag, int dataSize, const void* pData)

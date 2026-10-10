@@ -1,11 +1,8 @@
 #pragma once
 
 #include "IPlug_include_in_plug_hdr.h"
-#include "ISender.h"
 
 using namespace iplug;
-
-constexpr int SCOPE_BUFFER_SIZE = 512;
 
 class ChordLab final : public Plugin
 {
@@ -20,8 +17,4 @@ public:
   void OnIdle() override;
   void ProcessBlock(sample** inputs, sample** outputs, int nFrames) override;
   bool OnMessage(int msgTag, int ctrlTag, int dataSize, const void* pData) override;
-
-  using OscilloscopeSender = IBufferSender<1, 1, SCOPE_BUFFER_SIZE>;
-
-  OscilloscopeSender mScopeSender {-100.0};
 };
