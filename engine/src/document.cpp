@@ -1,0 +1,182 @@
+#include "chordlab/document.h"
+
+#include <algorithm>
+#include <cassert>
+#include <cstddef>
+#include <utility>
+
+namespace chordlab {
+
+// --- Document --------------------------------------------------------------------------
+
+double Document::startBeatOf(int index) const {
+    assert(index >= 0 && static_cast<std::size_t>(index) <= events.size());
+    double beat = 0.0;
+    for (int i = 0; i < index; ++i) {
+        beat += events[static_cast<std::size_t>(i)].lengthBeats;
+    }
+    return beat;
+}
+
+double Document::endBeat() const {
+    return startBeatOf(static_cast<int>(events.size()));
+}
+
+// --- DocumentStore ---------------------------------------------------------------------
+
+namespace {
+
+double clampLength(double lengthBeats) {
+    return std::clamp(lengthBeats, kMinLengthBeats, kMaxLengthBeats);
+}
+
+int clampVelocity(int velocity) {
+    return std::clamp(velocity, kMinVelocity, kMaxVelocity);
+}
+
+/// Checks the `Chord` preconditions documented in chord.h.
+void assertValidChord([[maybe_unused]] const Chord& chord) {
+    assert(chord.type != nullptr);
+    assert(chord.root >= 0 && chord.root < 12);
+}
+
+/// Checks the `Key` preconditions documented in pitch.h and scale.h.
+void assertValidKey([[maybe_unused]] const Key& key) {
+    assert(key.tonic.letter >= 'A' && key.tonic.letter <= 'G');
+    assert(key.tonic.alter >= -1 && key.tonic.alter <= 1);
+    assert(static_cast<int>(key.mode) >= 0 && static_cast<int>(key.mode) < kNumModes);
+}
+
+}  // namespace
+
+const Document& DocumentStore::doc() const {
+    return doc_;
+}
+
+int DocumentStore::findIndex(int id) const {
+    for (std::size_t i = 0; i < doc_.events.size(); ++i) {
+        if (doc_.events[i].id == id) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+bool DocumentStore::commit(Document next) {
+    if (next == doc_) {
+        return false;
+    }
+    undoStack_.push_back(std::move(doc_));
+    doc_ = std::move(next);
+    redoStack_.clear();
+    return true;
+}
+
+int DocumentStore::appendChord(Chord chord, double lengthBeats, int velocity) {
+    assertValidChord(chord);
+    const int id = nextId_++;
+    Document next = doc_;
+    next.events.push_back(ChordEvent{id, chord, clampLength(lengthBeats), clampVelocity(velocity)});
+    [[maybe_unused]] const bool changed = commit(std::move(next));
+    assert(changed);  // a fresh id always makes the sequence differ
+    return id;
+}
+
+void DocumentStore::moveChord(int id, int newIndex) {
+    const int from = findIndex(id);
+    if (from < 0) {
+        return;
+    }
+    const int to = std::clamp(newIndex, 0, static_cast<int>(doc_.events.size()) - 1);
+    if (to == from) {
+        return;
+    }
+    Document next = doc_;
+    auto& events = next.events;
+    const auto first = events.begin() + from;
+    const auto target = events.begin() + to;
+    if (from < to) {
+        std::rotate(first, first + 1, target + 1);
+    } else {
+        std::rotate(target, first, first + 1);
+    }
+    commit(std::move(next));
+}
+
+void DocumentStore::setLength(int id, double lengthBeats) {
+    const int index = findIndex(id);
+    if (index < 0) {
+        return;
+    }
+    Document next = doc_;
+    next.events[static_cast<std::size_t>(index)].lengthBeats = clampLength(lengthBeats);
+    commit(std::move(next));
+}
+
+void DocumentStore::setVelocity(int id, int velocity) {
+    const int index = findIndex(id);
+    if (index < 0) {
+        return;
+    }
+    Document next = doc_;
+    next.events[static_cast<std::size_t>(index)].velocity = clampVelocity(velocity);
+    commit(std::move(next));
+}
+
+void DocumentStore::removeChord(int id) {
+    const int index = findIndex(id);
+    if (index < 0) {
+        return;
+    }
+    Document next = doc_;
+    next.events.erase(next.events.begin() + index);
+    commit(std::move(next));
+}
+
+void DocumentStore::setProjectKey(Key key) {
+    assertValidKey(key);
+    Document next = doc_;
+    next.projectKey = key;
+    commit(std::move(next));
+}
+
+void DocumentStore::setBrowsedKey(Key key) {
+    assertValidKey(key);
+    Document next = doc_;
+    next.browsedKey = key;
+    commit(std::move(next));
+}
+
+void DocumentStore::setProgressionLoop(bool loop) {
+    Document next = doc_;
+    next.progressionLoop = loop;
+    commit(std::move(next));
+}
+
+void DocumentStore::setFollowHost(bool follow) {
+    Document next = doc_;
+    next.followHost = follow;
+    commit(std::move(next));
+}
+
+bool DocumentStore::undo() {
+    if (undoStack_.empty()) {
+        return false;
+    }
+    redoStack_.push_back(std::move(doc_));
+    doc_ = std::move(undoStack_.back());
+    undoStack_.pop_back();
+    return true;
+}
+
+bool DocumentStore::redo() {
+    if (redoStack_.empty()) {
+        return false;
+    }
+    undoStack_.push_back(std::move(doc_));
+    doc_ = std::move(redoStack_.back());
+    redoStack_.pop_back();
+    return true;
+}
+
+}  // namespace chordlab
