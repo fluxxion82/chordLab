@@ -64,19 +64,39 @@ int letterWithNaturalPc(PitchClass pc) {
     return -1;
 }
 
-/// Accidental count that moves `letter` to `pc`, as the representative in -2..2.
+/// Accidental count that moves `letter` to `pc`, as the representative of the difference mod 12 in
+/// -2..9. The formula alone does not bound the result to -2..2: that holds only because every caller
+/// passes a letter within two semitones of `pc`, which is true for the degrees of any valid key
+/// (single-accidental tonic, declared mode) and is what keeps `Spelling::alter` in -2..2.
 int alterToReach(char letter, PitchClass pc) {
     const int diff = pc - naturalPitchClass(letter);
     return ((diff % 12) + 12 + 2) % 12 - 2;
 }
 
+/// Tie-break order for enharmonic tonic spellings: natural, then sharp, then flat (lower wins).
+int tonicSpellingRank(int alter) {
+    switch (alter) {
+        case 0: return 0;
+        case 1: return 1;
+        default: return 2;
+    }
+}
+
+/// Checks the `Tonic` preconditions documented in pitch.h.
+void assertValidTonic([[maybe_unused]] const Tonic& tonic) {
+    assert(tonic.letter >= 'A' && tonic.letter <= 'G');
+    assert(tonic.alter >= -1 && tonic.alter <= 1);
+}
+
 }  // namespace
 
 PitchClass Key::tonicPc() const {
+    assertValidTonic(tonic);
     return pitchClassOf(naturalPitchClass(tonic.letter) + tonic.alter);
 }
 
 int signatureOf(const Key& key) {
+    assertValidTonic(key.tonic);
     return fifthsIndex(key.tonic.letter) + 7 * key.tonic.alter + modeSignatureOffset(key.mode);
 }
 
@@ -93,8 +113,9 @@ Tonic canonicalTonic(PitchClass pc, Mode mode) {
             }
             const int signature = signatureOf(candidate);
             const bool fewerAccidentals = std::abs(signature) < std::abs(bestSignature);
-            const bool sharperOnTie = std::abs(signature) == std::abs(bestSignature) && signature > bestSignature;
-            if (!found || fewerAccidentals || sharperOnTie) {
+            const bool simplerSpellingOnTie = std::abs(signature) == std::abs(bestSignature) &&
+                                              tonicSpellingRank(alter) < tonicSpellingRank(best.alter);
+            if (!found || fewerAccidentals || simplerSpellingOnTie) {
                 found = true;
                 best = candidate.tonic;
                 bestSignature = signature;
@@ -119,6 +140,7 @@ std::string Spelling::text() const {
 }
 
 Spelling spellDegree(const Key& key, int degree) {
+    assertValidTonic(key.tonic);
     const int d = ((degree % 7) + 7) % 7;
     const char letter = letterAt(letterIndex(key.tonic.letter) + d);
     const PitchClass pc = scalePitchClasses(key.tonicPc(), key.mode)[static_cast<std::size_t>(d)];
