@@ -79,7 +79,8 @@ Column buildColumn(const Key& browsedKey, const std::array<PitchClass, 7>& scale
         column[kPowerTier] = &chordType("5");
     }
     // The "unused" check is vacuous for tier 2 (none of its candidates is a triad or power chord) and
-    // is what gives tiers 3 and 4 their gaps.
+    // for tier 4 (none of its candidates appears in an earlier list, so its gaps come from key membership
+    // alone); it is what gives tier 3 its gaps.
     column[kSixthSeventhTier] = firstUnusedInKey(kSixthSeventhCandidates, root, browsedKey, column);
     column[kSeventhTier] = firstUnusedInKey(kSeventhCandidates, root, browsedKey, column);
     column[kColourTier] = firstUnusedInKey(kColourCandidates, root, browsedKey, column);
