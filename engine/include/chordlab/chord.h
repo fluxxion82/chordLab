@@ -23,14 +23,18 @@ struct ChordType {
 };
 
 /// The chord type with the given `id`. Throws `std::out_of_range` for an unknown id.
-/// The returned reference is stable for the program's lifetime, so a `Chord::type` may point at it.
+/// The returned reference is stable until module unload / static destruction, so a `Chord::type` may
+/// point at it.
 const ChordType& chordType(std::string_view id);
 
 /// Every chord type, in dictionary order (power chord, triads, sixths, sevenths, ninths, 7sus4).
-/// The vector is stable for the program's lifetime and `chordType(id)` returns references into it.
+/// The vector is stable until module unload / static destruction and `chordType(id)` returns references
+/// into it.
 const std::vector<ChordType>& allChordTypes();
 
 /// A chord: a root pitch class and a dictionary type. `type` must point into `allChordTypes()`.
+/// Stored `root` values must be canonical (0..11): `pitchClasses` reduces an out-of-range root modulo
+/// 12 as a convenience, but `operator==` compares raw roots, so `Chord{12, t} != Chord{0, t}`.
 struct Chord {
     PitchClass root;
     const ChordType* type;
