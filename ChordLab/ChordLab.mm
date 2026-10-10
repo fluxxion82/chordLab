@@ -4,6 +4,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>
+#include <cmath>
 
 #ifdef FRAMEWORK_BUILD
 #import <AUv3Framework/ChordLab-Swift.h>
@@ -22,6 +23,9 @@ ChordLab::ChordLab(const InstanceInfo& info)
 
 void ChordLab::OnIdle()
 {
+  // Spike 2 telemetry: refresh the UI's view of host time info a few times a second.
+  if (++mIdleCounter % 15 == 0 && mSpikeArp.load(std::memory_order_relaxed))
+    PushStateToUI();
 }
 
 void* ChordLab::OpenWindow(void* pParent)
@@ -61,6 +65,68 @@ void ChordLab::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
   const int nOut = NOutChansConnected();
   for (int c = 0; c < nOut; ++c)
     std::fill(outputs[c], outputs[c] + nFrames, 0.0);
+
+  mDbgPpq.store(GetPPQPos(), std::memory_order_relaxed);
+  mDbgTempo.store(GetTempo(), std::memory_order_relaxed);
+  mDbgPlaying.store(GetTransportIsRunning() ? 1 : 0, std::memory_order_relaxed);
+  mDbgLoop.store(mTimeInfo.mTransportLoopEnabled ? 1 : 0, std::memory_order_relaxed);
+  mDbgCycleStart.store(mTimeInfo.mCycleStart, std::memory_order_relaxed);
+  mDbgCycleEnd.store(mTimeInfo.mCycleEnd, std::memory_order_relaxed);
+
+  if (mSpikeArp.load(std::memory_order_relaxed))
+    RunSpikeArp(nFrames);
+  else if (mArpSounding >= 0)
+  {
+    IMidiMsg off; off.MakeNoteOffMsg(mArpSounding, 0); SendMidiMsg(off);
+    mArpSounding = -1;
+  }
+}
+
+void ChordLab::RunSpikeArp(int nFrames)
+{
+  const double sr = GetSampleRate();
+  const double bpm = GetTempo();
+  const double ppqStart = GetPPQPos();
+
+  auto noteOff = [&](int offset) {
+    IMidiMsg off; off.MakeNoteOffMsg(mArpSounding, offset); SendMidiMsg(off);
+    mArpSounding = -1;
+  };
+
+  if (!GetTransportIsRunning() || bpm <= 0.0 || sr <= 0.0)
+  {
+    if (mArpSounding >= 0) noteOff(0);
+    mArpLastPpqEnd = -1.0;
+    return;
+  }
+
+  const double ppqPerSample = bpm / (60.0 * sr);
+  const double ppqEnd = ppqStart + nFrames * ppqPerSample;
+
+  // Discontinuity (host loop wrap or seek): never leave a note hanging.
+  const bool jumped = mArpLastPpqEnd >= 0.0 && std::fabs(ppqStart - mArpLastPpqEnd) > 1.0 / 1024.0;
+  if (mArpSounding >= 0 && (jumped || mArpOffPpq < ppqStart))
+    noteOff(0);
+
+  auto offsetFor = [&](double ppq) {
+    return std::clamp((int) std::lround((ppq - ppqStart) / ppqPerSample), 0, nFrames - 1);
+  };
+
+  if (mArpSounding >= 0 && mArpOffPpq < ppqEnd)
+    noteOff(offsetFor(mArpOffPpq));
+
+  for (double b = std::ceil(ppqStart - 1e-9); b < ppqEnd; b += 1.0)
+  {
+    if (b < 0.0) continue;
+    const int offset = offsetFor(b);
+    if (mArpSounding >= 0) noteOff(offset);                 // off before on at the same offset
+    const int pitch = 60 + ((int) b % 4);
+    IMidiMsg on; on.MakeNoteOnMsg(pitch, 100, offset); SendMidiMsg(on);
+    mArpSounding = pitch;
+    mArpOffPpq = b + 0.125;                                  // 1/8 beat long
+  }
+
+  mArpLastPpqEnd = ppqEnd;
 }
 
 void ChordLab::OnUIOpen()
@@ -80,14 +146,29 @@ bool ChordLab::OnMessage(int msgTag, int ctrlTag, int dataSize, const void* pDat
     return true;
   }
 
+  if (msgTag == kMsgTagSpikeArp && dataSize == (int) sizeof(int32_t) && pData)
+  {
+    int32_t v = 0;
+    memcpy(&v, pData, sizeof(v));
+    mSpikeArp.store(v != 0, std::memory_order_relaxed);
+    PushStateToUI();
+    return true;
+  }
+
   return CocoaEditorDelegate::OnMessage(msgTag, ctrlTag, dataSize, pData);
 }
 
 std::string ChordLab::StateJson() const
 {
   // Built by hand for M0; the engine's json_api replaces this in M2.
-  char buf[128];
-  snprintf(buf, sizeof(buf), "{\"v\":%d,\"key\":\"C major\",\"test\":%d}", (int) kStateVersion, mTestValue);
+  char buf[256];
+  snprintf(buf, sizeof(buf),
+           "{\"v\":%d,\"key\":\"C major\",\"test\":%d,\"arp\":%d,"
+           "\"ppq\":%.3f,\"tempo\":%.2f,\"playing\":%d,\"loop\":%d,\"cycle\":[%.2f,%.2f]}",
+           (int) kStateVersion, mTestValue, mSpikeArp.load(std::memory_order_relaxed) ? 1 : 0,
+           mDbgPpq.load(std::memory_order_relaxed), mDbgTempo.load(std::memory_order_relaxed),
+           mDbgPlaying.load(std::memory_order_relaxed), mDbgLoop.load(std::memory_order_relaxed),
+           mDbgCycleStart.load(std::memory_order_relaxed), mDbgCycleEnd.load(std::memory_order_relaxed));
   return std::string(buf);
 }
 

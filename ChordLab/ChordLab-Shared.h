@@ -12,6 +12,7 @@ const NSInteger kNoCtrlTag = -1;
 
 // UI -> plugin
 const NSInteger kMsgTagSetTestValue = 3;   // payload: int32 (M0 spike 4)
+const NSInteger kMsgTagSpikeArp = 5;       // payload: int32 0/1 (M0 spike 2: ppq-driven test arpeggio)
 // plugin -> UI
 const NSInteger kMsgTagStateToUI = 4;      // payload: UTF-8 JSON of the plugin state
 

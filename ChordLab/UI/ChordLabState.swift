@@ -7,6 +7,7 @@ class ChordLabState: NSObject, ObservableObject {
   @Published var bundleID = String("")
   @Published var testValue: Int = 0        // M0 spike 4: round-trips through the state chunk
   @Published var stateJson: String = ""
+  @Published var spikeArp: Bool = false  // M0 spike 2
 
   let beginEdit: @MainActor (Int) -> Void
   let doEdit: @MainActor (Int, Double) -> Void
@@ -56,11 +57,17 @@ class ChordLabState: NSObject, ObservableObject {
   }
 
   /// Called with the JSON the plugin pushes on open and after every change.
+  @MainActor func setSpikeArp(_ on: Bool) {
+    spikeArp = on
+    var value: Int32 = on ? 1 : 0
+    sendCommand(kMsgTagSpikeArp, Data(bytes: &value, count: MemoryLayout<Int32>.size))
+  }
+
   func applyState(json: Data) {
     stateJson = String(decoding: json, as: UTF8.self)
-    if let obj = try? JSONSerialization.jsonObject(with: json) as? [String: Any],
-       let v = obj["test"] as? Int {
-      testValue = v
+    if let obj = try? JSONSerialization.jsonObject(with: json) as? [String: Any] {
+      if let v = obj["test"] as? Int { testValue = v }
+      if let a = obj["arp"] as? Int { spikeArp = a != 0 }
     }
   }
 }

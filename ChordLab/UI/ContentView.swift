@@ -36,7 +36,13 @@ struct ContentView: View {
                                      set: { state.setTestValue($0) }))
             .labelsHidden()
         }
+        // Spike 2: ppq-driven test arpeggio (one 1/8-note per beat, C D E F) while Live plays.
+        Toggle("Spike 2: ppq test arp (route track 2, press play in Live)",
+               isOn: Binding(get: { state.spikeArp }, set: { state.setSpikeArp($0) }))
+          .toggleStyle(.switch).foregroundStyle(.white)
+
         Text(state.stateJson).font(.caption.monospaced()).foregroundStyle(.gray)
+          .textSelection(.enabled)
       }
       .padding()
     }
