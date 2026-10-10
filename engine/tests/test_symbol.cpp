@@ -266,7 +266,9 @@ TEST_CASE("romanNumeral and chordSymbol: the tonic chord is always I/i and start
                         const std::string numeral = romanNumeral(c, k, style);
                         REQUIRE_FALSE(numeral.empty());
                         CHECK((numeral[0] == 'I' || numeral[0] == 'i'));
-                        CHECK(numeral.compare(0, 1, "V") != 0);
+                        // The roman part is exactly `I`/`i`: only the suffix may follow, never another
+                        // numeral letter (`II`, `IV`, `iii`...).
+                        CHECK((numeral.size() == 1 || !isNumeralLetter(numeral[1])));
                         const std::string symbol = chordSymbol(c, k, style);
                         CHECK(symbol.compare(0, tonicText.size(), tonicText) == 0);
                     }
