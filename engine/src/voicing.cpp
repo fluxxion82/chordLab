@@ -15,9 +15,13 @@ constexpr int kOctave = 12;
 constexpr int kMinRange = 2 * kOctave;
 constexpr int kMidiMax = 127;
 
-/// True if `lowest`..`highest` is a usable range: inside MIDI and at least two octaves wide.
+/// True if `lowest`..`highest` is a usable range: both ends inside MIDI and at least two octaves wide.
+/// Both endpoints are checked before `highest - lowest` is formed, so the subtraction cannot overflow.
 bool validRange(int lowest, int highest) {
-    return lowest >= 0 && highest <= kMidiMax && highest - lowest >= kMinRange;
+    if (lowest < 0 || lowest > kMidiMax || highest < 0 || highest > kMidiMax) {
+        return false;
+    }
+    return highest - lowest >= kMinRange;
 }
 
 }  // namespace

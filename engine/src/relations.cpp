@@ -16,7 +16,11 @@ Key canonicalKey(PitchClass pc, Mode mode) {
 }  // namespace
 
 Key fifthsNeighbour(const Key& key, int steps) {
-    return canonicalKey(pitchClassOf(key.tonicPc() + kFifth * steps), key.mode);
+    // Only `steps` modulo 12 matters, so reduce it to 0..11 first: `kFifth * steps` (and the tonic
+    // addition after it) would overflow for large |steps|. `steps % 12` is defined for every int,
+    // INT_MIN included.
+    const int s = ((steps % 12) + 12) % 12;
+    return canonicalKey(pitchClassOf(key.tonicPc() + kFifth * s), key.mode);
 }
 
 std::vector<Key> parallelModes(const Key& key) {
@@ -39,8 +43,10 @@ Key relativeKey(const Key& key) {
 }
 
 int fifthsDistance(const Key& from, const Key& to) {
-    // Seven fifths span seven octaves plus one semitone, so the inverse of "times 7" modulo 12 is itself
-    // "times 7": the step count is the semitone difference times 7, reduced to -5..6.
+    // Seven fifths span four octaves plus a semitone (7 * 7 = 49 = 4 * 12 + 1), so the inverse of
+    // "times 7" modulo 12 is itself "times 7": the step count is the semitone difference times 7,
+    // reduced to -5..6. Both tonics are pitch classes (0..11), so every intermediate value here stays
+    // below 100 and nothing can overflow.
     const int semitones = pitchClassOf(to.tonicPc() - from.tonicPc());
     const int steps = pitchClassOf(semitones * kFifth);
     return steps > 6 ? steps - 12 : steps;

@@ -5,6 +5,7 @@
 #include "chordlab/voicing.h"
 
 #include <algorithm>
+#include <climits>
 #include <cstddef>
 #include <set>
 #include <string_view>
@@ -73,6 +74,18 @@ TEST_CASE("closeVoicing: a range outside MIDI falls back to the defaults") {
     CHECK(closeVoicing(chord(0, "maj"), 100, 128) == closeVoicing(chord(0, "maj")));
 }
 
+TEST_CASE("closeVoicing: an extreme or reversed range falls back to the defaults without overflowing") {
+    for (const Chord& c : {chord(0, "maj"), chord(11, "9")}) {
+        CAPTURE(c.root);
+        const Notes expected = closeVoicing(c);
+        CHECK(closeVoicing(c, 1, INT_MIN) == expected);  // `highest - lowest` must not be formed
+        CHECK(closeVoicing(c, INT_MIN, 84) == expected);
+        CHECK(closeVoicing(c, 48, INT_MAX) == expected);
+        CHECK(closeVoicing(c, INT_MAX, INT_MIN) == expected);
+        CHECK(closeVoicing(c, 84, 48) == expected);  // reversed
+    }
+}
+
 TEST_CASE("closeVoicing: honours a valid custom range") {
     CHECK(closeVoicing(chord(0, "maj"), 60, 96) == Notes{60, 64, 67});
     CHECK(closeVoicing(chord(0, "maj"), 60, 84) == Notes{60, 64, 67});  // exactly two octaves is valid
@@ -95,7 +108,7 @@ TEST_CASE("closeVoicing: a chord that fits the range is not folded") {
 }
 
 TEST_CASE("closeVoicing: notes above highest fold down by octaves and re-sort into the chord") {
-    // B9 on 48..72: 59 63 66 69 73 -> 73 drops to 61 and sits a semitone above the root.
+    // B9 on 48..72: 59 63 66 69 73 -> 73 drops to 61 and sits a whole tone above the root.
     CHECK(closeVoicing(chord(11, "9"), 48, 72) == Notes{59, 61, 63, 66, 69});
     // Bb6/9 on 48..72: 58 62 65 67 72 -> nothing exceeds 72.
     CHECK(closeVoicing(chord(10, "69"), 48, 72) == Notes{58, 62, 65, 67, 72});

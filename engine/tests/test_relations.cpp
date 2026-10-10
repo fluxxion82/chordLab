@@ -5,6 +5,7 @@
 #include "chordlab/scale.h"
 
 #include <array>
+#include <climits>
 #include <cstddef>
 #include <vector>
 
@@ -74,6 +75,33 @@ TEST_CASE("fifthsNeighbour: every canonical key round-trips a step up and back")
         CHECK(fifthsNeighbour(fifthsNeighbour(k, +1), -1) == k);
         CHECK(fifthsNeighbour(fifthsNeighbour(k, -1), +1) == k);
         CHECK(fifthsNeighbour(k, +1).tonicPc() == pitchClassOf(k.tonicPc() + 7));
+    }
+}
+
+TEST_CASE("fifthsNeighbour: extreme step counts reduce modulo 12 without overflowing") {
+    // Only `steps` modulo 12 matters, so `7 * steps` must never be formed before reducing.
+    static_assert(INT_MAX % 12 == 7, "INT_MAX reduces to +7 steps");
+    static_assert(INT_MIN % 12 == -8, "INT_MIN reduces to -8 steps, i.e. +4 around the circle");
+    const Key bIonian = key('B', 0, Mode::Ionian);
+    CHECK(fifthsNeighbour(bIonian, INT_MAX) == fifthsNeighbour(bIonian, INT_MAX % 12));
+    CHECK(fifthsNeighbour(bIonian, INT_MAX) == kCIonian);  // B + 7 fifths = C
+    CHECK(fifthsNeighbour(bIonian, -INT_MAX) == fifthsNeighbour(bIonian, -(INT_MAX % 12)));
+    CHECK(fifthsNeighbour(bIonian, INT_MIN) == fifthsNeighbour(bIonian, INT_MIN % 12));
+    CHECK(fifthsNeighbour(bIonian, INT_MIN) == fifthsNeighbour(bIonian, 4));
+    CHECK(fifthsNeighbour(bIonian, INT_MIN) == key('E', -1, Mode::Ionian));  // B + 4 fifths = D#, spelled Eb
+}
+
+TEST_CASE("fifthsNeighbour: extreme step counts agree with their reduced step on every canonical key") {
+    for (const Key& k : allCanonicalKeys()) {
+        CAPTURE(k.tonic.letter);
+        CAPTURE(k.tonic.alter);
+        CAPTURE(static_cast<int>(k.mode));
+        CHECK(fifthsNeighbour(k, INT_MAX) == fifthsNeighbour(k, INT_MAX % 12));
+        CHECK(fifthsNeighbour(k, -INT_MAX) == fifthsNeighbour(k, -(INT_MAX % 12)));
+        CHECK(fifthsNeighbour(k, INT_MIN) == fifthsNeighbour(k, INT_MIN % 12));
+        CHECK(fifthsNeighbour(k, INT_MIN) == fifthsNeighbour(k, 4));
+        CHECK(fifthsDistance(k, fifthsNeighbour(k, INT_MAX)) == -5);  // +7 fifths is reported as -5
+        CHECK(fifthsDistance(k, fifthsNeighbour(k, INT_MIN)) == 4);
     }
 }
 
