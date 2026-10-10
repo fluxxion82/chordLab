@@ -116,28 +116,44 @@ TEST_CASE("romanNumeral: Standard style, chromatic and borrowed roots in C Ionia
     CHECK(romanNumeral(chord(Db, "maj"), kCIonian, SymbolStyle::Standard) == "bII");
 }
 
-TEST_CASE("romanNumeral: A Aeolian") {
+TEST_CASE("romanNumeral: A Aeolian is read against A major") {
     CHECK(romanNumeral(chord(A, "min"), kAAeolian, SymbolStyle::Standard) == "i");
-    CHECK(romanNumeral(chord(G, "maj"), kAAeolian, SymbolStyle::Standard) == "VII");
+    CHECK(romanNumeral(chord(G, "maj"), kAAeolian, SymbolStyle::Standard) == "bVII");
+    CHECK(romanNumeral(chord(F, "maj"), kAAeolian, SymbolStyle::Standard) == "bVI");
     CHECK(romanNumeral(chord(E, "maj"), kAAeolian, SymbolStyle::Standard) == "V");
     CHECK(romanNumeral(chord(D, "min"), kAAeolian, SymbolStyle::Standard) == "iv");
-    CHECK(romanNumeral(chord(F, "maj"), kAAeolian, SymbolStyle::Standard) == "VI");
     CHECK(romanNumeral(chord(B, "dim"), kAAeolian, SymbolStyle::Standard) == "ii°");
-    CHECK(romanNumeral(chord(Ab, "dim"), kAAeolian, SymbolStyle::Standard) == "#vii°");  // G# dim
+    CHECK(romanNumeral(chord(Ab, "dim"), kAAeolian, SymbolStyle::Standard) == "vii°");  // G# is in A major
+    CHECK(romanNumeral(chord(C, "maj"), kAAeolian, SymbolStyle::Standard) == "bIII");
 }
 
-TEST_CASE("romanNumeral: C Aeolian with chords browsed from G Aeolian") {
-    CHECK(romanNumeral(chord(D, "min"), kCAeolian, SymbolStyle::Standard) == "ii");
+TEST_CASE("romanNumeral: C Aeolian is read against C major") {
+    CHECK(romanNumeral(chord(C, "min"), kCAeolian, SymbolStyle::Standard) == "i");
+    CHECK(romanNumeral(chord(D, "m7b5"), kCAeolian, SymbolStyle::Standard) == "iiø7");
+    CHECK(romanNumeral(chord(Eb, "maj"), kCAeolian, SymbolStyle::Standard) == "bIII");
+    CHECK(romanNumeral(chord(F, "min"), kCAeolian, SymbolStyle::Standard) == "iv");
     CHECK(romanNumeral(chord(G, "min"), kCAeolian, SymbolStyle::Standard) == "v");
-    CHECK(romanNumeral(chord(Bb, "maj"), kCAeolian, SymbolStyle::Standard) == "VII");
-    CHECK(romanNumeral(chord(Eb, "maj"), kCAeolian, SymbolStyle::Standard) == "III");
-    CHECK(romanNumeral(chord(F, "maj"), kCAeolian, SymbolStyle::Standard) == "IV");
-    // A natural is not in C Aeolian (degree VI is Ab), so like B natural below it carries a '#'.
-    // The plan listed this as `viø7`; that is Klimper's major-relative convention, not this engine's.
-    CHECK(romanNumeral(chord(A, "m7b5"), kCAeolian, SymbolStyle::Standard) == "#viø7");
-    CHECK(romanNumeral(chord(A, "m7b5"), kCAeolian, SymbolStyle::Klimper) == "#vi7b5");
-    CHECK(romanNumeral(chord(B, "dim"), kCAeolian, SymbolStyle::Standard) == "#vii°");
-    CHECK(romanNumeral(chord(B, "dim"), kCAeolian, SymbolStyle::Klimper) == "#viib5");
+    CHECK(romanNumeral(chord(Ab, "maj"), kCAeolian, SymbolStyle::Standard) == "bVI");
+    CHECK(romanNumeral(chord(Bb, "maj"), kCAeolian, SymbolStyle::Standard) == "bVII");
+    CHECK(romanNumeral(chord(Bb, "7"), kCAeolian, SymbolStyle::Standard) == "bVII7");
+    CHECK(romanNumeral(chord(Ab, "maj7"), kCAeolian, SymbolStyle::Standard) == "bVIΔ7");
+    // Raised degrees that are in C major carry no accidental, as in Klimper / Hooktheory.
+    CHECK(romanNumeral(chord(A, "m7b5"), kCAeolian, SymbolStyle::Standard) == "viø7");
+    CHECK(romanNumeral(chord(A, "m7b5"), kCAeolian, SymbolStyle::Klimper) == "vi7b5");
+    CHECK(romanNumeral(chord(B, "dim"), kCAeolian, SymbolStyle::Standard) == "vii°");
+    CHECK(romanNumeral(chord(B, "dim"), kCAeolian, SymbolStyle::Klimper) == "viib5");
+}
+
+TEST_CASE("romanNumeral: chords of G Aeolian seen from C Aeolian match Klimper's palette") {
+    // Klimper shows `v vi♭5 ♭VII i ii ♭III IV` for this browse.
+    CHECK(romanNumeral(chord(G, "min"), kCAeolian, SymbolStyle::Klimper) == "v");
+    CHECK(romanNumeral(chord(A, "m7b5"), kCAeolian, SymbolStyle::Klimper) == "vi7b5");
+    CHECK(romanNumeral(chord(A, "dim"), kCAeolian, SymbolStyle::Klimper) == "vib5");
+    CHECK(romanNumeral(chord(Bb, "maj"), kCAeolian, SymbolStyle::Klimper) == "bVII");
+    CHECK(romanNumeral(chord(C, "min"), kCAeolian, SymbolStyle::Klimper) == "i");
+    CHECK(romanNumeral(chord(D, "min"), kCAeolian, SymbolStyle::Klimper) == "ii");
+    CHECK(romanNumeral(chord(Eb, "maj"), kCAeolian, SymbolStyle::Klimper) == "bIII");
+    CHECK(romanNumeral(chord(F, "maj"), kCAeolian, SymbolStyle::Klimper) == "IV");
 }
 
 TEST_CASE("romanNumeral: Klimper style replaces ° ø7 °7 with b5 7b5 dim7") {
@@ -157,13 +173,27 @@ TEST_CASE("romanNumeral: tritone root is #iv in minor keys too") {
     CHECK(romanNumeral(chord(Eb, "dim"), kAAeolian, SymbolStyle::Standard) == "#iv°");  // D# dim
 }
 
-TEST_CASE("romanNumeral: chromatic roots are relative to the project mode, not the major scale") {
-    CHECK(romanNumeral(chord(F, "maj"), key('C', 0, Mode::Lydian), SymbolStyle::Standard) == "bIV");
-    CHECK(romanNumeral(chord(G, "maj"), key('C', 0, Mode::Locrian), SymbolStyle::Standard) == "#V");
-    CHECK(romanNumeral(chord(G, "maj"), key('A', 0, Mode::HarmonicMinor), SymbolStyle::Standard) ==
-          "bVII");
-    CHECK(romanNumeral(chord(Ab, "maj"), key('A', 0, Mode::HarmonicMinor), SymbolStyle::Standard) ==
-          "VII");  // G# is diatonic
+TEST_CASE("romanNumeral: every mode is read against the parallel major, not its own scale") {
+    const Key cLydian = key('C', 0, Mode::Lydian);
+    CHECK(romanNumeral(chord(F, "maj"), cLydian, SymbolStyle::Standard) == "IV");
+    CHECK(romanNumeral(chord(Fs, "dim"), cLydian, SymbolStyle::Standard) == "#iv°");
+
+    const Key gMixolydian = key('G', 0, Mode::Mixolydian);
+    CHECK(romanNumeral(chord(F, "maj"), gMixolydian, SymbolStyle::Standard) == "bVII");
+    CHECK(romanNumeral(chord(F, "min"), gMixolydian, SymbolStyle::Standard) == "bvii");
+
+    const Key dDorian = key('D', 0, Mode::Dorian);
+    CHECK(romanNumeral(chord(B, "min"), dDorian, SymbolStyle::Standard) == "vi");
+    CHECK(romanNumeral(chord(B, "dim"), dDorian, SymbolStyle::Standard) == "vi°");
+    CHECK(romanNumeral(chord(F, "maj"), dDorian, SymbolStyle::Standard) == "bIII");
+    CHECK(romanNumeral(chord(C, "maj"), dDorian, SymbolStyle::Standard) == "bVII");
+
+    const Key aHarmonicMinor = key('A', 0, Mode::HarmonicMinor);
+    CHECK(romanNumeral(chord(G, "maj"), aHarmonicMinor, SymbolStyle::Standard) == "bVII");
+    CHECK(romanNumeral(chord(Ab, "dim"), aHarmonicMinor, SymbolStyle::Standard) == "vii°");  // G# dim
+    CHECK(romanNumeral(chord(E, "7"), aHarmonicMinor, SymbolStyle::Standard) == "V7");
+
+    CHECK(romanNumeral(chord(G, "maj"), key('C', 0, Mode::Locrian), SymbolStyle::Standard) == "V");
 }
 
 // --- Suffix tables ---------------------------------------------------------------------
@@ -246,7 +276,7 @@ TEST_CASE("romanNumeral and chordSymbol: the tonic chord is always I/i and start
     }
 }
 
-TEST_CASE("romanNumeral: every root in every key gets at most one accidental, then a numeral") {
+TEST_CASE("romanNumeral: every root in every key gets at most one accidental, read against the major scale") {
     for (char letter = 'A'; letter <= 'G'; ++letter) {
         for (int alter = -1; alter <= 1; ++alter) {
             for (const Mode mode : kAllModes) {
@@ -261,10 +291,10 @@ TEST_CASE("romanNumeral: every root in every key gets at most one accidental, th
                     if (numeral[0] == 'b' || numeral[0] == '#') {
                         REQUIRE(numeral.size() >= 2);
                         CHECK(isNumeralLetter(numeral[1]));
-                        CHECK(inScale(root, k.tonicPc(), mode) == false);
+                        CHECK(inScale(root, k.tonicPc(), Mode::Ionian) == false);
                     } else {
                         CHECK(isNumeralLetter(numeral[0]));
-                        CHECK(inScale(root, k.tonicPc(), mode));
+                        CHECK(inScale(root, k.tonicPc(), Mode::Ionian));
                     }
                 }
             }
