@@ -26,7 +26,7 @@ std::string chordSymbol(const Chord& chord, const Key& spellingKey, SymbolStyle 
 /// the quality (D major in C Ionian is `II`; B dim in C Aeolian is `vii°`). Any other root takes the
 /// degree it holds in a parallel mode (b2, b3, #4, b6, b7; the tritone is always #4 rather than b5) and
 /// is prefixed with a single `b` or `#`: in C Aeolian `Eb` is `bIII` and `Bb` is `bVII`, in A Aeolian
-/// `G` is `bVII` and `G#` is `vii°`, in C Lydian `F#` is `#IV`.
+/// `G` is `bVII` and `G#` diminished is `vii°`, in C Lydian `F#` is `#IV`.
 /// Case: lowercase when the type has a minor third and no major third; uppercase otherwise,
 /// including power chords and suspended chords (`I5`, `Isus4`).
 /// Suffix: as `chordSymbol`, except that a minor quality is carried by the lowercase numeral
