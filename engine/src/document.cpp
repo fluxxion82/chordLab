@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cassert>
+#include <climits>
+#include <cmath>
 #include <cstddef>
 #include <utility>
 
@@ -26,7 +28,9 @@ double Document::endBeat() const {
 
 namespace {
 
+/// `lengthBeats` must be finite: `std::clamp` on NaN is meaningless.
 double clampLength(double lengthBeats) {
+    assert(std::isfinite(lengthBeats));
     return std::clamp(lengthBeats, kMinLengthBeats, kMaxLengthBeats);
 }
 
@@ -47,7 +51,19 @@ void assertValidKey([[maybe_unused]] const Key& key) {
     assert(static_cast<int>(key.mode) >= 0 && static_cast<int>(key.mode) < kNumModes);
 }
 
+/// Copies the live (non-undoable) fields of `current` into `target`, so that restoring a snapshot keeps
+/// the browsed key and the transport toggles as they are now.
+void keepLiveState(Document& target, const Document& current) {
+    target.browsedKey = current.browsedKey;
+    target.progressionLoop = current.progressionLoop;
+    target.followHost = current.followHost;
+}
+
 }  // namespace
+
+DocumentStore::DocumentStore(int firstId) : nextId_(firstId) {
+    assert(firstId >= 1);
+}
 
 const Document& DocumentStore::doc() const {
     return doc_;
@@ -67,6 +83,9 @@ bool DocumentStore::commit(Document next) {
         return false;
     }
     undoStack_.push_back(std::move(doc_));
+    if (undoStack_.size() > kMaxUndoDepth) {
+        undoStack_.pop_front();
+    }
     doc_ = std::move(next);
     redoStack_.clear();
     return true;
@@ -74,6 +93,9 @@ bool DocumentStore::commit(Document next) {
 
 int DocumentStore::appendChord(Chord chord, double lengthBeats, int velocity) {
     assertValidChord(chord);
+    if (!std::isfinite(lengthBeats) || nextId_ == INT_MAX) {
+        return kNoEventId;
+    }
     const int id = nextId_++;
     Document next = doc_;
     next.events.push_back(ChordEvent{id, chord, clampLength(lengthBeats), clampVelocity(velocity)});
@@ -105,7 +127,7 @@ void DocumentStore::moveChord(int id, int newIndex) {
 
 void DocumentStore::setLength(int id, double lengthBeats) {
     const int index = findIndex(id);
-    if (index < 0) {
+    if (index < 0 || !std::isfinite(lengthBeats)) {
         return;
     }
     Document next = doc_;
@@ -142,30 +164,26 @@ void DocumentStore::setProjectKey(Key key) {
 
 void DocumentStore::setBrowsedKey(Key key) {
     assertValidKey(key);
-    Document next = doc_;
-    next.browsedKey = key;
-    commit(std::move(next));
+    doc_.browsedKey = key;  // live state: no history
 }
 
 void DocumentStore::setProgressionLoop(bool loop) {
-    Document next = doc_;
-    next.progressionLoop = loop;
-    commit(std::move(next));
+    doc_.progressionLoop = loop;  // live state: no history
 }
 
 void DocumentStore::setFollowHost(bool follow) {
-    Document next = doc_;
-    next.followHost = follow;
-    commit(std::move(next));
+    doc_.followHost = follow;  // live state: no history
 }
 
 bool DocumentStore::undo() {
     if (undoStack_.empty()) {
         return false;
     }
-    redoStack_.push_back(std::move(doc_));
-    doc_ = std::move(undoStack_.back());
+    Document restored = std::move(undoStack_.back());
     undoStack_.pop_back();
+    keepLiveState(restored, doc_);
+    redoStack_.push_back(std::move(doc_));
+    doc_ = std::move(restored);
     return true;
 }
 
@@ -173,9 +191,11 @@ bool DocumentStore::redo() {
     if (redoStack_.empty()) {
         return false;
     }
-    undoStack_.push_back(std::move(doc_));
-    doc_ = std::move(redoStack_.back());
+    Document restored = std::move(redoStack_.back());
     redoStack_.pop_back();
+    keepLiveState(restored, doc_);
+    undoStack_.push_back(std::move(doc_));
+    doc_ = std::move(restored);
     return true;
 }
 
