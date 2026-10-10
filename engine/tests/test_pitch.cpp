@@ -139,13 +139,13 @@ TEST_CASE("canonicalTonic: flats win when the sharp spelling would overshoot") {
     CHECK(canonicalTonic(3, Mode::Dorian) == eFlat);    // Eb Dorian (-5) over D# Dorian (+7)
 }
 
-TEST_CASE("canonicalTonic: ties at six accidentals prefer the sharp spelling") {
+TEST_CASE("canonicalTonic: ties at six accidentals prefer the natural spelling, then the sharp") {
     const Tonic fSharp{'F', +1};
     const Tonic cSharp{'C', +1};
     const Tonic gSharp{'G', +1};
     const Tonic dSharp{'D', +1};
     const Tonic aSharp{'A', +1};
-    const Tonic eSharp{'E', +1};
+    const Tonic f{'F', 0};
     const Tonic b{'B', 0};
     CHECK(canonicalTonic(6, Mode::Ionian) == fSharp);         // F# (+6) over Gb (-6)
     CHECK(canonicalTonic(1, Mode::Mixolydian) == cSharp);     // C# (+6) over Db (-6)
@@ -154,8 +154,8 @@ TEST_CASE("canonicalTonic: ties at six accidentals prefer the sharp spelling") {
     CHECK(canonicalTonic(3, Mode::HarmonicMinor) == dSharp);
     CHECK(canonicalTonic(3, Mode::MelodicMinor) == dSharp);
     CHECK(canonicalTonic(10, Mode::Phrygian) == aSharp);      // A# (+6) over Bb (-6)
-    CHECK(canonicalTonic(5, Mode::Locrian) == eSharp);        // E# (+6) over F (-6)
-    CHECK(canonicalTonic(11, Mode::Lydian) == b);             // B (+6) over Cb (-6)
+    CHECK(canonicalTonic(5, Mode::Locrian) == f);             // F (-6) over E# (+6): natural wins
+    CHECK(canonicalTonic(11, Mode::Lydian) == b);             // B (+6) over Cb (-6): natural wins
 }
 
 TEST_CASE("canonicalTonic: every pc x mode stays within six accidentals and round-trips the pc") {

@@ -9,6 +9,8 @@ namespace chordlab {
 /// A spelled tonic: a letter name 'A'..'G' plus a single accidental (-1 flat, 0 natural, +1 sharp).
 /// A pitch class alone cannot carry enharmonic intent (Eb Locrian needs 8 flats, D# Locrian 4 sharps),
 /// so keys hold a spelled tonic and all note spelling is derived from letters, not from the signature's sign.
+/// A `Tonic` passed to any engine function must have `letter` in 'A'..'G' and `alter` in -1..1; values
+/// outside those ranges (e.g. a lowercase letter or a double accidental) are a precondition violation.
 struct Tonic {
     char letter;
     int alter;
@@ -41,8 +43,9 @@ constexpr bool operator!=(const Key& a, const Key& b) noexcept {
 
 /// The tonic spelling of `pc` for `mode` whose key signature has the fewest accidentals.
 /// Candidates use at most one accidental: the natural letter, the sharp of the letter below and the
-/// flat of the letter above (pc 6 -> F# or Gb; pc 0 -> C or B#). Ties prefer the sharp spelling
-/// (F# Ionian over Gb Ionian). The chosen key always satisfies |signatureOf| <= 6.
+/// flat of the letter above (pc 6 -> F# or Gb; pc 0 -> C or B#). Ties prefer the natural spelling, then
+/// the sharp (F Locrian over E# Locrian, B Lydian over Cb Lydian, F# Ionian over Gb Ionian). The chosen
+/// key always satisfies |signatureOf| <= 6.
 Tonic canonicalTonic(PitchClass pc, Mode mode);
 
 /// Circle-of-fifths index of the key signature: positive counts sharps, negative counts flats.
