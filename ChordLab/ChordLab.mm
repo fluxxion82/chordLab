@@ -205,15 +205,20 @@ bool ChordLab::SerializeState(IByteChunk& chunk) const
 
 int ChordLab::UnserializeState(const IByteChunk& chunk, int startPos)
 {
+  // On malformed input return chunk.Size(), never -1: iPlug2's VST3 SetState seeks to the
+  // returned position unchecked (IPlugVST3_Common.h) and a negative seek reads out of bounds.
+  // Seeking to the end makes its bypass read fail cleanly instead.
+  const int fail = chunk.Size();
+
   uint8_t version = 0;
   int pos = chunk.Get(&version, startPos);
   if (pos < 0)
-    return -1;
+    return fail;
 
   int32_t len = 0;
   pos = chunk.Get(&len, pos);
   if (pos < 0 || len < 0 || len > chunk.Size() - pos)
-    return -1;                                                   // malformed: let the wrapper treat it as a failure
+    return fail;
 
   if (version == kStateVersion)
   {
@@ -226,6 +231,8 @@ int ChordLab::UnserializeState(const IByteChunk& chunk, int startPos)
   pos += len;
 
   pos = UnserializeParams(chunk, pos);
+  if (pos < 0)
+    pos = fail;
   PushStateToUI();                                               // no listener when the editor is closed
   return pos;
 }
