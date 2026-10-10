@@ -2,6 +2,8 @@
 
 #include "IPlug_include_in_plug_hdr.h"
 
+#include <string>
+
 using namespace iplug;
 
 class ChordLab final : public Plugin
@@ -15,6 +17,18 @@ public:
   bool OnHostRequestingSupportedViewConfiguration(int width, int height) override;
 
   void OnIdle() override;
+  void OnUIOpen() override;
   void ProcessBlock(sample** inputs, sample** outputs, int nFrames) override;
   bool OnMessage(int msgTag, int ctrlTag, int dataSize, const void* pData) override;
+
+  // M0 spike 4: versioned state chunk (version byte + UTF-8 JSON)
+  bool SerializeState(IByteChunk& chunk) const override;
+  int UnserializeState(const IByteChunk& chunk, int startPos) override;
+
+private:
+  void PushStateToUI();
+  std::string StateJson() const;
+
+  static constexpr uint8_t kStateVersion = 1;
+  int mTestValue = 42;
 };

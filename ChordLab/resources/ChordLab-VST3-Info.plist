@@ -7,7 +7,7 @@
 	<key>CFBundleExecutable</key>
 	<string>ChordLab</string>
 	<key>CFBundleGetInfoString</key>
-	<string>ChordLab v1.0.0 Copyright 2020 Acme Inc</string>
+	<string>ChordLab v1.0.0 Copyright 2026 Sterling Albury</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.SterlingAlbury.vst3.ChordLab</string>
 	<key>CFBundleInfoDictionaryVersion</key>
@@ -19,7 +19,7 @@
 	<key>CFBundleShortVersionString</key>
 	<string>1.0.0</string>
 	<key>CFBundleSignature</key>
-	<string>Wb3Z</string>
+	<string>pozR</string>
 	<key>CFBundleVersion</key>
 	<string>1.0.0</string>
 	<key>CSResourcesFileMapped</key>

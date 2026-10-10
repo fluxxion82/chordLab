@@ -1,31 +1,42 @@
 import SwiftUI
-import Accelerate
 
+/// M0 host-contract spikes (plan Tasks 0.3–0.6). Replaced by the real UI in M2.
 struct ContentView: View {
   @EnvironmentObject var state: ChordLabState
+  private let cMajor: [UInt8] = [60, 64, 67]
+
   var body: some View {
     ZStack {
-      MeshGradient(width: 2, height: 2, points: [
-          [0, 0], [1, 0], [0, 1], [1, 1]
-      ], colors: [.red, .orange, .blue, .yellow])
-      VStack {
-        Text("iPlug2 + SwiftUI + Metal")
-          .font(.title)
-          .padding()
-        HStack(alignment: .center) {
-//          ParamSliderView(param: state.params[kParamGain])
-//            .frame(width: 50, height: 200, alignment: .center)
-          OscilloscopeView()
-              .environmentObject(state)
+      Color(red: 0.06, green: 0.08, blue: 0.22)
+      VStack(spacing: 24) {
+        Text("ChordLab — M0 spikes").font(.title2).foregroundStyle(.white)
+
+        // Spike 1: preview a chord while the mouse is held.
+        Text("C major (hold)")
+          .font(.title3).foregroundStyle(.white)
+          .padding(.horizontal, 28).padding(.vertical, 16)
+          .background(Circle().fill(Color(red: 0.11, green: 0.44, blue: 0.50)))
+          .pressAction(onPress: { state.sendChord(cMajor, on: true) },
+                       onRelease: { state.sendChord(cMajor, on: false) })
+
+        // Spike 3: drag a prepared .mid out to the DAW.
+        Text("♫ Drag MIDI clip to Live")
+          .foregroundStyle(.white)
+          .padding(12)
+          .background(RoundedRectangle(cornerRadius: 8).fill(Color(red: 0.20, green: 0.25, blue: 0.55)))
+          .onDrag {
+            guard let url = ExportFixture.prepareExportFile() else { return NSItemProvider() }
+            return NSItemProvider(contentsOf: url) ?? NSItemProvider()
+          }
+
+        // Spike 4: a value that must survive save/reload through the state chunk.
+        HStack {
+          Text("Chunk test value: \(state.testValue)").foregroundStyle(.white)
+          Stepper("", value: Binding(get: { state.testValue },
+                                     set: { state.setTestValue($0) }))
+            .labelsHidden()
         }
-//        Spacer()
-//        Button(action: {
-//          state.sendMsg()
-//        },
-//        label: {
-//          Text("Send a message to C++")
-//            .foregroundStyle(.black)
-//        })
+        Text(state.stateJson).font(.caption.monospaced()).foregroundStyle(.gray)
       }
       .padding()
     }
@@ -35,9 +46,7 @@ struct ContentView: View {
 
 struct SwiftUIView_Previews: PreviewProvider {
   static var previews: some View {
-    Group {
-      ContentView().environmentObject(ChordLabState(numParams: kNumParams))
-        .frame(width: 300, height: 400, alignment: .center)
-    }
+    ContentView().environmentObject(ChordLabState(numParams: kNumParams))
+      .frame(width: 600, height: 400)
   }
 }

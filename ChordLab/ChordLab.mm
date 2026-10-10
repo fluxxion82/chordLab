@@ -1,6 +1,9 @@
 #include "ChordLab.h"
 #include "IPlug_include_in_plug_src.h"
 #include <algorithm>
+#include <cstring>
+#include <cstdlib>
+#include <cstdio>
 
 #ifdef FRAMEWORK_BUILD
 #import <AUv3Framework/ChordLab-Swift.h>
@@ -8,8 +11,6 @@
 #else
 #import <ChordLab-Swift.h>
 #endif
-
-const NSInteger kScopeBufferSize = 512; // legacy, UI scope removed in Task 0.3
 
 ChordLab::ChordLab(const InstanceInfo& info)
 : Plugin(info, MakeConfig(kNumParams, kNumPresets))
@@ -62,17 +63,70 @@ void ChordLab::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
     std::fill(outputs[c], outputs[c] + nFrames, 0.0);
 }
 
+void ChordLab::OnUIOpen()
+{
+  Plugin::OnUIOpen();
+  PushStateToUI();
+}
+
 bool ChordLab::OnMessage(int msgTag, int ctrlTag, int dataSize, const void* pData)
 {
-  if (msgTag == kMsgTagHello)
+  if (msgTag == kMsgTagSetTestValue && dataSize == (int) sizeof(int32_t) && pData)
   {
-    DBGMSG("MsgTagHello received on C++ side\n");
+    int32_t v = 0;
+    memcpy(&v, pData, sizeof(v));
+    mTestValue = v;
+    PushStateToUI();
     return true;
   }
-  else if(msgTag == kMsgTagRestorePreset)
-  {
-    RestorePreset(ctrlTag);
-  }
-  
+
   return CocoaEditorDelegate::OnMessage(msgTag, ctrlTag, dataSize, pData);
+}
+
+std::string ChordLab::StateJson() const
+{
+  // Built by hand for M0; the engine's json_api replaces this in M2.
+  char buf[128];
+  snprintf(buf, sizeof(buf), "{\"v\":%d,\"key\":\"C major\",\"test\":%d}", (int) kStateVersion, mTestValue);
+  return std::string(buf);
+}
+
+void ChordLab::PushStateToUI()
+{
+  const std::string json = StateJson();
+  SendArbitraryMsgFromDelegate((int) kMsgTagStateToUI, (int) json.size(), json.data());
+}
+
+bool ChordLab::SerializeState(IByteChunk& chunk) const
+{
+  chunk.Put(&kStateVersion);
+  const std::string json = StateJson();
+  const int32_t len = (int32_t) json.size();
+  chunk.Put(&len);
+  chunk.PutBytes(json.data(), len);
+  return true;
+}
+
+int ChordLab::UnserializeState(const IByteChunk& chunk, int startPos)
+{
+  uint8_t version = 0;
+  startPos = chunk.Get(&version, startPos);
+  if (version != kStateVersion)
+    return startPos;   // unknown version: keep defaults
+
+  int32_t len = 0;
+  startPos = chunk.Get(&len, startPos);
+  if (len < 0 || len > 1 << 20 || startPos + len > chunk.Size())
+    return startPos;
+
+  std::string json((const char*) chunk.GetData() + startPos, (size_t) len);
+  startPos += len;
+
+  // Minimal parse for the spike: find "test":<int>.
+  const auto pos = json.find("\"test\":");
+  if (pos != std::string::npos)
+    mTestValue = atoi(json.c_str() + pos + 7);
+
+  PushStateToUI();   // no-op if the editor is closed (nothing is listening)
+  return startPos;
 }

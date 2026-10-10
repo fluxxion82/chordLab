@@ -10,13 +10,13 @@
 			<key>factoryFunction</key>
 			<string>ChordLab_Factory</string>
 			<key>manufacturer</key>
-			<string>Acme</string>
+			<string>Ster</string>
 			<key>name</key>
 			<string>SterlingAlbury: ChordLab</string>
 			<key>sandboxSafe</key>
 			<true/>
 			<key>subtype</key>
-			<string>Wb3Z</string>
+			<string>pozR</string>
 			<key>type</key>
 			<string>aumu</string>
 			<key>version</key>
@@ -30,7 +30,7 @@
 	<key>CFBundleExecutable</key>
 	<string>ChordLab</string>
 	<key>CFBundleGetInfoString</key>
-	<string>ChordLab v1.0.0 Copyright 2020 Acme Inc</string>
+	<string>ChordLab v1.0.0 Copyright 2026 Sterling Albury</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.SterlingAlbury.audiounit.ChordLab</string>
 	<key>CFBundleInfoDictionaryVersion</key>
@@ -42,7 +42,7 @@
 	<key>CFBundleShortVersionString</key>
 	<string>1.0.0</string>
 	<key>CFBundleSignature</key>
-	<string>Wb3Z</string>
+	<string>pozR</string>
 	<key>CFBundleVersion</key>
 	<string>1.0.0</string>
 	<key>CSResourcesFileMapped</key>
