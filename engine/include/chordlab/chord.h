@@ -1,0 +1,54 @@
+#pragma once
+
+#include "chordlab/pitch.h"
+#include "chordlab/scale.h"
+
+#include <string_view>
+#include <vector>
+
+namespace chordlab {
+
+/// Klimper colour group of a chord type.
+enum class Family { Major, Minor, Other };
+
+/// A chord quality from the dictionary.
+/// `id` is the stable identifier that persistence stores; `symbol` is the Klimper-style suffix the UI
+/// appends to the root name (ASCII `b`/`#`, and the literal `Δ` character for a major seventh, so "Δ7",
+/// "mΔ7"); `intervals` are semitones above the root, starting at 0, strictly increasing and below 24.
+struct ChordType {
+    const char* id;
+    const char* symbol;
+    std::vector<int> intervals;
+    Family family;
+};
+
+/// The chord type with the given `id`. Throws `std::out_of_range` for an unknown id.
+/// The returned reference is stable for the program's lifetime, so a `Chord::type` may point at it.
+const ChordType& chordType(std::string_view id);
+
+/// Every chord type, in dictionary order (power chord, triads, sixths, sevenths, ninths, 7sus4).
+/// The vector is stable for the program's lifetime and `chordType(id)` returns references into it.
+const std::vector<ChordType>& allChordTypes();
+
+/// A chord: a root pitch class and a dictionary type. `type` must point into `allChordTypes()`.
+struct Chord {
+    PitchClass root;
+    const ChordType* type;
+};
+
+/// Chords are equal when they share a root and the same dictionary entry (compared by address).
+constexpr bool operator==(const Chord& a, const Chord& b) noexcept {
+    return a.root == b.root && a.type == b.type;
+}
+
+constexpr bool operator!=(const Chord& a, const Chord& b) noexcept {
+    return !(a == b);
+}
+
+/// Pitch classes of the chord: the root plus each interval, each reduced modulo 12, in interval order.
+std::vector<PitchClass> pitchClasses(const Chord& chord);
+
+/// True if every pitch class of the chord belongs to the key's scale.
+bool fullyInKey(const Chord& chord, const Key& key);
+
+}  // namespace chordlab
