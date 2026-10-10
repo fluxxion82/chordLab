@@ -38,7 +38,7 @@ struct Palette {
 ///
 /// Per degree d of the browsed scale, with that degree as the root:
 /// - Tier 1 is the stacked-third triad on degrees d, d+2, d+4 of the browsed scale, typed as whichever of
-///   maj/min/dim/aug has exactly those intervals (every heptatonic mode yields one of the four).
+///   maj/min/dim/aug has exactly those intervals (every supported mode yields one of the four).
 /// - Tier 0 is the power chord, present when the perfect fifth is in the browsed scale.
 /// - Tier 2 is the first of [6, m6, m7, m7b5, 7, maj7, mMaj7, dim7, augMaj7] fully in the browsed key.
 /// - Tier 3 is the first of [maj7, 7, m7, mMaj7, dim7, augMaj7, add9, madd9, m7b5] fully in the browsed
