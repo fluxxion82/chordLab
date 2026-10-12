@@ -91,8 +91,8 @@ std::vector<int> voicing(const Chord& chord, int inversion, int octave, int lowe
     inversion = std::clamp(inversion, 0, static_cast<int>(notes.size()) - 1);
     octave = std::clamp(octave, kMinVoicingOctave, kMaxVoicingOctave);
     // The lowest `inversion` notes go up an octave, so that chord tone `inversion` is the bass. A chord
-    // that spans more than an octave (a ninth) needs a second lift for the tones still under the new bass:
-    // the close voicing spans less than two octaves, so two lifts always clear it.
+    // that spans more than an octave (a ninth, a sharp eleventh) needs a second lift for the tones still
+    // under the new bass: the close voicing spans less than two octaves, so two lifts always clear it.
     const int bass = notes[static_cast<std::size_t>(inversion)];
     for (std::size_t i = 0; i < static_cast<std::size_t>(inversion); ++i) {
         notes[i] += kOctave;
@@ -107,8 +107,11 @@ std::vector<int> voicing(const Chord& chord, int inversion, int octave, int lowe
     notes.erase(std::unique(notes.begin(), notes.end()), notes.end());
     assert(notes.front() >= lowest + kOctave * octave);
     assert(notes.front() == bass + kOctave * octave);
-    assert(notes.back() <= highest + kOctave * (octave + 1));  // a lifted note may sit an octave above the register
-    assert(notes.front() >= 0 && notes.back() <= kMidiMax);    // what `validVoicingRange` guarantees
+    // The register bound of the header: a lifted note ends under an octave above the bass, and the bass is
+    // at most the root (below `lowest + 12`) plus the type's largest interval.
+    [[maybe_unused]] const int span = chord.type->intervals.back();
+    assert(notes.back() <= std::min(highest + kOctave - 1, lowest + span + 22) + kOctave * octave);
+    assert(notes.front() >= 0 && notes.back() <= kMidiMax);  // what `validVoicingRange` guarantees
     return notes;
 }
 
