@@ -23,6 +23,9 @@ struct ContentView: View {
           Button("Append C") { state.send(command: ["cmd": "appendChord", "root": 0, "type": "maj"]) }
           Button("Panic") { state.panic() }
             .accessibilityLabel("Silence every sounding note")
+          if let snapshot = state.snapshot, !snapshot.hasTonicTable {
+            Text("snapshot missing tonics").foregroundStyle(.orange).font(.callout)
+          }
           if state.incompleteBlocks > 0 {
             Text("incomplete blocks: \(state.incompleteBlocks)").foregroundStyle(.orange).font(.callout.monospacedDigit())
           }

@@ -28,7 +28,7 @@ struct PaletteView: View {
                 ForEach(0..<Self.columns, id: \.self) { degree in
                   if let cell = rows[tier][degree] {
                     PaletteCellView(cell: cell, size: cellSize, labelMode: labelMode,
-                                    isPressed: state.heldCellId == cell.id, projectKey: snapshot.projectKey)
+                                    isPressed: state.heldCellId == cell.id)
                       .pressAction(onPress: { state.pressCell(cell) },
                                    onRelease: { state.releaseCell(cell) })
                   } else {
@@ -70,7 +70,6 @@ struct PaletteCellView: View {
   let size: CGFloat
   let labelMode: LabelMode
   var isPressed = false
-  var projectKey: KeyJSON? = nil
 
   static let hoverDelay: TimeInterval = 0.25
 
@@ -135,16 +134,16 @@ struct PaletteCellView: View {
       }
     }
     .popover(isPresented: $showDetails, arrowEdge: .top) {
-      ChordDetailView(cell: cell, projectKey: projectKey).padding(12)
+      ChordDetailView(cell: cell).padding(12)
     }
   }
 }
 
-/// Popover body: symbol and numeral, family, the voicing as note names, and whether every note is in
-/// the project key (computed here from the voicing; it agrees with the engine's `filled`).
+/// Popover body: symbol and numeral, family, the voicing as note names, and the engine's verdict on the
+/// project key: "In key" or the borrowed notes (`outOfKey`; the line is omitted when an older plug-in
+/// build sends no such field).
 struct ChordDetailView: View {
   let cell: CellJSON
-  let projectKey: KeyJSON?
 
   var body: some View {
     VStack(alignment: .leading, spacing: 6) {
@@ -154,8 +153,7 @@ struct ChordDetailView: View {
       }
       Text(cell.family).font(.callout).foregroundStyle(.secondary)
       Text(cell.voicing.map(ChordSymbol.noteName(midi:)).joined(separator: "  ")).font(.body.monospacedDigit())
-      if let key = projectKey {
-        let outside = Scale.outOfKey(voicing: cell.voicing, key: key)
+      if let outside = cell.outOfKey {
         if outside.isEmpty {
           Text("In key").font(.callout).foregroundStyle(.secondary)
         } else {

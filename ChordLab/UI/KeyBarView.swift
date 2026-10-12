@@ -15,7 +15,9 @@ enum LabelMode: String, CaseIterable, Identifiable {
 }
 
 /// Project key pickers (tonic, mode), browsed-key steppers with home, and the label-mode toggle.
-/// Everything shown comes from the snapshot; every change is a command to the plugin.
+/// Everything shown comes from the snapshot (the pickers' items are its `modes` and `tonics` tables);
+/// every change is a command to the plugin. Without the tables (an older plug-in build) the pickers are
+/// disabled placeholders and ContentView says so.
 struct KeyBarView: View {
   @EnvironmentObject var state: ChordLabState
   @AppStorage(LabelMode.storageKey) private var labelMode: LabelMode = .both
@@ -24,10 +26,13 @@ struct KeyBarView: View {
     state.snapshot?.projectKey ?? KeyJSON(tonic: TonicJSON(letter: "C", alter: 0), mode: "Ionian")
   }
 
-  /// Picking a tonic or a mode sets the project key (spelled canonically for the mode) and brings the
-  /// browsed key home, so the palette follows.
+  private var modes: [String]? { state.snapshot?.modes }
+  private var tonicRow: [TonicNameJSON]? { state.snapshot?.tonics(for: projectKey.mode) }
+
+  /// Picking a tonic or a mode sets the project key, spelled as the snapshot's table spells that pitch
+  /// class in that mode, and brings the browsed key home, so the palette follows.
   private func setProjectKey(pc: Int, mode: String) {
-    let tonic = KeyNames.canonicalTonic(pc: pc, mode: mode)
+    guard let tonic = state.snapshot?.tonics(for: mode)?[pc] else { return }
     state.send(command: ["cmd": "setKey", "letter": tonic.letter, "alter": tonic.alter, "mode": mode])
     state.send(command: ["cmd": "browseKey", "home": true])
   }
@@ -67,18 +72,28 @@ struct KeyBarView: View {
     HStack(spacing: 8) {
       Text("Key").foregroundStyle(.secondary)
       Picker("Tonic", selection: tonicSelection) {
-        ForEach(0..<12, id: \.self) { pc in
-          Text(ChordSymbol.glyphs(KeyNames.text(KeyNames.canonicalTonic(pc: pc, mode: projectKey.mode)))).tag(pc)
+        if let row = tonicRow {
+          ForEach(0..<12, id: \.self) { pc in
+            Text(ChordSymbol.glyphs(row[pc].text)).tag(pc)
+          }
+        } else {
+          Text("—").tag(KeyNames.pitchClass(of: projectKey.tonic))   // keeps the selection valid
         }
       }
       .labelsHidden().fixedSize()
+      .disabled(tonicRow == nil)
       .accessibilityLabel("Project key tonic")
       Picker("Mode", selection: modeSelection) {
-        ForEach(KeyNames.modes, id: \.self) { mode in
-          Text(KeyNames.modeDisplayName(mode)).tag(mode)
+        if let modes = modes {
+          ForEach(modes, id: \.self) { mode in
+            Text(KeyNames.modeDisplayName(mode)).tag(mode)
+          }
+        } else {
+          Text("—").tag(projectKey.mode)
         }
       }
       .labelsHidden().fixedSize()
+      .disabled(modes == nil)
       .accessibilityLabel("Project key mode")
     }
   }
