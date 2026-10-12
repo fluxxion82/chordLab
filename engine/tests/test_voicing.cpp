@@ -21,8 +21,8 @@ Chord chord(PitchClass root, std::string_view typeId) {
 
 using Notes = std::vector<int>;
 
-constexpr int kDefaultLowest = 48;
-constexpr int kDefaultHighest = 84;
+constexpr int kDefaultLowest = 60;
+constexpr int kDefaultHighest = 96;
 
 bool sortedUniqueWithin(const Notes& notes, int lowest, int highest) {
     if (!std::is_sorted(notes.begin(), notes.end())) {
@@ -52,9 +52,21 @@ std::set<PitchClass> pitchClassSet(const Chord& c) {
 // --- Plan cases ----------------------------------------------------------------------------
 
 TEST_CASE("closeVoicing: stacks the chord from the first root at or above the default lowest note") {
-    CHECK(closeVoicing(chord(0, "maj")) == Notes{48, 52, 55});
-    CHECK(closeVoicing(chord(9, "min")) == Notes{57, 60, 64});
-    CHECK(closeVoicing(chord(0, "9")) == Notes{48, 52, 55, 58, 62});
+    CHECK(closeVoicing(chord(0, "maj")) == Notes{60, 64, 67});
+    CHECK(closeVoicing(chord(9, "min")) == Notes{69, 72, 76});
+    CHECK(closeVoicing(chord(0, "9")) == Notes{60, 64, 67, 70, 74});
+}
+
+TEST_CASE("closeVoicing: the default register is 60..96, the root in the middle-C octave") {
+    for (const Chord& c : {chord(0, "maj"), chord(9, "min"), chord(11, "9"), chord(1, "69")}) {
+        CAPTURE(c.root);
+        const Notes notes = closeVoicing(c);
+        CHECK(notes == closeVoicing(c, kDefaultLowest, kDefaultHighest));
+        REQUIRE_FALSE(notes.empty());
+        CHECK(notes.front() >= 60);
+        CHECK(notes.front() <= 71);
+    }
+    CHECK(closeVoicing(chord(0, "maj")) != closeVoicing(chord(0, "maj"), 48, 84));
 }
 
 TEST_CASE("closeVoicing: a high root stays within the range, sorted and unique") {
@@ -64,20 +76,20 @@ TEST_CASE("closeVoicing: a high root stays within the range, sorted and unique")
 }
 
 TEST_CASE("closeVoicing: a range narrower than two octaves falls back to the defaults") {
-    CHECK(closeVoicing(chord(0, "maj"), 60, 70) == closeVoicing(chord(0, "maj")));
-    CHECK(closeVoicing(chord(7, "9"), 48, 60) == closeVoicing(chord(7, "9")));  // 12 < 24
-    CHECK(closeVoicing(chord(0, "maj"), 60, 83) == closeVoicing(chord(0, "maj")));  // 23 < 24
+    CHECK(closeVoicing(chord(0, "maj"), 48, 60) == closeVoicing(chord(0, "maj"), 60, 96));
+    CHECK(closeVoicing(chord(7, "9"), 48, 60) == closeVoicing(chord(7, "9"), 60, 96));  // 12 < 24
+    CHECK(closeVoicing(chord(0, "maj"), 48, 71) == closeVoicing(chord(0, "maj"), 60, 96));  // 23 < 24
 }
 
 TEST_CASE("closeVoicing: a range outside MIDI falls back to the defaults") {
-    CHECK(closeVoicing(chord(0, "maj"), -1, 60) == closeVoicing(chord(0, "maj")));
-    CHECK(closeVoicing(chord(0, "maj"), 100, 128) == closeVoicing(chord(0, "maj")));
+    CHECK(closeVoicing(chord(0, "maj"), -1, 48) == closeVoicing(chord(0, "maj"), 60, 96));
+    CHECK(closeVoicing(chord(0, "maj"), 100, 128) == closeVoicing(chord(0, "maj"), 60, 96));
 }
 
 TEST_CASE("closeVoicing: an extreme or reversed range falls back to the defaults without overflowing") {
     for (const Chord& c : {chord(0, "maj"), chord(11, "9")}) {
         CAPTURE(c.root);
-        const Notes expected = closeVoicing(c);
+        const Notes expected = closeVoicing(c, 60, 96);
         CHECK(closeVoicing(c, 1, INT_MIN) == expected);  // `highest - lowest` must not be formed
         CHECK(closeVoicing(c, INT_MIN, 84) == expected);
         CHECK(closeVoicing(c, 48, INT_MAX) == expected);
@@ -132,7 +144,9 @@ TEST_CASE("closeVoicing: every type on every root fits the default range and kee
             CAPTURE(root);
             CHECK(sortedUniqueWithin(notes, kDefaultLowest, kDefaultHighest));
             CHECK(notes.size() <= type.intervals.size());
-            CHECK(notes.size() == type.intervals.size());  // nothing in the dictionary needs folding here
+            // The highest root is 71 and every interval is below 24, so no note exceeds 94 <= 96: nothing
+            // in the dictionary folds at the default range.
+            CHECK(notes.size() == type.intervals.size());
             CHECK(pitchClassSet(notes) == pitchClassSet(c));
             REQUIRE_FALSE(notes.empty());
             CHECK(pitchClassOf(notes.front()) == root);

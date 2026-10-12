@@ -250,36 +250,13 @@ Bytes readAll(const std::filesystem::path& path) {
     return Bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
 }
 
-/// The events the golden bytes encode: one C major chord of four beats at velocity 100, voiced
-/// C4 E4 G4 (60, 64, 67).
+/// The events of `compile(cMajorBars(1))`, which are also what the golden bytes encode: one C major chord
+/// of four beats at velocity 100, voiced C4 E4 G4 (60, 64, 67). For hand-built `Compiled` values.
 std::vector<NoteEvent> oneBarEvents() {
     return {
         {0.0, true, 60, 100}, {0.0, true, 64, 100}, {0.0, true, 67, 100},
         {4.0, false, 60, 0},  {4.0, false, 64, 0},  {4.0, false, 67, 0},
     };
-}
-
-/// The `Compiled` the golden bytes encode, built by hand.
-Compiled goldenCompiled() {
-    Compiled compiled;
-    compiled.events = oneBarEvents();
-    compiled.endBeat = 4.0;
-    return compiled;
-}
-
-/// NOTE: the plan's golden bytes voice the C chord at C4 (60, 64, 67), but `compile` voices it with
-/// `closeVoicing` at the default range 48..84, which starts at C3 (48, 52, 55; Task 1.7, pinned by
-/// Task 1.9's tests). `writeSmf0(compile(oneBarC), 120.0)` therefore differs from the golden in exactly
-/// its six pitch bytes and nowhere else. This is the golden with those six bytes at the engine's voicing.
-Bytes goldenAtEngineVoicing() {
-    Bytes bytes = kGolden;
-    const std::size_t pitchOffsets[] = {39, 43, 47, 52, 56, 60};
-    const std::uint8_t c4[] = {60, 64, 67, 60, 64, 67};
-    for (std::size_t i = 0; i < 6; ++i) {
-        REQUIRE(bytes[pitchOffsets[i]] == c4[i]);
-        bytes[pitchOffsets[i]] = static_cast<std::uint8_t>(c4[i] - 12);
-    }
-    return bytes;
 }
 
 }  // namespace
@@ -306,26 +283,12 @@ TEST_CASE("vlq: boundaries between byte counts") {
 // --- Golden ------------------------------------------------------------------------------------
 
 TEST_CASE("writeSmf0: golden bytes for one C chord, one bar, 120 bpm") {
-    const Bytes actual = writeSmf0(goldenCompiled(), 120.0);
+    const Compiled compiled = compile(cMajorBars(1));
+    CHECK(compiled.events == oneBarEvents());
+    const Bytes actual = writeSmf0(compiled, 120.0);
     INFO("actual:   " << hex(actual));
     INFO("expected: " << hex(kGolden));
     CHECK(actual == kGolden);
-    requireWellFormed(actual);
-}
-
-TEST_CASE("writeSmf0: the compiled one-bar C chord differs from the golden only in its voicing register") {
-    // See `goldenAtEngineVoicing`: the plan's golden assumes C4, the engine voices from C3.
-    const Compiled compiled = compile(cMajorBars(1));
-    REQUIRE(compiled.events.size() == 6);
-    CHECK(compiled.events[0].pitch == 48);
-    CHECK(compiled.events[1].pitch == 52);
-    CHECK(compiled.events[2].pitch == 55);
-
-    const Bytes actual = writeSmf0(compiled, 120.0);
-    INFO("actual:   " << hex(actual));
-    INFO("expected: " << hex(goldenAtEngineVoicing()));
-    CHECK(actual == goldenAtEngineVoicing());
-    CHECK(actual != kGolden);
     requireWellFormed(actual);
 }
 
@@ -333,8 +296,7 @@ TEST_CASE("writeSmf0: matches the committed fixture cmaj-1bar.mid") {
     const std::filesystem::path path = std::filesystem::path(CHORDLAB_FIXTURES_DIR) / "cmaj-1bar.mid";
     const Bytes fixture = readAll(path);
     CHECK(fixture == kGolden);
-    CHECK(writeSmf0(goldenCompiled(), 120.0) == fixture);
-    CHECK(writeSmf0(compile(cMajorBars(1)), 120.0) == goldenAtEngineVoicing());
+    CHECK(writeSmf0(compile(cMajorBars(1)), 120.0) == fixture);
     requireWellFormed(fixture);
 }
 
@@ -385,9 +347,9 @@ TEST_CASE("writeSmf0: two back-to-back chords put the offs before the ons at tic
         CHECK(at1920[i + 3].status == 0x90);
         CHECK(at1920[i].data[0] == at1920[i + 3].data[0]);  // same pitch, off then on
     }
-    CHECK(at1920[0].data[0] == 48);  // the engine's close voicing of C major: C3 E3 G3
-    CHECK(at1920[1].data[0] == 52);
-    CHECK(at1920[2].data[0] == 55);
+    CHECK(at1920[0].data[0] == 60);  // the default close voicing of C major: C4 E4 G4
+    CHECK(at1920[1].data[0] == 64);
+    CHECK(at1920[2].data[0] == 67);
     CHECK(parsed.events.back().tick == 3840);
 }
 
@@ -614,7 +576,7 @@ TEST_CASE("writeFile: round trip through a temporary path, overwriting what was 
     CHECK(readAll(path) == twoBars);
 
     // A shorter write replaces the longer file rather than overwriting its prefix.
-    const Bytes oneBar = writeSmf0(goldenCompiled(), 120.0);
+    const Bytes oneBar = writeSmf0(compile(cMajorBars(1)), 120.0);
     REQUIRE(oneBar.size() < twoBars.size());
     REQUIRE(writeFile(path.string(), oneBar));
     CHECK(readAll(path) == oneBar);
