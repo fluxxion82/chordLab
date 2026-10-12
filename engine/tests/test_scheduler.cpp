@@ -318,18 +318,25 @@ bool operator<(const AbsEv& a, const AbsEv& b) {
     return a.pitch < b.pitch;
 }
 
-/// Plays `compiled` (looped) from sample 0 to `totalSamples` in blocks of the given sizes (cycled, the
-/// last one trimmed), with the host's ppq derived from the absolute sample position as a real host does.
-std::vector<AbsEv> playPartitioned(const Compiled& compiled, long totalSamples, const std::vector<int>& sizes) {
+/// Plays `snapshot` from sample 0 to `totalSamples` in blocks of the given sizes (cycled, the last one
+/// trimmed), with the host's ppq derived from the absolute sample position as a real host does. With
+/// `jitterBeats` the reported ppqStart is nudged alternately up and down by that much (never on the
+/// first block), as a host with its own rounding would.
+std::vector<AbsEv> playPartitioned(const Snapshot& snapshot, long totalSamples, const std::vector<int>& sizes,
+                                   double jitterBeats = 0.0) {
     Host host;
-    host.adopt(snapshotOf(compiled));
+    host.adopt(snapshot);
     std::vector<AbsEv> events;
     long position = 0;
     std::size_t next = 0;
     while (position < totalSamples) {
-        int nFrames = sizes[next++ % sizes.size()];
+        int nFrames = sizes[next % sizes.size()];
         nFrames = static_cast<int>(std::min<long>(nFrames, totalSamples - position));
-        const double ppq = static_cast<double>(position) * kBpm / (60.0 * kSr);
+        double ppq = static_cast<double>(position) * kBpm / (60.0 * kSr);
+        if (position > 0) {
+            ppq += (next % 2 == 0) ? jitterBeats : -jitterBeats;
+        }
+        ++next;
         for (const Ev& e : host.run(ppq, nFrames, true)) {
             REQUIRE(e.offset >= 0);
             REQUIRE(e.offset < nFrames);
@@ -342,36 +349,79 @@ std::vector<AbsEv> playPartitioned(const Compiled& compiled, long totalSamples, 
     return events;
 }
 
-}  // namespace
-
-TEST_CASE("scheduler: partition invariance over beats 0..16 for several block sizes") {
-    const Compiled& compiled = cThenAm();  // endBeat 8: two passes in 16 beats
-    const long total = 16L * kSamplesPerBeat;
-
-    // The reference: every occurrence in [0, 16) at its exact sample.
+/// Every occurrence of `snapshot` (looped) before `totalSamples`, at the sample the scheduler must put it
+/// on: an event at beat b of wrap k sits at (k + 1) * endBeat when b is the final off beat, else at
+/// k * endBeat + b, rounded half up to a sample.
+std::vector<AbsEv> occurrencesBefore(const Snapshot& snapshot, long totalSamples) {
     std::vector<AbsEv> expected;
-    for (int k = 0; k < 2; ++k) {
-        for (const NoteEvent& e : compiled.events) {
-            const double beat = k * compiled.endBeat + e.beat;
-            if (beat < 16.0) {
-                expected.push_back(AbsEv{std::lround(beat * kSamplesPerBeat), e.on, e.pitch});
+    for (int k = 0;; ++k) {
+        bool any = false;
+        for (std::size_t i = 0; i < snapshot.count; ++i) {
+            const NoteEvent& e = snapshot.events[i];
+            const double beat = e.beat >= snapshot.endBeat ? (k + 1) * snapshot.endBeat : k * snapshot.endBeat + e.beat;
+            const long sample = static_cast<long>(std::floor(beat * kSamplesPerBeat + 0.5));
+            if (sample < totalSamples) {
+                expected.push_back(AbsEv{sample, e.on, e.pitch});
+                any = true;
             }
+        }
+        if (!any) {
+            break;
         }
     }
     std::sort(expected.begin(), expected.end());
-    REQUIRE(expected.size() == 21);  // 2 x 12 minus the three offs that sit exactly at 16
+    return expected;
+}
 
-    const std::vector<std::vector<int>> schemes{
-        {64}, {256}, {1024}, {100, 37, 500, 1, 999, 64, 2048, 3}, {7, 11, 13}, {kSamplesPerBeat * 3}};
-    for (std::size_t s = 0; s < schemes.size(); ++s) {
+const std::vector<std::vector<int>> kSchemes{
+    {64}, {256}, {1024}, {100, 37, 500, 1, 999, 64, 2048, 3}, {7, 11, 13}, {kSamplesPerBeat * 3}};
+
+void checkPartitionInvariance(const Snapshot& snapshot, long total, double jitterBeats = 0.0) {
+    const std::vector<AbsEv> expected = occurrencesBefore(snapshot, total);
+    REQUIRE(!expected.empty());
+    for (std::size_t s = 0; s < kSchemes.size(); ++s) {
         CAPTURE(s);
-        const std::vector<AbsEv> actual = playPartitioned(compiled, total, schemes[s]);
+        const std::vector<AbsEv> actual = playPartitioned(snapshot, total, kSchemes[s], jitterBeats);
         REQUIRE(actual.size() == expected.size());
         for (std::size_t i = 0; i < expected.size(); ++i) {
             CAPTURE(i);
             CHECK(actual[i] == expected[i]);
         }
     }
+}
+
+}  // namespace
+
+TEST_CASE("scheduler: partition invariance over beats 0..16 for several block sizes") {
+    const Compiled& compiled = cThenAm();  // endBeat 8: two passes in 16 beats
+    const long total = 16L * kSamplesPerBeat;
+    const std::vector<AbsEv> expected = occurrencesBefore(snapshotOf(compiled), total);
+    REQUIRE(expected.size() == 21);  // 2 x 12 minus the three offs that sit exactly at 16
+    checkPartitionInvariance(snapshotOf(compiled), total);
+}
+
+TEST_CASE("scheduler: partition invariance with fractional chord lengths") {
+    SUBCASE("thirds of a beat") {
+        const Compiled compiled = compile(documentOf({chord(0, "maj"), chord(9, "min"), chord(0, "maj")}, 1.0 / 3.0));
+        checkPartitionInvariance(snapshotOf(compiled), 7L * kSamplesPerBeat);
+    }
+    SUBCASE("0.333 beats") {
+        const Compiled compiled = compile(documentOf({chord(0, "maj"), chord(9, "min")}, 0.333));
+        checkPartitionInvariance(snapshotOf(compiled), 5L * kSamplesPerBeat);
+    }
+    SUBCASE("0.25001 beats, where k*endBeat + endBeat and (k+1)*endBeat differ by an ulp") {
+        const std::vector<NoteEvent> one{{0.0, true, 60, 100}, {0.25001, false, 60, 0}};
+        checkPartitionInvariance(snapshotOf(one, 0.25001), 4L * kSamplesPerBeat);
+    }
+}
+
+TEST_CASE("scheduler: host jitter below the seek threshold has no effect on the output") {
+    const Snapshot snapshot = snapshotOf(cThenAm());
+    const long total = 16L * kSamplesPerBeat;
+    checkPartitionInvariance(snapshot, total, 1.0 / kSamplesPerBeat);   // one sample of jitter
+    checkPartitionInvariance(snapshot, total, 0.9 / 1024.0);             // just under the seek threshold
+    const Compiled thirds = compile(documentOf({chord(0, "maj"), chord(9, "min"), chord(0, "maj")}, 1.0 / 3.0));
+    checkPartitionInvariance(snapshotOf(thirds), 7L * kSamplesPerBeat, 1.0 / kSamplesPerBeat);
 }
 
 // --- 9. negative ppq ---------------------------------------------------------------------------
@@ -534,6 +584,19 @@ TEST_CASE("scheduler: a preview auto-releases after four seconds of blocks witho
     }
 }
 
+TEST_CASE("scheduler: a pitch repeated within one preview command sounds and releases once") {
+    Host host;
+    CHECK(host.scheduler.pushPreview(previewStart(4, {75, 65, 65, 60})));
+    const std::vector<Ev> started = host.run(0.0, 512, false);
+    CAPTURE(describe(started));
+    CHECK(started == std::vector<Ev>{on(0, 75, 90), on(0, 65, 90), on(0, 60, 90)});
+    CHECK(host.scheduler.pushPreview(previewStop(4)));
+    const std::vector<Ev> stopped = host.run(0.0, 512, false);
+    CAPTURE(describe(stopped));
+    CHECK(stopped == std::vector<Ev>{off(0, 75), off(0, 65), off(0, 60)});
+    CHECK_FALSE(host.scheduler.sounding(65));
+}
+
 TEST_CASE("scheduler: two previews sharing a pitch release it only when both are gone") {
     Host host;
     CHECK(host.scheduler.pushPreview(previewStart(1, {60, 64})));
@@ -682,6 +745,8 @@ TEST_CASE("scheduler: 10000 random blocks and commands keep the ownership invari
             host.scheduler.reset(kSr);
         } else if (action < 30) {
             bpm = bpms[randInt(0, 3)];
+        } else if (action < 32) {
+            host.scheduler.panic();
         }
 
         const int nFrames = randInt(1, 2048);
@@ -712,10 +777,14 @@ TEST_CASE("scheduler: 10000 random blocks and commands keep the ownership invari
             REQUIRE(host.lastOk);
         }
 
-        // The owner bits are exactly the set of pitches that physically sound.
+        // The scheduler's idea of what sounds is exactly what the emitted ons and offs say; an owned
+        // pitch always sounds (an unowned one may still sound while its note-off is owed).
         int mismatches = 0;
         for (int pitch = 0; pitch < 128; ++pitch) {
-            if ((host.owners(pitch) != 0) != sounding[pitch]) {
+            if (host.scheduler.sounding(pitch) != sounding[pitch]) {
+                ++mismatches;
+            }
+            if (host.owners(pitch) != 0 && !sounding[pitch]) {
                 ++mismatches;
             }
         }
@@ -756,17 +825,43 @@ TEST_CASE("scheduler: absurd snapshots and host timing return promptly with rele
         CHECK(host.lastOk);
         CHECK(host.owners(60) == 0);
     }
-    SUBCASE("bpm 1e-9: a block is a sliver of a beat, a seek to 1e12 only releases") {
+    SUBCASE("bpm 1e-9: samples per beat beyond 1e9, so the block counts as stopped") {
         Host host;
         host.adopt(snapshotOf(cFour()));
-        const std::vector<Ev> started = host.run(0.0, 512, true, 1e-9);
-        CAPTURE(describe(started));
-        CHECK(started == std::vector<Ev>{on(0, 48), on(0, 52), on(0, 55)});
-        const std::vector<Ev> sought = host.run(1e12, 512, true, 1e-9);
-        CAPTURE(describe(sought));
-        CHECK(sought == std::vector<Ev>{off(0, 48), off(0, 52), off(0, 55)});
+        REQUIRE(host.run(0.0, 512, true) == std::vector<Ev>{on(0, 48), on(0, 52), on(0, 55)});
+        const std::vector<Ev> absurd = host.run(512.0 / kSamplesPerBeat, 512, true, 1e-9);
+        CAPTURE(describe(absurd));
+        CHECK(absurd == std::vector<Ev>{off(0, 48), off(0, 52), off(0, 55)});
+        CHECK(host.lastOk);
         CHECK(host.run(1e12, 512, true, 1e-9) == kNone);
         CHECK(host.lastOk);
+    }
+    SUBCASE("derived values are validated: samples per beat and the preview timer must be sane") {
+        struct Bad {
+            const char* what;
+            double sampleRate;
+            double bpm;
+        };
+        const Bad bads[] = {
+            {"spb overflows to inf", 1e300, 1e-300},
+            {"spb 5e11 > 1e9", 1e12, kBpm},
+            {"spb 2.88e15 > 1e9", kSr, 1e-9},
+            {"sampleRate 1e300 (preview timer cannot fit)", 1e300, 1e300 * 60.0 / 24000.0},
+        };
+        for (const Bad& bad : bads) {
+            CAPTURE(bad.what);
+            Host host;
+            host.adopt(snapshotOf(cFour()));
+            REQUIRE(host.run(0.0, 512, true) == std::vector<Ev>{on(0, 48), on(0, 52), on(0, 55)});
+            const BlockInfo info{512.0 / kSamplesPerBeat, 512, bad.sampleRate, bad.bpm, true};
+            std::size_t written = 0;
+            const bool ok = host.scheduler.process(info, host.buffer.data(), kBig, written);
+            const std::vector<Ev> events = decode(host.buffer.data(), written);
+            CAPTURE(describe(events));
+            CHECK(ok);
+            CHECK(events == std::vector<Ev>{off(0, 48), off(0, 52), off(0, 55)});
+            CHECK(host.owners(48) == 0);
+        }
     }
     SUBCASE("a block at ppq 1e300 and one at the largest finite ppq") {
         Host host;
@@ -823,4 +918,257 @@ TEST_CASE("scheduler: absurd snapshots and host timing return promptly with rele
         CHECK(skipped == std::vector<Ev>{off(0, 48), off(0, 52), off(0, 55)});
         CHECK(host.lastOk);
     }
+}
+
+// --- Review regressions ----------------------------------------------------------------------------
+
+TEST_CASE("regression: a release refused by output capacity is owed and paid by the next block") {
+    Host host;
+    host.adopt(snapshotOf(cFour()));
+    host.run(0.0, 512, true);
+
+    const std::vector<Ev> refused = host.run(0.5, 512, false, kBpm, 0);  // stop with no room at all
+    CHECK(refused == kNone);
+    CHECK_FALSE(host.lastOk);
+    CHECK(host.owners(48) == 0);         // the progression has let go...
+    CHECK(host.scheduler.sounding(48));  // ...but the note still physically sounds
+
+    const std::vector<Ev> owed = host.run(0.5, 512, false);
+    CAPTURE(describe(owed));
+    CHECK(owed == std::vector<Ev>{off(0, 48), off(0, 52), off(0, 55)});
+    CHECK(host.lastOk);
+    CHECK_FALSE(host.scheduler.sounding(48));
+    CHECK(host.run(0.5, 512, false) == kNone);
+}
+
+TEST_CASE("regression: owed releases are paid before anything else; an attack on an owed pitch retriggers") {
+    SUBCASE("the next playing block pays first, then attacks") {
+        Host host;
+        host.adopt(snapshotOf(cFour()));
+        host.run(0.0, 512, true);
+        REQUIRE(host.run(0.5, 512, false, kBpm, 0) == kNone);
+        const std::vector<Ev> events = host.run(0.0, 512, true);
+        CAPTURE(describe(events));
+        CHECK(events == std::vector<Ev>{off(0, 48), off(0, 52), off(0, 55), on(0, 48), on(0, 52), on(0, 55)});
+        CHECK(host.lastOk);
+    }
+    SUBCASE("a preview on an owed pitch sounds it afresh") {
+        Host host;
+        host.adopt(snapshotOf(cFour()));
+        host.run(0.0, 512, true);
+        REQUIRE(host.run(0.5, 512, false, kBpm, 0) == kNone);
+        CHECK(host.scheduler.pushPreview(previewStart(1, {48})));
+        const std::vector<Ev> events = host.run(0.5, 512, false);
+        CAPTURE(describe(events));
+        CHECK(events == std::vector<Ev>{off(0, 48), off(0, 52), off(0, 55), on(0, 48, 90)});
+        CHECK(host.owners(48) == kOwnerPreview);
+    }
+    SUBCASE("a capacity of 128 pays every owed release at once") {
+        std::vector<NoteEvent> all;
+        for (int p = 1; p < 128; ++p) {
+            all.push_back({0.0, true, p, 100});
+        }
+        for (int p = 1; p < 128; ++p) {
+            all.push_back({4.0, false, p, 0});
+        }
+        Host host;
+        host.adopt(snapshotOf(all, 4.0));
+        REQUIRE(host.run(0.0, 512, true).size() == 127);
+        REQUIRE(host.run(0.5, 512, false, kBpm, 0) == kNone);
+        const std::vector<Ev> owed = host.run(0.5, 512, false, kBpm, Scheduler::kCapacityForImmediateRelease);
+        CHECK(owed.size() == 127);
+        CHECK(host.lastOk);
+        CHECK(std::all_of(owed.begin(), owed.end(), [](const Ev& e) { return !e.on; }));
+    }
+}
+
+TEST_CASE("regression: mandatory releases survive a flood of preview commands") {
+    Host host;
+    host.adopt(snapshotOf(cFour()));
+    host.run(0.0, 512, true);
+    for (int id = 1; id <= 64; ++id) {
+        CAPTURE(id);
+        REQUIRE(host.scheduler.pushPreview(previewStart(id, {60, 61, 62, 63, 64, 65, 66, 67})));
+    }
+    const std::vector<Ev> events = host.run(0.5, 512, false);  // transport stops under the flood
+    CAPTURE(describe(events));
+    for (const int pitch : {48, 52, 55}) {
+        CAPTURE(pitch);
+        CHECK(std::count(events.begin(), events.end(), off(0, pitch)) == 1);
+        CHECK(host.owners(pitch) == 0);
+        CHECK_FALSE(host.scheduler.sounding(pitch));
+    }
+    CHECK(host.scheduler.sounding(60));
+    CHECK_FALSE(host.lastOk);  // only eight previews fit; the rest were refused
+}
+
+TEST_CASE("regression: a timeline too large for one block is carried over, never lost") {
+    std::vector<NoteEvent> dense;  // 127 pitches for a quarter beat: 254 events per wrap
+    for (int p = 1; p < 128; ++p) {
+        dense.push_back({0.0, true, p, 100});
+    }
+    for (int p = 1; p < 128; ++p) {
+        dense.push_back({0.25, false, p, 0});
+    }
+    Host host;
+    host.adopt(snapshotOf(dense, 0.25));
+    bool sounding[128] = {};
+    long ons = 0;
+    long offs = 0;
+    long position = 0;
+    auto play = [&](int nFrames, bool playing) {
+        const double ppq = static_cast<double>(position) * kBpm / (60.0 * kSr);
+        int previous = 0;
+        for (const Ev& e : host.run(ppq, nFrames, playing)) {
+            REQUIRE(e.offset >= previous);
+            previous = e.offset;
+            REQUIRE(sounding[e.pitch] != e.on);
+            sounding[e.pitch] = e.on;
+            (e.on ? ons : offs) += 1;
+        }
+        for (int p = 0; p < 128; ++p) {
+            REQUIRE(host.scheduler.sounding(p) == sounding[p]);
+        }
+        if (playing) {
+            position += nFrames;
+        }
+    };
+    for (int i = 0; i < 3; ++i) {
+        play(18000, true);  // three wraps = 762 events per block: more than the scratch holds
+    }
+    for (int i = 0; i < 200; ++i) {
+        play(600, true);  // small blocks let the backlog drain
+    }
+    play(512, false);
+    // 174000 samples = 7.25 beats: 29 wraps attacked, 28 released by the timeline, the last by the stop.
+    CHECK(ons == 29 * 127);
+    CHECK(offs == 29 * 127);
+    CHECK(std::none_of(std::begin(sounding), std::end(sounding), [](bool s) { return s; }));
+}
+
+TEST_CASE("regression: an attack coincident with a deferred off at a wrap boundary is never skipped") {
+    // endBeat 0.25001: 11 * endBeat + endBeat = 3.0001200000000003 but 12 * endBeat = 3.0001199999999999.
+    // Wrap 12 starts at 12 * 0.25001 * 24000 = 72002.88, i.e. sample 72003. A 64-sample block ending at
+    // 72003 sees that off at offset 63.88 -> 64 == nFrames, so it is deferred; the on must go with it.
+    const std::vector<NoteEvent> one{{0.0, true, 60, 100}, {0.25001, false, 60, 0}};
+    const Snapshot snapshot = snapshotOf(one, 0.25001);
+    const long total = 72003 + 64;
+    const std::vector<AbsEv> actual = playPartitioned(snapshot, total, {71939, 64});
+    const std::vector<AbsEv> expected = occurrencesBefore(snapshot, total);
+    REQUIRE(actual.size() == expected.size());
+    for (std::size_t i = 0; i < expected.size(); ++i) {
+        CAPTURE(i);
+        CHECK(actual[i] == expected[i]);
+    }
+    CHECK(std::count(actual.begin(), actual.end(), AbsEv{72003, false, 60}) == 1);
+    CHECK(std::count(actual.begin(), actual.end(), AbsEv{72003, true, 60}) == 1);
+}
+
+TEST_CASE("regression: an empty block is a no-op") {
+    Host host;
+    host.adopt(snapshotOf(cFour()));
+    host.run(0.0, 512, true);
+    CHECK(host.scheduler.pushPreview(previewStart(1, {60})));
+
+    const std::vector<Ev> empty = host.run(0.5, 0, false);  // a stop with no frames
+    CHECK(empty == kNone);
+    CHECK(host.lastOk);
+    CHECK(host.owners(48) == kOwnerProgression);  // nothing released...
+    CHECK(host.owners(60) == 0);                  // ...and the preview still queued
+
+    const std::vector<Ev> events = host.run(0.5, 512, false);
+    CAPTURE(describe(events));
+    CHECK(events == std::vector<Ev>{on(0, 60, 90), off(0, 48), off(0, 52), off(0, 55)});
+
+    // An empty playing block advances nothing either: the next block is still contiguous.
+    Host other;
+    other.adopt(snapshotOf(cFour()));
+    other.run(0.0, 93600, true);  // ends at 3.9
+    CHECK(other.run(3.9, 0, true) == kNone);
+    const std::vector<Ev> wrap = other.run(3.9, 4800, true);
+    CAPTURE(describe(wrap));
+    CHECK(wrap == std::vector<Ev>{off(2400, 48), off(2400, 52), off(2400, 55), on(2400, 48), on(2400, 52), on(2400, 55)});
+}
+
+TEST_CASE("regression: a stop in the same batch frees its preview slot for a start") {
+    Host host;
+    for (int id = 1; id <= 8; ++id) {
+        REQUIRE(host.scheduler.pushPreview(previewStart(id, {60 + id})));
+    }
+    REQUIRE(host.run(0.0, 512, false).size() == 8);
+    REQUIRE(host.lastOk);
+    SUBCASE("stop then start") {
+        CHECK(host.scheduler.pushPreview(previewStop(1)));
+        CHECK(host.scheduler.pushPreview(previewStart(9, {80})));
+        const std::vector<Ev> events = host.run(0.0, 512, false);
+        CAPTURE(describe(events));
+        CHECK(events == std::vector<Ev>{off(0, 61), on(0, 80, 90)});
+        CHECK(host.lastOk);
+    }
+    SUBCASE("restart of a running id") {
+        CHECK(host.scheduler.pushPreview(previewStart(1, {61, 70})));
+        const std::vector<Ev> events = host.run(0.0, 512, false);
+        CAPTURE(describe(events));
+        CHECK(events == std::vector<Ev>{off(0, 61), on(0, 61, 90), on(0, 70, 90)});
+        CHECK(host.lastOk);
+    }
+    SUBCASE("a ninth concurrent preview is refused and reported") {
+        CHECK(host.scheduler.pushPreview(previewStart(9, {80})));
+        CHECK(host.run(0.0, 512, false) == kNone);
+        CHECK_FALSE(host.lastOk);
+    }
+}
+
+TEST_CASE("regression: the snapshot size bound") {
+    std::vector<NoteEvent> big;
+    for (int i = 0; i < 2048; ++i) {
+        big.push_back({i * 0.001, true, 60, 100});
+        big.push_back({i * 0.001 + 0.0005, false, 60, 0});
+    }
+    REQUIRE(big.size() == Scheduler::kMaxSnapshotEvents);
+    Host host;
+    host.adopt(snapshotOf(big, 4.0));
+    const std::vector<Ev> played = host.run(0.0, 512, true);  // 512 samples = 0.0213 beats: 22 notes
+    CHECK(played.size() == 43);
+    CHECK(host.lastOk);
+#ifdef NDEBUG
+    // One more event than the bound: adopted as an empty snapshot (a debug build asserts instead).
+    big.push_back({4.0, false, 60, 0});
+    host.adopt(snapshotOf(big, 4.0, true, 2));
+    const std::vector<Ev> flushed = host.run(512.0 / kSamplesPerBeat, 512, true);
+    CAPTURE(describe(flushed));
+    CHECK(flushed == std::vector<Ev>{off(0, 60)});
+    CHECK(host.run(1024.0 / kSamplesPerBeat, 4 * kSamplesPerBeat, true) == kNone);
+#endif
+}
+
+TEST_CASE("scheduler: panic releases the progression and the previews, with no chase") {
+    Host host;
+    host.adopt(snapshotOf(cFour()));
+    host.run(0.0, 512, true);
+    CHECK(host.scheduler.pushPreview(previewStart(1, {60, 64})));
+    REQUIRE(host.run(512.0 / kSamplesPerBeat, 512, true) == std::vector<Ev>{on(0, 60, 90), on(0, 64, 90)});
+
+    host.scheduler.panic();
+    CHECK(host.owners(48) == 0);
+    CHECK(host.owners(60) == 0);
+    CHECK(host.scheduler.sounding(48));  // owed until the next block
+    CHECK(host.scheduler.sounding(60));
+
+    const std::vector<Ev> events = host.run(1024.0 / kSamplesPerBeat, 512, true);
+    CAPTURE(describe(events));
+    CHECK(events == std::vector<Ev>{off(0, 48), off(0, 52), off(0, 55), off(0, 60), off(0, 64)});
+    CHECK(host.lastOk);
+    CHECK_FALSE(host.scheduler.sounding(48));
+
+    // No chase: silence until the progression's next attack, at the wrap.
+    const std::vector<Ev> wrap = host.run(1536.0 / kSamplesPerBeat, 4 * kSamplesPerBeat, true);
+    const int offset = 4 * kSamplesPerBeat - 1536;
+    CAPTURE(describe(wrap));
+    CHECK(wrap == std::vector<Ev>{on(offset, 48), on(offset, 52), on(offset, 55)});
+
+    // The preview's slot is gone: its stop is a no-op.
+    CHECK(host.scheduler.pushPreview(previewStop(1)));
+    CHECK(host.run((1536.0 + 4 * kSamplesPerBeat) / kSamplesPerBeat, 512, true) == kNone);
+    CHECK(host.lastOk);
 }

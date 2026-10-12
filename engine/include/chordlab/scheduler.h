@@ -29,9 +29,10 @@ struct MidiOut {
 };
 
 /// The compiled progression as the scheduler plays it. `events` must be sorted by
-/// `(beat, off before on, pitch)` with every beat in `[0, endBeat]`, as `compile` produces; the array must
-/// stay valid and unchanged for as long as the scheduler may read it (until a later `adopt` replaces it
-/// and `process` has run once more). `generation` changes whenever the content changes.
+/// `(beat, off before on, pitch)` with every beat in `[0, endBeat]` and at most
+/// `Scheduler::kMaxSnapshotEvents` of them, as `compile` produces. The array is read only inside
+/// `process`: it must stay valid and unchanged from `adopt` until a later `adopt` has replaced it, after
+/// which it is never read again. `generation` changes whenever the content changes.
 struct Snapshot {
     const NoteEvent* events;
     std::size_t count;
@@ -64,70 +65,95 @@ constexpr std::uint8_t kOwnerPreview = 2;
 /// is silent. Previews release themselves four seconds after they start, counted in samples.
 ///
 /// Position: progression beat 0 sits at host ppq 0. With `Snapshot::loop` the progression repeats every
-/// `endBeat` beats; without it, it plays once and nothing sounds at or after `endBeat`. Nothing ever
-/// sounds before host ppq 0.
+/// `endBeat` beats; without it, it plays once and nothing sounds at or after `endBeat`. The progression
+/// never sounds before host ppq 0 (previews are independent of the transport).
 ///
-/// Each block: preview commands are drained, discontinuities (start, stop, seek, a pending flush from
-/// `reset` or `adopt`) release the progression's notes and chase the notes sounding at the new position,
-/// the block's own events are enumerated across every wrap it spans, and everything is written in
-/// `(sampleOffset, off before on, pitch)` order. Releases are never dropped for lack of output capacity;
-/// attacks that do not fit are dropped and left unowned, and `process` then returns false.
+/// Timing: playback is locked to an integer sample clock anchored at the host position where the
+/// transport started, sought or changed tempo. Every event sits at `round((beat - anchor) * samplesPerBeat)`
+/// on that clock, so the output does not depend on how the host cuts its blocks, and host positions that
+/// differ from the expected one by less than `kSeekThresholdBeats` are ignored. Beyond that threshold
+/// the block is a seek: the progression's notes are released and the notes sounding at the new position
+/// are chased (attacked at offset 0). Start, stop, `reset` and a changed `adopt` are discontinuities too.
 ///
-/// Bounded work: a block with unusable timing (`nFrames < 0`, `sampleRate` or `bpm` not positive, a
-/// non-finite `ppqStart`) is treated as a stopped block (previews served, progression released, nothing
-/// played), and a block that would span more than `kMaxWrapsPerBlock` wraps of the progression is skipped
-/// the same way, so no host value and no snapshot can make a block loop unboundedly.
+/// Output order: `(sampleOffset, off before on, pitch)` within each phase of a block; at equal offsets the
+/// phases run note-offs owed from earlier blocks, preview commands in arrival order, the discontinuity's
+/// releases and chase, then the timeline. Releases are never lost: one that does not fit the output is
+/// owed and paid at the start of the next block before anything else, and a capacity of at least
+/// `kCapacityForImmediateRelease` always pays every owed release in the block that owes it. Attacks that
+/// do not fit are dropped and left unowned, and `process` then returns false.
 ///
-/// Real time: after construction nothing allocates, throws, locks or logs. `process`, `reset` and `adopt`
-/// belong to one thread (the audio thread); `pushPreview` may be called from one other thread.
+/// Bounded work: a block of unusable timing (`nFrames < 0`, `sampleRate` or `bpm` not positive and finite,
+/// a non-finite `ppqStart`, samples per beat outside `(0, kMaxSamplesPerBeat]`, or a preview timer that
+/// does not fit) is treated as a stopped block (previews served, progression released, nothing played);
+/// a block spanning more than `kMaxWrapsPerBlock` wraps of the progression is skipped the same way; a
+/// timeline too dense for the scratch is carried over to the next block, late but complete. An empty
+/// block (`nFrames == 0`) does nothing at all and changes nothing.
+///
+/// Real time: after construction nothing allocates, throws, locks or logs. `process`, `reset`, `adopt`,
+/// `panic`, `ownersOf` and `sounding` belong to one thread (the audio thread); `pushPreview` may be
+/// called from one other thread.
 class Scheduler {
 public:
     static constexpr std::size_t kMaxEventsPerBlock = 512;
+    /// Scratch entries kept back for the block's own releases (the discontinuity's release-all and the
+    /// preview expiries), so that no number of attacks can displace them.
+    static constexpr std::size_t kReservedReleaseEvents = 32;
     static constexpr std::size_t kPreviewQueueCapacity = 64;
     static constexpr std::size_t kMaxPreviews = 8;
     static constexpr double kPreviewSeconds = 4.0;
-    /// A host position this far from the one we expected counts as a seek.
+    /// A host position this far from the expected one counts as a seek.
     static constexpr double kSeekThresholdBeats = 1.0 / 1024.0;
     /// The most progression wraps one block may span and still be played (16 beats of a 0.25-beat
     /// progression, far beyond any real block); beyond it the block only releases.
     static constexpr std::size_t kMaxWrapsPerBlock = 64;
+    /// The most events a snapshot may hold; a larger one is adopted as empty.
+    static constexpr std::size_t kMaxSnapshotEvents = 4096;
+    /// An output capacity that always pays every owed release in one block.
+    static constexpr std::size_t kCapacityForImmediateRelease = 128;
+    /// The largest sane sample-rate-to-tempo ratio; beyond it the block's timing is unusable.
+    static constexpr double kMaxSamplesPerBeat = 1e9;
 
     Scheduler() noexcept;
 
     /// Records the sample rate the preview timers use and marks a pending flush: the next `process`
     /// releases every progression note and chases the current position. Ownership state is kept, so the
-    /// notes that sound are released properly.
+    /// notes that sound are released properly; previews are untouched. `sampleRate` must be positive and
+    /// finite (an unusable value is ignored).
     void reset(double sampleRate) noexcept;
 
     /// Replaces the progression. A changed `generation` marks a pending flush (release all, then chase on
-    /// the next block); the same generation is adopted silently.
+    /// the next block); the same generation is adopted silently. A snapshot with more than
+    /// `kMaxSnapshotEvents` events is adopted as an empty one (and asserts in a debug build).
     void adopt(const Snapshot& snapshot) noexcept;
 
     /// Queues a preview command for the next block. Returns false, and queues nothing, when the queue is
     /// full. `count` must be at most 8 and every pitch below 128.
     bool pushPreview(const PreviewCmd& cmd) noexcept;
 
-    /// Produces this block's events into `out[0..capacity)`, setting `written`. Returns false if any
-    /// event was dropped (capacity, scratch space or the preview table ran out). `nFrames` must be at
-    /// least 0, `sampleRate` and `bpm` positive and `ppqStart` finite; `out` may be null only when
-    /// `capacity` is 0.
+    /// Produces this block's events into `out[0..capacity)`, setting `written`. Returns false if the block
+    /// could not emit everything it was due to: an attack was dropped (output capacity, scratch space or the
+    /// preview table ran out), a release had to be owed to a later block, or part of the timeline was
+    /// carried over. `out` may be null only when `capacity` is 0.
     bool process(const BlockInfo& info, MidiOut* out, std::size_t capacity, std::size_t& written) noexcept;
 
-    /// The owners currently holding `pitch` (a combination of `kOwnerProgression` and `kOwnerPreview`);
-    /// non-zero exactly when the pitch physically sounds. `pitch` must be in 0..127.
+    /// Silences everything: every sounding pitch, progression and preview alike, is released (its note-off
+    /// is owed and paid by the next block) and every preview is forgotten. The progression is not chased
+    /// afterwards: it stays silent until its next attack.
+    void panic() noexcept;
+
+    /// The owners currently holding `pitch` (a combination of `kOwnerProgression` and `kOwnerPreview`).
+    /// `pitch` must be in 0..127.
     std::uint8_t ownersOf(int pitch) const noexcept;
 
-private:
-    enum Kind : std::uint8_t {
-        ProgressionAttack,
-        ProgressionRelease,
-        ProgressionReleaseAll,
-        PreviewAttack,
-        PreviewRelease,
-    };
+    /// Whether `pitch` physically sounds: it has an owner, or its note-off is owed. `pitch` must be in
+    /// 0..127.
+    bool sounding(int pitch) const noexcept;
 
-    /// Where in the block's processing an event came from; earlier phases write first at equal offsets.
-    enum Phase : std::uint8_t { PhasePreview, PhaseFlush, PhaseChase, PhaseTimeline };
+private:
+    enum Kind : std::uint8_t { ProgressionAttack, ProgressionRelease, ProgressionReleaseAll, PreviewExpiry };
+
+    /// Where in the block an event came from; earlier phases write first at equal offsets.
+    enum Phase : std::uint8_t { PhaseFlush, PhaseChase, PhaseTimeline };
 
     /// One owner-level event of the block, before ownership turns it into physical MIDI (or into nothing).
     struct Logical {
@@ -136,16 +162,15 @@ private:
         Phase phase;
         std::uint8_t pitch;
         std::uint8_t velocity;
-        std::uint8_t slot;   // PreviewAttack / PreviewRelease: the preview slot
-        std::uint8_t index;  // PreviewAttack: the pitch's index within the slot
-        std::uint16_t seq;   // insertion order, the final tie-break
+        std::uint8_t slot;  // PreviewExpiry: the preview slot
+        std::uint16_t seq;  // insertion order, the final tie-break
     };
 
     /// One running preview.
     struct Preview {
         bool active;
         int id;
-        long remainingSamples;
+        std::int64_t expireAt;  // on the preview clock
         std::uint8_t count;
         std::uint8_t held;  // bit i set while pitches[i] is acquired by this preview
         std::uint8_t velocity;
@@ -156,34 +181,58 @@ private:
     /// for the dry run that counts releases.
     struct State {
         std::array<std::uint8_t, 128> owners;
+        std::array<bool, 128> owed;  // physically sounding with no owner: a note-off is due
         std::array<Preview, kMaxPreviews> previews;
     };
 
     struct Writer;
 
-    bool pushLogical(const Logical& event) noexcept;
-    void drainPreviews(double sampleRate) noexcept;
-    void expirePreviews(int nFrames) noexcept;
-    void chase(double ppq) noexcept;
-    double enumerate(double lo, double start, double end, int nFrames, double samplesPerBeat) noexcept;
+    void drainQueue() noexcept;
+    bool pushLogical(const Logical& event, bool mandatory) noexcept;
+    void pushExpiries(int nFrames, std::int64_t previewSamples) noexcept;
+    void chase(double samplesPerBeat) noexcept;
+    void enumerate(std::int64_t windowLo, std::int64_t windowHi, int nFrames, double samplesPerBeat) noexcept;
     bool snapshotUsable() const noexcept;
-    static bool previewHeldElsewhere(const State& state, std::size_t slot, std::uint8_t pitch) noexcept;
-    static void apply(State& state, const Logical& event, Writer& writer) noexcept;
+    std::int64_t sampleOf(double beat, double samplesPerBeat) const noexcept;
+
+    static bool attack(State& state, std::uint8_t owner, int offset, std::uint8_t pitch, std::uint8_t velocity,
+                       Writer& writer) noexcept;
+    static void physicalOff(State& state, int offset, std::uint8_t pitch, Writer& writer) noexcept;
     static void releaseProgression(State& state, int offset, std::uint8_t pitch, Writer& writer) noexcept;
     static void releasePreview(State& state, std::size_t slot, int offset, Writer& writer) noexcept;
+    static bool previewHeldElsewhere(const State& state, std::size_t slot, std::uint8_t pitch) noexcept;
+    static void payOwed(State& state, Writer& writer) noexcept;
+    static void applyBatch(State& state, const PreviewCmd* batch, std::size_t count, std::int64_t clock,
+                           std::int64_t previewSamples, Writer& writer) noexcept;
+    static void apply(State& state, const Logical& event, std::int64_t clock, Writer& writer) noexcept;
 
     State mState;
     Snapshot mSnapshot;
+    std::size_t mEndIndex;  // first snapshot event at beat >= endBeat (the final offs)
+    bool mHasSnapshot;
     double mSampleRate;
     bool mWasPlaying;
     bool mPendingFlush;
-    bool mHasSnapshot;
-    bool mHasFrontier;
-    double mFrontier;  // the beat up to which the progression has been enumerated (the previous ppqEnd)
 
+    // The sample clock the progression is played on while the transport runs.
+    bool mHasAnchor;
+    double mAnchorPpq;        // host beat at clock sample 0
+    double mSamplesPerBeat;   // the tempo the clock was anchored with
+    std::int64_t mBlockSample;     // clock sample at which the next block starts
+    std::int64_t mFrontierSample;  // first clock sample whose events have not been emitted (<= mBlockSample)
+    bool mHasLag;                  // the frontier lags behind the block start (a carried-over timeline)
+    double mLagBeat;               // the beat of the first carried-over event, to re-anchor with
+    std::int64_t mPreviewClock;    // runs whether or not the transport does
+
+    // Per-block scratch.
     std::array<Logical, kMaxEventsPerBlock> mScratch;
     std::size_t mScratchCount;
     bool mDropped;
+    std::int64_t mNextFrontier;
+    bool mNextHasLag;
+    double mNextLagBeat;
+    std::array<PreviewCmd, kPreviewQueueCapacity> mBatch;
+    std::size_t mBatchCount;
 
     std::array<PreviewCmd, kPreviewQueueCapacity> mQueue;
     std::atomic<std::uint32_t> mQueueHead;
