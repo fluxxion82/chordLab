@@ -72,6 +72,13 @@ private:
   // kMsgTagError. Nothing is rewritten or deleted here except exports older than ten minutes (see the
   // cleanup note in ChordLab.mm).
   void HandleExport();
+  // Main thread: the same for one section (a kMsgTagExportSection payload {"schema":1,"id":n}), compiled
+  // with compileSection (re-based to beat 0) and named after the key and the section; an unknown id or a
+  // malformed message is a kMsgTagError.
+  void HandleExportSection(std::string_view json);
+  // Main thread: the shared tail of the two exports: writes `compiled` under a unique name carrying
+  // `label` ("C Ionian", "C Ionian-Verse"; sanitised), purges stale exports and pushes the path or an error.
+  void WriteExport(const chordlab::Compiled& compiled, const std::string& label);
   // Main thread: pushes {"schema":1,"path":path} to the editor.
   void PushExportReady(const std::string& path);
 

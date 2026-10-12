@@ -65,6 +65,36 @@ expect(SequenceGeometry.resizedLength(4, by: 2, pxPerBeat: px, snap: 0.25, range
 expect(SequenceGeometry.resizedLength(0.5, by: -1000, pxPerBeat: px, snap: 0.25, range: range) == 0.25, "clamped to 0.25")
 expect(SequenceGeometry.resizedLength(60, by: 1000, pxPerBeat: px, snap: 0.25, range: range) == 64, "clamped to 64")
 
+// --- section spans and boundary snapping (the sections header) ---
+let spans = SequenceGeometry.sectionSpans(starts: [0, 2], in: mixed)
+expect(spans == [SequenceGeometry.SpanFrame(x: 0, width: 102), SequenceGeometry.SpanFrame(x: 102, width: 48)],
+       "two sections over 4, 0.25, 2 beats: spans 0–102 and 102–150")
+expect(SequenceGeometry.sectionSpans(starts: [0], in: mixed) == [SequenceGeometry.SpanFrame(x: 0, width: 150)], "one section spans everything")
+expect(SequenceGeometry.sectionSpans(starts: [], in: mixed).isEmpty, "no sections, no spans")
+expect(SequenceGeometry.sectionSpans(starts: [0, 7], in: mixed) == [SequenceGeometry.SpanFrame(x: 0, width: 150), SequenceGeometry.SpanFrame(x: 150, width: 0)],
+       "a start outside the layout: the earlier span runs to the end, the stale one is empty")
+expect(SequenceGeometry.sectionSpans(starts: [2, 1], in: mixed) == [SequenceGeometry.SpanFrame(x: 102, width: 48), SequenceGeometry.SpanFrame(x: 150, width: 0)],
+       "an unsorted start is empty")
+expect(SequenceGeometry.sectionSpans(starts: [0], in: empty) == [SequenceGeometry.SpanFrame(x: 0, width: 0)], "a section on no blocks is empty")
+expect(SequenceGeometry.boundaryIndex(nearestTo: 0, in: mixed) == 0 && SequenceGeometry.boundaryIndex(nearestTo: 40, in: mixed) == 0,
+       "x 0 and 40 snap to block 0 (starts 0, 96, 102)")
+expect(SequenceGeometry.boundaryIndex(nearestTo: 97, in: mixed) == 1 && SequenceGeometry.boundaryIndex(nearestTo: 99, in: mixed) == 1,
+       "97 and 99 (a tie) snap to block 1, the lower index")
+expect(SequenceGeometry.boundaryIndex(nearestTo: 100, in: mixed) == 2 && SequenceGeometry.boundaryIndex(nearestTo: 1000, in: mixed) == 2,
+       "100 and far right snap to block 2")
+expect(SequenceGeometry.boundaryIndex(nearestTo: -50, in: mixed) == 0, "far left snaps to block 0")
+expect(SequenceGeometry.boundaryIndex(nearestTo: 10, in: empty) == 0, "no blocks: 0")
+
+// --- section names: the engine's 64-byte bound at a character boundary ---
+expect(HarmonyText.boundedSectionName("Verse") == "Verse", "a short name is untouched")
+expect(HarmonyText.boundedSectionName(String(repeating: "a", count: 64)) == String(repeating: "a", count: 64), "64 ASCII bytes pass")
+expect(HarmonyText.boundedSectionName(String(repeating: "a", count: 65)) == String(repeating: "a", count: 64), "65 cut to 64")
+let twoByte = String(repeating: "é", count: 33)   // 66 bytes
+expect(HarmonyText.boundedSectionName(twoByte) == String(repeating: "é", count: 32), "33 two-byte characters cut to 32 (64 bytes)")
+expect(HarmonyText.boundedSectionName(String(repeating: "a", count: 63) + "é") == String(repeating: "a", count: 63),
+       "a character straddling the bound is dropped whole")
+expect(HarmonyText.boundedSectionName("") == "", "empty stays empty")
+
 // --- HarmonyText: function words, tension, "why" lines ---
 expect(HarmonyText.functionWord("T") == "Tonic" && HarmonyText.functionWord("PD") == "Predominant" &&
        HarmonyText.functionWord("D") == "Dominant" && HarmonyText.functionWord("O") == "Other", "function words")

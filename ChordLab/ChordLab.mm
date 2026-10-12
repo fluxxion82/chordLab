@@ -86,8 +86,8 @@
 
 // MIDI export files and their cleanup
 // -----------------------------------
-// Every export is a new file under NSTemporaryDirectory()/ChordLab with a unique name,
-// ChordLab-<key>-<yyyyMMdd-HHmmss>-<pid>-<counter>-<uuid8>.mid, checked for non-existence before it is
+// Every export (the whole progression or one section) is a new file under NSTemporaryDirectory()/ChordLab
+// with a unique name, ChordLab-<label>-<yyyyMMdd-HHmmss>-<pid>-<counter>-<uuid8>.mid, checked for non-existence before it is
 // written and never rewritten or truncated afterwards: an NSItemProvider handed to the host copies the
 // file lazily, after the drop callback has returned, so a file may back a drag for a while. Nothing is
 // deleted at export time. Cleanup is deferred and age-based only: each export purges files in that folder
@@ -373,6 +373,12 @@ bool ChordLab::OnMessage(int msgTag, int ctrlTag, int dataSize, const void* pDat
     return true;
   }
 
+  if (msgTag == kMsgTagExportSection)
+  {
+    HandleExportSection((pData && dataSize > 0) ? std::string_view((const char*) pData, (size_t) dataSize) : std::string_view());
+    return true;
+  }
+
   return CocoaEditorDelegate::OnMessage(msgTag, ctrlTag, dataSize, pData);
 }
 
@@ -451,18 +457,66 @@ void ChordLab::HandlePreview(std::string_view text)
 
 void ChordLab::HandleExport()
 {
-  // Main thread, never real-time: compile and the SMF writer allocate. The tempo is the host's as
-  // ProcessBlock last saw it (120 before the first block); the export is otherwise exactly the playback
+  // Main thread, never real-time: compile and the SMF writer allocate. The export is exactly the playback
   // content, so a dropped clip is as long as the progression, trailing silence included (D10).
   @autoreleasepool
   {
   chordlab::Compiled compiled;
-  std::string keyName;
+  std::string label;
   {
     std::lock_guard<std::mutex> lock(mModelMutex);
     compiled = chordlab::compile(mStore.doc());
-    keyName = chordlab::keyName(mStore.doc().projectKey);
+    label = chordlab::keyName(mStore.doc().projectKey);
   }
+  WriteExport(compiled, label);
+  }
+}
+
+void ChordLab::HandleExportSection(std::string_view text)
+{
+  // Main thread. {"schema":1,"id":n}: the section is compiled as it sounds in the whole progression
+  // (compileSection slices the whole document's voicings) and re-based to beat 0, so the clip starts at
+  // once and is as long as the section.
+  @autoreleasepool
+  {
+  int id = -1;
+  {
+    const nlohmann::json message = nlohmann::json::parse(text, nullptr, /*allow_exceptions=*/false);
+    const auto schema = message.is_object() ? message.find("schema") : message.end();
+    const auto idField = message.is_object() ? message.find("id") : message.end();
+    if (!message.is_object() || schema == message.end() || !schema->is_number_integer() ||
+        schema->get<int>() != chordlab::kJsonSchema || idField == message.end() || !idField->is_number_integer() ||
+        idField->get<long long>() < 1 || idField->get<long long>() > INT_MAX)
+    {
+      PushError("section export message needs schema 1 and a section id");
+      return;
+    }
+    id = idField->get<int>();
+  }
+  chordlab::Compiled compiled;
+  std::string label;
+  {
+    std::lock_guard<std::mutex> lock(mModelMutex);
+    const int index = mStore.findSectionIndex(id);
+    if (index < 0)
+    {
+      PushError("no such section");
+      return;
+    }
+    const chordlab::Document& doc = mStore.doc();
+    compiled = chordlab::compileSection(doc, index);
+    label = chordlab::keyName(doc.projectKey) + "-" + doc.sections[(size_t) index].name;
+  }
+  WriteExport(compiled, label);
+  }
+}
+
+void ChordLab::WriteExport(const chordlab::Compiled& compiled, const std::string& label)
+{
+  // Main thread, never real-time. The tempo is the host's as ProcessBlock last saw it (120 before the
+  // first block).
+  @autoreleasepool
+  {
   double bpm = mHostBpm.load(std::memory_order_relaxed);
   if (!std::isfinite(bpm) || bpm <= 0.0)
     bpm = 120.0;
@@ -474,13 +528,14 @@ void ChordLab::HandleExport()
     return;
   }
 
-  // NSTemporaryDirectory()/ChordLab/ChordLab-<key>-<yyyyMMdd-HHmmss>-<pid>-<counter>-<uuid8>.mid, the key
-  // spelled with 's' for a sharp and '-' for anything but a letter or digit so the name is safe anywhere
-  // ("C-Ionian", "Fs-Dorian"); pid, counter and uuid make it unique across instances and processes, and
-  // the name is checked to be unused before anything is written (see the cleanup note above).
-  std::string safeKey;
-  for (const char c : keyName)
-    safeKey += std::isalnum((unsigned char) c) ? c : (c == '#' ? 's' : '-');
+  // NSTemporaryDirectory()/ChordLab/ChordLab-<label>-<yyyyMMdd-HHmmss>-<pid>-<counter>-<uuid8>.mid, the
+  // label (the key, plus the section name for a section) spelled with 's' for a sharp and '-' for
+  // anything but an ASCII letter or digit so the name is safe anywhere ("C-Ionian", "Fs-Dorian",
+  // "C-Ionian-Verse"); pid, counter and uuid make it unique across instances and processes, and the name
+  // is checked to be unused before anything is written (see the cleanup note above).
+  std::string safeLabel;
+  for (const char c : label)
+    safeLabel += std::isalnum((unsigned char) c) ? c : (c == '#' ? 's' : '-');
   char stamp[32] = {0};
   const std::time_t now = std::time(nullptr);
   std::tm local{};
@@ -496,7 +551,7 @@ void ChordLab::HandleExport()
   for (int attempt = 0; attempt < 8 && path.empty(); ++attempt)
   {
     NSString* uuid = [[[NSUUID UUID] UUIDString] substringToIndex:8];
-    std::string candidate = std::string([dir UTF8String]) + "/ChordLab-" + safeKey + "-" + stamp + "-" +
+    std::string candidate = std::string([dir UTF8String]) + "/ChordLab-" + safeLabel + "-" + stamp + "-" +
                             std::to_string(getpid()) + "-" + std::to_string(++mExportCounter) + "-" + [uuid UTF8String] + ".mid";
     if (![[NSFileManager defaultManager] fileExistsAtPath:[NSString stringWithUTF8String:candidate.c_str()]])
       path = std::move(candidate);                             // never an existing file: nothing is ever rewritten

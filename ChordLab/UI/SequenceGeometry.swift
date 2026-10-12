@@ -52,6 +52,48 @@ enum SequenceGeometry {
     return layout.frames.enumerated().filter { $0.offset != from && $0.element.centre < dropped }.count
   }
 
+  /// A section's horizontal extent in the header row: from its first block's x to the next section's first
+  /// block's x, or `endX` for the last.
+  struct SpanFrame: Equatable {
+    let x: CGFloat
+    let width: CGFloat
+  }
+
+  /// The spans of sections starting at the block indices `starts` (in order, as the snapshot lists them):
+  /// each runs from `frames[start].x` to the next start's x, the last to `endX`. A start outside the
+  /// layout, or not after the previous one, gets a zero-width span at the layout's end (drawn as nothing),
+  /// so a stale snapshot cannot put a span anywhere the blocks are not.
+  static func sectionSpans(starts: [Int], in layout: Layout) -> [SpanFrame] {
+    var spans: [SpanFrame] = []
+    spans.reserveCapacity(starts.count)
+    for (i, start) in starts.enumerated() {
+      guard layout.frames.indices.contains(start), i == 0 || start > starts[i - 1] else {
+        spans.append(SpanFrame(x: layout.endX, width: 0))
+        continue
+      }
+      let x = layout.frames[start].x
+      let next = i + 1 < starts.count ? starts[i + 1] : nil
+      let end = next.flatMap { layout.frames.indices.contains($0) && $0 > start ? layout.frames[$0].x : nil } ?? layout.endX
+      spans.append(SpanFrame(x: x, width: max(0, end - x)))
+    }
+    return spans
+  }
+
+  /// The block whose start is nearest to `x` (a section edge dropped there): the index in
+  /// 0...frames.count-1 minimising |frames[i].x - x|, the lower index on a tie; 0 without blocks.
+  static func boundaryIndex(nearestTo x: CGFloat, in layout: Layout) -> Int {
+    var best = 0
+    var bestDistance = CGFloat.infinity
+    for (i, frame) in layout.frames.enumerated() {
+      let distance = abs(frame.x - x)
+      if distance < bestDistance {
+        best = i
+        bestDistance = distance
+      }
+    }
+    return best
+  }
+
   /// `lengthBeats` after dragging its handle by `dx` points: snapped to `snap` and clamped to `range`.
   static func resizedLength(_ lengthBeats: Double, by dx: CGFloat, pxPerBeat: CGFloat,
                             snap: Double, range: ClosedRange<Double>) -> Double {

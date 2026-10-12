@@ -21,6 +21,7 @@ static const NSInteger kMsgTagRequestSnapshot = 11;  // no payload: asks for a f
 static const NSInteger kMsgTagPreview = 12;          // payload: {"schema":1,"id":n,"on":true|false,"velocity":100,"pitches":[..]} (<= 8)
 static const NSInteger kMsgTagPanic = 13;            // no payload: silence everything on the next audio block
 static const NSInteger kMsgTagExport = 14;           // no payload: write the progression as a .mid file; answered by kMsgTagExportReady or kMsgTagError
+static const NSInteger kMsgTagExportSection = 15;    // payload: {"schema":1,"id":<sectionId>}: write that section alone as a .mid file; same answers
 // plugin -> UI
 static const NSInteger kMsgTagSnapshot = 20;         // payload: snapshotJson (document + palette)
 static const NSInteger kMsgTagError = 21;            // payload: {"schema":1,"error":"..."} for a rejected command or preview

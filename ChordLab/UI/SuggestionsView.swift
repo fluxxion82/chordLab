@@ -7,9 +7,10 @@ import SwiftUI
 /// its digit) appends that chord (`appendChord`); resting the mouse on it shows the engine's reasons
 /// (`reasonTexts`). Nothing is shown for a snapshot without `suggestions` (an older plug-in build).
 ///
-/// The digit shortcuts are bare keys (no modifier) on the chip buttons themselves. Live may swallow bare
-/// digits before the plug-in window sees them (a Live check); in the standalone APP they work from any
-/// focus.
+/// The digit shortcuts are bare keys (no modifier) on the chip buttons themselves, withdrawn while a text
+/// field is being edited (`state.editingText`, a section rename) so typing a name appends nothing. Live
+/// may swallow bare digits before the plug-in window sees them (a Live check); in the standalone APP they
+/// work from any focus.
 struct SuggestionsView: View {
   @EnvironmentObject var state: ChordLabState
 
@@ -31,7 +32,7 @@ struct SuggestionsView: View {
         .frame(minWidth: 64, alignment: .leading)
         .accessibilityHidden(true)
       ForEach(Array(suggestions.enumerated()), id: \.element.id) { index, suggestion in
-        SuggestionChip(suggestion: suggestion, number: index + 1) {
+        SuggestionChip(suggestion: suggestion, number: index + 1, shortcutActive: !state.editingText) {
           state.send(command: ["cmd": "appendChord", "root": suggestion.root, "type": suggestion.type])
         }
       }
@@ -47,10 +48,12 @@ struct SuggestionsView: View {
   }
 }
 
-/// One chip: a button that appends the chord, with the digit `number` as its bare-key shortcut.
+/// One chip: a button that appends the chord, with the digit `number` as its bare-key shortcut while
+/// `shortcutActive`.
 struct SuggestionChip: View {
   let suggestion: SuggestionJSON
   let number: Int
+  var shortcutActive = true
   let append: () -> Void
 
   @State private var hovering = false
@@ -76,12 +79,11 @@ struct SuggestionChip: View {
       .contentShape(RoundedRectangle(cornerRadius: 8))
     }
     .buttonStyle(.plain)
-    .keyboardShortcut(KeyEquivalent(Character(String(number))), modifiers: [])
+    .keyboardShortcut(shortcutActive ? KeyboardShortcut(KeyEquivalent(Character(String(number))), modifiers: []) : nil)
     .onHover { hovering = $0 }
     .hoverPopover(arrowEdge: .bottom) {
       SuggestionDetailView(suggestion: suggestion).padding(12)
     }
-    .help("Append \(ChordSymbol.glyphs(suggestion.symbol)) (key \(number))")
     .accessibilityLabel("Append " + ChordSymbol.spokenName(symbol: suggestion.symbol, type: suggestion.type) +
                         ", suggestion \(number)")
   }

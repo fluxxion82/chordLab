@@ -21,6 +21,8 @@ import SwiftUI
 /// - click the "v" badge at a block's bottom right → the voicing popover (`VoicingPopoverView`:
 ///   inversion, octave, Auto); right-click a block → a context menu with the same choices plus "Voicing…"
 ///   for the popover. A chord with its own voicing wears a "manual" badge at the top right.
+/// The sections (P2-D6) sit in a header row above the blocks (`SectionsHeaderView`, in the same scroll
+/// and geometry), and a thin line through the block row marks each section's start.
 /// Undo/redo are the key bar's buttons (⌘Z / ⇧⌘Z), so they work whatever has focus.
 ///
 /// The playhead (`state.transport`, ~15 Hz from the plug-in) is a 2-pt line at the position's beat, folded
@@ -32,7 +34,7 @@ struct SequenceBarView: View {
   @AppStorage(LabelMode.storageKey) private var labelMode: LabelMode = .both
 
   static let pxPerBeat: CGFloat = 24
-  static let height: CGFloat = 96
+  static let height: CGFloat = 118
   static let blockHeight: CGFloat = 56
   static let rulerHeight: CGFloat = 20
   static let handleWidth: CGFloat = 6
@@ -63,6 +65,7 @@ struct SequenceBarView: View {
   @FocusState private var focused: Bool
 
   private var events: [EventJSON] { state.snapshot?.events ?? [] }
+  private var sections: [SectionJSON] { state.snapshot?.sections ?? [] }
 
   /// The store's live selection, as the last snapshot reported it (nil before Phase 2 plug-in builds).
   private var selectedEventId: Int? { state.snapshot?.selectedEventId }
@@ -87,6 +90,7 @@ struct SequenceBarView: View {
       ScrollView(.horizontal) {
         ZStack(alignment: .topLeading) {
           VStack(alignment: .leading, spacing: 2) {
+            SectionsHeaderView(sections: sections, layout: layout, width: contentWidth)
             ZStack(alignment: .leading) {
               Color.clear
                 .frame(width: contentWidth, height: Self.blockHeight)
@@ -96,6 +100,14 @@ struct SequenceBarView: View {
                 ForEach(Array(events.enumerated()), id: \.element.id) { index, event in
                   block(event, frame: layout.frames[index])
                 }
+              }
+              ForEach(sections.filter { $0.firstEventIndex > 0 && layout.frames.indices.contains($0.firstEventIndex) }) { section in
+                Rectangle()
+                  .fill(Color.white.opacity(0.55))
+                  .frame(width: 1, height: Self.blockHeight)
+                  .offset(x: layout.frames[section.firstEventIndex].x)
+                  .allowsHitTesting(false)
+                  .accessibilityHidden(true)
               }
               if events.isEmpty {
                 Text("Drag chords here")
@@ -109,7 +121,7 @@ struct SequenceBarView: View {
           if let beat = playheadBeat {
             Rectangle()
               .fill(Color.white)
-              .frame(width: 2, height: Self.blockHeight + 2 + Self.rulerHeight)
+              .frame(width: 2, height: SectionsHeaderView.height + 2 + Self.blockHeight + 2 + Self.rulerHeight)
               .offset(x: SequenceGeometry.x(ofBeat: beat, pxPerBeat: Self.pxPerBeat) - 1)
               .allowsHitTesting(false)
               .accessibilityHidden(true)

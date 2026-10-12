@@ -50,4 +50,23 @@ enum HarmonyText {
   static func reasonsLine(_ reasonTexts: [String]) -> String {
     reasonTexts.joined(separator: " · ")
   }
+
+  /// The engine's bound on a section name (`kMaxSectionNameBytes`, document.h): `renameSection` rejects a
+  /// longer one as malformed, so the rename field keeps its draft within it.
+  static let maxSectionNameBytes = 64
+
+  /// `name` cut down to `maxBytes` of UTF-8 at a character boundary (a character straddling the bound is
+  /// dropped whole), as the store itself cuts a long name.
+  static func boundedSectionName(_ name: String, maxBytes: Int = maxSectionNameBytes) -> String {
+    guard name.utf8.count > maxBytes else { return name }
+    var result = ""
+    var bytes = 0
+    for character in name {
+      let size = character.utf8.count
+      if bytes + size > maxBytes { break }
+      result.append(character)
+      bytes += size
+    }
+    return result
+  }
 }
