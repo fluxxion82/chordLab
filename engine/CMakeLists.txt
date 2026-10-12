@@ -20,3 +20,7 @@ target_link_libraries(engine_rt_alloc_test PRIVATE chordlab_engine)
 target_include_directories(engine_rt_alloc_test PRIVATE tests)
 target_compile_options(engine_rt_alloc_test PRIVATE -Wall -Wextra -Wpedantic)
 add_test(NAME engine_rt_alloc_test COMMAND engine_rt_alloc_test)
+# Not a test: the weight grid search behind src/suggest.cpp's constants (see tools/suggest_tune.cpp).
+add_executable(suggest_tune tools/suggest_tune.cpp)
+target_link_libraries(suggest_tune PRIVATE chordlab_engine)
+target_compile_options(suggest_tune PRIVATE -Wall -Wextra -Wpedantic)
