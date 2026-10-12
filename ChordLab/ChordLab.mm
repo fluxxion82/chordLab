@@ -14,6 +14,11 @@
 // plug-in on whatever thread releases the audio unit, IPlugAUAudioUnit.mm). No deadlock: the destructor
 // never runs inside a queued hop, the inline main-thread path takes no Lifeline lock (so a hop calling
 // PushSnapshot does not re-enter it), and the lock order is always Lifeline::mutex then mModelMutex.
+// Assumption: the host never destroys the plug-in re-entrantly from inside one of these hops (a resize
+// request or a snapshot push calling back into a host that deletes the plug-in on the spot); that would
+// run the destructor on the thread that already holds the non-recursive Lifeline mutex and deadlock.
+// mViewController is written only on the main thread (OpenWindow / CloseWindow); other threads learn
+// whether an editor is attached from the atomic mEditorOpen.
 //
 // Chord preview (M2, Task 2.4) does not go through the model: the Swift palette sends note-ons/offs with
 // IPlugCocoaViewController::sendMidiMsgFromUI -> SendMidiMsgFromUI, which iPlug2 queues for the next
@@ -71,9 +76,16 @@ void* ChordLab::OpenWindow(void* pParent)
   vc.view.frame = MAKERECT(0.f, 0.f, (float) width, (float) height);
   [platformParent addSubview:vc.view];
   
+  mEditorOpen.store(true);
   OnUIOpen();
   
   return vc.view;
+}
+
+void ChordLab::CloseWindow()
+{
+  CocoaEditorDelegate::CloseWindow();                            // drops mViewController
+  mEditorOpen.store(false);
 }
 
 void ChordLab::OnParentWindowResize(int width, int height)
@@ -175,7 +187,7 @@ void ChordLab::OnMain(std::function<void()> fn)
 void ChordLab::PushSnapshot()
 {
   OnMain([this] {
-    if (!mViewController)                                        // no listener: nothing to serialize
+    if (!mEditorOpen.load())                                     // no listener: nothing to serialize
       return;
     std::string json;
     {
@@ -189,7 +201,7 @@ void ChordLab::PushSnapshot()
 void ChordLab::PushError(const std::string& message)
 {
   OnMain([this, message] {
-    if (!mViewController)
+    if (!mEditorOpen.load())
       return;
     // The only JSON the plugin writes itself; nlohmann escapes the message (engine error strings quote
     // user input, e.g. unknown cmd "x"), replacing any invalid UTF-8 rather than throwing.
@@ -206,7 +218,7 @@ void ChordLab::RestoreEditorSize(int width, int height)
   // resizes. VST3 and APP implement EditorResize (host window resize, true, and they record the size
   // themselves after comparing with GetEditorWidth/Height, so it must run before any SetEditorSize);
   // AUv2 and AUv3 inherit the default, which resizes nothing and returns false.
-  if (!mViewController)
+  if (!mEditorOpen.load())
   {
     std::lock_guard<std::mutex> lock(mModelMutex);
     SetEditorSize(width, height);                                // closed since the load: next open uses it
@@ -274,7 +286,7 @@ int ChordLab::UnserializeState(const IByteChunk& chunk, int startPos)
       if (loaded)
       {
         RebuildPaletteLocked();
-        editorOpen = mViewController != nullptr;
+        editorOpen = mEditorOpen.load();
         if (!editorOpen)
           SetEditorSize(width, height);                          // synchronous: a save right after this load sees it
       }

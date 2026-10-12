@@ -5,6 +5,7 @@
 #include "chordlab/document.h"
 #include "chordlab/palette.h"
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -20,6 +21,7 @@ public:
   ~ChordLab() override;
 
   void* OpenWindow(void* pParent) override;
+  void CloseWindow() override;
   
   void OnParentWindowResize(int width, int height) override;
   bool OnHostRequestingSupportedViewConfiguration(int width, int height) override;
@@ -53,6 +55,10 @@ private:
   mutable std::mutex mModelMutex;
   chordlab::DocumentStore mStore;
   chordlab::Palette mPalette;
+
+  // Whether an editor is attached: set at the end of OpenWindow, cleared in CloseWindow (both main
+  // thread). Any thread may read it; mViewController itself is only touched on the main thread.
+  std::atomic<bool> mEditorOpen{false};
 
   // Shared with the main-thread hops OnMain queues. A hop runs under `mutex` and skips `fn` once `alive`
   // is false; the destructor flips `alive` under the same mutex, so it waits for a hop that is running
