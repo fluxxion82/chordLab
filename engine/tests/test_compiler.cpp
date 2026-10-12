@@ -560,7 +560,8 @@ TEST_CASE("compile: random documents with auto voice-leading keep the event inva
             CHECK(std::is_sorted(v.begin(), v.end()));
             CHECK(std::adjacent_find(v.begin(), v.end()) == v.end());
             CHECK(v.front() >= 48);
-            CHECK(v.back() <= 108);
+            CHECK(v.back() <= 60 + e.chord.type->intervals.back() + 22 + 12);  // voicing.h's bound at octave +1
+            CHECK(v.back() <= 127);
             if (e.manualVoicing || i == 0) {
                 CHECK(v == voicing(e.chord, e.inversion, e.octave));  // manual chords, and the first chord
             }

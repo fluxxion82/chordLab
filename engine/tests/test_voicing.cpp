@@ -228,6 +228,22 @@ TEST_CASE("voicing: a ninth chord rotates through all five chord tones, the nint
     CHECK(voicing(chord(11, "maj9"), 4, 1) == Notes{97, 99, 102, 106, 107});
 }
 
+TEST_CASE("voicing: a sharp-eleventh chord spans 18 semitones, so its high inversions rise above the register") {
+    // C7#11 closes to 60 64 67 70 78. In fourth inversion the #11 (78) is the bass; C and E need two lifts.
+    CHECK(voicing(chord(0, "7#11"), 4, 0) == Notes{78, 79, 82, 84, 88});
+    CHECK(voicing(chord(0, "7#11"), 3, 0) == Notes{70, 72, 76, 78, 79});
+    CHECK(voicing(chord(0, "maj7#11"), 4, 0) == Notes{78, 79, 83, 84, 88});
+    // The worst case in the dictionary: B7#11 (71 75 78 81 89) in fourth inversion reaches 99, three
+    // semitones above the register's top, and 111 at octave +1: the bound 100 + 12 * octave, inside MIDI.
+    CHECK(voicing(chord(11, "7#11"), 4, 0) == Notes{89, 90, 93, 95, 99});
+    CHECK(voicing(chord(11, "7#11"), 4, 1) == Notes{101, 102, 105, 107, 111});
+    CHECK(voicing(chord(11, "7#11"), 4, -1) == Notes{77, 78, 81, 83, 87});
+    CHECK(voicing(chord(11, "maj7#11"), 4, 1) == Notes{101, 102, 106, 107, 111});
+    // Its lower inversions stay inside the register: one lift clears the bass.
+    CHECK(voicing(chord(11, "7#11"), 1, 0) == Notes{75, 78, 81, 83, 89});
+    CHECK(voicing(chord(11, "7#11"), 3, 0) == Notes{81, 83, 87, 89, 90});
+}
+
 TEST_CASE("voicing: root position at octave 0 is exactly closeVoicing, for every type on every root") {
     for (const ChordType& type : allChordTypes()) {
         for (PitchClass root = 0; root < 12; ++root) {
@@ -292,6 +308,7 @@ TEST_CASE("voicing: a rotated note that would leave a narrow register is kept ra
 // --- voicing: properties ----------------------------------------------------------------------
 
 TEST_CASE("voicing: every type x root x inversion x octave is sorted, unique, in register and keeps the chord") {
+    int highestNote = 0;
     for (const ChordType& type : allChordTypes()) {
         for (PitchClass root = 0; root < 12; ++root) {
             const Chord c{root, &type};
@@ -305,10 +322,18 @@ TEST_CASE("voicing: every type x root x inversion x octave is sorted, unique, in
                     CAPTURE(inversion);
                     CAPTURE(octave);
                     const Notes notes = voicing(c, inversion, octave);
-                    // The register for an octave is the default one shifted by that octave; at the
-                    // default range no rotated note ever leaves it, so the union over octaves is 48..108.
-                    CHECK(sortedUniqueWithin(notes, kDefaultLowest + 12 * octave, kDefaultHighest + 12 * octave));
-                    CHECK(sortedUniqueWithin(notes, kDefaultLowest - 12, kDefaultHighest + 12));
+                    // The register bound of voicing.h: the default register shifted by the octave, which
+                    // a type spanning at most 14 semitones never leaves; a wider type (the sharp
+                    // elevenths) may exceed its top by span - 14, and never by more than eleven.
+                    const int span = type.intervals.back();
+                    const int top = std::min(kDefaultHighest + 11, kDefaultLowest + span + 22) + 12 * octave;
+                    CHECK(sortedUniqueWithin(notes, kDefaultLowest + 12 * octave, top));
+                    if (span <= 14) {
+                        CHECK(sortedUniqueWithin(notes, kDefaultLowest + 12 * octave, kDefaultHighest + 12 * octave));
+                    }
+                    CHECK(notes.back() <= 112);  // what the bound gives for the widest type at octave +1
+                    CHECK(notes.back() <= 127);
+                    highestNote = std::max(highestNote, notes.back());
                     CHECK(notes.size() == base.size());
                     CHECK(pitchClassSet(notes) == pitchClassSet(c));
                     REQUIRE_FALSE(notes.empty());
@@ -318,6 +343,7 @@ TEST_CASE("voicing: every type x root x inversion x octave is sorted, unique, in
             }
         }
     }
+    CHECK(highestNote == 111);  // B7#11 / Bmaj7#11, fourth inversion, octave +1: the dictionary's ceiling
 }
 
 TEST_CASE("voicing: distinct inversions of one chord are distinct voicings") {
