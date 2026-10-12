@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// Key bar, transport row, sequence bar and palette grid, with a temporary status line and the MIDI
-/// drag-out control along the bottom.
+/// Key bar, transport row, sequence bar, suggestions strip and palette grid, with a temporary status
+/// line and the MIDI drag-out control along the bottom.
 struct ContentView: View {
   @EnvironmentObject var state: ChordLabState
 
@@ -14,6 +14,8 @@ struct ContentView: View {
         TransportBarView()
 
         SequenceBarView()
+
+        SuggestionsView()
 
         PaletteView()
 

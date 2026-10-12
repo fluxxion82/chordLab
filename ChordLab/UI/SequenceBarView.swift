@@ -11,7 +11,9 @@ import SwiftUI
 ///
 /// Editing, every step a command to the plugin (the snapshot it answers with redraws the strip):
 /// - drop a palette cell anywhere on the strip → `appendChord`;
-/// - click a block → selected (UI state); Delete / Forward Delete → `removeChord`;
+/// - click a block → `selectEvent {id}` (the snapshot's `selectedEventId` is the selection: the white ring,
+///   the suggestions strip and the plug-in agree on it); click the empty strip → `selectEvent {id: null}`;
+///   Delete / Forward Delete → `removeChord` of the selection;
 /// - drag the handle at a block's right edge → `setLength`, snapped to quarter beats and clamped to
 ///   0.25…64, sent when the drag ends (the width follows the mouse meanwhile, as local state);
 /// - drag a block sideways → `moveChord` to the index its centre lands on, sent when the drag ends
@@ -50,13 +52,15 @@ struct SequenceBarView: View {
     var offset: CGFloat
   }
 
-  @State private var selectedEventId: Int?
   @State private var resize: Resize?
   @State private var move: Move?
   @State private var dropTargeted = false
   @FocusState private var focused: Bool
 
   private var events: [EventJSON] { state.snapshot?.events ?? [] }
+
+  /// The store's live selection, as the last snapshot reported it (nil before Phase 2 plug-in builds).
+  private var selectedEventId: Int? { state.snapshot?.selectedEventId }
 
   /// The beat the playhead sits at, or nil when it is hidden.
   private var playheadBeat: Double? {
@@ -82,7 +86,7 @@ struct SequenceBarView: View {
               Color.clear
                 .frame(width: contentWidth, height: Self.blockHeight)
                 .contentShape(Rectangle())
-                .onTapGesture { selectedEventId = nil }       // click the empty strip: deselect
+                .onTapGesture { deselect() }                  // click the empty strip: deselect
               HStack(spacing: 0) {
                 ForEach(Array(events.enumerated()), id: \.element.id) { index, event in
                   block(event, frame: layout.frames[index])
@@ -125,12 +129,6 @@ struct SequenceBarView: View {
       state.send(command: ["cmd": "appendChord", "root": ref.root, "type": ref.type])
       return true
     } isTargeted: { dropTargeted = $0 }
-    .onChange(of: state.snapshot) { _, snapshot in
-      // The selection follows the id; a chord removed or undone away is simply no longer selected.
-      if let id = selectedEventId, snapshot?.events.contains(where: { $0.id == id }) != true {
-        selectedEventId = nil
-      }
-    }
     .accessibilityLabel("Progression")
   }
 
@@ -253,9 +251,19 @@ struct SequenceBarView: View {
 
   // MARK: - Gestures
 
+  /// The selection lives in the store (`selectEvent`); the snapshot it answers with draws the ring. A
+  /// chord removed or undone away is dropped from the selection by the store itself.
   private func select(_ event: EventJSON) {
-    selectedEventId = event.id
+    if selectedEventId != event.id {
+      state.send(command: ["cmd": "selectEvent", "id": event.id])
+    }
     focused = true
+  }
+
+  private func deselect() {
+    if selectedEventId != nil {
+      state.send(command: ["cmd": "selectEvent", "id": NSNull()])
+    }
   }
 
   private func resizeGesture(_ event: EventJSON) -> some Gesture {
@@ -293,7 +301,6 @@ struct SequenceBarView: View {
 
   private func deleteSelection() -> KeyPress.Result {
     guard let id = selectedEventId else { return .ignored }
-    selectedEventId = nil
     state.send(command: ["cmd": "removeChord", "id": id])
     return .handled
   }
