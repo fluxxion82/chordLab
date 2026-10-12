@@ -2,8 +2,9 @@ import SwiftUI
 
 /// The Klimper-style palette grid of the browsed key: 7 columns (scale degrees), one row per tier with
 /// tier 0 (power chords) at the bottom and higher tiers above. A degree with no chord in a tier leaves
-/// an empty slot so the columns stay aligned. Everything shown comes from the snapshot; the grid has no
-/// interaction yet (preview is Task 2.4).
+/// an empty slot so the columns stay aligned. Everything shown comes from the snapshot. Pressing a cell
+/// previews its voicing through `ChordLabState.pressCell` / `releaseCell` (press, release, cancel and
+/// disappearance are all handled by `PressAction`).
 struct PaletteView: View {
   @EnvironmentObject var state: ChordLabState
   @AppStorage(LabelMode.storageKey) private var labelMode: LabelMode = .both
@@ -26,7 +27,10 @@ struct PaletteView: View {
               HStack(spacing: Self.spacing) {
                 ForEach(0..<Self.columns, id: \.self) { degree in
                   if let cell = rows[tier][degree] {
-                    PaletteCellView(cell: cell, size: cellSize, labelMode: labelMode)
+                    PaletteCellView(cell: cell, size: cellSize, labelMode: labelMode,
+                                    isPressed: state.heldCellId == cell.id)
+                      .pressAction(onPress: { state.pressCell(cell) },
+                                   onRelease: { state.releaseCell(cell) })
                   } else {
                     Color.clear.frame(width: cellSize, height: cellSize)
                   }
@@ -57,11 +61,13 @@ struct PaletteView: View {
 }
 
 /// One cell: a circle coloured by family, filled when every note is in the project key and a ring
-/// otherwise (a borrowed chord), with the symbol and/or roman numeral inside.
+/// otherwise (a borrowed chord), with the symbol and/or roman numeral inside. While pressed it gets a
+/// white ring and a brighter fill (Klimper's selected look).
 struct PaletteCellView: View {
   let cell: CellJSON
   let size: CGFloat
   let labelMode: LabelMode
+  var isPressed = false
 
   static func color(family: String) -> Color {
     switch family {
@@ -78,6 +84,10 @@ struct PaletteCellView: View {
         Circle().fill(color)
       } else {
         Circle().strokeBorder(color, lineWidth: max(2, size * 0.045))
+      }
+      if isPressed {
+        Circle().fill(Color.white.opacity(cell.filled ? 0.25 : 0.15))
+        Circle().strokeBorder(Color.white, lineWidth: 2)
       }
       VStack(spacing: 1) {
         if labelMode != .numerals {
@@ -96,6 +106,7 @@ struct PaletteCellView: View {
       .padding(.horizontal, size * 0.08)
     }
     .frame(width: size, height: size)
+    .contentShape(Circle())
     .accessibilityLabel("\(cell.symbol), \(cell.roman)")
   }
 }

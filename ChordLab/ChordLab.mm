@@ -10,6 +10,11 @@
 // main thread: OnMain runs the block inline when already there and dispatches it otherwise. A dispatched
 // block captures mAlive, which the destructor clears, so a hop that outlives the plugin does nothing (the
 // hosts destroy plug-ins on the main thread, so the flag and the block are not racing each other).
+//
+// Chord preview (M2, Task 2.4) does not go through the model: the Swift palette sends note-ons/offs with
+// IPlugCocoaViewController::sendMidiMsgFromUI -> SendMidiMsgFromUI, which iPlug2 queues for the next
+// ProcessBlock's MIDI output; the UI guarantees one note-off per note-on. M3 replaces this with
+// Scheduler::pushPreview, which owns the sounding notes and adds a watchdog.
 
 #include "ChordLab.h"
 #include "IPlug_include_in_plug_src.h"

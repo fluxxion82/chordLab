@@ -1,10 +1,9 @@
 import SwiftUI
 
-/// Key bar over the palette grid, with a temporary status line, the Spike 1 preview button and the
-/// Spike 3 drag-out label along the bottom until their Live verification and M3/M4 replace them.
+/// Key bar over the palette grid, with a temporary status line and the Spike 3 drag-out label along the
+/// bottom until M3/M4 replace them.
 struct ContentView: View {
   @EnvironmentObject var state: ChordLabState
-  private let cMajor: [UInt8] = [60, 64, 67]
 
   var body: some View {
     ZStack {
@@ -28,14 +27,6 @@ struct ContentView: View {
 
           Spacer()
 
-          // Spike 1: preview a chord while the mouse is held (Live verification still pending).
-          Text("C major (hold)")
-            .foregroundStyle(.white)
-            .padding(.horizontal, 16).padding(.vertical, 8)
-            .background(Capsule().fill(Color(red: 0.11, green: 0.44, blue: 0.50)))
-            .pressAction(onPress: { state.sendChord(cMajor, on: true) },
-                         onRelease: { state.sendChord(cMajor, on: false) })
-
           // Spike 3: drag a prepared .mid out to the DAW.
           Text("♫ Drag MIDI clip to Live")
             .foregroundStyle(.white)
@@ -51,6 +42,7 @@ struct ContentView: View {
     }
     .edgesIgnoringSafeArea(.all)
     .onAppear { state.requestSnapshot() }
+    .onDisappear { state.releaseHeld() }      // editor closed mid-press: never leave a note sounding
   }
 }
 

@@ -9,6 +9,9 @@ class ChordLabState: NSObject, ObservableObject {
   @Published var snapshot: Snapshot?
   /// The last command the plugin rejected, or a decode failure; cleared by the next good snapshot.
   @Published var lastError: String?
+  /// Id of the palette cell whose voicing is sounding (pressed), or nil.
+  @Published private(set) var heldCellId: String?
+  private var heldPitches: [UInt8] = []
 
   let beginEdit: @MainActor (Int) -> Void
   let doEdit: @MainActor (Int, Double) -> Void
@@ -45,12 +48,37 @@ class ChordLabState: NSObject, ObservableObject {
     }
   }
 
-  // MARK: - Preview (Task 2.4 routes palette presses through here)
+  // MARK: - Preview (M2: straight through the UI MIDI path; M3 moves it to the scheduler)
 
   @MainActor func sendChord(_ pitches: [UInt8], on: Bool, velocity: UInt8 = 100) {
     for p in pitches {
       sendMidi(on ? 0x90 : 0x80, p, on ? velocity : 0)
     }
+  }
+
+  /// Sounds `cell`'s voicing. At most one cell is held: pressing another first releases the held one,
+  /// so every note-on this object sends is matched by exactly one note-off.
+  @MainActor func pressCell(_ cell: CellJSON) {
+    releaseHeld()
+    let pitches = cell.voicing.compactMap { UInt8(exactly: $0) }.filter { $0 <= 127 }
+    heldPitches = pitches
+    heldCellId = cell.id
+    sendChord(pitches, on: true)
+  }
+
+  /// Releases `cell` if it is the held one; a cell that was already released (by a press elsewhere,
+  /// a cancelled gesture or disappearance) is ignored, never released twice.
+  @MainActor func releaseCell(_ cell: CellJSON) {
+    guard heldCellId == cell.id else { return }
+    releaseHeld()
+  }
+
+  /// Releases whatever is held (view disappearance, window close).
+  @MainActor func releaseHeld() {
+    guard heldCellId != nil else { return }
+    sendChord(heldPitches, on: false)
+    heldPitches = []
+    heldCellId = nil
   }
 
   // MARK: - Commands (engine wire format, json_api.h)
