@@ -2,8 +2,10 @@ import Foundation
 
 /// Codable mirror of the engine's snapshot JSON (`snapshotJson` in engine/include/chordlab/json_api.h,
 /// written by engine/src/json_api.cpp). The UI never computes theory: everything it shows is in here.
-/// Fields the engine added under schema 1 (`modes`, `tonics`, `outOfKey`) are optional so that a UI
-/// built against this file still decodes a snapshot from an older plug-in build.
+/// Fields the engine added under schema 1 (`modes`, `tonics`, `outOfKey`, and the Phase 2 fields:
+/// `function`, `tension`, the voicing fields, `why`, `sections`, `suggestions`, `autoVoiceLead`,
+/// `selectedEventId`) are optional so that a UI built against this file still decodes a snapshot from an
+/// older plug-in build.
 
 /// `{"letter":"C","alter":0}`: a spelled tonic, `alter` -1 flat, 0 natural, 1 sharp.
 struct TonicJSON: Codable, Equatable {
@@ -25,10 +27,28 @@ struct KeyJSON: Codable, Equatable {
   let mode: String
 }
 
+/// An event's `why`: how its chord relates to the one before it (P2-D2), as data plus the engine's one
+/// sentence (`text`, "G7 → C: down a fifth, resolves (D→T), 1 common tone (G), smooth voice leading
+/// (cost 4)"). `commonNames` spells `commonPcs` in the project key; `borrowedFrom` / `borrowedFromName`
+/// are nil for a chord in the key or in no parallel mode.
+struct WhyJSON: Codable, Equatable {
+  let commonTones: Int
+  let commonPcs: [Int]
+  let commonNames: [String]
+  let rootMotion: String
+  let voiceLeadingCost: Int
+  let borrowedFrom: KeyJSON?
+  let borrowedFromName: String?
+  let text: String
+}
+
 /// One chord of the progression, in playback order. `symbol` and `roman` are spelled in the project key;
-/// `family` is the type's "Major", "Minor" or "Other" (the sequence bar's colour); `voicing` is the
-/// default close voicing as MIDI note numbers; `outOfKey` the chord's pitch classes outside the project
-/// key's scale (ascending, no repeats). `family` and `outOfKey` are absent from older plug-in builds.
+/// `family` is the type's "Major", "Minor" or "Other" (the sequence bar's colour); `voicing` is what
+/// `compile` gives the chord (the auto voice-leading's choice, or the stored inversion and octave) as MIDI
+/// note numbers; `outOfKey` the chord's pitch classes outside the project key's scale (ascending, no
+/// repeats). `function` is "T", "PD", "D" or "O", `tension` 0..100; `inversion`, `octave` and
+/// `manualVoicing` the stored voicing fields; `why` the relation to the previous event, nil on the first.
+/// Everything after `voicing` is absent from older plug-in builds.
 struct EventJSON: Codable, Equatable, Identifiable {
   let id: Int
   let root: Int
@@ -41,12 +61,18 @@ struct EventJSON: Codable, Equatable, Identifiable {
   let velocity: Int
   let voicing: [Int]
   let outOfKey: [Int]?
+  let function: String?
+  let tension: Int?
+  let inversion: Int?
+  let octave: Int?
+  let manualVoicing: Bool?
+  let why: WhyJSON?
 }
 
 /// One palette cell: the chord on scale degree `degree` (0..6) of the browsed key in row `tier`.
 /// `filled` is false for a borrowed chord (a note outside the project key); `family` is "Major", "Minor"
-/// or "Other"; `outOfKey` lists the borrowed pitch classes (empty exactly when `filled`; absent from
-/// older plug-in builds).
+/// or "Other"; `outOfKey` lists the borrowed pitch classes (empty exactly when `filled`); `function` and
+/// `tension` as on events. `outOfKey`, `function` and `tension` are absent from older plug-in builds.
 struct CellJSON: Codable, Equatable, Identifiable {
   let degree: Int
   let tier: Int
@@ -58,6 +84,8 @@ struct CellJSON: Codable, Equatable, Identifiable {
   let filled: Bool
   let voicing: [Int]
   let outOfKey: [Int]?
+  let function: String?
+  let tension: Int?
 
   /// Grid position; unique within a palette (one cell per tier and degree).
   var id: String { "\(tier)/\(degree)" }
@@ -68,6 +96,34 @@ struct CellJSON: Codable, Equatable, Identifiable {
 struct PaletteJSON: Codable, Equatable {
   let tiers: Int
   let cells: [CellJSON]
+}
+
+/// One section (P2-D6): a named, coloured span of the progression from `firstEventIndex` up to the next
+/// section's first event. `colourIndex` indexes the UI's 8-colour palette; `id` is stable for the
+/// section's life.
+struct SectionJSON: Codable, Equatable, Identifiable {
+  let id: Int
+  let name: String
+  let colourIndex: Int
+  let firstEventIndex: Int
+}
+
+/// One next-chord suggestion (P2-D3) for the selected (else the last) chord: the chord as the engine
+/// identifies it (`root`, `type`, what `appendChord` takes), its `symbol` and `roman` in the project key,
+/// `function` as on events, the ranking `score`, and the `reasons` (engine names) with their parallel
+/// prose `reasonTexts` ("1 common tone (C)").
+struct SuggestionJSON: Codable, Equatable, Identifiable {
+  let root: Int
+  let type: String
+  let symbol: String
+  let roman: String
+  let function: String
+  let score: Double
+  let reasons: [String]
+  let reasonTexts: [String]
+
+  /// The chord; unique within one list (the engine never suggests the same chord twice).
+  var id: String { "\(root)/\(type)" }
 }
 
 /// The whole document as the UI shows it, plus the palette of the browsed key.
@@ -87,6 +143,16 @@ struct Snapshot: Codable, Equatable {
   let tonics: [String: [TonicNameJSON]]?
   let events: [EventJSON]
   let palette: PaletteJSON
+  /// Whether `compile` picks each non-manual chord's inversion and octave (P2-D5).
+  let autoVoiceLead: Bool?
+  /// The selected event (the store's live selection), nil (JSON null, or absent) for none. The sequence
+  /// bar's selection ring and the suggestions follow it.
+  let selectedEventId: Int?
+  /// The sections in order of `firstEventIndex`; empty (or absent) when the document has none.
+  let sections: [SectionJSON]?
+  /// Up to 8 next-chord suggestions after the selected (else the last) chord, best first; the opening
+  /// suggestions when the progression is empty.
+  let suggestions: [SuggestionJSON]?
 
   /// Whether the key pickers can be built from this snapshot.
   var hasTonicTable: Bool { modes != nil && tonics != nil }

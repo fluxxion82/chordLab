@@ -1,6 +1,7 @@
-// Checks of SequenceGeometry (ChordLab has no XCTest target): `run.sh` compiles this with plain swiftc
-// against ../../UI/SequenceGeometry.swift and runs it. Prints one line per expectation and exits non-zero
-// if any failed. Add a case here whenever the sequence bar's geometry rules change.
+// Checks of the UI's pure logic (ChordLab has no XCTest target): `run.sh` compiles this with plain swiftc
+// against ../../UI/SequenceGeometry.swift, HarmonyText.swift, ChordSymbol.swift and Snapshot.swift and
+// runs it. Prints one line per expectation and exits non-zero if any failed. Add a case here whenever the
+// sequence bar's geometry rules or the harmony text formatting change.
 import CoreGraphics
 import Foundation
 
@@ -63,6 +64,63 @@ expect(SequenceGeometry.resizedLength(4, by: 5, pxPerBeat: px, snap: 0.25, range
 expect(SequenceGeometry.resizedLength(4, by: 2, pxPerBeat: px, snap: 0.25, range: range) == 4, "+2 pt (0.08 beat) snaps back to 4")
 expect(SequenceGeometry.resizedLength(0.5, by: -1000, pxPerBeat: px, snap: 0.25, range: range) == 0.25, "clamped to 0.25")
 expect(SequenceGeometry.resizedLength(60, by: 1000, pxPerBeat: px, snap: 0.25, range: range) == 64, "clamped to 64")
+
+// --- HarmonyText: function words, tension, "why" lines ---
+expect(HarmonyText.functionWord("T") == "Tonic" && HarmonyText.functionWord("PD") == "Predominant" &&
+       HarmonyText.functionWord("D") == "Dominant" && HarmonyText.functionWord("O") == "Other", "function words")
+expect(HarmonyText.functionWord("X") == "Other" && HarmonyText.functionWord(nil) == nil, "unknown code is Other, nil is nil")
+expect(HarmonyText.tensionFraction(42) == 0.42 && HarmonyText.tensionFraction(0) == 0 && HarmonyText.tensionFraction(100) == 1,
+       "tension fraction")
+expect(HarmonyText.tensionFraction(-5) == 0 && HarmonyText.tensionFraction(250) == 1 && HarmonyText.tensionFraction(nil) == 0,
+       "tension fraction clamps; nil is 0")
+let why = WhyJSON(commonTones: 2, commonPcs: [0, 4], commonNames: ["C", "E"], rootMotion: "down a fifth",
+                  voiceLeadingCost: 4, borrowedFrom: nil, borrowedFromName: nil,
+                  text: "G7 → C: down a fifth, resolves (D→T), 2 common tones (C, E), smooth voice leading (cost 4)")
+expect(HarmonyText.whyHeadline(why) == why.text, "headline is the engine's sentence")
+expect(HarmonyText.whyHeadline(nil) == "first chord", "the first block says \"first chord\"")
+expect(HarmonyText.whyChips(why) == ["common C", "common E", "down a fifth", "cost 4"], "chips: common tones, motion, cost")
+let borrowed = WhyJSON(commonTones: 0, commonPcs: [], commonNames: [], rootMotion: "up a third", voiceLeadingCost: 6,
+                       borrowedFrom: KeyJSON(tonic: TonicJSON(letter: "C", alter: 0), mode: "Aeolian"),
+                       borrowedFromName: "C Aeolian", text: "C → Eb: up a third, borrowed from C Aeolian")
+expect(HarmonyText.whyChips(borrowed) == ["up a third", "cost 6", "borrowed from C Aeolian"], "chips: borrowed-from last, no common tones")
+expect(HarmonyText.whyChips(nil).isEmpty, "no chips for the first block")
+expect(HarmonyText.voicingText([60, 64, 67]) == "C4  E4  G4" && HarmonyText.voicingText([59, 62, 67, 70]) == "B3  D4  G4  A♯4",
+       "voicing text, C4 = 60")
+expect(HarmonyText.reasonsLine(["resolves (D→T)", "1 common tone (G)"]) == "resolves (D→T) · 1 common tone (G)", "reasons joined")
+
+// --- Snapshot decoding: the Phase 2 fields are optional, so a Phase 1 snapshot still decodes ---
+let phase1 = """
+{"schema":1,"projectKey":{"tonic":{"letter":"C","alter":0},"mode":"Ionian"},"browsedKey":{"tonic":{"letter":"C","alter":0},"mode":"Ionian"},
+ "projectKeyName":"C Ionian","browsedKeyName":"C Ionian","progressionLoop":true,"followHost":true,"endBeat":4.0,
+ "events":[{"id":1,"root":0,"type":"maj","symbol":"C","roman":"I","startBeat":0.0,"lengthBeats":4.0,"velocity":100,"voicing":[60,64,67]}],
+ "palette":{"tiers":1,"cells":[{"degree":0,"tier":0,"root":0,"type":"5","symbol":"C5","roman":"I","family":"Other","filled":true,"voicing":[48,55]}]}}
+"""
+let decoded1 = try? JSONDecoder().decode(Snapshot.self, from: Data(phase1.utf8))
+expect(decoded1 != nil, "a Phase 1 snapshot decodes")
+expect(decoded1?.events[0].function == nil && decoded1?.events[0].why == nil && decoded1?.suggestions == nil &&
+       decoded1?.sections == nil && decoded1?.selectedEventId == nil && decoded1?.autoVoiceLead == nil, "its Phase 2 fields are nil")
+let phase2 = """
+{"schema":1,"projectKey":{"tonic":{"letter":"C","alter":0},"mode":"Ionian"},"browsedKey":{"tonic":{"letter":"C","alter":0},"mode":"Ionian"},
+ "projectKeyName":"C Ionian","browsedKeyName":"C Ionian","progressionLoop":true,"followHost":true,"autoVoiceLead":true,"endBeat":8.0,
+ "selectedEventId":null,
+ "events":[{"id":1,"root":7,"type":"7","symbol":"G7","roman":"V7","family":"Major","function":"D","tension":30,"startBeat":0.0,"lengthBeats":4.0,
+            "velocity":100,"inversion":0,"octave":0,"manualVoicing":false,"voicing":[55,59,62,65],"outOfKey":[],"why":null},
+           {"id":2,"root":0,"type":"maj","symbol":"C","roman":"I","family":"Major","function":"T","tension":3,"startBeat":4.0,"lengthBeats":4.0,
+            "velocity":100,"inversion":1,"octave":0,"manualVoicing":true,"voicing":[64,67,72],"outOfKey":[],
+            "why":{"commonTones":1,"commonPcs":[7],"commonNames":["G"],"rootMotion":"down a fifth","voiceLeadingCost":4,
+                   "borrowedFrom":null,"borrowedFromName":null,"text":"G7 → C: down a fifth"}}],
+ "sections":[{"id":1,"name":"Verse","colourIndex":2,"firstEventIndex":0}],
+ "suggestions":[{"root":5,"type":"maj","symbol":"F","roman":"IV","function":"PD","score":2.35,"reasons":["commonTones"],"reasonTexts":["1 common tone (C)"]}],
+ "palette":{"tiers":1,"cells":[{"degree":0,"tier":0,"root":0,"type":"5","symbol":"C5","roman":"I","family":"Other","function":"T","tension":0,"filled":true,"voicing":[48,55],"outOfKey":[]}]}}
+"""
+let decoded2 = try? JSONDecoder().decode(Snapshot.self, from: Data(phase2.utf8))
+expect(decoded2 != nil, "a Phase 2 snapshot decodes")
+expect(decoded2?.selectedEventId == nil && decoded2?.autoVoiceLead == true, "null selection reads as nil; autoVoiceLead true")
+expect(decoded2?.events[0].why == nil && decoded2?.events[1].why?.commonNames == ["G"], "why: null on the first event, data on the second")
+expect(decoded2?.events[1].manualVoicing == true && decoded2?.events[1].inversion == 1, "voicing fields")
+expect(decoded2?.sections?.first?.name == "Verse" && decoded2?.sections?.first?.colourIndex == 2, "sections")
+expect(decoded2?.suggestions?.first?.symbol == "F" && decoded2?.suggestions?.first?.reasonTexts == ["1 common tone (C)"], "suggestions")
+expect(decoded2?.palette.cells[0].function == "T" && decoded2?.palette.cells[0].tension == 0, "cell function and tension")
 
 print(failures == 0 ? "ALL OK" : "\(failures) FAILED")
 exit(failures == 0 ? 0 : 1)

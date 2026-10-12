@@ -2,7 +2,10 @@ import SwiftUI
 
 /// The progression as a strip of blocks over a beat ruler, above the palette: one block per event,
 /// `lengthBeats × pxPerBeat` wide, coloured by family, a ring instead of a fill when the chord has notes
-/// outside the project key, labelled per the label mode. Everything drawn comes from the snapshot, and
+/// outside the project key, labelled per the label mode, with the function dot at the top left and a
+/// 2-pt tension strip along the bottom edge (the function colour at 40 %, brightened over `tension`/100
+/// of the width). Resting the mouse on a block opens its popover (`BlockDetailView`: the voicing, the
+/// tension and the engine's "why" against the previous chord). Everything drawn comes from the snapshot, and
 /// every position comes from `SequenceGeometry`: the blocks, the ruler, the playhead and the reorder
 /// arithmetic share one linear layout, so what is drawn is what is computed.
 ///
@@ -32,6 +35,8 @@ struct SequenceBarView: View {
   static let snapBeats = 0.25
   static let lengthRange = 0.25...64.0   // kMinLengthBeats...kMaxLengthBeats
   static let cornerRadius: CGFloat = 6
+  static let dotSize: CGFloat = 6
+  static let tensionStripHeight: CGFloat = 2
 
   /// A resize in progress: the handle of `id` is being dragged and the block shows `lengthBeats`.
   struct Resize: Equatable {
@@ -172,6 +177,11 @@ struct SequenceBarView: View {
         RoundedRectangle(cornerRadius: Self.cornerRadius).strokeBorder(Color.white, lineWidth: 2)
       }
       labels(event)
+      FunctionDot(function: event.function, size: Self.dotSize)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .padding(4)
+      tensionStrip(event, width: frame.width)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
     }
     .padding(.horizontal, 0.5)
     .frame(width: frame.width, height: Self.blockHeight)
@@ -180,6 +190,9 @@ struct SequenceBarView: View {
     .contentShape(Rectangle())
     .onTapGesture { select(event) }
     .gesture(moveGesture(event))
+    .hoverPopover(suppressed: moving || resize?.id == event.id) {
+      BlockDetailView(event: event).padding(12)
+    }
     .offset(x: offset)
     .zIndex(moving ? 1 : 0)
     .opacity(moving ? 0.85 : 1)
@@ -188,13 +201,30 @@ struct SequenceBarView: View {
                         ", \(event.lengthBeats.formatted()) beats" + (selected ? ", selected" : ""))
   }
 
+  /// The 2-pt strip along the bottom edge: the function colour at 40 % over the whole width, at full
+  /// strength over `tension`/100 of it (so 0 is a dim line, 100 a bright one). Nothing without a tension
+  /// (an older plug-in build).
+  private func tensionStrip(_ event: EventJSON, width: CGFloat) -> some View {
+    let color = FunctionStyle.color(event.function)
+    return ZStack(alignment: .leading) {
+      if let tension = event.tension {
+        Rectangle().fill(color.opacity(0.4))
+        Rectangle().fill(color).frame(width: width * HarmonyText.tensionFraction(tension))
+      }
+    }
+    .frame(height: Self.tensionStripHeight)
+    .padding(.horizontal, Self.cornerRadius / 2)   // inside the rounded corners
+    .accessibilityHidden(true)
+  }
+
   private func labels(_ event: EventJSON) -> some View {
     VStack(spacing: 1) {
       if labelMode != .numerals {
         Text(ChordSymbol.glyphs(event.symbol)).font(.system(size: 13, weight: .medium))
       }
       if labelMode != .names {
-        Text(ChordSymbol.glyphs(event.roman)).font(.system(size: 11)).opacity(labelMode == .both ? 0.85 : 1)
+        Text(PaletteCellView.numeralLabel(roman: event.roman, function: event.function, labelMode: labelMode))
+          .font(.system(size: 11)).opacity(labelMode == .both ? 0.85 : 1)
       }
     }
     .foregroundStyle(.white)
@@ -297,6 +327,44 @@ struct SequenceBarView: View {
     }
     .frame(width: width, height: Self.rulerHeight)
     .accessibilityHidden(true)
+  }
+}
+
+/// A block's hover popover: symbol and numeral, family and function word, the voicing that sounds (note
+/// names, C4 = MIDI 60), the tension bar, then the engine's "why" against the previous chord: its
+/// sentence (`why.text`; "first chord" on the first block) and the reason chips (`HarmonyText.whyChips`).
+/// Lines whose field an older plug-in build does not send are omitted.
+struct BlockDetailView: View {
+  let event: EventJSON
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 6) {
+      HStack(alignment: .firstTextBaseline, spacing: 10) {
+        Text(ChordSymbol.glyphs(event.symbol)).font(.title2.weight(.semibold))
+        Text(ChordSymbol.glyphs(event.roman)).font(.title3).foregroundStyle(.secondary)
+      }
+      HStack(spacing: 6) {
+        Text(event.family ?? "").font(.callout).foregroundStyle(.secondary)
+        if let word = HarmonyText.functionWord(event.function) {
+          FunctionDot(function: event.function)
+          Text(word).font(.callout).foregroundStyle(.secondary)
+        }
+      }
+      Text(HarmonyText.voicingText(event.voicing)).font(.body.monospacedDigit())
+      if let tension = event.tension {
+        TensionBar(tension: tension, function: event.function)
+      }
+      if event.function != nil {   // a Phase 2 snapshot: `why` is null on the first event, never absent
+        Divider()
+        Text(HarmonyText.whyHeadline(event.why)).font(.callout)
+          .fixedSize(horizontal: false, vertical: true)
+        let chips = HarmonyText.whyChips(event.why)
+        if !chips.isEmpty {
+          ChipRow(chips: chips)
+        }
+      }
+    }
+    .frame(minWidth: 160, maxWidth: 300, alignment: .leading)
   }
 }
 
