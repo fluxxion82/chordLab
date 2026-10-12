@@ -12,7 +12,7 @@ host-independent C++17 engine that owns all the theory (`engine/`), and a SwiftU
 Phase 1, the basics:
 
 - A project key (12 tonics × 9 modes: the seven church modes, harmonic minor and melodic minor) and a
-  separately browsed key, stepped along the circle of fifths or switched to a parallel mode.
+  separately browsed key, stepped along the circle of fifths (parallel-mode browsing is currently available only through the engine JSON command).
 - A palette of the browsed key: 7 scale degrees × up to 5 tiers (power chord, triad, sixth/seventh,
   seventh/add9, colour chords). Chords with notes outside the project key are drawn as rings.
 - Press a cell to hear it; drag it into the sequence bar to append it.
@@ -121,7 +121,7 @@ Top to bottom:
 - **Key bar.** *Key*: tonic and mode pickers for the project key (choosing one also brings the browsed
   key home). *Browse*: `<` and `>` step the browsed key a fifth down or up, *Home* returns to the
   project key. Undo / redo buttons (⌘Z / ⇧⌘Z). *Names / Numerals / Both* chooses how chords are
-  labelled everywhere (default Both: the symbol over the numeral and function, e.g. `C` / `I · T`).
+  labelled in palette cells, the home row, sequence blocks and cell drag previews (default Both: the symbol over the numeral and function, e.g. `C` / `I · T`).
 - **Transport row.** *Follow Live*, *Loop*, *Panic* (silences every sounding note), *Auto voice-lead*,
   and *+ Section* (starts a section on the selected chord, else the last one).
 - **Sequence bar.** A sections header, the chord blocks, and a ruler with bar numbers.
