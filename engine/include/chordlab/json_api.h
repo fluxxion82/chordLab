@@ -62,23 +62,31 @@ constexpr int kMaxJsonDepth = 64;
 /// ```
 /// {"schema":1,
 ///  "projectKey":<key>, "browsedKey":<key>, "projectKeyName":"C Ionian", "browsedKeyName":"G Ionian",
-///  "progressionLoop":true, "followHost":true, "endBeat":4.0,
+///  "progressionLoop":true, "followHost":true, "autoVoiceLead":false, "endBeat":4.0,
+///  "selectedEventId":2|null,
 ///  "modes":["Ionian","Dorian","Phrygian","Lydian","Mixolydian","Aeolian","Locrian","HarmonicMinor",
 ///           "MelodicMinor"],
 ///  "tonics":{"Ionian":[{"letter":"C","alter":0,"text":"C"},{"letter":"D","alter":-1,"text":"Db"}, ...],
 ///            "Dorian":[...], ...},
-///  "events":[{"id":1,"root":0,"type":"maj","symbol":"C","roman":"I","family":"Major","startBeat":0.0,
-///             "lengthBeats":4.0,"velocity":100,"voicing":[60,64,67],"outOfKey":[]}, ...],
+///  "events":[{"id":1,"root":0,"type":"maj","symbol":"C","roman":"I","family":"Major","function":"T",
+///             "tension":3,"startBeat":0.0,"lengthBeats":4.0,"velocity":100,
+///             "inversion":0,"octave":0,"manualVoicing":false,"voicing":[60,64,67],"outOfKey":[],
+///             "why":null}, ...],
+///  "sections":[{"id":1,"name":"Verse","colourIndex":0,"firstEventIndex":0}, ...],
+///  "suggestions":[{"root":5,"type":"maj","symbol":"F","roman":"IV","function":"PD","score":2.35,
+///                  "reasons":["commonTones","smooth","diatonic","predominant"],
+///                  "reasonTexts":["1 common tone (C)", ...]}, ...],
 ///  "palette":{"tiers":5,
 ///             "cells":[{"degree":0,"tier":1,"root":0,"type":"maj","symbol":"C","roman":"I",
-///                       "family":"Major","filled":true,"voicing":[60,64,67],"outOfKey":[]}, ...]}}
+///                       "family":"Major","function":"T","tension":3,"filled":true,
+///                       "voicing":[60,64,67],"outOfKey":[]}, ...]}}
 /// ```
 /// Events are in playback order with `startBeat` accumulated as `Document::startBeatOf` does; `symbol` is
 /// the Klimper-style symbol spelled in the project key, `roman` the Standard-style numeral relative to the
-/// project key, `voicing` the default `closeVoicing`, `family` the type's family ("Major", "Minor" or
-/// "Other", the sequence bar's colour; additive, no schema bump). Palette cells carry the palette's own
-/// `symbol` (spelled in the browsed key) and `roman`, the same `family` and the same `voicing`, in the
-/// palette's order.
+/// project key, `family` the type's family ("Major", "Minor" or "Other", the sequence bar's colour;
+/// additive, no schema bump). Palette cells carry the palette's own `symbol` (spelled in the browsed key)
+/// and `roman`, the same `family`, and the default `closeVoicing` as their `voicing`, in the palette's
+/// order.
 /// `outOfKey`, on events and cells alike, is the chord's pitch classes that are not in the project key's
 /// scale, ascending and without repeats: what a hover popover lists as borrowed notes. It is empty
 /// exactly when a cell is `filled`.
@@ -86,7 +94,59 @@ constexpr int kMaxJsonDepth = 64;
 /// by pitch class, the `canonicalTonic` of that pitch class in that mode with its ASCII `text`
 /// ("Db", "F#"), so that the key pickers can label themselves without a copy of the theory. Both are
 /// constant for a given engine build and are repeated in every snapshot for simplicity.
-std::string snapshotJson(const Document& doc, const Palette& palette);
+///
+/// Phase 2 fields (P2-D8; all additive, schema still 1), events and cells alike:
+/// - `function`: `functionShortName(functionOf(chord, projectKey))`, "T", "PD", "D" or "O".
+/// - `tension`: `tension(chord, projectKey)`, 0..100.
+///
+/// Events only:
+/// - `inversion`, `octave`, `manualVoicing`: the event's stored voicing fields (document.h).
+/// - `voicing`: the notes `compile` gives the chord, `voicings(doc)[i]` (compiler.h): with
+///   `autoVoiceLead` on, the inversion and octave auto voice-leading chose; otherwise, and for a manual
+///   chord, `voicing(chord, inversion, octave)`. The sequence bar therefore shows what sounds.
+/// - `why`: null on the first event; on every later one the `relate` (harmony.h) of its chord against the
+///   chord before it, as data plus one sentence:
+///   ```
+///   {"commonTones":1, "commonPcs":[7], "commonNames":["G"], "rootMotion":"down a fifth",
+///    "voiceLeadingCost":4, "borrowedFrom":<key>|null, "borrowedFromName":"C Aeolian"|null,
+///    "text":"G7 → C: down a fifth, resolves (D→T), 1 common tone (G), smooth voice leading (cost 4)"}
+///   ```
+///   `commonNames` spells `commonPcs` in the project key; `rootMotion` is `rootMotionName`;
+///   `voiceLeadingCost` is the octave-free `pcVoiceLeadingCost`; `borrowedFrom` is the key the chord is
+///   borrowed from (`borrowedFrom`, harmony.h) and `borrowedFromName` its `keyName`, both null for a chord
+///   in the key or in no parallel mode.
+///   `text` is "<previous symbol> → <symbol>: <root motion>" (the symbols as the events' `symbol`, the
+///   arrow a literal UTF-8 character) followed by these clauses, in this order, each only when it holds:
+///     ", resolves (D→T)"                 `functionOf` the previous chord is Dominant and this one's Tonic;
+///     ", 1 common tone (G)"              commonTones >= 1: the count, "tone" or "tones", and the
+///     ", 2 common tones (C, E)"          `commonNames` comma-separated;
+///     ", smooth voice leading (cost c)"  voiceLeadingCost <= the number of voices it sums over, the
+///                                        larger of the two chords' pitch-class counts (every voice moves
+///                                        one semitone on average, or less: G7 → C costs 4 over four
+///                                        voices, C → D costs 6 over three). This is a looser bar than the
+///                                        suggestions' `Reason::Smooth` (cost <= 2), which ranks
+///                                        candidates rather than describes a move the user made;
+///     ", borrowed from C harmonic minor" borrowedFrom is set; the key in prose as the suggestions'
+///                                        `reasonTexts` write it (mode names as `Mode` spells them,
+///                                        except "harmonic minor" and "melodic minor"), so that the two
+///                                        popovers agree. `borrowedFromName` keeps the `keyName` form of
+///                                        `projectKeyName` for a UI that looks keys up by name.
+///
+/// Top level:
+/// - `autoVoiceLead`: `Document::autoVoiceLead`.
+/// - `sections`: `Document::sections` in order, each `{id, name, colourIndex, firstEventIndex}`; empty
+///   when the document has none.
+/// - `selectedEventId`: `selectedEventId` when an event has that id, else null (so `kNoEventId`, the
+///   default, and a stale id alike read as "no selection"). The plug-in passes the store's live
+///   selection (`DocumentStore::selectedEventId`).
+/// - `suggestions`: `suggestNext(previous, projectKey, browsedKey)` (suggest.h, Pop style, at most 8),
+///   where `previous` is the selected event's chord when `selectedEventId` names an event, else the last
+///   event's chord, else null (the opening suggestions of an empty document). Each entry carries the
+///   chord (`root`, `type`), the `Suggestion`'s `label` as `symbol` and its `roman`, `function` as the
+///   events do (the chord's `functionOf` in the project key), the `score`, the `reasons` as `reasonName`
+///   strings and the parallel `reasonTexts`.
+/// Allocates (compiles, ranks): the UI/message thread only.
+std::string snapshotJson(const Document& doc, const Palette& palette, int selectedEventId = -1);
 
 /// A key as the snapshot names it: the spelled tonic and the mode name, "C Ionian", "Bb HarmonicMinor"
 /// (the `projectKeyName` / `browsedKeyName` fields; the plug-in names its MIDI export after it).

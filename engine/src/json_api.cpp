@@ -1,12 +1,17 @@
 #include "chordlab/json_api.h"
 
 #include "chordlab/chord.h"
+#include "chordlab/compiler.h"
 #include "chordlab/document.h"
+#include "chordlab/function.h"
+#include "chordlab/harmony.h"
 #include "chordlab/palette.h"
 #include "chordlab/pitch.h"
 #include "chordlab/relations.h"
 #include "chordlab/scale.h"
+#include "chordlab/suggest.h"
 #include "chordlab/symbol.h"
+#include "chordlab/tension.h"
 #include "chordlab/voicing.h"
 
 #include <nlohmann/json.hpp>
@@ -123,6 +128,86 @@ json outOfKeyJson(const Chord& chord, const Key& key) {
     std::sort(out.begin(), out.end());
     out.erase(std::unique(out.begin(), out.end()), out.end());
     return json(out);
+}
+
+/// Mode names as prose, for the sentences the UI shows: the `Mode` spelling except for the two altered
+/// minor scales. The same table as the suggestions' reason texts (suggest.cpp), so that "borrowed from"
+/// reads identically in the why popover and the suggestion popover.
+constexpr const char* kModeProse[kNumModes] = {"Ionian",  "Dorian",  "Phrygian",       "Lydian",       "Mixolydian",
+                                               "Aeolian", "Locrian", "harmonic minor", "melodic minor"};
+
+std::string keyProse(const Key& key) {
+    return tonicText(key.tonic) + " " + kModeProse[static_cast<int>(key.mode)];
+}
+
+/// The `why` object of event `to` against the event `from` before it: `relate` as data plus the sentence
+/// whose rules json_api.h spells out.
+json whyJson(const Chord& from, const Chord& to, const Key& projectKey) {
+    const Relation relation = relate(from, to, projectKey);
+
+    json commonNames = json::array();
+    std::string names;
+    for (const PitchClass pc : relation.commonPcs) {
+        const std::string name = spell(pc, projectKey).text();
+        commonNames.push_back(name);
+        names += (names.empty() ? "" : ", ") + name;
+    }
+
+    std::string text = chordSymbol(from, projectKey) + " → " + chordSymbol(to, projectKey) + ": " +
+                       rootMotionName(relation.motion);
+    if (functionOf(from, projectKey) == Function::Dominant && functionOf(to, projectKey) == Function::Tonic) {
+        text += ", resolves (D→T)";
+    }
+    if (relation.commonTones >= 1) {
+        text += ", " + std::to_string(relation.commonTones) + (relation.commonTones == 1 ? " common tone (" : " common tones (") +
+                names + ")";
+    }
+    // The cost sums over one voice per pitch class of the larger chord (the smaller is padded up to it).
+    const int voices = static_cast<int>(std::max(pitchClasses(from).size(), pitchClasses(to).size()));
+    if (relation.voiceLeadingCost <= voices) {
+        text += ", smooth voice leading (cost " + std::to_string(relation.voiceLeadingCost) + ")";
+    }
+    if (relation.borrowedFrom) {
+        text += ", borrowed from " + keyProse(*relation.borrowedFrom);
+    }
+
+    return json{{"commonTones", relation.commonTones},
+                {"commonPcs", relation.commonPcs},
+                {"commonNames", std::move(commonNames)},
+                {"rootMotion", rootMotionName(relation.motion)},
+                {"voiceLeadingCost", relation.voiceLeadingCost},
+                {"borrowedFrom", relation.borrowedFrom ? keyToJson(*relation.borrowedFrom) : json()},
+                {"borrowedFromName", relation.borrowedFrom ? json(keyName(*relation.borrowedFrom)) : json()},
+                {"text", std::move(text)}};
+}
+
+json sectionsJson(const Document& doc) {
+    json sections = json::array();
+    for (const Section& s : doc.sections) {
+        sections.push_back(
+            {{"id", s.id}, {"name", s.name}, {"colourIndex", s.colourIndex}, {"firstEventIndex", s.firstEventIndex}});
+    }
+    return sections;
+}
+
+/// `suggestNext` after `previous` (null to open), as the snapshot lists it.
+json suggestionsJson(const Chord* previous, const Document& doc) {
+    json suggestions = json::array();
+    for (const Suggestion& s : suggestNext(previous, doc.projectKey, doc.browsedKey)) {
+        json reasons = json::array();
+        for (const Reason r : s.reasons) {
+            reasons.push_back(reasonName(r));
+        }
+        suggestions.push_back({{"root", s.chord.root},
+                               {"type", s.chord.type->id},
+                               {"symbol", s.label},
+                               {"roman", s.roman},
+                               {"function", functionShortName(functionOf(s.chord, doc.projectKey))},
+                               {"score", s.score},
+                               {"reasons", std::move(reasons)},
+                               {"reasonTexts", s.reasonTexts}});
+    }
+    return suggestions;
 }
 
 // --- Reading ---------------------------------------------------------------------------
@@ -715,21 +800,40 @@ std::string keyName(const Key& key) {
     return tonicText(key.tonic) + " " + modeName(key.mode);
 }
 
-std::string snapshotJson(const Document& doc, const Palette& palette) {
+static_assert(kNoEventId == -1, "snapshotJson's default selectedEventId must be kNoEventId");
+
+std::string snapshotJson(const Document& doc, const Palette& palette, int selectedEventId) {
+    // The selection counts only when an event has that id; the UI may hold a stale one for a moment.
+    int selectedIndex = -1;
+    for (std::size_t i = 0; i < doc.events.size(); ++i) {
+        if (doc.events[i].id == selectedEventId) {
+            selectedIndex = static_cast<int>(i);
+            break;
+        }
+    }
+
+    const std::vector<std::vector<int>> compiledVoicings = voicings(doc);
     json events = json::array();
     double beat = 0.0;  // accumulated left to right, exactly as Document::startBeatOf does
-    for (const ChordEvent& e : doc.events) {
+    for (std::size_t i = 0; i < doc.events.size(); ++i) {
+        const ChordEvent& e = doc.events[i];
         json event = {{"id", e.id},
                       {"root", e.chord.root},
                       {"type", e.chord.type->id},
                       {"symbol", chordSymbol(e.chord, doc.projectKey)},
                       {"roman", romanNumeral(e.chord, doc.projectKey)},
                       {"family", familyName(e.chord.type->family)},
+                      {"function", functionShortName(functionOf(e.chord, doc.projectKey))},
+                      {"tension", tension(e.chord, doc.projectKey)},
                       {"startBeat", beat},
                       {"lengthBeats", e.lengthBeats},
                       {"velocity", e.velocity},
-                      {"voicing", closeVoicing(e.chord)},
-                      {"outOfKey", outOfKeyJson(e.chord, doc.projectKey)}};
+                      {"inversion", e.inversion},
+                      {"octave", e.octave},
+                      {"manualVoicing", e.manualVoicing},
+                      {"voicing", compiledVoicings[i]},
+                      {"outOfKey", outOfKeyJson(e.chord, doc.projectKey)},
+                      {"why", i == 0 ? json() : whyJson(doc.events[i - 1].chord, e.chord, doc.projectKey)}};
         events.push_back(std::move(event));
         beat += e.lengthBeats;
     }
@@ -743,10 +847,20 @@ std::string snapshotJson(const Document& doc, const Palette& palette) {
                      {"symbol", c.symbol},
                      {"roman", c.roman},
                      {"family", familyName(c.chord.type->family)},
+                     {"function", functionShortName(functionOf(c.chord, doc.projectKey))},
+                     {"tension", tension(c.chord, doc.projectKey)},
                      {"filled", c.filled},
                      {"voicing", closeVoicing(c.chord)},
                      {"outOfKey", outOfKeyJson(c.chord, doc.projectKey)}};
         cells.push_back(std::move(cell));
+    }
+
+    // Suggestions follow the selected chord, else the last one, else open the progression.
+    const Chord* previous = nullptr;
+    if (selectedIndex >= 0) {
+        previous = &doc.events[static_cast<std::size_t>(selectedIndex)].chord;
+    } else if (!doc.events.empty()) {
+        previous = &doc.events.back().chord;
     }
 
     const json snapshot = {{"schema", kJsonSchema},
@@ -756,10 +870,14 @@ std::string snapshotJson(const Document& doc, const Palette& palette) {
                            {"browsedKeyName", keyName(doc.browsedKey)},
                            {"progressionLoop", doc.progressionLoop},
                            {"followHost", doc.followHost},
+                           {"autoVoiceLead", doc.autoVoiceLead},
                            {"endBeat", beat},
+                           {"selectedEventId", selectedIndex >= 0 ? json(selectedEventId) : json()},
                            {"modes", modesJson()},
                            {"tonics", tonicsJson()},
                            {"events", std::move(events)},
+                           {"sections", sectionsJson(doc)},
+                           {"suggestions", suggestionsJson(previous, doc)},
                            {"palette", {{"tiers", palette.tiers}, {"cells", std::move(cells)}}}};
     return snapshot.dump();
 }

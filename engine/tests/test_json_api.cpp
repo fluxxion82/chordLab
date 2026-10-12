@@ -1,12 +1,18 @@
 #include "doctest.h"
 
 #include "chordlab/chord.h"
+#include "chordlab/compiler.h"
 #include "chordlab/document.h"
+#include "chordlab/function.h"
+#include "chordlab/harmony.h"
 #include "chordlab/json_api.h"
 #include "chordlab/limits.h"
 #include "chordlab/palette.h"
 #include "chordlab/pitch.h"
 #include "chordlab/scale.h"
+#include "chordlab/suggest.h"
+#include "chordlab/tension.h"
+#include "chordlab/voicing.h"
 
 #include <nlohmann/json.hpp>
 
@@ -313,6 +319,291 @@ TEST_CASE("snapshot: outOfKey lists each chord's pitch classes outside the proje
     CHECK(snap.at("events")[2].at("outOfKey") == json::array({2, 11}));  // G B D in Ab major: B and D
     CHECK(cellAt(snap, 0, 1).at("outOfKey") == json::array({2, 11}));    // the browsed G cell, now borrowed
     CHECK(cellAt(snap, 0, 1).at("filled") == false);
+}
+
+// --- Snapshot: function, tension, voicing, why, sections, suggestions (Phase 2) ---------
+
+namespace {
+
+/// A store with C (id 1), G7 (id 2), Am (id 3) in C major, auto voice-leading on.
+DocumentStore cG7Am() {
+    DocumentStore store;
+    store.appendChord(kC);
+    store.appendChord(kG7);
+    store.appendChord(chord(9, "min"));
+    store.setAutoVoiceLead(true);
+    return store;
+}
+
+/// The store's snapshot with `selectedEventId` passed through.
+json snapshotSelecting(const DocumentStore& store, int selectedEventId) {
+    const Document& d = store.doc();
+    return json::parse(snapshotJson(d, buildPalette(d.browsedKey, d.projectKey), selectedEventId));
+}
+
+/// The `symbol` of every suggestion in the snapshot, in order.
+std::vector<std::string> suggestionSymbols(const json& snap) {
+    std::vector<std::string> out;
+    for (const json& s : snap.at("suggestions")) {
+        out.push_back(s.at("symbol").get<std::string>());
+    }
+    return out;
+}
+
+/// Checks that the snapshot's suggestions are exactly `suggestNext(previous, project, browsed)`, field by field.
+void checkSuggestionsAre(const json& snap, const Chord* previous, const Document& doc) {
+    const std::vector<Suggestion> expected = suggestNext(previous, doc.projectKey, doc.browsedKey);
+    const json& actual = snap.at("suggestions");
+    REQUIRE(actual.size() == expected.size());
+    for (std::size_t i = 0; i < expected.size(); ++i) {
+        CAPTURE(i);
+        const json& s = actual[i];
+        const Suggestion& e = expected[i];
+        CHECK(s.at("root") == e.chord.root);
+        CHECK(s.at("type") == e.chord.type->id);
+        CHECK(s.at("symbol") == e.label);
+        CHECK(s.at("roman") == e.roman);
+        CHECK(s.at("function") == functionShortName(functionOf(e.chord, doc.projectKey)));
+        CHECK(s.at("score").get<double>() == e.score);
+        std::vector<std::string> names;
+        for (const Reason r : e.reasons) {
+            names.emplace_back(reasonName(r));
+        }
+        CHECK(s.at("reasons").get<std::vector<std::string>>() == names);
+        CHECK(s.at("reasonTexts").get<std::vector<std::string>>() == e.reasonTexts);
+    }
+}
+
+}  // namespace
+
+TEST_CASE("snapshot: cells and events carry the function label and the tension in the project key") {
+    const DocumentStore store = cG7Am();
+    const json snap = snapshot(store);
+    CHECK(snap.at("schema") == 1);  // every Phase 2 field is additive
+
+    CHECK(cellAt(snap, 0, 1).at("function") == "T");
+    CHECK(cellAt(snap, 1, 1).at("function") == "PD");
+    CHECK(cellAt(snap, 2, 1).at("function") == "T");
+    CHECK(cellAt(snap, 3, 1).at("function") == "PD");
+    CHECK(cellAt(snap, 4, 1).at("function") == "D");
+    CHECK(cellAt(snap, 5, 1).at("function") == "T");
+    CHECK(cellAt(snap, 6, 1).at("function") == "D");
+    CHECK(cellAt(snap, 0, 1).at("tension") == 3);
+    CHECK(cellAt(snap, 4, 3).at("type") == "7");
+    CHECK(cellAt(snap, 4, 3).at("tension") == 27);
+    for (const json& cell : snap.at("palette").at("cells")) {
+        CAPTURE(cell.dump());
+        const Chord ch = chord(cell.at("root").get<int>(), cell.at("type").get<std::string>());
+        CHECK(cell.at("function") == functionShortName(functionOf(ch, store.doc().projectKey)));
+        CHECK(cell.at("tension") == tension(ch, store.doc().projectKey));
+    }
+
+    REQUIRE(snap.at("events").size() == 3);
+    CHECK(snap.at("events")[0].at("function") == "T");
+    CHECK(snap.at("events")[1].at("function") == "D");
+    CHECK(snap.at("events")[2].at("function") == "T");
+    CHECK(snap.at("events")[0].at("tension") == 3);
+    CHECK(snap.at("events")[1].at("tension") == 27);
+    CHECK(snap.at("events")[2].at("tension") == 3);
+
+    // Against the project key, not the browsed one: Ab in C major is a predominant with two foreign notes.
+    DocumentStore borrowed;
+    borrowed.appendChord(chord(8, "maj"));
+    const json b = snapshot(borrowed);
+    CHECK(b.at("events")[0].at("function") == "PD");
+    CHECK(b.at("events")[0].at("tension") == 37);
+}
+
+TEST_CASE("snapshot: events carry inversion, octave, manualVoicing and the voicing compile gives them") {
+    DocumentStore store = cG7Am();
+    json snap = snapshot(store);
+    CHECK(snap.at("autoVoiceLead") == true);
+    for (const json& e : snap.at("events")) {
+        CAPTURE(e.dump());
+        CHECK(e.at("inversion") == 0);
+        CHECK(e.at("octave") == 0);
+        CHECK(e.at("manualVoicing") == false);
+    }
+    // Auto voice-leading: the first chord as stored, G7 in second inversion an octave down under it, Am likewise.
+    CHECK(snap.at("events")[0].at("voicing") == json({60, 64, 67}));
+    CHECK(snap.at("events")[1].at("voicing") == json({62, 65, 67, 71}));
+    CHECK(snap.at("events")[2].at("voicing") == json({60, 64, 69}));
+    const std::vector<std::vector<int>> chosen = voicings(store.doc());
+    for (std::size_t i = 0; i < chosen.size(); ++i) {
+        CHECK(snap.at("events")[i].at("voicing") == json(chosen[i]));
+    }
+    // Palette cells keep the plain close voicing: they are not in the progression.
+    CHECK(cellAt(snap, 4, 3).at("type") == "7");
+    CHECK(cellAt(snap, 4, 3).at("voicing") == json(closeVoicing(kG7)));
+
+    // A manual voicing is reported as stored and sounds as stored.
+    store.setInversion(2, 1);
+    store.setOctave(2, 1);
+    snap = snapshot(store);
+    const json& g7 = snap.at("events")[1];
+    CHECK(g7.at("inversion") == 1);
+    CHECK(g7.at("octave") == 1);
+    CHECK(g7.at("manualVoicing") == true);
+    CHECK(g7.at("voicing") == json(voicing(kG7, 1, 1)));
+    CHECK(snap.at("events")[0].at("manualVoicing") == false);
+
+    // With auto voice-leading off every chord is voiced as stored: the defaults are the close voicing.
+    store.setAutoVoiceLead(false);
+    snap = snapshot(store);
+    CHECK(snap.at("autoVoiceLead") == false);
+    CHECK(snap.at("events")[1].at("voicing") == json(voicing(kG7, 1, 1)));
+    CHECK(snap.at("events")[2].at("voicing") == json(closeVoicing(chord(9, "min"))));
+}
+
+TEST_CASE("snapshot: why is null on the first event and relates every later one to the chord before it") {
+    const DocumentStore store = cG7Am();
+    const json snap = snapshot(store);
+    REQUIRE(snap.at("events").size() == 3);
+    CHECK(snap.at("events")[0].at("why").is_null());
+
+    // C -> G7: one common tone, up a fifth, pitch-class cost 4 over four voices (smooth), not borrowed.
+    const json& g7 = snap.at("events")[1].at("why");
+    REQUIRE(g7.is_object());
+    CHECK(g7.at("commonTones") == 1);
+    CHECK(g7.at("commonPcs") == json({7}));
+    CHECK(g7.at("commonNames") == json({"G"}));
+    CHECK(g7.at("rootMotion") == "up a fifth");
+    CHECK(g7.at("voiceLeadingCost") == 4);
+    CHECK(g7.at("borrowedFrom").is_null());
+    CHECK(g7.at("borrowedFromName").is_null());
+    CHECK(g7.at("text") == "C → G7: up a fifth, 1 common tone (G), smooth voice leading (cost 4)");
+
+    // G7 -> Am: nothing in common, up a step, cost 7 (not smooth), the dominant resolving to a tonic chord.
+    const json& am = snap.at("events")[2].at("why");
+    CHECK(am.at("commonTones") == 0);
+    CHECK(am.at("commonPcs") == json::array());
+    CHECK(am.at("commonNames") == json::array());
+    CHECK(am.at("rootMotion") == "up a step");
+    CHECK(am.at("voiceLeadingCost") == 7);
+    CHECK(am.at("text") == "G7 → Am: up a step, resolves (D→T)");
+
+    // The data agrees with `relate` field by field.
+    const Relation r = relate(kG7, chord(9, "min"), store.doc().projectKey);
+    CHECK(am.at("commonTones") == r.commonTones);
+    CHECK(am.at("rootMotion") == rootMotionName(r.motion));
+    CHECK(am.at("voiceLeadingCost") == r.voiceLeadingCost);
+}
+
+TEST_CASE("snapshot: the why sentence follows the documented rules clause by clause") {
+    // Each pair is appended after a leading C so that the relation is the pair's own; the leading chord
+    // of each pair is at index 1 and the one explained at index 2.
+    const auto textOf = [](const Chord& from, const Chord& to, Key projectKey = key('C', 0, Mode::Ionian)) {
+        DocumentStore store;
+        store.setProjectKey(projectKey);
+        store.appendChord(from);
+        store.appendChord(to);
+        return snapshot(store).at("events")[1].at("why").at("text").get<std::string>();
+    };
+
+    // The plan's example: a cadence with a common tone and a smooth move.
+    CHECK(textOf(kG7, kC) == "G7 → C: down a fifth, resolves (D→T), 1 common tone (G), smooth voice leading (cost 4)");
+    // Plural common tones.
+    CHECK(textOf(kC, chord(9, "min")) == "C → Am: down a third, 2 common tones (C, E), smooth voice leading (cost 2)");
+    // A repeated chord keeps all its tones and costs nothing.
+    CHECK(textOf(kC, kC) == "C → C: same root, 3 common tones (C, E, G), smooth voice leading (cost 0)");
+    // A borrowed chord names its source after everything else; common tones are spelled in the project key.
+    CHECK(textOf(kC, chord(8, "maj")) ==
+          "C → Ab: down a third, 1 common tone (C), smooth voice leading (cost 2), borrowed from C Aeolian");
+    // Nothing in common, nothing smooth (cost 5 over three voices), in no parallel mode: the root motion
+    // stands alone.
+    CHECK(textOf(kC, chord(6, "min")) == "C → F#m: tritone");
+    // D major in C major is Lydian's: the borrowed clause can be the only one.
+    CHECK(textOf(kC, chord(2, "maj")) == "C → D: up a step, borrowed from C Lydian");
+    // A move of three voices by a semitone each is smooth (cost 3 over three voices).
+    CHECK(textOf(kC, chord(1, "maj")) == "C → Db: up a semitone, smooth voice leading (cost 3), borrowed from C Phrygian");
+    // The altered minor scales are written in prose, as the suggestions' reason texts write them.
+    CHECK(textOf(chord(0, "min"), kG7, key('C', 0, Mode::Aeolian)) ==
+          "Cm → G7: up a fifth, 1 common tone (G), borrowed from C harmonic minor");
+    // Four voices moving a total of four semitones is smooth; five is not.
+    CHECK(textOf(kG7, chord(9, "min")) == "G7 → Am: up a step, resolves (D→T)");
+    // Symbols are spelled in the project key, like the events' own `symbol`.
+    CHECK(textOf(chord(10, "maj"), chord(3, "maj"), key('E', -1, Mode::Ionian)) ==
+          "Bb → Eb: down a fifth, resolves (D→T), 1 common tone (Bb), smooth voice leading (cost 3)");
+}
+
+TEST_CASE("snapshot: why carries the borrowed-from key as data and as a name") {
+    DocumentStore store;
+    store.appendChord(kC);
+    store.appendChord(chord(8, "maj"));
+    const json why = snapshot(store).at("events")[1].at("why");
+    CHECK(why.at("borrowedFrom") == keyJson("C", 0, "Aeolian"));
+    CHECK(why.at("borrowedFromName") == "C Aeolian");
+
+    store.setProjectKey(key('C', 0, Mode::Aeolian));
+    store.appendChord(kG7);
+    const json g7 = snapshot(store).at("events")[2].at("why");
+    CHECK(g7.at("borrowedFrom") == keyJson("C", 0, "HarmonicMinor"));
+    CHECK(g7.at("borrowedFromName") == "C HarmonicMinor");  // as `keyName` and `projectKeyName` write it
+}
+
+TEST_CASE("snapshot: sections are listed in order with their ids, names, colours and start indices") {
+    DocumentStore store = cG7Am();
+    CHECK(snapshot(store).at("sections") == json::array());
+
+    REQUIRE(store.addSection(0, "Verse") == 1);
+    REQUIRE(store.addSection(2) == 2);
+    store.setSectionColour(2, 5);
+    const json sections = snapshot(store).at("sections");
+    REQUIRE(sections.size() == 2);
+    CHECK(sections[0] == json({{"id", 1}, {"name", "Verse"}, {"colourIndex", 0}, {"firstEventIndex", 0}}));
+    CHECK(sections[1] == json({{"id", 2}, {"name", "Section 2"}, {"colourIndex", 5}, {"firstEventIndex", 2}}));
+}
+
+TEST_CASE("snapshot: selectedEventId is echoed when it names an event, else null") {
+    const DocumentStore store = cG7Am();
+    CHECK(snapshot(store).at("selectedEventId").is_null());
+    CHECK(snapshotSelecting(store, 2).at("selectedEventId") == 2);
+    CHECK(snapshotSelecting(store, 99).at("selectedEventId").is_null());
+    CHECK(snapshotSelecting(store, kNoEventId).at("selectedEventId").is_null());
+}
+
+TEST_CASE("snapshot: suggestions follow the selected event, else the last event, else open the progression") {
+    const DocumentStore store = cG7Am();
+    const Chord am = chord(9, "min");
+
+    // No selection: after the last chord (Am), a predominant leads.
+    json snap = snapshot(store);
+    REQUIRE(snap.at("suggestions").size() <= 8);
+    CHECK(snap.at("suggestions").size() == 8);
+    checkSuggestionsAre(snap, &am, store.doc());
+    CHECK(suggestionSymbols(snap)[0] == "F");
+
+    // The selected event's chord: after G7 (id 2) the tonic leads, with the cadence among its reasons.
+    snap = snapshotSelecting(store, 2);
+    checkSuggestionsAre(snap, &kG7, store.doc());
+    const json& top = snap.at("suggestions")[0];
+    CHECK(top.at("symbol") == "C");
+    CHECK(top.at("roman") == "I");
+    CHECK(top.at("function") == "T");
+    CHECK(top.at("root") == 0);
+    CHECK(top.at("type") == "maj");
+    const auto reasons = top.at("reasons").get<std::vector<std::string>>();
+    CHECK(std::find(reasons.begin(), reasons.end(), "cadence") != reasons.end());
+    CHECK(top.at("reasons").size() == top.at("reasonTexts").size());
+    CHECK(top.at("score").get<double>() > snap.at("suggestions")[1].at("score").get<double>());
+
+    // An id no event has is no selection: back to the last chord.
+    snap = snapshotSelecting(store, 42);
+    checkSuggestionsAre(snap, &am, store.doc());
+
+    // An empty document opens with the tonic triad.
+    const DocumentStore empty;
+    snap = snapshot(empty);
+    checkSuggestionsAre(snap, nullptr, empty.doc());
+    CHECK(suggestionSymbols(snap)[0] == "C");
+    CHECK(snap.at("suggestions")[0].at("reasons").get<std::vector<std::string>>() ==
+          std::vector<std::string>{"diatonic", "tonic"});
+
+    // The browsed key supplies the candidates, the project key the numerals and functions.
+    DocumentStore browsing = cG7Am();
+    browsing.setBrowsedKey(key('G', 0, Mode::Ionian));
+    snap = snapshot(browsing);
+    checkSuggestionsAre(snap, &am, browsing.doc());
 }
 
 // --- browseKey -------------------------------------------------------------------------
