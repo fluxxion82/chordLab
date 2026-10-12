@@ -1,7 +1,7 @@
 #pragma once
 
-#include "chordlab/compiler.h"
 #include "chordlab/limits.h"
+#include "chordlab/note_event.h"
 
 #include <array>
 #include <atomic>

@@ -1,28 +1,11 @@
 #pragma once
 
 #include "chordlab/document.h"
+#include "chordlab/note_event.h"
 
 #include <vector>
 
 namespace chordlab {
-
-/// One note-on or note-off of the compiled progression, in beats from the start of the progression.
-/// `velocity` is the chord's velocity for an on and 0 for an off. Plain data with no constructors so
-/// that the scheduler can read an array of these from the audio thread.
-struct NoteEvent {
-    double beat;
-    bool on;
-    int pitch;
-    int velocity;
-};
-
-constexpr bool operator==(const NoteEvent& a, const NoteEvent& b) noexcept {
-    return a.beat == b.beat && a.on == b.on && a.pitch == b.pitch && a.velocity == b.velocity;
-}
-
-constexpr bool operator!=(const NoteEvent& a, const NoteEvent& b) noexcept {
-    return !(a == b);
-}
 
 /// The playback form of a document: every note of every chord as on/off events, plus where the
 /// progression ends (the point a looping scheduler wraps at, and where the MIDI file's end-of-track sits).

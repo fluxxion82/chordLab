@@ -1,6 +1,8 @@
 #include "chordlab/json_api.h"
 
 #include "chordlab/chord.h"
+#include "chordlab/document.h"
+#include "chordlab/palette.h"
 #include "chordlab/pitch.h"
 #include "chordlab/relations.h"
 #include "chordlab/scale.h"

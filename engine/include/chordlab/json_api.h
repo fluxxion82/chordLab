@@ -1,13 +1,15 @@
 #pragma once
 
-#include "chordlab/document.h"
-#include "chordlab/palette.h"
-
 #include <cstddef>
 #include <string>
 #include <string_view>
 
 namespace chordlab {
+
+// Only references cross this interface, so the definitions (document.h, palette.h) are not needed here.
+struct Document;
+class DocumentStore;
+struct Palette;
 
 /// Version of the wire format. Every message (snapshot, command, state) carries `"schema": kJsonSchema`;
 /// a message with a different or missing schema is rejected.
