@@ -2,9 +2,11 @@ import SwiftUI
 
 /// Transport row above the sequence bar: Follow Live (the progression plays while Live's transport runs;
 /// off, it is silent and previews still work), Loop (the progression repeats; off, it plays once and stops
-/// at its end) and Panic. The toggles show the snapshot's `followHost` / `progressionLoop` and send
-/// `setFollowHost` / `setProgressionLoop`; the snapshot the plug-in answers with is what flips them, so
-/// they never drift from the document (and stay put if a command is rejected).
+/// at its end), Panic, and Auto voice-lead (`compile` picks each non-manual chord's inversion and octave
+/// for the smoothest motion from the chord before; P2-D5). The toggles show the snapshot's `followHost`
+/// / `progressionLoop` / `autoVoiceLead` and send `setFollowHost` / `setProgressionLoop` /
+/// `setAutoVoiceLead`; the snapshot the plug-in answers with is what flips them, so they never drift from
+/// the document (and stay put if a command is rejected).
 struct TransportBarView: View {
   @EnvironmentObject var state: ChordLabState
 
@@ -16,6 +18,11 @@ struct TransportBarView: View {
   private var loop: Binding<Bool> {
     Binding(get: { state.snapshot?.progressionLoop ?? true },
             set: { state.send(command: ["cmd": "setProgressionLoop", "on": $0]) })
+  }
+
+  private var autoVoiceLead: Binding<Bool> {
+    Binding(get: { state.snapshot?.autoVoiceLead ?? false },
+            set: { state.send(command: ["cmd": "setAutoVoiceLead", "on": $0]) })
   }
 
   var body: some View {
@@ -31,6 +38,10 @@ struct TransportBarView: View {
       Button("Panic") { state.panic() }
         .help("Silence every sounding note")
         .accessibilityLabel("Silence every sounding note")
+      Toggle(isOn: autoVoiceLead) { Text("Auto voice-lead").foregroundStyle(.white) }
+        .toggleStyle(.switch)
+        .help("Choose each chord's inversion and octave for the smoothest motion from the chord before (manual chords keep theirs)")
+        .accessibilityLabel("Auto voice-lead")
       Spacer(minLength: 0)
     }
     .font(.body)
