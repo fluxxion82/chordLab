@@ -78,10 +78,6 @@ std::string tonicText(const Tonic& tonic) {
     return Spelling{tonic.letter, tonic.alter}.text();
 }
 
-std::string keyName(const Key& key) {
-    return tonicText(key.tonic) + " " + modeName(key.mode);
-}
-
 // --- Writing ---------------------------------------------------------------------------
 
 json keyToJson(const Key& key) {
@@ -714,6 +710,10 @@ void setInternalError(std::string& error) noexcept {
 }  // namespace
 
 // --- Public API ------------------------------------------------------------------------
+
+std::string keyName(const Key& key) {
+    return tonicText(key.tonic) + " " + modeName(key.mode);
+}
 
 std::string snapshotJson(const Document& doc, const Palette& palette) {
     json events = json::array();

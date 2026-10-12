@@ -119,3 +119,10 @@ struct TransportJSON: Codable, Equatable {
   let ppq: Double
   let playing: Bool
 }
+
+/// `kMsgTagExportReady` payload: `{"schema":1,"path":"…"}`, the MIDI file the plug-in just wrote for a
+/// drag-out (the answer to `kMsgTagExport`; a failure comes back as `kMsgTagError` instead).
+struct ExportReadyJSON: Codable, Equatable {
+  let schema: Int
+  let path: String
+}

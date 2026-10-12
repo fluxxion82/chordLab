@@ -66,6 +66,12 @@ private:
   void PushStatus(uint32_t incompleteBlocks);
   // Main thread: pushes {"schema":1,"ppq":ppq,"playing":playing} (the playhead) to the editor.
   void PushTransport(double ppq, bool playing);
+  // Main thread: compiles the document, writes it as a format 0 MIDI file in the temporary directory at
+  // the host's tempo and pushes kMsgTagExportReady with the path, or kMsgTagError. The previous export is
+  // deleted then, never the one just written (the host reads a dropped file after the drop returns).
+  void HandleExport();
+  // Main thread: pushes {"schema":1,"path":path} to the editor.
+  void PushExportReady(const std::string& path);
 
   static constexpr uint8_t kStateVersion = 2;   // 1 was the M0 spike payload; it is not migrated
 
@@ -124,6 +130,9 @@ private:
   // pushes them as kMsgTagTransport at most every kTransportPushInterval, and only when they changed.
   std::atomic<double> mTransportPpq{0.0};
   std::atomic<bool> mTransportPlaying{false};
+  // The host tempo as ProcessBlock last saw it, for the MIDI export; 120 until the first block.
+  std::atomic<double> mHostBpm{120.0};
+  std::string mLastExportPath;                                 // main thread: deleted by the next export
   static constexpr std::chrono::milliseconds kTransportPushInterval{66};   // ~15 Hz
   std::chrono::steady_clock::time_point mLastTransportPush{};               // main thread
   double mPushedPpq = std::numeric_limits<double>::quiet_NaN();              // main thread; NaN: nothing pushed yet

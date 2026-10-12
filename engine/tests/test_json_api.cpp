@@ -933,3 +933,9 @@ TEST_CASE("capacity: a state with more than kMaxChords chords is rejected whole;
     CHECK_FALSE(apply(store, {{"cmd", "appendChord"}, {"root", 0}, {"type", "maj"}}, error));
     CHECK_FALSE(error.empty());
 }
+
+TEST_CASE("keyName: the spelled tonic and the mode name, as the snapshot's key names") {
+    CHECK(keyName(key('C', 0, Mode::Ionian)) == "C Ionian");
+    CHECK(keyName(key('B', -1, Mode::HarmonicMinor)) == "Bb HarmonicMinor");
+    CHECK(keyName(key('F', 1, Mode::Dorian)) == "F# Dorian");
+}

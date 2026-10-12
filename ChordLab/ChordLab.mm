@@ -56,18 +56,22 @@
 #include "IPlug_include_in_plug_src.h"
 
 #include "chordlab/json_api.h"
+#include "chordlab/smf.h"
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <cassert>
+#include <cctype>
 #include <chrono>
 #include <climits>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <ctime>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #ifdef FRAMEWORK_BUILD
 #import <AUv3Framework/ChordLab-Swift.h>
@@ -191,10 +195,12 @@ void ChordLab::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
   // Follow Live gates the progression only: previews are independent of the transport, and the scheduler
   // releases the progression on the playing -> stopped edge, so turning it off mid-chord is clean.
   const double ppq = GetPPQPos();
+  const double bpm = GetTempo();
   const bool playing = GetTransportIsRunning() && mFollowHost.load(std::memory_order_relaxed);
-  const chordlab::BlockInfo block{ppq, nFrames, GetSampleRate(), GetTempo(), playing};
+  const chordlab::BlockInfo block{ppq, nFrames, GetSampleRate(), bpm, playing};
   mTransportPpq.store(ppq, std::memory_order_relaxed);             // the playhead, read by OnIdle
   mTransportPlaying.store(playing, std::memory_order_relaxed);
+  mHostBpm.store(bpm, std::memory_order_relaxed);                  // the export's tempo
   std::size_t written = 0;
   const bool complete = mScheduler.process(block, mMidiOut.data(), mMidiOut.size(), written);
 
@@ -306,6 +312,12 @@ bool ChordLab::OnMessage(int msgTag, int ctrlTag, int dataSize, const void* pDat
     return true;
   }
 
+  if (msgTag == kMsgTagExport)
+  {
+    HandleExport();
+    return true;
+  }
+
   return CocoaEditorDelegate::OnMessage(msgTag, ctrlTag, dataSize, pData);
 }
 
@@ -380,6 +392,60 @@ void ChordLab::HandlePreview(std::string_view text)
     return;
   }
   mOpenPreviewId = cmd.kind == chordlab::PreviewCmd::Start ? cmd.id : (cmd.id == mOpenPreviewId ? -1 : mOpenPreviewId);
+}
+
+void ChordLab::HandleExport()
+{
+  // Main thread, never real-time: compile and the SMF writer allocate. The tempo is the host's as
+  // ProcessBlock last saw it (120 before the first block); the export is otherwise exactly the playback
+  // content, so a dropped clip is as long as the progression, trailing silence included (D10).
+  chordlab::Compiled compiled;
+  std::string keyName;
+  {
+    std::lock_guard<std::mutex> lock(mModelMutex);
+    compiled = chordlab::compile(mStore.doc());
+    keyName = chordlab::keyName(mStore.doc().projectKey);
+  }
+  double bpm = mHostBpm.load(std::memory_order_relaxed);
+  if (!std::isfinite(bpm) || bpm <= 0.0)
+    bpm = 120.0;
+  const std::vector<uint8_t> bytes = compiled.events.empty() ? std::vector<uint8_t>{}
+                                                             : chordlab::writeSmf0(compiled, bpm, 4, 4, 480);
+  if (bytes.empty())
+  {
+    PushError("nothing to export");                              // no chords, or the writer refused (a tempo it cannot encode)
+    return;
+  }
+
+  // NSTemporaryDirectory()/ChordLab/ChordLab-<key>-<yyyyMMdd-HHmmss>.mid, the key spelled with 's' for a
+  // sharp and '-' for anything but a letter or digit so the name is safe anywhere ("C-Ionian", "Fs-Dorian").
+  std::string safeKey;
+  for (const char c : keyName)
+    safeKey += std::isalnum((unsigned char) c) ? c : (c == '#' ? 's' : '-');
+  char stamp[32] = {0};
+  const std::time_t now = std::time(nullptr);
+  std::tm local{};
+  localtime_r(&now, &local);
+  std::strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", &local);
+  NSString* dir = [NSTemporaryDirectory() stringByAppendingPathComponent:@"ChordLab"];
+  if (![[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil])
+  {
+    PushError("could not create the export folder");
+    return;
+  }
+  const std::string path = std::string([dir UTF8String]) + "/ChordLab-" + safeKey + "-" + stamp + ".mid";
+  if (!chordlab::writeFile(path, bytes))
+  {
+    PushError("could not write the MIDI file");
+    return;
+  }
+  // The previous export goes now, never the one just written: Live reads a dropped file after the drop
+  // callback has returned, so deleting in that callback would hand it a missing file. Two exports within
+  // one second share a name and the second simply replaces the first in place.
+  if (!mLastExportPath.empty() && mLastExportPath != path)
+    [[NSFileManager defaultManager] removeItemAtPath:[NSString stringWithUTF8String:mLastExportPath.c_str()] error:nil];
+  mLastExportPath = path;
+  PushExportReady(path);
 }
 
 void ChordLab::RebuildPaletteLocked()
@@ -474,6 +540,17 @@ void ChordLab::PushTransport(double ppq, bool playing)
       return;
     const std::string json = nlohmann::json{{"schema", chordlab::kJsonSchema}, {"ppq", ppq}, {"playing", playing}}.dump();
     SendArbitraryMsgFromDelegate((int) kMsgTagTransport, (int) json.size(), json.data());
+  });
+}
+
+void ChordLab::PushExportReady(const std::string& path)
+{
+  OnMain([this, path] {
+    if (!mEditorOpen.load())
+      return;
+    const std::string json = nlohmann::json{{"schema", chordlab::kJsonSchema}, {"path", path}}
+                               .dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
+    SendArbitraryMsgFromDelegate((int) kMsgTagExportReady, (int) json.size(), json.data());
   });
 }
 

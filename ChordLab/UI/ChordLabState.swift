@@ -13,6 +13,8 @@ class ChordLabState: NSObject, ObservableObject {
   @Published var incompleteBlocks: Int = 0
   /// The playhead (`kMsgTagTransport`); nil until the plug-in pushes one.
   @Published var transport: TransportJSON?
+  /// The MIDI file of the last export request (`kMsgTagExportReady`), or nil while none is ready.
+  @Published var exportPath: String?
   /// Id of the palette cell whose voicing is sounding (pressed), or nil.
   @Published private(set) var heldCellId: String?
   /// Preview id of the held cell: a per-press counter, so that Start and Stop pair up in the scheduler.
@@ -112,6 +114,14 @@ class ChordLabState: NSObject, ObservableObject {
     sendCommand(kMsgTagRequestSnapshot, Data())
   }
 
+  /// Asks the plugin to write the progression as a MIDI file. The round trip is synchronous on the main
+  /// thread (`OnMessage` runs inline and answers through the delegate at once), so `exportPath` holds the
+  /// new file, or nil after a failure, when this returns.
+  @MainActor func requestExport() {
+    exportPath = nil
+    sendCommand(kMsgTagExport, Data())
+  }
+
   // MARK: - Messages from the plugin
 
   /// `kMsgTagSnapshot` payload.
@@ -135,6 +145,13 @@ class ChordLabState: NSObject, ObservableObject {
   func applyTransport(json: Data) {
     if let transport = try? JSONDecoder().decode(TransportJSON.self, from: json) {
       self.transport = transport
+    }
+  }
+
+  /// `kMsgTagExportReady` payload.
+  func applyExportReady(json: Data) {
+    if let ready = try? JSONDecoder().decode(ExportReadyJSON.self, from: json) {
+      exportPath = ready.path
     }
   }
 

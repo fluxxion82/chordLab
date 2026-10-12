@@ -9,6 +9,7 @@ namespace chordlab {
 // Only references cross this interface, so the definitions (document.h, palette.h) are not needed here.
 struct Document;
 class DocumentStore;
+struct Key;
 struct Palette;
 
 /// Version of the wire format. Every message (snapshot, command, state) carries `"schema": kJsonSchema`;
@@ -86,6 +87,11 @@ constexpr int kMaxJsonDepth = 64;
 /// ("Db", "F#"), so that the key pickers can label themselves without a copy of the theory. Both are
 /// constant for a given engine build and are repeated in every snapshot for simplicity.
 std::string snapshotJson(const Document& doc, const Palette& palette);
+
+/// A key as the snapshot names it: the spelled tonic and the mode name, "C Ionian", "Bb HarmonicMinor"
+/// (the `projectKeyName` / `browsedKeyName` fields; the plug-in names its MIDI export after it).
+/// Allocates: not for the audio thread.
+std::string keyName(const Key& key);
 
 /// Applies one UI command, `{"schema":1,"cmd":"<name>", ...fields}`, to the store:
 /// - `setKey {letter,alter,mode}`: `setProjectKey` (the browsed key is left alone).

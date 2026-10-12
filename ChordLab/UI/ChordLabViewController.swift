@@ -55,7 +55,8 @@ public typealias MIDIVelocity = UInt8
     hostingController.view.pinToSuperviewEdges()
   }
 
-  /// Messages from C++ (SendArbitraryMsgFromDelegate): snapshots, errors, scheduler status, the playhead.
+  /// Messages from C++ (SendArbitraryMsgFromDelegate): snapshots, errors, scheduler status, the playhead,
+  /// the export file.
   override func onMessage(_ msgTag: Int, _ ctrlTag: Int, _ msg: Data!) -> Bool {
     guard let msg = msg else { return false }
     switch msgTag {
@@ -70,6 +71,9 @@ public typealias MIDIVelocity = UInt8
       return true
     case kMsgTagTransport:
       state.applyTransport(json: msg)
+      return true
+    case kMsgTagExportReady:
+      state.applyExportReady(json: msg)
       return true
     default:
       return false

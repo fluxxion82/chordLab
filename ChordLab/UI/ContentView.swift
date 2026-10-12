@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// Key bar, transport row, sequence bar and palette grid, with a temporary status line and the Spike 3
-/// drag-out label along the bottom until M4 replaces them.
+/// Key bar, transport row, sequence bar and palette grid, with a temporary status line and the MIDI
+/// drag-out control along the bottom.
 struct ContentView: View {
   @EnvironmentObject var state: ChordLabState
 
@@ -37,15 +37,7 @@ struct ContentView: View {
 
           Spacer()
 
-          // Spike 3: drag a prepared .mid out to the DAW.
-          Text("♫ Drag MIDI clip to Live")
-            .foregroundStyle(.white)
-            .padding(.horizontal, 12).padding(.vertical, 8)
-            .background(RoundedRectangle(cornerRadius: 8).fill(Color(red: 0.20, green: 0.25, blue: 0.55)))
-            .onDrag {
-              guard let url = ExportFixture.prepareExportFile() else { return NSItemProvider() }
-              return NSItemProvider(contentsOf: url) ?? NSItemProvider()
-            }
+          ExportDragView()
         }
       }
       .padding(12)
