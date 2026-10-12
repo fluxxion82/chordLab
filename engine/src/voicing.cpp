@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstddef>
 
 namespace chordlab {
 
@@ -23,6 +24,12 @@ bool validRange(int lowest, int highest) {
         return false;
     }
     return highest - lowest >= kMinRange;
+}
+
+/// True if `lowest`..`highest` is usable by `voicing`: a `validRange` with an octave of MIDI below it
+/// (octave -1) and two above it (a moved note at octave +1).
+bool validVoicingRange(int lowest, int highest) {
+    return validRange(lowest, highest) && lowest >= kOctave && highest <= kMidiMax - 2 * kOctave;
 }
 
 }  // namespace
@@ -46,6 +53,55 @@ std::vector<int> closeVoicing(const Chord& chord, int lowest, int highest) {
     }
     std::sort(notes.begin(), notes.end());
     notes.erase(std::unique(notes.begin(), notes.end()), notes.end());
+    return notes;
+}
+
+int inversionCount(const Chord& chord) {
+    assert(chord.type != nullptr);
+    bool seen[12] = {};
+    int count = 0;
+    for (const PitchClass pc : pitchClasses(chord)) {
+        if (!seen[static_cast<std::size_t>(pc)]) {
+            seen[static_cast<std::size_t>(pc)] = true;
+            ++count;
+        }
+    }
+    return count;
+}
+
+std::vector<int> voicing(const Chord& chord, int inversion, int octave, int lowest, int highest) {
+    assert(chord.type != nullptr);
+    if (!validVoicingRange(lowest, highest)) {
+        lowest = kDefaultLowest;
+        highest = kDefaultHighest;
+    }
+    std::vector<int> notes = closeVoicing(chord, lowest, highest);
+    assert(!notes.empty());
+    // Every dictionary type stacks distinct pitch classes, so the close voicing holds one note per chord
+    // tone and `inversionCount` is its size. The clamp uses the size, which keeps the rotation in bounds
+    // even for a type that folded two intervals onto one note.
+    assert(static_cast<int>(notes.size()) == inversionCount(chord));
+    inversion = std::clamp(inversion, 0, static_cast<int>(notes.size()) - 1);
+    octave = std::clamp(octave, kMinVoicingOctave, kMaxVoicingOctave);
+    // The lowest `inversion` notes go up an octave, so that chord tone `inversion` is the bass. A chord
+    // that spans more than an octave (a ninth) needs a second lift for the tones still under the new bass:
+    // the close voicing spans less than two octaves, so two lifts always clear it.
+    const int bass = notes[static_cast<std::size_t>(inversion)];
+    for (std::size_t i = 0; i < static_cast<std::size_t>(inversion); ++i) {
+        notes[i] += kOctave;
+        while (notes[i] < bass) {
+            notes[i] += kOctave;
+        }
+    }
+    for (int& note : notes) {
+        note += kOctave * octave;
+    }
+    std::sort(notes.begin(), notes.end());
+    notes.erase(std::unique(notes.begin(), notes.end()), notes.end());
+    assert(notes.front() >= lowest + kOctave * octave);
+    assert(notes.front() == bass + kOctave * octave);
+    assert(notes.back() <= highest + kOctave * (octave + 1));  // a lifted note may sit an octave above the register
+    assert(notes.front() >= 0 && notes.back() <= kMidiMax);    // what `validVoicingRange` guarantees
     return notes;
 }
 

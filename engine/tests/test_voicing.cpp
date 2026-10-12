@@ -171,3 +171,167 @@ TEST_CASE("closeVoicing: every type on every root fits a two-octave range and ke
         }
     }
 }
+
+// --- inversionCount --------------------------------------------------------------------------
+
+TEST_CASE("inversionCount: the number of distinct pitch classes") {
+    CHECK(inversionCount(chord(0, "5")) == 2);
+    CHECK(inversionCount(chord(0, "maj")) == 3);
+    CHECK(inversionCount(chord(9, "min")) == 3);
+    CHECK(inversionCount(chord(0, "7")) == 4);
+    CHECK(inversionCount(chord(0, "add9")) == 4);  // the ninth is its own pitch class
+    CHECK(inversionCount(chord(0, "9")) == 5);
+}
+
+TEST_CASE("inversionCount: every dictionary type has one chord tone per interval, on every root") {
+    for (const ChordType& type : allChordTypes()) {
+        for (PitchClass root = 0; root < 12; ++root) {
+            CAPTURE(type.id);
+            CAPTURE(root);
+            CHECK(inversionCount(Chord{root, &type}) == static_cast<int>(type.intervals.size()));
+            CHECK(inversionCount(Chord{root, &type}) == static_cast<int>(pitchClassSet(Chord{root, &type}).size()));
+        }
+    }
+}
+
+// --- voicing: plan cases ---------------------------------------------------------------------
+
+TEST_CASE("voicing: C major in root position, first and second inversion") {
+    CHECK(voicing(chord(0, "maj"), 0, 0) == Notes{60, 64, 67});
+    CHECK(voicing(chord(0, "maj"), 1, 0) == Notes{64, 67, 72});
+    CHECK(voicing(chord(0, "maj"), 2, 0) == Notes{67, 72, 76});
+}
+
+TEST_CASE("voicing: the octave shifts the whole voicing by twelve semitones") {
+    CHECK(voicing(chord(0, "maj"), 0, -1) == Notes{48, 52, 55});
+    CHECK(voicing(chord(0, "maj"), 0, 1) == Notes{72, 76, 79});
+    CHECK(voicing(chord(0, "maj"), 1, -1) == Notes{52, 55, 60});
+    CHECK(voicing(chord(0, "maj"), 2, 1) == Notes{79, 84, 88});
+}
+
+TEST_CASE("voicing: C7 in third inversion puts the seventh in the bass") {
+    CHECK(voicing(chord(0, "7"), 3, 0) == Notes{70, 72, 76, 79});
+    CHECK(voicing(chord(0, "7"), 1, 0) == Notes{64, 67, 70, 72});
+    CHECK(voicing(chord(0, "7"), 2, 0) == Notes{67, 70, 72, 76});
+}
+
+TEST_CASE("voicing: a ninth chord rotates through all five chord tones, the ninth in the bass last") {
+    CHECK(voicing(chord(0, "9"), 0, 0) == Notes{60, 64, 67, 70, 74});
+    CHECK(voicing(chord(0, "9"), 1, 0) == Notes{64, 67, 70, 72, 74});  // the root lands under the ninth
+    CHECK(voicing(chord(0, "9"), 3, 0) == Notes{70, 72, 74, 76, 79});
+    // One octave would leave the root (72) under the ninth (74): it is lifted a second time.
+    CHECK(voicing(chord(0, "9"), 4, 0) == Notes{74, 76, 79, 82, 84});
+    CHECK(voicing(chord(0, "add9"), 3, 0) == Notes{74, 76, 79, 84});
+    CHECK(voicing(chord(11, "maj9"), 4, 0) == Notes{85, 87, 90, 94, 95});  // the highest default-range voicing
+    CHECK(voicing(chord(11, "maj9"), 4, 1) == Notes{97, 99, 102, 106, 107});
+}
+
+TEST_CASE("voicing: root position at octave 0 is exactly closeVoicing, for every type on every root") {
+    for (const ChordType& type : allChordTypes()) {
+        for (PitchClass root = 0; root < 12; ++root) {
+            const Chord c{root, &type};
+            CAPTURE(type.id);
+            CAPTURE(root);
+            CHECK(voicing(c, 0, 0) == closeVoicing(c));
+            CHECK(voicing(c, 0, 0, 48, 72) == closeVoicing(c, 48, 72));
+            CHECK(voicing(c, 0, 0, 12, 103) == closeVoicing(c, 12, 103));
+        }
+    }
+}
+
+// --- voicing: clamping -------------------------------------------------------------------------
+
+TEST_CASE("voicing: the inversion is clamped to 0..inversionCount-1") {
+    CHECK(voicing(chord(0, "maj"), 3, 0) == voicing(chord(0, "maj"), 2, 0));
+    CHECK(voicing(chord(0, "maj"), 99, 0) == voicing(chord(0, "maj"), 2, 0));
+    CHECK(voicing(chord(0, "maj"), -1, 0) == voicing(chord(0, "maj"), 0, 0));
+    CHECK(voicing(chord(0, "maj"), INT_MIN, 0) == voicing(chord(0, "maj"), 0, 0));
+    CHECK(voicing(chord(0, "maj"), INT_MAX, 0) == voicing(chord(0, "maj"), 2, 0));
+    CHECK(voicing(chord(0, "7"), 4, 0) == voicing(chord(0, "7"), 3, 0));
+    CHECK(voicing(chord(0, "5"), 2, 0) == voicing(chord(0, "5"), 1, 0));
+    CHECK(voicing(chord(0, "5"), 1, 0) == Notes{67, 72});
+}
+
+TEST_CASE("voicing: the octave is clamped to -1..1") {
+    CHECK(voicing(chord(0, "maj"), 0, 2) == voicing(chord(0, "maj"), 0, 1));
+    CHECK(voicing(chord(0, "maj"), 0, -2) == voicing(chord(0, "maj"), 0, -1));
+    CHECK(voicing(chord(0, "maj"), 0, INT_MAX) == Notes{72, 76, 79});
+    CHECK(voicing(chord(0, "maj"), 0, INT_MIN) == Notes{48, 52, 55});
+}
+
+TEST_CASE("voicing: a range without an octave of MIDI below it or two above it falls back to the defaults") {
+    // 12..103 is the widest range every octave and inversion of every chord fits in MIDI.
+    CHECK(voicing(chord(0, "maj"), 0, 0, 12, 103) == Notes{12, 16, 19});
+    CHECK(voicing(chord(0, "maj"), 0, -1, 12, 103) == Notes{0, 4, 7});
+    CHECK(voicing(chord(0, "maj"), 2, 1, 12, 103) == Notes{31, 36, 40});
+    CHECK(voicing(chord(0, "maj"), 0, 0, 11, 103) == voicing(chord(0, "maj"), 0, 0));   // 11 - 12 < 0
+    CHECK(voicing(chord(0, "maj"), 0, 0, 12, 104) == voicing(chord(0, "maj"), 0, 0));   // 104 + 24 > 127
+    CHECK(voicing(chord(0, "maj"), 0, 0, 0, 127) == voicing(chord(0, "maj"), 0, 0));    // valid for closeVoicing only
+    CHECK(voicing(chord(11, "9"), 4, 1, 90, 115) == voicing(chord(11, "9"), 4, 1));     // 115 + 24 > 127
+}
+
+// --- voicing: range handling --------------------------------------------------------------------
+
+TEST_CASE("voicing: honours a valid custom range and falls back to the defaults for an invalid one") {
+    CHECK(voicing(chord(0, "maj"), 1, 0, 48, 84) == Notes{52, 55, 60});
+    CHECK(voicing(chord(0, "maj"), 2, -1, 48, 84) == Notes{43, 48, 52});
+    CHECK(voicing(chord(0, "maj"), 1, 0, 48, 60) == voicing(chord(0, "maj"), 1, 0));  // too narrow
+    CHECK(voicing(chord(0, "maj"), 1, 1, 84, 48) == voicing(chord(0, "maj"), 1, 1));  // reversed
+    CHECK(voicing(chord(0, "maj"), 1, -1, -1, 48) == voicing(chord(0, "maj"), 1, -1));  // outside MIDI
+    CHECK(voicing(chord(11, "9"), 4, 1, INT_MIN, INT_MAX) == voicing(chord(11, "9"), 4, 1));
+}
+
+TEST_CASE("voicing: a rotated note that would leave a narrow register is kept rather than folded under the bass") {
+    // B9 on 48..72 closes to 59 61 63 66 69; the fourth inversion moves the four lowest notes up an octave
+    // and the bass (69) stays the bass: folding 73, 75 or 78 back down would put them under it.
+    CHECK(voicing(chord(11, "9"), 4, 0, 48, 72) == Notes{69, 71, 73, 75, 78});
+}
+
+// --- voicing: properties ----------------------------------------------------------------------
+
+TEST_CASE("voicing: every type x root x inversion x octave is sorted, unique, in register and keeps the chord") {
+    for (const ChordType& type : allChordTypes()) {
+        for (PitchClass root = 0; root < 12; ++root) {
+            const Chord c{root, &type};
+            const Notes base = closeVoicing(c);
+            const int count = inversionCount(c);
+            REQUIRE(count == static_cast<int>(base.size()));
+            for (int inversion = 0; inversion < count; ++inversion) {
+                for (int octave = -1; octave <= 1; ++octave) {
+                    CAPTURE(type.id);
+                    CAPTURE(root);
+                    CAPTURE(inversion);
+                    CAPTURE(octave);
+                    const Notes notes = voicing(c, inversion, octave);
+                    // The register for an octave is the default one shifted by that octave; at the
+                    // default range no rotated note ever leaves it, so the union over octaves is 48..108.
+                    CHECK(sortedUniqueWithin(notes, kDefaultLowest + 12 * octave, kDefaultHighest + 12 * octave));
+                    CHECK(sortedUniqueWithin(notes, kDefaultLowest - 12, kDefaultHighest + 12));
+                    CHECK(notes.size() == base.size());
+                    CHECK(pitchClassSet(notes) == pitchClassSet(c));
+                    REQUIRE_FALSE(notes.empty());
+                    // The bass is chord tone `inversion`, counted up the close voicing.
+                    CHECK(pitchClassOf(notes.front()) == pitchClassOf(base[static_cast<std::size_t>(inversion)]));
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("voicing: distinct inversions of one chord are distinct voicings") {
+    for (const ChordType& type : allChordTypes()) {
+        for (PitchClass root = 0; root < 12; ++root) {
+            const Chord c{root, &type};
+            const int count = inversionCount(c);
+            for (int a = 0; a < count; ++a) {
+                for (int b = a + 1; b < count; ++b) {
+                    CAPTURE(type.id);
+                    CAPTURE(root);
+                    CAPTURE(a);
+                    CAPTURE(b);
+                    CHECK(voicing(c, a, 0) != voicing(c, b, 0));
+                }
+            }
+        }
+    }
+}
