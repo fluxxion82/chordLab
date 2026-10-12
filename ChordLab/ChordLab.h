@@ -8,6 +8,7 @@
 
 #include <array>
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -69,7 +70,12 @@ private:
   // entry and is called from the main thread only (OnMessage, CloseWindow). OnReset and panic requests
   // are flagged here and consumed at the top of ProcessBlock.
   chordlab::Scheduler mScheduler;
-  std::array<chordlab::MidiOut, 256> mMidiOut{};               // >= Scheduler::kCapacityForImmediateRelease
+  static constexpr std::size_t kMidiOutCapacity = 256;
+  static_assert(kMidiOutCapacity >= chordlab::Scheduler::kCapacityForImmediateRelease,
+                "every owed release must fit the block that owes it");
+  std::array<chordlab::MidiOut, kMidiOutCapacity> mMidiOut{};
+  static_assert(std::atomic<bool>::is_always_lock_free && std::atomic<double>::is_always_lock_free &&
+                std::atomic<uint32_t>::is_always_lock_free, "the audio thread must never lock on these");
   std::atomic<bool> mResetPending{false};
   std::atomic<double> mResetSampleRate{44100.0};
   std::atomic<bool> mPanicPending{false};

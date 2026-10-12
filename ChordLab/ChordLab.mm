@@ -28,7 +28,12 @@
 // reset/panic flags, runs Scheduler::process and forwards the events with SendMidiMsg. The scheduler
 // owns the sounding notes: one physical note per pitch, Start/Stop paired by id, and a 4 s watchdog
 // releases a preview whose Stop never arrives (editor closed mid-press: Swift's onDisappear sends the
-// Stop, CloseWindow pushes one for an outstanding Start as well, and the watchdog covers the rest).
+// Stop, CloseWindow pushes one for an outstanding Start as well, and the watchdog covers the rest). The
+// watchdog counts processed audio time, not wall time: while the host has processing suspended a
+// preview stays armed and is released once blocks run again.
+//
+// The Cocoa view controller: ARC is off for this file. OpenWindow's alloc/init returns the controller
+// at +1 and CocoaEditorDelegate::CloseWindow only forgets the pointer, so CloseWindow here releases it.
 
 #include "ChordLab.h"
 #include "IPlug_include_in_plug_src.h"
@@ -91,16 +96,20 @@ void* ChordLab::OpenWindow(void* pParent)
 
 void ChordLab::CloseWindow()
 {
-  CocoaEditorDelegate::CloseWindow();                            // drops mViewController
-  mEditorOpen.store(false);
+  // Main thread. AUv2's view factory path has no close callback in iPlug2, so that lifecycle still
+  // leaks the controller (known; Phase 1 targets VST3).
+  id controller = (id) mViewController;                         // +1 from OpenWindow's alloc/init
   if (mOpenPreviewId >= 0)                                       // belt and braces: the UI's onDisappear sends this too
   {
     chordlab::PreviewCmd stop{};
     stop.kind = chordlab::PreviewCmd::Stop;
     stop.id = mOpenPreviewId;
-    mScheduler.pushPreview(stop);                                // a full ring is covered by the 4 s watchdog
+    mScheduler.pushPreview(stop);                                // a full ring is covered by the watchdog
     mOpenPreviewId = -1;
   }
+  CocoaEditorDelegate::CloseWindow();                            // forgets mViewController
+  mEditorOpen.store(false);
+  [controller release];
 }
 
 void ChordLab::OnParentWindowResize(int width, int height)
@@ -152,8 +161,10 @@ void ChordLab::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
   std::size_t written = 0;
   const bool complete = mScheduler.process(block, mMidiOut.data(), mMidiOut.size(), written);
 
-  // iPlug2's VST3 output queue grows by realloc the first time a block's burst exceeds its previous
-  // maximum (plan M3.3): a one-time cost per peak, bounded here by mMidiOut.size() events per block.
+  // Output capacity (plan M3.3): iPlug2's VST3 output event queue is page-rounded (at least 512 entries),
+  // so a burst of at most kMidiOutCapacity events fits without a realloc; but incoming MIDI shares that
+  // queue, its events are retained across blocks while the host passes no pOutputEvents, and the
+  // standalone APP's SendMidiMsg allocates a std::vector per message (IPlug/APP/IPlugAPP.cpp:79).
   for (std::size_t i = 0; i < written; ++i)
   {
     const chordlab::MidiOut& e = mMidiOut[i];
@@ -301,7 +312,7 @@ void ChordLab::HandlePreview(std::string_view text)
   }
   if (!mScheduler.pushPreview(cmd))
   {
-    PushError("preview queue full");                             // the 4 s watchdog still ends what is sounding
+    PushError("preview queue full");                             // the watchdog (4 s of processed audio) still ends what sounds
     return;
   }
   mOpenPreviewId = cmd.kind == chordlab::PreviewCmd::Start ? cmd.id : (cmd.id == mOpenPreviewId ? -1 : mOpenPreviewId);
