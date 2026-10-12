@@ -2,9 +2,11 @@
 
 #include "IPlug_include_in_plug_hdr.h"
 
+#include "chordlab/compiler.h"
 #include "chordlab/document.h"
 #include "chordlab/palette.h"
 #include "chordlab/scheduler.h"
+#include "chordlab/triple_buffer.h"
 
 #include <array>
 #include <atomic>
@@ -17,6 +19,14 @@
 #include <string_view>
 
 using namespace iplug;
+
+// Debug builds count the operator new calls made during ProcessBlock (a replaced global operator new in
+// ChordLab.mm) and report blocks that allocated; Release builds compile none of it.
+#if defined(DEBUG) && !defined(NDEBUG)
+  #define CHORDLAB_COUNT_ALLOCATIONS 1
+#else
+  #define CHORDLAB_COUNT_ALLOCATIONS 0
+#endif
 
 class ChordLab final : public Plugin
 {
@@ -44,6 +54,10 @@ private:
   // Palette of the browsed key annotated against the project key; call after anything that may have
   // changed either key (commands, undo/redo, a state load). The caller holds mModelMutex.
   void RebuildPaletteLocked();
+  // Compiles the document and, when the playback content changed, publishes it to the audio thread with a
+  // new generation (see "Playback snapshots" in ChordLab.mm). Call after every accepted command and
+  // state load. The caller holds mModelMutex, which is what makes it a single producer.
+  void PublishSnapshotLocked();
   // Pushes snapshotJson(doc, palette) to the editor, on the main thread; a no-op when no editor is open.
   void PushSnapshot();
   // Pushes {"schema":1,"error":message} to the editor, on the main thread.
@@ -54,8 +68,8 @@ private:
   void RestoreEditorSize(int width, int height);
   // Main thread: parses a kMsgTagPreview payload and queues it for the scheduler.
   void HandlePreview(std::string_view json);
-  // Main thread: pushes {"schema":1,"incompleteBlocks":n} to the editor.
-  void PushStatus(uint32_t incompleteBlocks);
+  // Main thread: pushes {"schema":1,"incompleteBlocks":n[,"allocatingBlocks":m]} to the editor.
+  void PushStatus(uint32_t incompleteBlocks, uint32_t allocatingBlocks);
 
   static constexpr uint8_t kStateVersion = 2;   // 1 was the M0 spike payload; it is not migrated
 
@@ -65,6 +79,30 @@ private:
   mutable std::mutex mModelMutex;
   chordlab::DocumentStore mStore;
   chordlab::Palette mPalette;
+
+  // Playback snapshots. PublishSnapshotLocked (the producer, under mModelMutex) compiles the document
+  // into the back slot of mSnapshots and publishes it; ProcessBlock (the consumer) acquires the newest one
+  // at the top of every block and hands the scheduler a Snapshot pointing into the front slot, which the
+  // triple buffer keeps unmodified until the next acquire: exactly the lifetime adopt requires. Every slot
+  // is preallocated, so the handoff never allocates, locks or blocks either thread. mGeneration is bumped
+  // on every publish and a publish happens only when the compiled content (events, endBeat or loop)
+  // differs from the last one, so the scheduler's rule "same generation, same content" holds and a
+  // command that leaves playback alone (browseKey, setFollowHost) causes no flush. mPublished keeps the
+  // last published content for that comparison; it belongs to the producer.
+  // Plain aggregate on purpose: a default member initializer here would make the nested type's
+  // implicit constructor unusable until ChordLab is complete, and TripleBuffer asserts on it when the
+  // member below is declared. The buffer value-initializes the slots and the producer writes every field.
+  struct SnapshotSlot
+  {
+    std::array<chordlab::NoteEvent, chordlab::kMaxSnapshotEvents> events;
+    std::size_t count;
+    double endBeat;
+    bool loop;
+  };
+  chordlab::TripleBuffer<SnapshotSlot> mSnapshots;
+  uint32_t mGeneration = 0;                                    // producer: 0 until the first publish
+  chordlab::Compiled mPublished;                               // producer: the content of generation mGeneration
+  bool mPublishedLoop = true;
 
   // The scheduler belongs to the audio thread (process, reset, panic); pushPreview is its one other-thread
   // entry and is called from the main thread only (OnMessage, CloseWindow). OnReset and panic requests
@@ -81,6 +119,9 @@ private:
   std::atomic<bool> mPanicPending{false};
   std::atomic<uint32_t> mIncompleteBlocks{0};                  // blocks whose process() returned false
   uint32_t mReportedIncompleteBlocks = 0;                      // main thread: last value pushed to the UI
+  std::atomic<uint32_t> mAllocatingBlocks{0};                  // blocks that called operator new (Debug builds only)
+  uint32_t mReportedAllocatingBlocks = 0;                      // main thread: last value pushed to the UI
+  bool mAllocationLogged = false;                              // main thread: the one-time DBGMSG went out
   int mOpenPreviewId = -1;                                     // main thread: Start without a Stop yet
 
   // Whether an editor is attached: set at the end of OpenWindow, cleared in CloseWindow (both main

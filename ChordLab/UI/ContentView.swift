@@ -29,6 +29,9 @@ struct ContentView: View {
           if state.incompleteBlocks > 0 {
             Text("incomplete blocks: \(state.incompleteBlocks)").foregroundStyle(.orange).font(.callout.monospacedDigit())
           }
+          if state.allocatingBlocks > 0 {
+            Text("allocating blocks: \(state.allocatingBlocks)").foregroundStyle(.orange).font(.callout.monospacedDigit())
+          }
           if let error = state.lastError {
             Text("Error: \(error)").foregroundStyle(.red).font(.callout).lineLimit(2)
           }
