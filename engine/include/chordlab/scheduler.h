@@ -96,8 +96,10 @@ constexpr std::uint8_t kOwnerPreview = 2;
 /// nothing at all and changes nothing.
 ///
 /// Real time: after construction nothing allocates, throws, locks or logs. `process`, `reset`, `adopt`,
-/// `panic`, `ownersOf` and `sounding` belong to one thread (the audio thread); `pushPreview` may be
-/// called from one other thread.
+/// `panic`, `ownersOf` and `sounding` belong to one thread, the audio thread; `pushPreview` may be
+/// called from one other thread. `reset` and `adopt` may also be called from another thread while the
+/// host guarantees that no `process` runs concurrently (iPlug2's `OnReset` before processing starts, for
+/// instance); without such a guarantee the plugin must marshal them to the audio callback.
 class Scheduler {
 public:
     static constexpr std::size_t kMaxEventsPerBlock = 512;
@@ -130,8 +132,10 @@ public:
     void reset(double sampleRate) noexcept;
 
     /// Replaces the progression. A changed `generation` marks a pending flush (release all, then chase on
-    /// the next block); the same generation is adopted silently. A snapshot with more than
-    /// `kMaxSnapshotEvents` events is adopted as an empty one (and asserts in a debug build).
+    /// the next block), and if that abandons occurrences of the old timeline that were overdue, the next
+    /// block reports it (returns false). The same generation means the same content: playback goes on
+    /// exactly as if `adopt` had not been called. A snapshot with more than `kMaxSnapshotEvents` events is
+    /// adopted as an empty one (and asserts in a debug build).
     void adopt(const Snapshot& snapshot) noexcept;
 
     /// Queues a preview command for the next block. Returns false, and queues nothing, when the queue is
@@ -140,8 +144,10 @@ public:
 
     /// Produces this block's events into `out[0..capacity)`, setting `written`. Returns false if the block
     /// could not emit everything it was due to: an attack was dropped (output capacity, scratch space or the
-    /// preview table ran out), a release had to be owed to a later block, or part of the timeline was
-    /// carried over. `out` may be null only when `capacity` is 0.
+    /// preview table ran out), a release had to be owed to a later block, part of the timeline was carried
+    /// over, dropped or skipped, an `adopt` abandoned overdue occurrences, or the block's timing was
+    /// unusable. Only an empty block (`nFrames == 0`) is a true no-op. `out` may be null only when
+    /// `capacity` is 0.
     bool process(const BlockInfo& info, MidiOut* out, std::size_t capacity, std::size_t& written) noexcept;
 
     /// Silences everything: every sounding pitch, progression and preview alike, is released (its note-off
@@ -239,6 +245,7 @@ private:
     bool mHasCursor;
     std::int64_t mCursorWrap;
     std::size_t mCursorIndex;
+    bool mBacklogAbandoned;  // an `adopt` dropped overdue occurrences: the next block reports it
 
     // Per-block scratch.
     std::array<Logical, kMaxEventsPerBlock> mScratch;

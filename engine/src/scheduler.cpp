@@ -124,6 +124,7 @@ Scheduler::Scheduler() noexcept
       mHasCursor(false),
       mCursorWrap(0),
       mCursorIndex(0),
+      mBacklogAbandoned(false),
       mScratch{},
       mScratchCount(0),
       mDropped(false),
@@ -156,9 +157,21 @@ void Scheduler::adopt(const Snapshot& snapshot) noexcept {
         assert(snapshot.events[i - 1].beat <= snapshot.events[i].beat);
     }
 #endif
-    if (!mHasSnapshot || snapshot.generation != mSnapshot.generation) {
+    const bool changed = !mHasSnapshot || snapshot.generation != mSnapshot.generation;
+    if (changed) {
+        // Occurrences of the old timeline that are overdue but not yet emitted are abandoned with it;
+        // the next block says so.
+        std::int64_t wrap = 0;
+        std::size_t index = 0;
+        if (mWasPlaying && mHasAnchor && cursorNext(wrap, index) &&
+            sampleOf(canonicalBeat(wrap, index), mSamplesPerBeat) < mBlockSample) {
+            mBacklogAbandoned = true;
+        }
         mPendingFlush = true;
+        mHasCursor = false;  // the pending flush re-seeks it
     }
+    // With the generation unchanged the content is the same by contract: the cursor and everything else
+    // stay as they are, and playback does not notice.
     mSnapshot = snapshot;
     mHasSnapshot = true;
     if (mSnapshot.events == nullptr || mSnapshot.count > kMaxSnapshotEvents || !std::isfinite(mSnapshot.endBeat)) {
@@ -173,7 +186,6 @@ void Scheduler::adopt(const Snapshot& snapshot) noexcept {
             break;
         }
     }
-    mHasCursor = false;  // the pending flush re-seeks it
 }
 
 bool Scheduler::pushPreview(const PreviewCmd& cmd) noexcept {
@@ -614,7 +626,10 @@ bool Scheduler::process(const BlockInfo& info, MidiOut* out, std::size_t capacit
     const std::int64_t previewSamples = static_cast<std::int64_t>(std::floor(kPreviewSeconds * previewRate + 0.5));
 
     mScratchCount = 0;
-    mDropped = false;
+    // A rejected block is not the block the host asked for, and an `adopt` that abandoned overdue
+    // occurrences has left a hole in the timeline: both make this block incomplete.
+    mDropped = !timingValid || mBacklogAbandoned;
+    mBacklogAbandoned = false;
     drainQueue();
 
     // Discontinuities, and the clock. Whether a carried-over timeline is pending is judged on the clock

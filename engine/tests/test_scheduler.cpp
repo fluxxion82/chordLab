@@ -709,7 +709,8 @@ TEST_CASE("scheduler: 10000 random blocks and commands keep the ownership invari
     Host host;
     std::uint32_t generation = 1;
     bool loop = true;
-    host.adopt(snapshotOf(docs[0], loop, generation));
+    std::size_t current = 0;  // the generation names the content: a re-adopt of the same generation is identical
+    host.adopt(snapshotOf(docs[current], loop, generation));
 
     bool sounding[128] = {};
     bool playing = false;
@@ -729,8 +730,9 @@ TEST_CASE("scheduler: 10000 random blocks and commands keep the ownership invari
             if (randInt(0, 3) != 0) {
                 ++generation;
                 loop = randInt(0, 3) != 0;
+                current = d;
             }
-            host.adopt(snapshotOf(docs[d], loop, generation));
+            host.adopt(snapshotOf(docs[current], loop, generation));
         } else if (action < 25) {
             if (randInt(0, 1) == 0) {
                 std::vector<int> pitches;
@@ -834,9 +836,11 @@ TEST_CASE("scheduler: absurd snapshots and host timing return promptly with rele
         const std::vector<Ev> absurd = host.run(512.0 / kSamplesPerBeat, 512, true, 1e-9);
         CAPTURE(describe(absurd));
         CHECK(absurd == std::vector<Ev>{off(0, 48), off(0, 52), off(0, 55)});
-        CHECK(host.lastOk);
+        CHECK_FALSE(host.lastOk);  // rejected timing on a non-empty block is reported
         CHECK(host.run(1e12, 512, true, 1e-9) == kNone);
-        CHECK(host.lastOk);
+        CHECK_FALSE(host.lastOk);
+        CHECK(host.run(1e12, 512, false, 1e-9) == kNone);  // stopped or not: the timing was unusable
+        CHECK_FALSE(host.lastOk);
     }
     SUBCASE("derived values are validated: samples per beat and the preview timer must be sane") {
         struct Bad {
@@ -860,7 +864,7 @@ TEST_CASE("scheduler: absurd snapshots and host timing return promptly with rele
             const bool ok = host.scheduler.process(info, host.buffer.data(), kBig, written);
             const std::vector<Ev> events = decode(host.buffer.data(), written);
             CAPTURE(describe(events));
-            CHECK(ok);
+            CHECK_FALSE(ok);
             CHECK(events == std::vector<Ev>{off(0, 48), off(0, 52), off(0, 55)});
             CHECK(host.owners(48) == 0);
         }
@@ -898,7 +902,7 @@ TEST_CASE("scheduler: absurd snapshots and host timing return promptly with rele
             const bool ok = host.scheduler.process(info, host.buffer.data(), kBig, written);
             const std::vector<Ev> events = decode(host.buffer.data(), written);
             CAPTURE(describe(events));
-            CHECK(ok);
+            CHECK_FALSE(ok);  // the block was not played as asked: reported
             CHECK(events == std::vector<Ev>{off(0, 48), off(0, 52), off(0, 55)});
             CHECK(host.owners(48) == 0);
 
@@ -1451,4 +1455,65 @@ TEST_CASE("regression: tempo jitter on every block emits each occurrence exactly
         REQUIRE(model.sequence[i].on == atMost[i].first);
         REQUIRE(model.sequence[i].pitch == atMost[i].second);
     }
+}
+
+// --- Third review regressions ------------------------------------------------------------------------
+
+TEST_CASE("regression: re-adopting the same generation changes nothing about playback") {
+    const std::vector<NoteEvent> one{{0.0, true, 60, 100}, {4.0, false, 60, 0}};
+    Host host;
+    host.adopt(snapshotOf(one, 4.0, true, 1));
+    Model model;
+    model.take(host, host.run(0.0, 24000, true), 24000);  // on 60 at beat 0
+    host.adopt(snapshotOf(one, 4.0, true, 1));            // the identical generation again, at beat 1
+    const std::vector<Ev> crossing = host.run(1.0, 96000, true);  // [1, 5): the beat-4 release and wrap
+    model.take(host, crossing, 96000);
+    CAPTURE(describe(crossing));
+    CHECK(crossing == std::vector<Ev>{off(72000, 60), on(72000, 60)});
+    CHECK(host.lastOk);
+    const std::vector<Ev> later = host.run(5.0, 96000, true);  // [5, 9): the beat-8 release and wrap
+    model.take(host, later, 96000);
+    CAPTURE(describe(later));
+    CHECK(later == std::vector<Ev>{off(72000, 60), on(72000, 60)});
+    CHECK(host.lastOk);
+    // Stopped, an identical re-adopt is just as silent.
+    model.take(host, host.run(9.0, 512, false), 512);
+    CHECK(model.silent());
+    host.adopt(snapshotOf(one, 4.0, true, 1));
+    CHECK(host.run(9.0, 512, false) == kNone);
+    CHECK(host.lastOk);
+}
+
+TEST_CASE("regression: a changed adopt that abandons overdue occurrences reports it") {
+    std::vector<NoteEvent> dense;  // 127 pitches for a quarter beat: 254 events per wrap
+    for (int p = 1; p < 128; ++p) {
+        dense.push_back({0.0, true, p, 100});
+    }
+    for (int p = 1; p < 128; ++p) {
+        dense.push_back({0.25, false, p, 0});
+    }
+    Host host;
+    host.adopt(snapshotOf(dense, 0.25, true, 1));
+    Model model;
+    model.take(host, host.run(0.0, 48000, true), 48000);  // two beats: 2032 events, a scratch-full emitted
+    REQUIRE_FALSE(host.lastOk);
+
+    const std::vector<NoteEvent> one{{0.0, true, 60, 100}, {4.0, false, 60, 0}};
+    host.adopt(snapshotOf(one, 4.0, true, 2));  // the overdue remainder of the old timeline is abandoned
+    const std::vector<Ev> next = host.run(2.0, 512, true);
+    model.take(host, next, 512);
+    CAPTURE(describe(next));
+    CHECK_FALSE(host.lastOk);
+    // ...and the discontinuity still does its job: every old note released, the new position chased.
+    REQUIRE(!next.empty());
+    CHECK(next.back() == on(0, 60));
+    CHECK(std::all_of(next.begin(), next.end() - 1, [](const Ev& e) { return !e.on; }));
+    CHECK(host.owners(60) == kOwnerProgression);
+    for (int p = 1; p < 128; ++p) {
+        if (p != 60) {
+            CHECK_FALSE(host.scheduler.sounding(p));
+        }
+    }
+    CHECK(host.run(2.0 + 512.0 / kSamplesPerBeat, 512, true) == kNone);
+    CHECK(host.lastOk);
 }
