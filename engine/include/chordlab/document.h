@@ -153,7 +153,11 @@ bool sectionsWellFormed(const Document& doc);
 /// current one after clamping, a move to the chord's current position, a rejected argument) pushes nothing
 /// and leaves the redo stack intact.
 /// `browsedKey`, `progressionLoop` and `followHost` are live state: their setters never touch the history,
-/// and `undo()`/`redo()` keep their current values while restoring the undoable state.
+/// and `undo()`/`redo()` keep their current values while restoring the undoable state. So is the
+/// selection (`selectedEventId`), which lives in the store rather than the document: it is kept across
+/// edits, undo and redo for as long as the selected event exists and is cleared the moment no event has
+/// its id (a remove, an undo of the append, a `replace`); it is never restored by undo and never
+/// persisted (`stateJson` leaves it out).
 /// The history holds at most `kMaxUndoDepth` snapshots; beyond that the oldest is dropped.
 /// Event ids are handed out from a counter that starts at `firstId` (1 by default), only ever increases
 /// and is not part of the undoable state, so an id is never reused even after undo or redo. Section ids
@@ -240,6 +244,15 @@ public:
     void setProgressionLoop(bool loop);
     void setFollowHost(bool follow);
 
+    /// The id of the event the UI has selected, or `kNoEventId`. Live state (see the class comment): kept
+    /// while that event exists, whatever edits, undos and redos happen around it, and cleared as soon as
+    /// no event has the id. Never restored by undo and not persisted.
+    int selectedEventId() const;
+
+    /// Selects event `id`; `kNoEventId` clears the selection. An id no event has is a no-op (the UI may
+    /// name an event that an edit just removed). Never recorded in the history.
+    void setSelectedEvent(int id);
+
     /// Starts a section on the chord at `firstEventIndex` and returns its new id; the list stays sorted.
     /// An empty `name` takes the default "Section <id>"; the colour is the id's turn in the cycle of
     /// `kNumSectionColours` (id 1 gets colour 0). The first section always starts at 0: when the document
@@ -277,7 +290,8 @@ public:
     bool redo();
 
     /// Replaces the whole document, live state included, and restarts the id counters: what a load does.
-    /// Clears the undo and redo history and changes nothing else.
+    /// Clears the undo and redo history and the selection (a loaded document starts unselected, even
+    /// when it holds an event with the selected id) and changes nothing else.
     /// `doc` must satisfy the store's invariants (valid chords and keys, finite lengths within
     /// [kMinLengthBeats, kMaxLengthBeats], velocities within [kMinVelocity, kMaxVelocity], inversions
     /// within 0..`inversionCount(chord) - 1`, octaves within [kMinVoicingOctave, kMaxVoicingOctave],
@@ -308,11 +322,16 @@ private:
     /// whether anything changed.
     bool commit(Document next);
 
+    /// Clears the selection when no event of the current document has its id. Called after every change
+    /// of `doc_` (a commit, an undo, a redo); `replace` clears unconditionally.
+    void dropStaleSelection() noexcept;
+
     Document doc_;
     std::deque<Document> undoStack_;
     std::deque<Document> redoStack_;
     int nextId_;
     int nextSectionId_ = 1;
+    int selectedEventId_ = kNoEventId;
 };
 
 }  // namespace chordlab

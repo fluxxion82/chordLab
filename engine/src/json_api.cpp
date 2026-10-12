@@ -481,7 +481,9 @@ bool parseKeyField(Fields& fields, const char* name, Key& out, std::string& erro
 
 /// A validated UI command: plain data, trivially destructible, so that nothing can throw while one goes
 /// out of scope (see the Readers section for why that matters). Only the fields its `kind` uses are
-/// meaningful; the chord type is resolved to its dictionary entry during validation.
+/// meaningful; the chord type is resolved to its dictionary entry during validation. The one string a
+/// command can carry, a section name, travels beside it in a `std::string` owned by the reader's frame
+/// (destroying a string frees but never allocates, like the `Document` of `loadStateJson`).
 struct Command {
     enum class Kind {
         SetKey,
@@ -495,6 +497,16 @@ struct Command {
         RemoveChord,
         SetProgressionLoop,
         SetFollowHost,
+        SetInversion,
+        SetOctave,
+        ResetVoicing,
+        SetAutoVoiceLead,
+        AddSection,
+        RenameSection,
+        SetSectionColour,
+        RemoveSection,
+        MoveSectionStart,
+        SelectEvent,
         Undo,
         Redo
     };
@@ -505,9 +517,12 @@ struct Command {
     Chord chord{0, nullptr};   // AppendChord
     double lengthBeats = 4.0;  // AppendChord (optional, store default), SetLength
     int velocity = 100;        // AppendChord (optional, store default), SetVelocity
-    int id = 0;                // MoveChord, SetLength, SetVelocity, RemoveChord
-    int index = 0;             // MoveChord
-    bool on = false;           // SetProgressionLoop, SetFollowHost
+    int id = 0;                // MoveChord, SetLength, SetVelocity, RemoveChord, the voicing, section and selection commands
+    int index = 0;             // MoveChord, AddSection, MoveSectionStart
+    bool on = false;           // SetProgressionLoop, SetFollowHost, SetAutoVoiceLead
+    int inversion = 0;         // SetInversion
+    int octave = 0;            // SetOctave
+    int colourIndex = 0;       // SetSectionColour
 };
 static_assert(std::is_trivially_destructible_v<Command>, "Command must be plain data: destroying one must not allocate");
 
@@ -583,10 +598,65 @@ bool parseRemoveChord(Fields& fields, Command& out) {
     return fields.getInt("id", out.id);
 }
 
-/// `setProgressionLoop` / `setFollowHost`.
+/// `setProgressionLoop` / `setFollowHost` / `setAutoVoiceLead`.
 bool parseToggle(Fields& fields, Command::Kind kind, Command& out) {
     out.kind = kind;
     return fields.getBool("on", out.on);
+}
+
+/// `resetVoicing` / `removeSection`: an id and nothing else.
+bool parseIdOnly(Fields& fields, Command::Kind kind, Command& out) {
+    out.kind = kind;
+    return fields.getInt("id", out.id);
+}
+
+bool parseSetInversion(Fields& fields, Command& out) {
+    out.kind = Command::Kind::SetInversion;
+    return fields.getInt("id", out.id) && fields.getInt("inversion", out.inversion);
+}
+
+bool parseSetOctave(Fields& fields, Command& out) {
+    out.kind = Command::Kind::SetOctave;
+    return fields.getInt("id", out.id) && fields.getInt("octave", out.octave);
+}
+
+/// `addSection {index, name?}`: the name, when given, goes to `name`; absent, it stays empty (the store's
+/// default name).
+bool parseAddSection(Fields& fields, Command& out, std::string& name) {
+    out.kind = Command::Kind::AddSection;
+    if (!fields.getInt("index", out.index)) {
+        return false;
+    }
+    return !fields.has("name") || fields.getString("name", name);
+}
+
+bool parseRenameSection(Fields& fields, Command& out, std::string& name) {
+    out.kind = Command::Kind::RenameSection;
+    return fields.getInt("id", out.id) && fields.getString("name", name);
+}
+
+bool parseSetSectionColour(Fields& fields, Command& out) {
+    out.kind = Command::Kind::SetSectionColour;
+    return fields.getInt("id", out.id) && fields.getInt("colourIndex", out.colourIndex);
+}
+
+bool parseMoveSectionStart(Fields& fields, Command& out) {
+    out.kind = Command::Kind::MoveSectionStart;
+    return fields.getInt("id", out.id) && fields.getInt("index", out.index);
+}
+
+/// `selectEvent {id}`: an integer, or null for no selection.
+bool parseSelectEvent(Fields& fields, Command& out) {
+    out.kind = Command::Kind::SelectEvent;
+    const json* id = fields.find("id");
+    if (id == nullptr) {
+        return fields.fail("id", "is missing");
+    }
+    if (id->is_null()) {
+        out.id = kNoEventId;
+        return true;
+    }
+    return toInt(*id, out.id) || fields.fail("id", "must be an integer or null");
 }
 
 // --- Readers ---------------------------------------------------------------------------
@@ -597,8 +667,8 @@ bool parseToggle(Fields& fields, Command::Kind kind, Command& out) {
 // its cleanup into std::terminate with the mutation already applied. Phase A parses and validates into
 // plain data and returns with the tree destroyed; Phase B takes nothing but the store and that data.
 
-/// Phase A of `applyCommandJson`: parses and validates `text` into `out`.
-bool parseCommand(std::string_view text, Command& out, std::string& error) {
+/// Phase A of `applyCommandJson`: parses and validates `text` into `out`, and a section name into `name`.
+bool parseCommand(std::string_view text, Command& out, std::string& name, std::string& error) {
     json message;
     if (!parseMessage(text, message, error)) {
         return false;
@@ -635,6 +705,36 @@ bool parseCommand(std::string_view text, Command& out, std::string& error) {
     if (cmd == "setFollowHost") {
         return parseToggle(fields, Command::Kind::SetFollowHost, out);
     }
+    if (cmd == "setInversion") {
+        return parseSetInversion(fields, out);
+    }
+    if (cmd == "setOctave") {
+        return parseSetOctave(fields, out);
+    }
+    if (cmd == "resetVoicing") {
+        return parseIdOnly(fields, Command::Kind::ResetVoicing, out);
+    }
+    if (cmd == "setAutoVoiceLead") {
+        return parseToggle(fields, Command::Kind::SetAutoVoiceLead, out);
+    }
+    if (cmd == "addSection") {
+        return parseAddSection(fields, out, name);
+    }
+    if (cmd == "renameSection") {
+        return parseRenameSection(fields, out, name);
+    }
+    if (cmd == "setSectionColour") {
+        return parseSetSectionColour(fields, out);
+    }
+    if (cmd == "removeSection") {
+        return parseIdOnly(fields, Command::Kind::RemoveSection, out);
+    }
+    if (cmd == "moveSectionStart") {
+        return parseMoveSectionStart(fields, out);
+    }
+    if (cmd == "selectEvent") {
+        return parseSelectEvent(fields, out);
+    }
     if (cmd == "undo") {
         out.kind = Command::Kind::Undo;
         return true;
@@ -648,13 +748,28 @@ bool parseCommand(std::string_view text, Command& out, std::string& error) {
 }
 
 /// Why Phase B refused a validated command; `None` is success.
-enum class Refusal { None, DocumentFull, IdsExhausted };
+enum class Refusal { None, DocumentFull, IdsExhausted, SectionIdsExhausted };
+
+/// True when `index` is a chord position of `doc` at which no section starts: the one case in which the
+/// store's `addSection` can still refuse, for want of ids.
+bool canStartSection(const Document& doc, int index) {
+    if (index < 0 || index >= static_cast<int>(doc.events.size())) {
+        return false;
+    }
+    for (const Section& s : doc.sections) {
+        if (s.firstEventIndex == index) {
+            return false;
+        }
+    }
+    return true;
+}
 
 /// Phase B of `applyCommandJson`: applies a validated command through one store call, which gives the
-/// strong guarantee. Takes nothing but the store and plain data, so no JSON object can be alive here.
-/// Refuses only an append, when the document already holds `kMaxChords` chords or the store's id counter
-/// is exhausted; either way nothing changes.
-Refusal applyCommand(DocumentStore& store, const Command& command) {
+/// strong guarantee. Takes nothing but the store, plain data and the section name, so no JSON object can
+/// be alive here. Refuses only an append, when the document already holds `kMaxChords` chords or the
+/// store's id counter is exhausted, and a section add when the section id counter is; either way nothing
+/// changes.
+Refusal applyCommand(DocumentStore& store, const Command& command, std::string& name) {
     const Document& doc = store.doc();
     switch (command.kind) {
         case Command::Kind::SetKey:
@@ -693,6 +808,39 @@ Refusal applyCommand(DocumentStore& store, const Command& command) {
             return Refusal::None;
         case Command::Kind::SetFollowHost:
             store.setFollowHost(command.on);
+            return Refusal::None;
+        case Command::Kind::SetInversion:
+            store.setInversion(command.id, command.inversion);
+            return Refusal::None;
+        case Command::Kind::SetOctave:
+            store.setOctave(command.id, command.octave);
+            return Refusal::None;
+        case Command::Kind::ResetVoicing:
+            store.resetVoicing(command.id);
+            return Refusal::None;
+        case Command::Kind::SetAutoVoiceLead:
+            store.setAutoVoiceLead(command.on);
+            return Refusal::None;
+        case Command::Kind::AddSection:
+            if (!canStartSection(doc, command.index)) {
+                return Refusal::None;  // a valid no-op, like an unknown id
+            }
+            return store.addSection(command.index, std::move(name)) != kNoSectionId ? Refusal::None
+                                                                                     : Refusal::SectionIdsExhausted;
+        case Command::Kind::RenameSection:
+            store.renameSection(command.id, std::move(name));
+            return Refusal::None;
+        case Command::Kind::SetSectionColour:
+            store.setSectionColour(command.id, command.colourIndex);
+            return Refusal::None;
+        case Command::Kind::RemoveSection:
+            store.removeSection(command.id);
+            return Refusal::None;
+        case Command::Kind::MoveSectionStart:
+            store.moveSectionStart(command.id, command.index);
+            return Refusal::None;
+        case Command::Kind::SelectEvent:
+            store.setSelectedEvent(command.id);
             return Refusal::None;
         case Command::Kind::Undo:
             store.undo();  // nothing to undo is a no-op, not an error
@@ -908,10 +1056,11 @@ bool applyCommandJson(DocumentStore& store, std::string_view text, std::string& 
     try {
         error.clear();
         Command command;
-        if (!parseCommand(text, command, error)) {  // Phase A: the JSON tree is destroyed on return
+        std::string name;  // a section name; its destructor frees, never allocates
+        if (!parseCommand(text, command, name, error)) {  // Phase A: the JSON tree is destroyed on return
             return false;
         }
-        switch (applyCommand(store, command)) {  // Phase B: only the store and plain data in scope
+        switch (applyCommand(store, command, name)) {  // Phase B: only the store, plain data and the name in scope
             case Refusal::None:
                 return true;
             case Refusal::DocumentFull:
@@ -920,6 +1069,9 @@ bool applyCommandJson(DocumentStore& store, std::string_view text, std::string& 
                 return false;
             case Refusal::IdsExhausted:
                 error = "\"appendChord\" refused: no event ids left";
+                return false;
+            case Refusal::SectionIdsExhausted:
+                error = "\"addSection\" refused: no section ids left";
                 return false;
         }
         return true;

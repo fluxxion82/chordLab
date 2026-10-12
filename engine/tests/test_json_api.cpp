@@ -769,6 +769,274 @@ TEST_CASE("undo / redo commands") {
     CHECK(snapshotIds(snapshot(store)) == std::vector<int>{1, 2});
 }
 
+// --- Voicing, sections and selection commands (Phase 2) --------------------------------
+
+namespace {
+
+/// The snapshot's event with `id`; null if there is none.
+json eventWithId(const json& snap, int id) {
+    for (const json& e : snap.at("events")) {
+        if (e.at("id") == id) {
+            return e;
+        }
+    }
+    return json();
+}
+
+}  // namespace
+
+TEST_CASE("voicing commands: setInversion, setOctave and resetVoicing edit one event's voicing, clamped, undoably") {
+    DocumentStore store = cG7Am();
+
+    applyOk(store, {{"cmd", "setInversion"}, {"id", 2}, {"inversion", 2}});
+    json g7 = eventWithId(snapshot(store), 2);
+    CHECK(g7.at("inversion") == 2);
+    CHECK(g7.at("octave") == 0);
+    CHECK(g7.at("manualVoicing") == true);
+    CHECK(g7.at("voicing") == json(voicing(kG7, 2, 0)));  // manual: honoured under auto voice-leading
+
+    applyOk(store, {{"cmd", "setOctave"}, {"id", 2}, {"octave", -1}});
+    g7 = eventWithId(snapshot(store), 2);
+    CHECK(g7.at("octave") == -1);
+    CHECK(g7.at("voicing") == json(voicing(kG7, 2, -1)));
+
+    // Out-of-range values are clamped by the store, not rejected.
+    applyOk(store, {{"cmd", "setInversion"}, {"id", 2}, {"inversion", 9}});
+    applyOk(store, {{"cmd", "setOctave"}, {"id", 2}, {"octave", 5}});
+    g7 = eventWithId(snapshot(store), 2);
+    CHECK(g7.at("inversion") == inversionCount(kG7) - 1);
+    CHECK(g7.at("octave") == kMaxVoicingOctave);
+    applyOk(store, {{"cmd", "setInversion"}, {"id", 2}, {"inversion", -3}});
+    applyOk(store, {{"cmd", "setOctave"}, {"id", 2}, {"octave", -7}});
+    g7 = eventWithId(snapshot(store), 2);
+    CHECK(g7.at("inversion") == 0);
+    CHECK(g7.at("octave") == kMinVoicingOctave);
+
+    applyOk(store, {{"cmd", "resetVoicing"}, {"id", 2}});
+    g7 = eventWithId(snapshot(store), 2);
+    CHECK(g7.at("inversion") == 0);
+    CHECK(g7.at("octave") == 0);
+    CHECK(g7.at("manualVoicing") == false);
+    CHECK(g7.at("voicing") == json({62, 65, 67, 71}));  // auto voice-leading decides again
+
+    // Undoable, one step each.
+    applyOk(store, {{"cmd", "undo"}});
+    g7 = eventWithId(snapshot(store), 2);
+    CHECK(g7.at("manualVoicing") == true);
+    CHECK(g7.at("octave") == kMinVoicingOctave);
+    applyOk(store, {{"cmd", "undo"}});
+    CHECK(eventWithId(snapshot(store), 2).at("octave") == kMaxVoicingOctave);
+
+    // The other events are untouched throughout.
+    CHECK(eventWithId(snapshot(store), 1).at("manualVoicing") == false);
+    CHECK(eventWithId(snapshot(store), 3).at("manualVoicing") == false);
+}
+
+TEST_CASE("voicing commands: unknown ids are accepted as no-ops and record no history") {
+    DocumentStore store = cG7Am();
+    const Document before = store.doc();
+    std::string error;
+    CHECK(apply(store, {{"cmd", "setInversion"}, {"id", 99}, {"inversion", 1}}, error));
+    CHECK(apply(store, {{"cmd", "setOctave"}, {"id", 99}, {"octave", 1}}, error));
+    CHECK(apply(store, {{"cmd", "resetVoicing"}, {"id", 99}}, error));
+    CHECK(error.empty());
+    CHECK(store.doc() == before);
+    REQUIRE(store.undo());  // the setAutoVoiceLead of cG7Am, not a phantom entry
+    CHECK(store.doc().autoVoiceLead == false);
+}
+
+TEST_CASE("setAutoVoiceLead: undoable, and the compiled voicings follow it") {
+    DocumentStore store = cG7Am();
+    applyOk(store, {{"cmd", "setAutoVoiceLead"}, {"on", false}});
+    json snap = snapshot(store);
+    CHECK(snap.at("autoVoiceLead") == false);
+    CHECK(snap.at("events")[1].at("voicing") == json(closeVoicing(kG7)));
+
+    applyOk(store, {{"cmd", "setAutoVoiceLead"}, {"on", true}});
+    snap = snapshot(store);
+    CHECK(snap.at("autoVoiceLead") == true);
+    CHECK(snap.at("events")[1].at("voicing") == json({62, 65, 67, 71}));
+
+    applyOk(store, {{"cmd", "undo"}});
+    CHECK(snapshot(store).at("autoVoiceLead") == false);
+    applyOk(store, {{"cmd", "redo"}});
+    CHECK(snapshot(store).at("autoVoiceLead") == true);
+
+    std::string error;
+    CHECK(apply(store, {{"cmd", "setAutoVoiceLead"}, {"on", true}}, error));  // the same value: a no-op
+    applyOk(store, {{"cmd", "undo"}});
+    CHECK(snapshot(store).at("autoVoiceLead") == false);
+}
+
+TEST_CASE("section commands: add, rename, colour, move and remove, in the snapshot's sections list") {
+    DocumentStore store = cG7Am();
+    applyOk(store, {{"cmd", "addSection"}, {"index", 0}, {"name", "Verse"}});
+    json sections = snapshot(store).at("sections");
+    REQUIRE(sections.size() == 1);
+    CHECK(sections[0] == json({{"id", 1}, {"name", "Verse"}, {"colourIndex", 0}, {"firstEventIndex", 0}}));
+
+    applyOk(store, {{"cmd", "addSection"}, {"index", 2}});  // name optional: the store's default
+    sections = snapshot(store).at("sections");
+    REQUIRE(sections.size() == 2);
+    CHECK(sections[1] == json({{"id", 2}, {"name", "Section 2"}, {"colourIndex", 1}, {"firstEventIndex", 2}}));
+
+    applyOk(store, {{"cmd", "renameSection"}, {"id", 2}, {"name", "Chorus"}});
+    applyOk(store, {{"cmd", "setSectionColour"}, {"id", 2}, {"colourIndex", 99}});  // clamped by the store
+    applyOk(store, {{"cmd", "moveSectionStart"}, {"id", 2}, {"index", 1}});
+    sections = snapshot(store).at("sections");
+    CHECK(sections[1] == json({{"id", 2}, {"name", "Chorus"}, {"colourIndex", kNumSectionColours - 1}, {"firstEventIndex", 1}}));
+    applyOk(store, {{"cmd", "setSectionColour"}, {"id", 2}, {"colourIndex", -4}});
+    CHECK(snapshot(store).at("sections")[1].at("colourIndex") == 0);
+
+    applyOk(store, {{"cmd", "removeSection"}, {"id", 1}});  // the first: the next takes index 0
+    sections = snapshot(store).at("sections");
+    REQUIRE(sections.size() == 1);
+    CHECK(sections[0].at("id") == 2);
+    CHECK(sections[0].at("firstEventIndex") == 0);
+
+    // Each one undoable.
+    applyOk(store, {{"cmd", "undo"}});
+    CHECK(snapshot(store).at("sections").size() == 2);
+    applyOk(store, {{"cmd", "undo"}});  // the colour -4
+    applyOk(store, {{"cmd", "undo"}});  // the move
+    CHECK(snapshot(store).at("sections")[1].at("firstEventIndex") == 2);
+}
+
+TEST_CASE("addSection: the first section at an inner chord gets a leading section, as the store does") {
+    DocumentStore store = cG7Am();
+    applyOk(store, {{"cmd", "addSection"}, {"index", 1}, {"name", "B"}});
+    const json sections = snapshot(store).at("sections");
+    REQUIRE(sections.size() == 2);
+    CHECK(sections[0] == json({{"id", 1}, {"name", "Section 1"}, {"colourIndex", 0}, {"firstEventIndex", 0}}));
+    CHECK(sections[1] == json({{"id", 2}, {"name", "B"}, {"colourIndex", 1}, {"firstEventIndex", 1}}));
+}
+
+TEST_CASE("section commands: an index that is no chord position or already starts a section, and unknown ids, are no-ops") {
+    DocumentStore store = cG7Am();
+    applyOk(store, {{"cmd", "addSection"}, {"index", 0}});
+    applyOk(store, {{"cmd", "addSection"}, {"index", 2}});
+    const Document before = store.doc();
+    const int nextSectionId = store.nextSectionId();
+
+    std::string error;
+    CHECK(apply(store, {{"cmd", "addSection"}, {"index", 3}}, error));
+    CHECK(apply(store, {{"cmd", "addSection"}, {"index", -1}}, error));
+    CHECK(apply(store, {{"cmd", "addSection"}, {"index", 2}}, error));  // already starts one
+    CHECK(apply(store, {{"cmd", "renameSection"}, {"id", 99}, {"name", "x"}}, error));
+    CHECK(apply(store, {{"cmd", "setSectionColour"}, {"id", 99}, {"colourIndex", 1}}, error));
+    CHECK(apply(store, {{"cmd", "removeSection"}, {"id", 99}}, error));
+    CHECK(apply(store, {{"cmd", "moveSectionStart"}, {"id", 99}, {"index", 1}}, error));
+    CHECK(apply(store, {{"cmd", "moveSectionStart"}, {"id", 1}, {"index", 1}}, error));   // the first is pinned
+    CHECK(apply(store, {{"cmd", "moveSectionStart"}, {"id", 2}, {"index", 7}}, error));   // out of range
+    CHECK(apply(store, {{"cmd", "moveSectionStart"}, {"id", 2}, {"index", 0}}, error));   // a collision
+    CHECK(error.empty());
+    CHECK(store.doc() == before);
+    CHECK(store.nextSectionId() == nextSectionId);  // no id consumed by the refused adds
+
+    DocumentStore empty;
+    CHECK(apply(empty, {{"cmd", "addSection"}, {"index", 0}}, error));  // no chord to start on
+    CHECK(empty.doc() == Document{});
+
+    REQUIRE(store.undo());  // the second add, not a phantom entry
+    CHECK(store.doc().sections.size() == 1);
+}
+
+TEST_CASE("addSection: refused with a clear error when the section ids are exhausted, changing nothing") {
+    DocumentStore store;
+    Document doc = cG7Am().doc();
+    store.replace(doc, 4, INT_MAX);
+    const Document before = store.doc();
+    std::string error;
+    CHECK_FALSE(apply(store, {{"cmd", "addSection"}, {"index", 0}}, error));
+    CAPTURE(error);
+    CHECK(error.find("addSection") != std::string::npos);
+    CHECK(store.doc() == before);
+    CHECK_FALSE(store.undo());
+}
+
+TEST_CASE("selectEvent: live selection in the store; null clears, unknown ids are no-ops, a removed event is deselected") {
+    DocumentStore store = cG7Am();
+    applyOk(store, {{"cmd", "selectEvent"}, {"id", 2}});
+    CHECK(store.selectedEventId() == 2);
+    json snap = snapshotSelecting(store, store.selectedEventId());
+    CHECK(snap.at("selectedEventId") == 2);
+    CHECK(suggestionSymbols(snap)[0] == "C");  // after G7
+
+    std::string error;
+    CHECK(apply(store, {{"cmd", "selectEvent"}, {"id", 99}}, error));
+    CHECK(store.selectedEventId() == 2);
+
+    applyOk(store, {{"cmd", "selectEvent"}, {"id", nullptr}});
+    CHECK(store.selectedEventId() == kNoEventId);
+    CHECK(snapshotSelecting(store, store.selectedEventId()).at("selectedEventId").is_null());
+
+    applyOk(store, {{"cmd", "selectEvent"}, {"id", 3}});
+    applyOk(store, {{"cmd", "removeChord"}, {"id", 3}});
+    CHECK(store.selectedEventId() == kNoEventId);
+    applyOk(store, {{"cmd", "undo"}});
+    CHECK(store.selectedEventId() == kNoEventId);  // back, but not reselected
+
+    applyOk(store, {{"cmd", "selectEvent"}, {"id", 1}});
+    applyOk(store, {{"cmd", "undo"}});  // the setAutoVoiceLead: the selection is live state and survives
+    CHECK(store.selectedEventId() == 1);
+    applyOk(store, {{"cmd", "redo"}});
+    CHECK(store.selectedEventId() == 1);
+}
+
+TEST_CASE("selectEvent: never records history") {
+    DocumentStore store;
+    applyOk(store, {{"cmd", "appendChord"}, {"root", 0}, {"type", "maj"}});
+    applyOk(store, {{"cmd", "selectEvent"}, {"id", 1}});
+    applyOk(store, {{"cmd", "selectEvent"}, {"id", nullptr}});
+    REQUIRE(store.undo());  // the append
+    CHECK_FALSE(store.undo());
+}
+
+TEST_CASE("rejection: Phase 2 commands with missing or mistyped fields are refused whole") {
+    DocumentStore store = cG7Am();
+    applyOk(store, {{"cmd", "addSection"}, {"index", 0}, {"name", "Verse"}});
+    applyOk(store, {{"cmd", "selectEvent"}, {"id", 2}});
+
+    checkRejected(store, {{"cmd", "setInversion"}, {"id", 1}});
+    checkRejected(store, {{"cmd", "setInversion"}, {"inversion", 1}});
+    checkRejected(store, {{"cmd", "setInversion"}, {"id", 1}, {"inversion", "1"}});
+    checkRejected(store, {{"cmd", "setInversion"}, {"id", 1}, {"inversion", 1.5}});
+    checkRejected(store, {{"cmd", "setInversion"}, {"id", "1"}, {"inversion", 1}});
+    checkRejected(store, {{"cmd", "setOctave"}, {"id", 1}});
+    checkRejected(store, {{"cmd", "setOctave"}, {"id", 1}, {"octave", "up"}});
+    checkRejected(store, {{"cmd", "setOctave"}, {"id", 1}, {"octave", 0.5}});
+    checkRejected(store, {{"cmd", "resetVoicing"}});
+    checkRejected(store, {{"cmd", "resetVoicing"}, {"id", "1"}});
+    checkRejected(store, {{"cmd", "setAutoVoiceLead"}});
+    checkRejected(store, {{"cmd", "setAutoVoiceLead"}, {"on", 1}});
+    checkRejected(store, {{"cmd", "setAutoVoiceLead"}, {"on", "true"}});
+    checkRejected(store, {{"cmd", "addSection"}});
+    checkRejected(store, {{"cmd", "addSection"}, {"index", "0"}});
+    checkRejected(store, {{"cmd", "addSection"}, {"index", 0.5}});
+    checkRejected(store, {{"cmd", "addSection"}, {"index", 1}, {"name", 5}});
+    checkRejected(store, {{"cmd", "addSection"}, {"index", 1}, {"name", nullptr}});
+    checkRejected(store, {{"cmd", "renameSection"}, {"id", 1}});
+    checkRejected(store, {{"cmd", "renameSection"}, {"name", "x"}});
+    checkRejected(store, {{"cmd", "renameSection"}, {"id", 1}, {"name", 3}});
+    checkRejected(store, {{"cmd", "setSectionColour"}, {"id", 1}});
+    checkRejected(store, {{"cmd", "setSectionColour"}, {"id", 1}, {"colourIndex", "red"}});
+    checkRejected(store, {{"cmd", "setSectionColour"}, {"id", 1}, {"colourIndex", 1.5}});
+    checkRejected(store, {{"cmd", "removeSection"}});
+    checkRejected(store, {{"cmd", "removeSection"}, {"id", "1"}});
+    checkRejected(store, {{"cmd", "moveSectionStart"}, {"id", 1}});
+    checkRejected(store, {{"cmd", "moveSectionStart"}, {"index", 1}});
+    checkRejected(store, {{"cmd", "moveSectionStart"}, {"id", 1}, {"index", 1.5}});
+    checkRejected(store, {{"cmd", "selectEvent"}});
+    checkRejected(store, {{"cmd", "selectEvent"}, {"id", "2"}});
+    checkRejected(store, {{"cmd", "selectEvent"}, {"id", true}});
+    checkRejected(store, {{"cmd", "selectEvent"}, {"id", 2.5}});
+    checkRejected(store, {{"cmd", "selectEvent"}, {"id", json::array()}});
+
+    CHECK(store.selectedEventId() == 2);  // a rejected selectEvent leaves the selection alone
+    REQUIRE(store.undo());  // the addSection: no phantom entries
+    CHECK(store.doc().sections.empty());
+}
+
 // --- Rejection -------------------------------------------------------------------------
 
 TEST_CASE("rejection: a fresh store is untouched and gains no history") {

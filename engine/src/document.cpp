@@ -211,6 +211,7 @@ void DocumentStore::replace(Document doc, int nextId, int nextSectionId) {
     undoStack_.clear();
     redoStack_.clear();
     nextId_ = nextId;
+    selectedEventId_ = kNoEventId;
 }
 
 int DocumentStore::nextId() const {
@@ -246,7 +247,24 @@ bool DocumentStore::commit(Document next) {
         undoStack_.pop_front();
     }
     redoStack_.clear();
+    dropStaleSelection();
     return true;
+}
+
+void DocumentStore::dropStaleSelection() noexcept {
+    if (selectedEventId_ != kNoEventId && indexOfEvent(doc_.events, selectedEventId_) < 0) {
+        selectedEventId_ = kNoEventId;
+    }
+}
+
+int DocumentStore::selectedEventId() const {
+    return selectedEventId_;
+}
+
+void DocumentStore::setSelectedEvent(int id) {
+    if (id == kNoEventId || indexOfEvent(doc_.events, id) >= 0) {
+        selectedEventId_ = id;
+    }
 }
 
 int DocumentStore::appendChord(Chord chord, double lengthBeats, int velocity) {
@@ -482,6 +500,7 @@ bool DocumentStore::undo() {
     keepLiveState(restored, doc_);
     doc_ = std::move(restored);
     undoStack_.pop_back();
+    dropStaleSelection();
     return true;
 }
 
@@ -494,6 +513,7 @@ bool DocumentStore::redo() {
     keepLiveState(restored, doc_);
     doc_ = std::move(restored);
     redoStack_.pop_back();
+    dropStaleSelection();
     return true;
 }
 

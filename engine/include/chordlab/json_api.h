@@ -164,17 +164,32 @@ std::string keyName(const Key& key);
 /// - `moveChord {id,index}`, `setLength {id,lengthBeats}`, `setVelocity {id,velocity}`,
 ///   `removeChord {id}`: the matching store call.
 /// - `setProgressionLoop {on}`, `setFollowHost {on}`: the matching live-state setter.
+/// - `setInversion {id,inversion}`, `setOctave {id,octave}`, `resetVoicing {id}`: the matching store
+///   call (the values are clamped by the store and the event is marked manual; see document.h).
+/// - `setAutoVoiceLead {on}`: `setAutoVoiceLead`, undoable.
+/// - `addSection {index,name?}`: `addSection(index, name)`; `name` defaults to the store's "Section <id>".
+///   An `index` that is no chord position, or that already starts a section, is a valid no-op (the UI
+///   may name a chord an edit just moved). Refused (false, an error naming the reason, no change) only
+///   when the section id counter is exhausted, like `appendChord`.
+/// - `renameSection {id,name}`, `setSectionColour {id,colourIndex}`, `removeSection {id}`,
+///   `moveSectionStart {id,index}`: the matching store call (colours clamped, a move the store declines
+///   is a no-op).
+/// - `selectEvent {id}`: `setSelectedEvent`, live state; `id` is an integer or null (null, like
+///   `kNoEventId`, clears the selection; an id no event has is a no-op). Pass the store's
+///   `selectedEventId()` to `snapshotJson` so that the snapshot's `selectedEventId` and `suggestions`
+///   follow it.
 /// - `undo`, `redo`: no fields.
 ///
 /// Every field is validated before anything is touched: an unknown `cmd`, a missing or mistyped field, a
 /// root outside 0..11, an unknown chord type or mode, a bad letter or alter, or a non-finite number makes
-/// the call return false with a description in `error`, leaving the document and its history exactly as
-/// they were. Fields the command does not use are ignored. Numbers are not range-checked beyond that:
-/// lengths, velocities and move targets are clamped by the store, exactly as the direct calls do.
+/// the call return false with a description in `error`, leaving the document, its history and the
+/// selection exactly as they were. Fields the command does not use are ignored. Numbers are not
+/// range-checked beyond that: lengths, velocities, inversions, octaves, colours and move targets are
+/// clamped by the store, exactly as the direct calls do.
 ///
 /// Returns true for every accepted command, including ones that change nothing: an edit naming an id no
-/// event has, a move to the chord's current position, and `undo`/`redo` with nothing to undo or redo are
-/// valid no-ops, not errors. `error` is cleared on success.
+/// event or section has, a move to the chord's current position, and `undo`/`redo` with nothing to undo
+/// or redo are valid no-ops, not errors. `error` is cleared on success.
 bool applyCommandJson(DocumentStore& store, std::string_view json, std::string& error) noexcept;
 
 /// The persistent form of the store's document, without the palette:
