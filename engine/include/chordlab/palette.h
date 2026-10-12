@@ -12,6 +12,9 @@ namespace chordlab {
 /// 3 the seventh/add9 and 4 the colour row (ninths, #11 chords, 6/9, suspended chords).
 constexpr int kPaletteTiers = 5;
 
+/// The row of the diatonic triads (tier 1): the tier the snapshot's `homeTriads` entries carry.
+constexpr int kPaletteTriadTier = 1;
+
 /// One chord of the palette grid: the chord built on scale degree `degree` (0..6) of the browsed key, in
 /// row `tier` (0..kPaletteTiers-1).
 /// `filled` is whether every note is in the project key (hollow cells are borrowed); `symbol` is the

@@ -612,6 +612,119 @@ TEST_CASE("snapshot: suggestions follow the selected event, else the last event,
     checkSuggestionsAre(snap, &am, browsing.doc());
 }
 
+// --- Snapshot: the home-key compare row -------------------------------------------------
+
+namespace {
+
+/// One member of every `homeTriads` entry, in order.
+template <typename T>
+std::vector<T> homeField(const json& snap, const char* member) {
+    std::vector<T> out;
+    for (const json& t : snap.at("homeTriads")) {
+        out.push_back(t.at(member).get<T>());
+    }
+    return out;
+}
+
+const std::vector<std::string> kCMajorTriads{"C", "Dm", "Em", "F", "G", "Am", "Bmb5"};
+const std::vector<std::string> kMajorRomans{"I", "ii", "iii", "IV", "V", "vi", "vii°"};
+
+}  // namespace
+
+TEST_CASE("snapshot: homeTriads is empty while the browsed key is the project key") {
+    DocumentStore store;
+    json snap = snapshot(store);
+    REQUIRE(snap.at("homeTriads").is_array());
+    CHECK(snap.at("homeTriads").empty());
+    CHECK(snap.at("schema") == 1);  // additive
+
+    // Away and home again, and a project key other than the default.
+    store.setBrowsedKey(key('G', 0, Mode::Ionian));
+    CHECK(snapshot(store).at("homeTriads").size() == 7);
+    applyOk(store, {{"cmd", "browseKey"}, {"home", true}});
+    CHECK(snapshot(store).at("homeTriads").empty());
+    store.setProjectKey(key('A', 0, Mode::Aeolian));
+    store.setBrowsedKey(key('A', 0, Mode::Aeolian));
+    CHECK(snapshot(store).at("homeTriads").empty());
+}
+
+TEST_CASE("snapshot: homeTriads lists the project key's seven triads in degree order, whatever is browsed") {
+    for (const Key& browsed :
+         {key('A', 0, Mode::Aeolian), key('D', 0, Mode::Dorian), key('F', 1, Mode::Ionian), key('C', 0, Mode::Aeolian)}) {
+        CAPTURE(keyName(browsed));
+        DocumentStore store;
+        store.setBrowsedKey(browsed);
+        const json snap = snapshot(store);
+        REQUIRE(snap.at("homeTriads").size() == 7);
+        CHECK(homeField<std::string>(snap, "symbol") == kCMajorTriads);
+        CHECK(homeField<std::string>(snap, "roman") == kMajorRomans);
+        CHECK(homeField<int>(snap, "degree") == std::vector<int>{0, 1, 2, 3, 4, 5, 6});
+        CHECK(homeField<int>(snap, "root") == std::vector<int>{0, 2, 4, 5, 7, 9, 11});
+        CHECK(homeField<std::string>(snap, "type") ==
+              std::vector<std::string>{"maj", "min", "min", "maj", "maj", "min", "dim"});
+        CHECK(homeField<std::string>(snap, "function") == std::vector<std::string>{"T", "PD", "T", "PD", "D", "T", "D"});
+        CHECK(homeField<std::string>(snap, "id") ==
+              std::vector<std::string>{"home-0", "home-1", "home-2", "home-3", "home-4", "home-5", "home-6"});
+        for (const json& t : snap.at("homeTriads")) {
+            CAPTURE(t.dump());
+            CHECK(t.at("tier") == 1);  // the palette's triad row
+            CHECK(t.at("filled") == true);
+            CHECK(t.at("outOfKey").empty());
+        }
+        CHECK(snap.at("homeTriads")[0].at("voicing") == json({60, 64, 67}));
+        CHECK(snap.at("homeTriads")[0].at("family") == "Major");
+        CHECK(snap.at("homeTriads")[6].at("family") == "Other");
+    }
+}
+
+TEST_CASE("snapshot: homeTriads of a minor project key are spelled and numbered in that key") {
+    DocumentStore store;
+    store.setProjectKey(key('A', 0, Mode::Aeolian));
+    store.setBrowsedKey(key('C', 0, Mode::Ionian));  // the same notes, another key: still a compare row
+    json snap = snapshot(store);
+    CHECK(homeField<std::string>(snap, "symbol") == std::vector<std::string>{"Am", "Bmb5", "C", "Dm", "Em", "F", "G"});
+    CHECK(homeField<std::string>(snap, "roman") ==
+          std::vector<std::string>{"i", "ii°", "bIII", "iv", "v", "bVI", "bVII"});
+
+    // Flats follow the project key, not the browsed one.
+    store.setProjectKey(key('C', 0, Mode::Aeolian));
+    store.setBrowsedKey(key('E', 0, Mode::Ionian));
+    snap = snapshot(store);
+    CHECK(homeField<std::string>(snap, "symbol") ==
+          std::vector<std::string>{"Cm", "Dmb5", "Eb", "Fm", "Gm", "Ab", "Bb"});
+
+    // Harmonic minor: its own triads (the augmented III, the major V, the diminished vii).
+    store.setProjectKey(key('A', 0, Mode::HarmonicMinor));
+    snap = snapshot(store);
+    CHECK(homeField<std::string>(snap, "type") ==
+          std::vector<std::string>{"min", "dim", "aug", "min", "maj", "maj", "dim"});
+}
+
+TEST_CASE("snapshot: a home triad is the palette's triad cell of the project key, plus its id") {
+    for (const Key& project : {key('C', 0, Mode::Ionian), key('A', 0, Mode::Aeolian), key('E', -1, Mode::Lydian),
+                               key('D', 0, Mode::Dorian), key('F', 1, Mode::HarmonicMinor)}) {
+        CAPTURE(keyName(project));
+        DocumentStore store;
+        store.setProjectKey(project);
+        store.setBrowsedKey(project);
+        const json home = snapshot(store);  // browsing the project key: the palette's tier 1 is the reference
+        store.setBrowsedKey(key('B', 0, Mode::Phrygian));
+        const json away = snapshot(store);
+        REQUIRE(away.at("homeTriads").size() == 7);
+        for (int degree = 0; degree < 7; ++degree) {
+            CAPTURE(degree);
+            json triad = away.at("homeTriads")[static_cast<std::size_t>(degree)];
+            CHECK(triad.at("id") == "home-" + std::to_string(degree));
+            triad.erase("id");
+            CHECK(triad == cellAt(home, degree, 1));  // symbol, roman, function, tension, voicing, all of it
+        }
+        // No palette cell carries an id, so a home id cannot collide with one.
+        for (const json& cell : away.at("palette").at("cells")) {
+            CHECK_FALSE(cell.contains("id"));
+        }
+    }
+}
+
 // --- browseKey -------------------------------------------------------------------------
 
 TEST_CASE("browseKey steps: moves the browsed key along the fifths and hollows the borrowed cells") {

@@ -40,7 +40,8 @@ pinned in `tests/test_suggest.cpp` hold; run it after changing the formula or th
 `json_api.h` is the one description of what crosses the bridge to the UI, and the only place the field
 lists live: the snapshot (`snapshotJson`: the keys, the events with symbol, numeral, function, tension,
 the voicing `compile` gives them and the "why" of each against the chord before it, the palette cells,
-the sections, the live selection and the next-chord suggestions), the commands (`applyCommandJson`: keys
+the sections, the live selection, the next-chord suggestions and `homeTriads`, the project key's seven
+diatonic triads in the palette cells' shape while another key is browsed, empty otherwise), the commands (`applyCommandJson`: keys
 and browsing, chord edits, voicing and auto voice-leading, sections, selection, undo/redo) and the
 persisted state (`stateJson` / `loadStateJson`). The rules behind the "why" sentence, the validation of
 each command and the defaults a loader applies are in that header's doc blocks and are not repeated

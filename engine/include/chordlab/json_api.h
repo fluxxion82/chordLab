@@ -15,8 +15,8 @@ struct Palette;
 /// Version of the wire format. Every message (snapshot, command, state) carries `"schema": kJsonSchema`;
 /// a message with a different or missing schema is rejected.
 /// Adding a field is not a schema change: the readers here ignore members they do not know, and the UI
-/// reads only the members it needs, so a new field (the snapshot's `modes`, `tonics` and `outOfKey`
-/// were added under schema 1) costs nothing to a reader that has not heard of it. The number bumps only
+/// reads only the members it needs, so a new field (the snapshot's `modes`, `tonics`, `outOfKey` and
+/// `homeTriads` were added under schema 1) costs nothing to a reader that has not heard of it. The number bumps only
 /// when an existing field changes meaning or shape, or a required one is removed.
 constexpr int kJsonSchema = 1;
 
@@ -79,7 +79,8 @@ constexpr int kMaxJsonDepth = 64;
 ///  "palette":{"tiers":5,
 ///             "cells":[{"degree":0,"tier":1,"root":0,"type":"maj","symbol":"C","roman":"I",
 ///                       "family":"Major","function":"T","tension":3,"filled":true,
-///                       "voicing":[60,64,67],"outOfKey":[]}, ...]}}
+///                       "voicing":[60,64,67],"outOfKey":[]}, ...]},
+///  "homeTriads":[]}
 /// ```
 /// Events are in playback order with `startBeat` accumulated as `Document::startBeatOf` does; `symbol` is
 /// the Klimper-style symbol spelled in the project key, `roman` the Standard-style numeral relative to the
@@ -139,6 +140,20 @@ constexpr int kMaxJsonDepth = 64;
 /// - `selectedEventId`: `selectedEventId` when an event has that id, else null (so `kNoEventId`, the
 ///   default, and a stale id alike read as "no selection"). The plug-in passes the store's live
 ///   selection (`DocumentStore::selectedEventId`).
+/// - `homeTriads` (additive, schema still 1): what a "home" compare row under the palette shows while
+///   another key is browsed. Empty when `browsedKey == projectKey` (the keys as spelled, tonic and mode:
+///   the palette is then the home key's own). Otherwise exactly seven entries, the diatonic triads of the
+///   PROJECT key (`diatonicTriad(projectKey, degree)`) in degree order 0..6, each with every member of a
+///   palette cell and the same meaning, plus an `id`:
+///   ```
+///   {"id":"home-0","degree":0,"tier":1,"root":0,"type":"maj","symbol":"C","roman":"I","family":"Major",
+///    "function":"T","tension":3,"filled":true,"voicing":[60,64,67],"outOfKey":[]}
+///   ```
+///   `degree` is the degree of the project scale, `tier` always `kPaletteTriadTier` (1), `symbol` is
+///   spelled in the project key and `roman`, `function`, `tension` are read against it, so an entry
+///   equals the tier-1 cell the palette holds for that degree when the project key itself is browsed;
+///   `filled` is therefore always true and `outOfKey` always empty. `id` is "home-<degree>"; palette
+///   cells carry no `id` (the UI derives one from tier and degree), so the two cannot collide.
 /// - `suggestions`: `suggestNext(previous, projectKey, browsedKey)` (suggest.h, Pop style, at most 8),
 ///   where `previous` is the selected event's chord when `selectedEventId` names an event, else the last
 ///   event's chord, else null (the opening suggestions of an empty document). Each entry carries the

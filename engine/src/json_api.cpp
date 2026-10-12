@@ -130,6 +130,47 @@ json outOfKeyJson(const Chord& chord, const Key& key) {
     return json(out);
 }
 
+/// One palette cell as the snapshot writes it (`palette.cells` and `homeTriads` alike): the cell's own
+/// position, chord, symbol, numeral and `filled`, plus what is read against `projectKey`.
+json cellJson(const PaletteCell& c, const Key& projectKey) {
+    return {{"degree", c.degree},
+            {"tier", c.tier},
+            {"root", c.chord.root},
+            {"type", c.chord.type->id},
+            {"symbol", c.symbol},
+            {"roman", c.roman},
+            {"family", familyName(c.chord.type->family)},
+            {"function", functionShortName(functionOf(c.chord, projectKey))},
+            {"tension", tension(c.chord, projectKey)},
+            {"filled", c.filled},
+            {"voicing", closeVoicing(c.chord)},
+            {"outOfKey", outOfKeyJson(c.chord, projectKey)}};
+}
+
+/// The snapshot's `homeTriads`: nothing while the project key is the one browsed (the palette already
+/// shows it); otherwise the project key's seven diatonic triads in degree order, each the cell the
+/// palette's triad row would hold for it when browsing the project key, plus an `id` ("home-<degree>")
+/// that no palette cell has.
+json homeTriadsJson(const Document& doc) {
+    json out = json::array();
+    if (doc.browsedKey == doc.projectKey) {
+        return out;
+    }
+    for (int degree = 0; degree < 7; ++degree) {
+        const Chord triad = diatonicTriad(doc.projectKey, degree);
+        const PaletteCell cell{degree,
+                               kPaletteTriadTier,
+                               triad,
+                               fullyInKey(triad, doc.projectKey),
+                               chordSymbol(triad, doc.projectKey),
+                               romanNumeral(triad, doc.projectKey)};
+        json entry = cellJson(cell, doc.projectKey);
+        entry["id"] = "home-" + std::to_string(degree);
+        out.push_back(std::move(entry));
+    }
+    return out;
+}
+
 /// Mode names as prose, for the sentences the UI shows: the `Mode` spelling except for the two altered
 /// minor scales. The same table as the suggestions' reason texts (suggest.cpp), so that "borrowed from"
 /// reads identically in the why popover and the suggestion popover.
@@ -1064,19 +1105,7 @@ std::string snapshotJson(const Document& doc, const Palette& palette, int select
 
     json cells = json::array();
     for (const PaletteCell& c : palette.cells) {
-        json cell = {{"degree", c.degree},
-                     {"tier", c.tier},
-                     {"root", c.chord.root},
-                     {"type", c.chord.type->id},
-                     {"symbol", c.symbol},
-                     {"roman", c.roman},
-                     {"family", familyName(c.chord.type->family)},
-                     {"function", functionShortName(functionOf(c.chord, doc.projectKey))},
-                     {"tension", tension(c.chord, doc.projectKey)},
-                     {"filled", c.filled},
-                     {"voicing", closeVoicing(c.chord)},
-                     {"outOfKey", outOfKeyJson(c.chord, doc.projectKey)}};
-        cells.push_back(std::move(cell));
+        cells.push_back(cellJson(c, doc.projectKey));
     }
 
     // Suggestions follow the selected chord, else the last one, else open the progression.
@@ -1102,6 +1131,7 @@ std::string snapshotJson(const Document& doc, const Palette& palette, int select
                            {"events", std::move(events)},
                            {"sections", sectionsJson(doc)},
                            {"suggestions", suggestionsJson(previous, doc)},
+                           {"homeTriads", homeTriadsJson(doc)},
                            {"palette", {{"tiers", palette.tiers}, {"cells", std::move(cells)}}}};
     return snapshot.dump();
 }

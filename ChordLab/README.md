@@ -1,5 +1,5 @@
-# ChordLab
+# ChordLab (plug-in sources)
 
-A macOS and iOS only plug-in using [SwiftUI](https://developer.apple.com/xcode/swiftui/) in order to implement the GUI
-
-This example requires macOS 15 / iOS18 or higher in order to use modern SwiftUI features.
+This directory holds the iPlug2 plug-in shell and the SwiftUI editor. Build, install and Ableton Live
+routing instructions are in the [top-level README](../README.md); the engine is described in
+[`engine/README.md`](../engine/README.md).

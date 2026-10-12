@@ -5,14 +5,14 @@ import SwiftUI
 /// an empty slot so the columns stay aligned. Everything shown comes from the snapshot. Pressing a cell
 /// previews its voicing through `ChordLabState.pressCell` / `releaseCell` (press, release, cancel and
 /// disappearance are all handled by `PressAction`); dragging a cell carries a `ChordRef` to the
-/// sequence bar. The press is a simultaneous gesture under `.draggable`: the preview starts on mouse
+/// sequence bar (both wired in `PaletteCellControl`). The press is a simultaneous gesture under `.draggable`: the preview starts on mouse
 /// down and ends when the press gesture ends or is cancelled. Starting the native drag session is
 /// expected, not guaranteed, to cancel it; if it does not, the preview lasts until the drop, and the
 /// scheduler's 4 s watchdog is the backstop either way. A press that never moves far enough simply
 /// releases on mouse up.
 struct PaletteView: View {
   @EnvironmentObject var state: ChordLabState
-  @AppStorage(LabelMode.storageKey) private var labelMode: LabelMode = .both
+  @AppStorage(LabelMode.storageKey) private var labelMode = LabelMode.defaultMode
 
   static let columns = 7
   static let spacing: CGFloat = 10
@@ -32,13 +32,7 @@ struct PaletteView: View {
               HStack(spacing: Self.spacing) {
                 ForEach(0..<Self.columns, id: \.self) { degree in
                   if let cell = rows[tier][degree] {
-                    PaletteCellView(cell: cell, size: cellSize, labelMode: labelMode,
-                                    isPressed: state.heldCellId == cell.id)
-                      .pressAction(onPress: { state.pressCell(cell) },
-                                   onRelease: { state.releaseCell(cell) })
-                      .draggable(ChordRef(root: cell.root, type: cell.type)) {
-                        ChordDragPreview(cell: cell, labelMode: labelMode)
-                      }
+                    PaletteCellControl(cell: cell, size: cellSize, labelMode: labelMode)
                   } else {
                     Color.clear.frame(width: cellSize, height: cellSize)
                   }
@@ -66,6 +60,26 @@ struct PaletteView: View {
       rows[cell.tier][cell.degree] = cell
     }
     return rows
+  }
+}
+
+/// A cell with its gestures, as the palette grid and the home row (`HomeRowView`) both use it: the look
+/// of `PaletteCellView` (with its hover popover), press to preview through `ChordLabState.pressCell` /
+/// `releaseCell`, and a drag that carries the chord's `ChordRef` to the sequence bar under a
+/// `ChordDragPreview`. The one place these are wired, so the two can not drift apart.
+struct PaletteCellControl: View {
+  @EnvironmentObject var state: ChordLabState
+  let cell: CellJSON
+  let size: CGFloat
+  let labelMode: LabelMode
+
+  var body: some View {
+    PaletteCellView(cell: cell, size: size, labelMode: labelMode, isPressed: state.heldCellId == cell.id)
+      .pressAction(onPress: { state.pressCell(cell) },
+                   onRelease: { state.releaseCell(cell) })
+      .draggable(ChordRef(root: cell.root, type: cell.type)) {
+        ChordDragPreview(cell: cell, labelMode: labelMode)
+      }
   }
 }
 

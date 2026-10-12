@@ -13,7 +13,7 @@ namespace chordlab {
 namespace {
 
 constexpr int kPowerTier = 0;
-constexpr int kTriadTier = 1;
+constexpr int kTriadTier = kPaletteTriadTier;
 constexpr int kSixthSeventhTier = 2;
 constexpr int kSeventhTier = 3;
 constexpr int kColourTier = 4;
