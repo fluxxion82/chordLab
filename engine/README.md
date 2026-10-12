@@ -7,12 +7,13 @@ exercised by a doctest suite.
 
 ```
 include/chordlab/   public headers, one per module (pitch, scale, chord, symbol, function, applied,
-                    harmony, tension, relations, voicing, palette, document, compiler, note_event,
+                    harmony, tension, relations, suggest, voicing, palette, document, compiler, note_event,
                     limits, scheduler, triple_buffer, publication, smf, json_api)
 src/                the matching implementations
 tests/              doctest suite (tests/doctest.h is the vendored framework), one file per module;
                     tests/rt_alloc/ is a second executable that counts allocations (see below)
 fixtures/           golden files the tests compare against (cmaj-1bar.mid)
+tools/              developer tools built alongside the library but not run by ctest (see Tools)
 third_party/        vendored headers; see third_party/README.md for provenance and hashes
 build/              CMake output, ignored by git
 ```
@@ -26,6 +27,13 @@ cmake -S engine -B engine/build && cmake --build engine/build && ctest --test-di
 That runs two executables, `engine_tests` (the suite) and `engine_rt_alloc_test` (below); either can be run
 directly, e.g. `timeout 300 engine/build/engine_tests`. C++17, `-Wall -Wextra -Wpedantic`, zero warnings
 expected. Both must report `0 failed`.
+
+## Tools
+
+`suggest_tune` (`tools/suggest_tune.cpp`, target of the same name) is the grid search behind the weights
+frozen in `src/suggest.cpp`: it mirrors `suggestNext`'s scoring with the weights as variables, walks a
+grid around the frozen values and reports, per point, the smallest margin by which the Pop expectations
+pinned in `tests/test_suggest.cpp` hold; run it after changing the formula or the expectations.
 
 ## Error handling
 
