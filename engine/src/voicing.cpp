@@ -33,6 +33,12 @@ bool validVoicingRange(int lowest, int highest) {
     return validRange(lowest, highest) && lowest >= kOctave && highest <= kMidiMax - 2 * kOctave;
 }
 
+/// `voiceLeadingCost`'s precondition: one to `kMaxVoiceLeadingNotes` MIDI notes.
+bool isMidiVoicing(const std::vector<int>& notes) {
+    return !notes.empty() && notes.size() <= static_cast<std::size_t>(kMaxVoiceLeadingNotes) &&
+           std::all_of(notes.begin(), notes.end(), [](int n) { return n >= 0 && n <= kMidiMax; });
+}
+
 }  // namespace
 
 std::vector<int> closeVoicing(const Chord& chord, int lowest, int highest) {
@@ -107,7 +113,7 @@ std::vector<int> voicing(const Chord& chord, int inversion, int octave, int lowe
 }
 
 int voiceLeadingCost(const std::vector<int>& from, const std::vector<int>& to) {
-    assert(from.empty() == to.empty());
+    assert(isMidiVoicing(from) && isMidiVoicing(to));
     std::vector<int> a(from);
     std::vector<int> b(to);
     std::sort(a.begin(), a.end());
@@ -115,9 +121,6 @@ int voiceLeadingCost(const std::vector<int>& from, const std::vector<int>& to) {
     // Each missing voice of the shorter voicing is the octave above its lowest note, inserted in order so
     // that the sorted pairing below stays the optimal one.
     const auto pad = [](std::vector<int>& shorter, std::size_t size) {
-        if (shorter.empty()) {
-            return;
-        }
         const int doubling = shorter.front() + kOctave;
         while (shorter.size() < size) {
             shorter.insert(std::upper_bound(shorter.begin(), shorter.end(), doubling), doubling);

@@ -7,6 +7,7 @@
 #include <climits>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
 #include <tuple>
 #include <utility>
 
@@ -28,21 +29,19 @@ void assertValidEvent([[maybe_unused]] const ChordEvent& event) {
 }
 
 /// The voicing of `chord` closest to `previous` over every inversion at octaves -1..1 (at most 15
-/// candidates). Candidates are visited in the tie-break order (octave 0, then -1, then 1; inversions
-/// ascending) and replace the best one only when strictly cheaper, so the first of equally cheap
-/// candidates wins.
+/// candidates): the one with the smallest key (cost, |octave|, inversion, octave), so that equally cheap
+/// candidates go to the smaller |octave|, then the smaller inversion, then the lower octave.
 std::vector<int> closestVoicing(const Chord& chord, const std::vector<int>& previous) {
-    constexpr int kOctaveOrder[] = {0, kMinVoicingOctave, kMaxVoicingOctave};
-    static_assert(kMinVoicingOctave == -1 && kMaxVoicingOctave == 1, "the tie-break order lists every octave");
+    using Key = std::tuple<int, int, int, int>;
     std::vector<int> best;
-    int bestCost = INT_MAX;
+    Key bestKey{INT_MAX, INT_MAX, INT_MAX, INT_MAX};
     const int count = inversionCount(chord);
-    for (const int octave : kOctaveOrder) {
+    for (int octave = kMinVoicingOctave; octave <= kMaxVoicingOctave; ++octave) {
         for (int inversion = 0; inversion < count; ++inversion) {
             std::vector<int> candidate = voicing(chord, inversion, octave);
-            const int cost = voiceLeadingCost(previous, candidate);
-            if (cost < bestCost) {
-                bestCost = cost;
+            const Key key{voiceLeadingCost(previous, candidate), std::abs(octave), inversion, octave};
+            if (key < bestKey) {
+                bestKey = key;
                 best = std::move(candidate);
             }
         }

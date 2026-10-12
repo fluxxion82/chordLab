@@ -182,7 +182,7 @@ TEST_CASE("publication: inversion, octave and auto voice-leading change the comp
     store.setAutoVoiceLead(true);
     CHECK_FALSE(fillSlot(store.doc(), *slot, last));
     CHECK(last.generation == 5);
-    store.setInversion(f, 0);  // manual root position under auto: F E A -> F A C
+    store.setInversion(f, 0);  // manual root position under auto: C F A -> F A C
     store.setOctave(f, 0);
     REQUIRE(fillSlot(store.doc(), *slot, last));
     CHECK(last.generation == 6);

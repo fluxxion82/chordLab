@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <climits>
 #include <cstddef>
+#include <cstdlib>
+#include <numeric>
 #include <set>
 #include <string_view>
 #include <vector>
@@ -338,8 +340,82 @@ TEST_CASE("voicing: distinct inversions of one chord are distinct voicings") {
 
 // --- voiceLeadingCost --------------------------------------------------------------------------
 
-TEST_CASE("voiceLeadingCost: total semitone displacement over the best pairing of two voicings") {
-    CHECK(voiceLeadingCost({60, 64, 67}, {60, 64, 67}) == 0);
+namespace {
+
+/// Every dictionary chord on every root.
+std::vector<Chord> allChords() {
+    std::vector<Chord> chords;
+    for (const ChordType& type : allChordTypes()) {
+        for (PitchClass root = 0; root < 12; ++root) {
+            chords.push_back(Chord{root, &type});
+        }
+    }
+    return chords;
+}
+
+/// Every dictionary chord on C.
+std::vector<Chord> allChordsOnC() {
+    std::vector<Chord> chords;
+    for (const ChordType& type : allChordTypes()) {
+        chords.push_back(Chord{0, &type});
+    }
+    return chords;
+}
+
+/// Total displacement after sorting both voicings. For two same-size voicings on a line, the
+/// monotone (sorted-to-sorted) matching is an optimal bijection: uncrossing any two crossed pairs never
+/// increases |a1-b1| + |a2-b2|.
+int sortedMatchingCost(Notes a, Notes b) {
+    REQUIRE(a.size() == b.size());
+    std::sort(a.begin(), a.end());
+    std::sort(b.begin(), b.end());
+    int cost = 0;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        cost += std::abs(a[i] - b[i]);
+    }
+    return cost;
+}
+
+/// The documented contract computed the slow way: the shorter voicing padded with its lowest note an
+/// octave up, then the minimum over every bijection, by trying every permutation. Independent of the
+/// implementation's sorted pairing, so it is the oracle for it.
+int bruteForceCost(Notes a, Notes b) {
+    REQUIRE_FALSE(a.empty());
+    REQUIRE_FALSE(b.empty());
+    const auto pad = [](Notes& shorter, std::size_t size) {
+        const int doubling = *std::min_element(shorter.begin(), shorter.end()) + 12;
+        while (shorter.size() < size) {
+            shorter.push_back(doubling);
+        }
+    };
+    pad(a, b.size());
+    pad(b, a.size());
+    std::vector<std::size_t> order(a.size());
+    std::iota(order.begin(), order.end(), std::size_t{0});
+    int best = INT_MAX;
+    do {
+        int total = 0;
+        for (std::size_t i = 0; i < a.size(); ++i) {
+            total += std::abs(a[i] - b[order[i]]);
+        }
+        best = std::min(best, total);
+    } while (std::next_permutation(order.begin(), order.end()));
+    return best;
+}
+
+}  // namespace
+
+TEST_CASE("kMaxVoiceLeadingNotes: plan value, and every dictionary voicing fits it") {
+    CHECK(kMaxVoiceLeadingNotes == 6);
+    for (const Chord& c : allChords()) {
+        CAPTURE(c.type->id);
+        CAPTURE(c.root);
+        CHECK(closeVoicing(c).size() <= static_cast<std::size_t>(kMaxVoiceLeadingNotes));
+        CHECK(closeVoicing(c).size() >= 1);
+    }
+}
+
+TEST_CASE("voiceLeadingCost: plan cases") {
     CHECK(voiceLeadingCost({60, 64, 67}, {60, 65, 69}) == 3);   // C -> F/C: E up to F, G up to A
     CHECK(voiceLeadingCost({60, 64, 67}, {59, 62, 67}) == 3);   // C -> G/B: C down to B, E down to D
     CHECK(voiceLeadingCost({60, 64, 67}, {60, 64, 69}) == 2);   // C -> Am/C: G up to A
@@ -347,10 +423,20 @@ TEST_CASE("voiceLeadingCost: total semitone displacement over the best pairing o
     CHECK(voiceLeadingCost({60, 64, 67}, {64, 67, 72}) == 12);  // C -> C/E: the voices rotate upward
 }
 
-TEST_CASE("voiceLeadingCost: symmetric and independent of the order the notes are given in") {
-    CHECK(voiceLeadingCost({60, 65, 69}, {60, 64, 67}) == 3);
-    CHECK(voiceLeadingCost({67, 60, 64}, {69, 65, 60}) == 3);
-    CHECK(voiceLeadingCost({72, 76, 79}, {60, 64, 67}) == 36);
+TEST_CASE("voiceLeadingCost: identical voicings cost nothing") {
+    CHECK(voiceLeadingCost({60, 64, 67}, {60, 64, 67}) == 0);
+    CHECK(voiceLeadingCost({60}, {60}) == 0);
+    for (const Chord& c : allChords()) {
+        CAPTURE(c.type->id);
+        CAPTURE(c.root);
+        CHECK(voiceLeadingCost(closeVoicing(c), closeVoicing(c)) == 0);
+    }
+}
+
+TEST_CASE("voiceLeadingCost: finds the cheapest bijection, not the index-wise pairing") {
+    CHECK(voiceLeadingCost({60, 64, 67}, {67, 60, 64}) == 0);  // a permutation of the same notes
+    CHECK(voiceLeadingCost({60, 64, 67}, {69, 65, 60}) == 3);  // index-wise would be 9 + 1 + 7
+    CHECK(voiceLeadingCost({67, 64, 60}, {60, 65, 69}) == 3);
 }
 
 TEST_CASE("voiceLeadingCost: the best pairing never crosses voices") {
@@ -359,15 +445,88 @@ TEST_CASE("voiceLeadingCost: the best pairing never crosses voices") {
     CHECK(voiceLeadingCost({60, 62, 64}, {61, 63, 65}) == 3);
 }
 
-TEST_CASE("voiceLeadingCost: each missing voice of the shorter voicing is the octave above its lowest note") {
-    // C (60 64 67) -> C7 (60 64 67 70): the padding 72 moves down to 70.
+TEST_CASE("voiceLeadingCost: symmetric and independent of the order the notes are given in") {
+    const Notes c{60, 64, 67};
+    const Notes f{60, 65, 69};
+    CHECK(voiceLeadingCost(f, c) == 3);
+    CHECK(voiceLeadingCost({67, 60, 64}, f) == voiceLeadingCost(c, f));
+    CHECK(voiceLeadingCost(c, {69, 60, 65}) == voiceLeadingCost(c, f));
+    CHECK(voiceLeadingCost({72, 76, 79}, {60, 64, 67}) == 36);
+}
+
+TEST_CASE("voiceLeadingCost: a shorter voicing is padded with its lowest note an octave up") {
+    // C {60 64 67} vs G7 {67 71 74 77}: C becomes {60 64 67 72}; the cheapest bijection is
+    // 60->67 (7), 64->71 (7), 67->74 (7), 72->77 (5) = 26.
+    CHECK(voiceLeadingCost({60, 64, 67}, {67, 71, 74, 77}) == 26);
+    CHECK(voiceLeadingCost({67, 71, 74, 77}, {60, 64, 67}) == 26);  // whichever side is shorter
+    // C vs C7 {60 64 67 70}: the padded 72 moves to 70.
     CHECK(voiceLeadingCost({60, 64, 67}, {60, 64, 67, 70}) == 2);
     CHECK(voiceLeadingCost({60, 64, 67, 70}, {60, 64, 67}) == 2);
-    // C5 (60 67) -> C9 (60 64 67 70 74): padded to 60 67 72 72 72.
-    CHECK(voiceLeadingCost({60, 67}, {60, 64, 67, 70, 74}) == 12);
+    // C vs Cmaj7 {60 64 67 71}: 72 moves to 71.
+    CHECK(voiceLeadingCost({60, 64, 67}, {60, 64, 67, 71}) == 1);
+    // The pad is the lowest note's octave whatever the input order.
+    CHECK(voiceLeadingCost({67, 60, 64}, {60, 64, 67, 71}) == 1);
+    // A voicing whose lowest note is not the root still pads from its lowest note: {64 67 72} + 76.
+    CHECK(voiceLeadingCost({64, 67, 72}, {64, 67, 72, 76}) == 0);
     CHECK(voiceLeadingCost({60, 64, 67}, {64, 67, 72, 76}) == 16);  // 60->64 64->67 67->72, padding 72->76
 }
 
-TEST_CASE("voiceLeadingCost: two empty voicings cost nothing") {
-    CHECK(voiceLeadingCost({}, {}) == 0);
+TEST_CASE("voiceLeadingCost: pads with as many octave doublings as the size difference") {
+    // C5 {60 67} vs C9 {60 64 67 70 74}: C5 becomes {60 67 72 72 72};
+    // 60->60 (0), 67->67 (0), 72->64 (8), 72->70 (2), 72->74 (2) = 12.
+    CHECK(voiceLeadingCost({60, 67}, {60, 64, 67, 70, 74}) == 12);
+    CHECK(voiceLeadingCost({60, 64, 67, 70, 74}, {60, 67}) == 12);
+    CHECK(voiceLeadingCost({60}, {60, 72, 72}) == 0);
+}
+
+TEST_CASE("voiceLeadingCost: is symmetric for every pair of dictionary voicings") {
+    const std::vector<Chord> onC = allChordsOnC();
+    const std::vector<Chord> all = allChords();
+    for (const Chord& a : onC) {
+        for (const Chord& b : all) {
+            CAPTURE(a.type->id);
+            CAPTURE(b.type->id);
+            CAPTURE(b.root);
+            const Notes va = closeVoicing(a);
+            const Notes vb = closeVoicing(b);
+            const int cost = voiceLeadingCost(va, vb);
+            CHECK(cost >= 0);
+            CHECK(voiceLeadingCost(vb, va) == cost);
+        }
+    }
+}
+
+TEST_CASE("voiceLeadingCost: agrees with the sorted matching for same-size voicings") {
+    const std::vector<Chord> onC = allChordsOnC();
+    const std::vector<Chord> all = allChords();
+    for (const Chord& a : onC) {
+        for (const Chord& b : all) {
+            const Notes va = closeVoicing(a);
+            const Notes vb = closeVoicing(b);
+            if (va.size() != vb.size()) {
+                continue;
+            }
+            CAPTURE(a.type->id);
+            CAPTURE(b.type->id);
+            CAPTURE(b.root);
+            CHECK(voiceLeadingCost(va, vb) == sortedMatchingCost(va, vb));
+        }
+    }
+}
+
+TEST_CASE("voiceLeadingCost: agrees with the exhaustive bijection search for every pair of dictionary voicings") {
+    // Across sizes too, so the padding and the sorted pairing are both checked against the contract.
+    const std::vector<Chord> onC = allChordsOnC();
+    const std::vector<Chord> all = allChords();
+    for (const Chord& a : onC) {
+        for (const Chord& b : all) {
+            CAPTURE(a.type->id);
+            CAPTURE(b.type->id);
+            CAPTURE(b.root);
+            const Notes va = closeVoicing(a);
+            const Notes vb = closeVoicing(b);
+            CHECK(voiceLeadingCost(va, vb) == bruteForceCost(va, vb));
+            CHECK(voiceLeadingCost(va, voicing(b, 1, -1)) == bruteForceCost(va, voicing(b, 1, -1)));
+        }
+    }
 }

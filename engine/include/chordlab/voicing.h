@@ -43,12 +43,22 @@ int inversionCount(const Chord& chord);
 /// `highest <= 103`). Anything else is a programmer error: it is ignored and the defaults are used.
 std::vector<int> voicing(const Chord& chord, int inversion, int octave, int lowest = 60, int highest = 96);
 
-/// Voice-leading cost between two voicings: the smallest total displacement, in semitones, over every
-/// pairing of the notes of `from` with the notes of `to`. The shorter voicing is padded to the longer
-/// one's size with the octave above its lowest note, once per missing voice, so that a triad moving to a
-/// seventh pays for the voice that enters. The best pairing never crosses voices, so it is the pairing in
-/// ascending order; the notes may be given in any order. Two empty voicings cost 0; one empty and one not
-/// is a precondition violation.
+/// Upper bound on the number of notes `voiceLeadingCost` (here) and `pcVoiceLeadingCost` (harmony.h)
+/// accept per side. A voicing has one note per chord tone, at most five today (the ninths); six leaves
+/// headroom, and keeps the pitch-class cost's search over every bijection (n!) trivial.
+constexpr int kMaxVoiceLeadingNotes = 6;
+
+/// Cost of moving one concrete voicing onto another: the total displacement, in semitones, of the
+/// cheapest one-to-one pairing of the MIDI notes of `from` with those of `to` (the minimum over every
+/// bijection of the sum of |from[i] - to[j]|). This is the register-aware cost for actual voicings, as
+/// the auto voice-leading of P2-D5 compares them (compiler.h); the smoothness of one chord into another
+/// regardless of register is `pcVoiceLeadingCost` in harmony.h. The order of the notes in either voicing
+/// is irrelevant. When the voicings differ in size, the shorter is first padded up to the longer's size
+/// with its lowest note an octave up (the same doubled note as often as needed), so a triad against a
+/// seventh chord moves three real voices plus one doubled root; the result is therefore symmetric for
+/// any two voicings. The cheapest pairing never crosses voices, so it is the pairing of both voicings in
+/// ascending order. Both voicings are MIDI note numbers (0..127), non-empty, and hold at most
+/// `kMaxVoiceLeadingNotes` notes; anything else is a precondition violation.
 int voiceLeadingCost(const std::vector<int>& from, const std::vector<int>& to);
 
 }  // namespace chordlab
