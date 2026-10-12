@@ -75,12 +75,49 @@
 #include <utility>
 #include <vector>
 
+#include <unistd.h>
+
 #ifdef FRAMEWORK_BUILD
 #import <AUv3Framework/ChordLab-Swift.h>
 #import <AUv3Framework/ChordLab-Shared.h>
 #else
 #import <ChordLab-Swift.h>
 #endif
+
+// MIDI export files and their cleanup
+// -----------------------------------
+// Every export is a new file under NSTemporaryDirectory()/ChordLab with a unique name,
+// ChordLab-<key>-<yyyyMMdd-HHmmss>-<pid>-<counter>-<uuid8>.mid, checked for non-existence before it is
+// written and never rewritten or truncated afterwards: an NSItemProvider handed to the host copies the
+// file lazily, after the drop callback has returned, so a file may back a drag for a while. Nothing is
+// deleted at export time. Cleanup is deferred and age-based only: each export purges files in that folder
+// named ChordLab-*.mid whose modification time is older than kExportMaxAgeSeconds (ten minutes, any
+// instance's), and the destructor purges this instance's own files older than the same age. A file younger
+// than ten minutes is never touched, so any drag or drop in flight is safe, and the OS purges the
+// temporary folder eventually (macOS clears it on reboot and after days without access), so what the
+// purges miss does not accumulate forever.
+namespace
+{
+constexpr double kExportMaxAgeSeconds = 600.0;
+
+// Deletes `path` if its modification time is older than kExportMaxAgeSeconds; a missing file is nothing.
+void RemoveIfStale(NSString* path)
+{
+  NSDictionary* attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:nil];
+  NSDate* modified = attributes ? attributes[NSFileModificationDate] : nil;
+  if (modified && -[modified timeIntervalSinceNow] > kExportMaxAgeSeconds)
+    [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+}
+
+// Purges every stale export in `dir`, whichever instance or process wrote it.
+void PurgeStaleExports(NSString* dir)
+{
+  NSArray<NSString*>* names = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:dir error:nil];
+  for (NSString* name in names)
+    if ([name hasPrefix:@"ChordLab-"] && [name hasSuffix:@".mid"])
+      RemoveIfStale([dir stringByAppendingPathComponent:name]);
+}
+}  // namespace
 
 ChordLab::ChordLab(const InstanceInfo& info)
 : Plugin(info, MakeConfig(kNumParams, kNumPresets))
@@ -96,8 +133,17 @@ ChordLab::ChordLab(const InstanceInfo& info)
 
 ChordLab::~ChordLab()
 {
-  std::lock_guard<std::mutex> guard(mLifeline->mutex);         // waits for a hop in flight; later hops do nothing
-  mLifeline->alive = false;
+  {
+    std::lock_guard<std::mutex> guard(mLifeline->mutex);       // waits for a hop in flight; later hops do nothing
+    mLifeline->alive = false;
+  }
+  // This instance's exports that are old enough to be certainly unused; younger ones stay for the next
+  // purge or the OS (see the cleanup note above). May run off the main thread (AUv3), hence the pool.
+  @autoreleasepool
+  {
+    for (const std::string& path : mExportPaths)
+      RemoveIfStale([NSString stringWithUTF8String:path.c_str()]);
+  }
 }
 
 void* ChordLab::OpenWindow(void* pParent)
@@ -408,6 +454,8 @@ void ChordLab::HandleExport()
   // Main thread, never real-time: compile and the SMF writer allocate. The tempo is the host's as
   // ProcessBlock last saw it (120 before the first block); the export is otherwise exactly the playback
   // content, so a dropped clip is as long as the progression, trailing silence included (D10).
+  @autoreleasepool
+  {
   chordlab::Compiled compiled;
   std::string keyName;
   {
@@ -426,8 +474,10 @@ void ChordLab::HandleExport()
     return;
   }
 
-  // NSTemporaryDirectory()/ChordLab/ChordLab-<key>-<yyyyMMdd-HHmmss>.mid, the key spelled with 's' for a
-  // sharp and '-' for anything but a letter or digit so the name is safe anywhere ("C-Ionian", "Fs-Dorian").
+  // NSTemporaryDirectory()/ChordLab/ChordLab-<key>-<yyyyMMdd-HHmmss>-<pid>-<counter>-<uuid8>.mid, the key
+  // spelled with 's' for a sharp and '-' for anything but a letter or digit so the name is safe anywhere
+  // ("C-Ionian", "Fs-Dorian"); pid, counter and uuid make it unique across instances and processes, and
+  // the name is checked to be unused before anything is written (see the cleanup note above).
   std::string safeKey;
   for (const char c : keyName)
     safeKey += std::isalnum((unsigned char) c) ? c : (c == '#' ? 's' : '-');
@@ -442,19 +492,30 @@ void ChordLab::HandleExport()
     PushError("could not create the export folder");
     return;
   }
-  const std::string path = std::string([dir UTF8String]) + "/ChordLab-" + safeKey + "-" + stamp + ".mid";
+  std::string path;
+  for (int attempt = 0; attempt < 8 && path.empty(); ++attempt)
+  {
+    NSString* uuid = [[[NSUUID UUID] UUIDString] substringToIndex:8];
+    std::string candidate = std::string([dir UTF8String]) + "/ChordLab-" + safeKey + "-" + stamp + "-" +
+                            std::to_string(getpid()) + "-" + std::to_string(++mExportCounter) + "-" + [uuid UTF8String] + ".mid";
+    if (![[NSFileManager defaultManager] fileExistsAtPath:[NSString stringWithUTF8String:candidate.c_str()]])
+      path = std::move(candidate);                             // never an existing file: nothing is ever rewritten
+  }
+  if (path.empty())
+  {
+    PushError("could not name the MIDI file");
+    return;
+  }
   if (!chordlab::writeFile(path, bytes))
   {
     PushError("could not write the MIDI file");
     return;
   }
-  // The previous export goes now, never the one just written: Live reads a dropped file after the drop
-  // callback has returned, so deleting in that callback would hand it a missing file. Two exports within
-  // one second share a name and the second simply replaces the first in place.
-  if (!mLastExportPath.empty() && mLastExportPath != path)
-    [[NSFileManager defaultManager] removeItemAtPath:[NSString stringWithUTF8String:mLastExportPath.c_str()] error:nil];
-  mLastExportPath = path;
+  mExportPaths.push_back(path);
+  mLastExportPath = path;                                        // for the UI only: nothing is deleted on its account
+  PurgeStaleExports(dir);                                        // deferred cleanup: ten-minute-old files of any instance
   PushExportReady(path);
+  }
 }
 
 void ChordLab::RebuildPaletteLocked()

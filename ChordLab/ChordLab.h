@@ -19,6 +19,7 @@
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <vector>
 
 using namespace iplug;
 
@@ -66,9 +67,10 @@ private:
   void PushStatus(uint32_t incompleteBlocks);
   // Main thread: pushes {"schema":1,"ppq":ppq,"playing":playing} (the playhead) to the editor.
   void PushTransport(double ppq, bool playing);
-  // Main thread: compiles the document, writes it as a format 0 MIDI file in the temporary directory at
-  // the host's tempo and pushes kMsgTagExportReady with the path, or kMsgTagError. The previous export is
-  // deleted then, never the one just written (the host reads a dropped file after the drop returns).
+  // Main thread: compiles the document, writes it as a format 0 MIDI file under a unique, never-reused
+  // name in the temporary directory at the host's tempo and pushes kMsgTagExportReady with the path, or
+  // kMsgTagError. Nothing is rewritten or deleted here except exports older than ten minutes (see the
+  // cleanup note in ChordLab.mm).
   void HandleExport();
   // Main thread: pushes {"schema":1,"path":path} to the editor.
   void PushExportReady(const std::string& path);
@@ -116,7 +118,9 @@ private:
   std::atomic<bool> mTransportPlaying{false};
   // The host tempo as ProcessBlock last saw it, for the MIDI export; 120 until the first block.
   std::atomic<double> mHostBpm{120.0};
-  std::string mLastExportPath;                                 // main thread: deleted by the next export
+  std::string mLastExportPath;                                 // main thread: the path the UI was last given
+  std::vector<std::string> mExportPaths;                       // main thread: this instance's exports, for the destructor's cleanup
+  uint32_t mExportCounter = 0;                                 // main thread: part of every export's unique name
   static constexpr std::chrono::milliseconds kTransportPushInterval{67};   // at most ~15 Hz
   std::chrono::steady_clock::time_point mLastTransportPush{};               // main thread
   double mPushedPpq = std::numeric_limits<double>::quiet_NaN();              // main thread; NaN: nothing pushed yet
