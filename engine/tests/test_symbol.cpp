@@ -84,8 +84,8 @@ TEST_CASE("chordSymbol: root spelling follows the spelling key") {
     CHECK(chordSymbol(chord(Fs, "maj"), key('G', 0, Mode::Ionian)) == "F#");
     CHECK(chordSymbol(chord(Fs, "maj"), key('E', -1, Mode::Ionian)) == "Gb");
     CHECK(chordSymbol(chord(Fs, "dim"), key('E', -1, Mode::Ionian), SymbolStyle::Standard) == "Gb°");
-    // Chromatic roots follow the parallel-major degree table, so symbol and numeral agree on the
-    // accidental: Bb in D major is bVI, not A#.
+    // Chromatic roots take the letter of the parallel-major degree they alter: Bb in D major is the
+    // lowered sixth, not A#.
     CHECK(chordSymbol(chord(Bb, "maj"), key('D', 0, Mode::Ionian)) == "Bb");
     CHECK(chordSymbol(chord(Db, "maj"), kCIonian) == "Db");
     CHECK(chordSymbol(chord(Fs, "dim"), kCIonian) == "F#mb5");
@@ -199,6 +199,36 @@ TEST_CASE("romanNumeral: every mode is read against the parallel major, not its 
     CHECK(romanNumeral(chord(E, "7"), aHarmonicMinor, SymbolStyle::Standard) == "V7");
 
     CHECK(romanNumeral(chord(G, "maj"), key('C', 0, Mode::Locrian), SymbolStyle::Standard) == "V");
+}
+
+// --- Symbol accidental vs numeral alteration ------------------------------------------------
+
+TEST_CASE("chordSymbol and romanNumeral: the symbol's accidental is letter-relative, the numeral's key-relative") {
+    // Both pick the root's letter and degree from the same parallel-major table, but the numeral
+    // measures its alteration from the key's own degree (G in E major sits a semitone under G#: bIII)
+    // while the symbol shows only the accidental on its letter (G, none), and white-key folding
+    // (Cb -> B, Fb -> E, E# -> F) removes symbol accidentals the numeral keeps.
+    const Key eMajor = key('E', 0, Mode::Ionian);
+    CHECK(chordSymbol(chord(G, "maj"), eMajor, SymbolStyle::Standard) == "G");
+    CHECK(romanNumeral(chord(G, "maj"), eMajor, SymbolStyle::Standard) == "bIII");
+    CHECK(chordSymbol(chord(Bb, "dim"), eMajor, SymbolStyle::Standard) == "A#°");
+    CHECK(romanNumeral(chord(Bb, "dim"), eMajor, SymbolStyle::Standard) == "#iv°");
+
+    const Key aFlatMajor = key('A', -1, Mode::Ionian);
+    CHECK(chordSymbol(chord(B, "maj"), aFlatMajor, SymbolStyle::Standard) == "B");  // Cb folded
+    CHECK(romanNumeral(chord(B, "maj"), aFlatMajor, SymbolStyle::Standard) == "bIII");
+    CHECK(chordSymbol(chord(E, "maj"), aFlatMajor, SymbolStyle::Standard) == "E");  // Fb folded
+    CHECK(romanNumeral(chord(E, "maj"), aFlatMajor, SymbolStyle::Standard) == "bVI");
+
+    const Key bMajor = key('B', 0, Mode::Ionian);
+    CHECK(chordSymbol(chord(F, "dim"), bMajor, SymbolStyle::Standard) == "F°");  // E# folded
+    CHECK(romanNumeral(chord(F, "dim"), bMajor, SymbolStyle::Standard) == "#iv°");
+
+    // With a natural tonic every major degree is natural, so in C major the two coincide.
+    CHECK(chordSymbol(chord(Db, "maj"), kCIonian, SymbolStyle::Standard) == "Db");
+    CHECK(romanNumeral(chord(Db, "maj"), kCIonian, SymbolStyle::Standard) == "bII");
+    CHECK(chordSymbol(chord(Fs, "dim"), kCIonian, SymbolStyle::Standard) == "F#°");
+    CHECK(romanNumeral(chord(Fs, "dim"), kCIonian, SymbolStyle::Standard) == "#iv°");
 }
 
 // --- Suffix tables ---------------------------------------------------------------------
