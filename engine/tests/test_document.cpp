@@ -721,6 +721,26 @@ TEST_CASE("undo: history is capped at kMaxUndoDepth, dropping the oldest snapsho
     CHECK(store.doc().events.size() == 250);
 }
 
+// --- replace ---------------------------------------------------------------------------
+
+TEST_CASE("replace: swaps in a document, resets the id counter and clears the whole history") {
+    DocumentStore store = threeChords();
+    REQUIRE(store.undo());  // one undo entry left, one redo entry
+
+    Document doc;
+    doc.projectKey = key('D', 0, Mode::Dorian);
+    doc.browsedKey = key('G', 0, Mode::Ionian);
+    doc.progressionLoop = false;
+    doc.events.push_back(ChordEvent{7, kC, 2.0, 90});
+    store.replace(doc, 8);
+
+    CHECK(store.doc() == doc);  // live state included: replace is a load, not an edit
+    CHECK_FALSE(store.undo());
+    CHECK_FALSE(store.redo());
+    CHECK(store.appendChord(kF) == 8);
+    CHECK(store.findIndex(7) == 0);
+}
+
 // --- Property test ---------------------------------------------------------------------
 
 // The engine is seeded, but what `std::uniform_int_distribution` / `std::uniform_real_distribution` make

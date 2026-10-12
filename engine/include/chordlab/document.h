@@ -135,6 +135,18 @@ public:
     /// nothing, when there is nothing to redo.
     bool redo();
 
+    /// Replaces the whole document, live state included, and restarts the id counter at `nextId`: what a
+    /// load does. Clears the undo and redo history and changes nothing else.
+    /// `doc` must satisfy the store's invariants (valid chords and keys, finite lengths within
+    /// [kMinLengthBeats, kMaxLengthBeats], velocities within [kMinVelocity, kMaxVelocity], distinct ids)
+    /// and `nextId` must be >= 1 and greater than every event id, so that ids stay unique. Callers that
+    /// take documents from outside the process (`loadStateJson`) validate before calling.
+    void replace(Document doc, int nextId);
+
+    /// The id the next successful append will get. Persisted by `stateJson` so that a reloaded document
+    /// keeps handing out fresh ids.
+    int nextId() const;
+
     /// Position of event `id` in playback order, or -1 if no event has that id.
     int findIndex(int id) const;
 

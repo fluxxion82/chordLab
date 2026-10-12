@@ -5,6 +5,7 @@
 #include <climits>
 #include <cmath>
 #include <cstddef>
+#include <set>
 #include <utility>
 
 namespace chordlab {
@@ -51,6 +52,17 @@ void assertValidKey([[maybe_unused]] const Key& key) {
     assert(static_cast<int>(key.mode) >= 0 && static_cast<int>(key.mode) < kNumModes);
 }
 
+/// True when no two events of `doc` share an id. Debug-only, for `replace`'s precondition check.
+[[maybe_unused]] bool idsAreDistinct(const Document& doc) {
+    std::set<int> seen;
+    for (const ChordEvent& e : doc.events) {
+        if (!seen.insert(e.id).second) {
+            return false;
+        }
+    }
+    return true;
+}
+
 /// Copies the live (non-undoable) fields of `current` into `target`, so that restoring a snapshot keeps
 /// the browsed key and the transport toggles as they are now.
 void keepLiveState(Document& target, const Document& current) {
@@ -67,6 +79,27 @@ DocumentStore::DocumentStore(int firstId) : nextId_(firstId) {
 
 const Document& DocumentStore::doc() const {
     return doc_;
+}
+
+void DocumentStore::replace(Document doc, int nextId) {
+    assertValidKey(doc.projectKey);
+    assertValidKey(doc.browsedKey);
+    assert(nextId >= 1);
+    for ([[maybe_unused]] const ChordEvent& e : doc.events) {
+        assertValidChord(e.chord);
+        assert(std::isfinite(e.lengthBeats) && e.lengthBeats >= kMinLengthBeats && e.lengthBeats <= kMaxLengthBeats);
+        assert(e.velocity >= kMinVelocity && e.velocity <= kMaxVelocity);
+        assert(e.id >= 1 && e.id < nextId);
+    }
+    assert(idsAreDistinct(doc));
+    doc_ = std::move(doc);
+    undoStack_.clear();
+    redoStack_.clear();
+    nextId_ = nextId;
+}
+
+int DocumentStore::nextId() const {
+    return nextId_;
 }
 
 int DocumentStore::findIndex(int id) const {
