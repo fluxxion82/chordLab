@@ -161,6 +161,7 @@ TEST_CASE("snapshot: appendChord yields one event spelled and numbered in the pr
     CHECK(e.at("type") == "maj");
     CHECK(e.at("symbol") == "C");
     CHECK(e.at("roman") == "I");
+    CHECK(e.at("family") == "Major");
     CHECK(e.at("startBeat").get<double>() == 0.0);
     CHECK(e.at("lengthBeats").get<double>() == 4.0);
     CHECK(e.at("velocity") == 100);
@@ -183,6 +184,7 @@ TEST_CASE("snapshot: start beats accumulate and symbols follow the project key, 
     CHECK(e.at("id") == 2);
     CHECK(e.at("symbol") == "Eb");  // chromatic in F major: bVII by the parallel-major degree table; D# in the browsed key
     CHECK(e.at("roman") == "bVII");
+    CHECK(e.at("family") == "Major");
     CHECK(e.at("startBeat").get<double>() == 4.0);
     CHECK(e.at("lengthBeats").get<double>() == 2.5);
     CHECK(e.at("velocity") == 80);

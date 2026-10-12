@@ -724,6 +724,7 @@ std::string snapshotJson(const Document& doc, const Palette& palette) {
                       {"type", e.chord.type->id},
                       {"symbol", chordSymbol(e.chord, doc.projectKey)},
                       {"roman", romanNumeral(e.chord, doc.projectKey)},
+                      {"family", familyName(e.chord.type->family)},
                       {"startBeat", beat},
                       {"lengthBeats", e.lengthBeats},
                       {"velocity", e.velocity},

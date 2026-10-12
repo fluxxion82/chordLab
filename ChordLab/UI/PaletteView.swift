@@ -4,7 +4,10 @@ import SwiftUI
 /// tier 0 (power chords) at the bottom and higher tiers above. A degree with no chord in a tier leaves
 /// an empty slot so the columns stay aligned. Everything shown comes from the snapshot. Pressing a cell
 /// previews its voicing through `ChordLabState.pressCell` / `releaseCell` (press, release, cancel and
-/// disappearance are all handled by `PressAction`).
+/// disappearance are all handled by `PressAction`); dragging a cell carries a `ChordRef` to the
+/// sequence bar. The press is a simultaneous gesture under `.draggable`: the preview starts on mouse
+/// down, and when AppKit begins the drag session the press gesture is cancelled (its `@GestureState`
+/// resets), which releases the preview; a press that never moves far enough simply releases on mouse up.
 struct PaletteView: View {
   @EnvironmentObject var state: ChordLabState
   @AppStorage(LabelMode.storageKey) private var labelMode: LabelMode = .both
@@ -31,6 +34,9 @@ struct PaletteView: View {
                                     isPressed: state.heldCellId == cell.id)
                       .pressAction(onPress: { state.pressCell(cell) },
                                    onRelease: { state.releaseCell(cell) })
+                      .draggable(ChordRef(root: cell.root, type: cell.type)) {
+                        ChordDragPreview(cell: cell, labelMode: labelMode)
+                      }
                   } else {
                     Color.clear.frame(width: cellSize, height: cellSize)
                   }
@@ -136,6 +142,34 @@ struct PaletteCellView: View {
     .popover(isPresented: $showDetails, arrowEdge: .top) {
       ChordDetailView(cell: cell).padding(12)
     }
+  }
+}
+
+/// What travels under the mouse while a cell is dragged to the sequence bar: a compact block in the
+/// cell's colour with the label the cell shows.
+struct ChordDragPreview: View {
+  let cell: CellJSON
+  let labelMode: LabelMode
+
+  var body: some View {
+    let color = PaletteCellView.color(family: cell.family)
+    ZStack {
+      if cell.filled {
+        RoundedRectangle(cornerRadius: 6).fill(color)
+      } else {
+        RoundedRectangle(cornerRadius: 6).strokeBorder(color, lineWidth: 2)
+      }
+      VStack(spacing: 1) {
+        if labelMode != .numerals {
+          Text(ChordSymbol.glyphs(cell.symbol)).font(.system(size: 13, weight: .medium))
+        }
+        if labelMode != .names {
+          Text(ChordSymbol.glyphs(cell.roman)).font(.system(size: 11)).opacity(labelMode == .both ? 0.85 : 1)
+        }
+      }
+      .foregroundStyle(.white)
+    }
+    .frame(width: 4 * SequenceBarView.pxPerBeat, height: SequenceBarView.blockHeight)   // a 4-beat block
   }
 }
 

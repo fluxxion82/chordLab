@@ -14,7 +14,9 @@ enum LabelMode: String, CaseIterable, Identifiable {
   }
 }
 
-/// Project key pickers (tonic, mode), browsed-key steppers with home, and the label-mode toggle.
+/// Project key pickers (tonic, mode), browsed-key steppers with home, undo/redo (⌘Z / ⇧⌘Z, as
+/// keyboard shortcuts on the buttons so they work whatever has focus; a host may swallow them before the
+/// plug-in sees them, a Live check) and the label-mode toggle.
 /// Everything shown comes from the snapshot (the pickers' items are its `modes` and `tonics` tables);
 /// every change is a command to the plugin. Without the tables (an older plug-in build) the pickers are
 /// disabled placeholders and ContentView says so.
@@ -54,6 +56,7 @@ struct KeyBarView: View {
         projectKeyControls
         browseControls
         Spacer(minLength: 0)
+        historyControls
         labelModeControl
       }
       VStack(alignment: .leading, spacing: 8) {
@@ -62,7 +65,10 @@ struct KeyBarView: View {
           Spacer(minLength: 0)
           browseControls
         }
-        labelModeControl
+        HStack(spacing: 16) {
+          historyControls
+          labelModeControl
+        }
       }
     }
     .font(.body)
@@ -110,6 +116,19 @@ struct KeyBarView: View {
         .accessibilityLabel("Browse a fifth up")
       Button("Home") { state.send(command: ["cmd": "browseKey", "home": true]) }
         .accessibilityLabel("Browse the project key")
+    }
+  }
+
+  private var historyControls: some View {
+    HStack(spacing: 4) {
+      Button { state.send(command: ["cmd": "undo"]) } label: { Image(systemName: "arrow.uturn.backward") }
+        .keyboardShortcut("z", modifiers: .command)
+        .help("Undo (⌘Z)")
+        .accessibilityLabel("Undo")
+      Button { state.send(command: ["cmd": "redo"]) } label: { Image(systemName: "arrow.uturn.forward") }
+        .keyboardShortcut("z", modifiers: [.command, .shift])
+        .help("Redo (⇧⌘Z)")
+        .accessibilityLabel("Redo")
     }
   }
 

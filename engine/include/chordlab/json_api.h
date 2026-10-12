@@ -66,7 +66,7 @@ constexpr int kMaxJsonDepth = 64;
 ///           "MelodicMinor"],
 ///  "tonics":{"Ionian":[{"letter":"C","alter":0,"text":"C"},{"letter":"D","alter":-1,"text":"Db"}, ...],
 ///            "Dorian":[...], ...},
-///  "events":[{"id":1,"root":0,"type":"maj","symbol":"C","roman":"I","startBeat":0.0,
+///  "events":[{"id":1,"root":0,"type":"maj","symbol":"C","roman":"I","family":"Major","startBeat":0.0,
 ///             "lengthBeats":4.0,"velocity":100,"voicing":[60,64,67],"outOfKey":[]}, ...],
 ///  "palette":{"tiers":5,
 ///             "cells":[{"degree":0,"tier":1,"root":0,"type":"maj","symbol":"C","roman":"I",
@@ -74,9 +74,10 @@ constexpr int kMaxJsonDepth = 64;
 /// ```
 /// Events are in playback order with `startBeat` accumulated as `Document::startBeatOf` does; `symbol` is
 /// the Klimper-style symbol spelled in the project key, `roman` the Standard-style numeral relative to the
-/// project key, `voicing` the default `closeVoicing`. Palette cells carry the palette's own `symbol`
-/// (spelled in the browsed key) and `roman`, the type's `family` ("Major", "Minor" or "Other") and the
-/// same `voicing`, in the palette's order.
+/// project key, `voicing` the default `closeVoicing`, `family` the type's family ("Major", "Minor" or
+/// "Other", the sequence bar's colour; additive, no schema bump). Palette cells carry the palette's own
+/// `symbol` (spelled in the browsed key) and `roman`, the same `family` and the same `voicing`, in the
+/// palette's order.
 /// `outOfKey`, on events and cells alike, is the chord's pitch classes that are not in the project key's
 /// scale, ascending and without repeats: what a hover popover lists as borrowed notes. It is empty
 /// exactly when a cell is `filled`.

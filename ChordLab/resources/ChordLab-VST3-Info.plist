@@ -26,5 +26,18 @@
 	<true/>
 	<key>LSMinimumSystemVersion</key>
 	<string>11.0</string>
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>ChordLab chord</string>
+			<key>UTTypeIdentifier</key>
+			<string>com.sterlingalbury.chordlab.chord</string>
+		</dict>
+	</array>
 </dict>
 </plist>

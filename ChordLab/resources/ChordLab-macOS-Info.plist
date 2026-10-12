@@ -36,5 +36,18 @@
 	<string>This app needs mic access to process audio.</string>
 	<key>NSPrincipalClass</key>
 	<string>SWELLApplication</string>
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>ChordLab chord</string>
+			<key>UTTypeIdentifier</key>
+			<string>com.sterlingalbury.chordlab.chord</string>
+		</dict>
+	</array>
 </dict>
 </plist>

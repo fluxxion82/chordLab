@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// Key bar over the palette grid, with a temporary status line and the Spike 3 drag-out label along the
-/// bottom until M3/M4 replace them.
+/// Key bar, sequence bar and palette grid, with a temporary status line and the Spike 3 drag-out label
+/// along the bottom until M3/M4 replace them.
 struct ContentView: View {
   @EnvironmentObject var state: ChordLabState
 
@@ -10,6 +10,8 @@ struct ContentView: View {
       PaletteView.background
       VStack(spacing: 12) {
         KeyBarView()
+
+        SequenceBarView()
 
         PaletteView()
 

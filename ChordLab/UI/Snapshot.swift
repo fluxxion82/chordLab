@@ -26,14 +26,16 @@ struct KeyJSON: Codable, Equatable {
 }
 
 /// One chord of the progression, in playback order. `symbol` and `roman` are spelled in the project key;
-/// `voicing` is the default close voicing as MIDI note numbers; `outOfKey` the chord's pitch classes
-/// outside the project key's scale (ascending, no repeats; absent from older plug-in builds).
+/// `family` is the type's "Major", "Minor" or "Other" (the sequence bar's colour); `voicing` is the
+/// default close voicing as MIDI note numbers; `outOfKey` the chord's pitch classes outside the project
+/// key's scale (ascending, no repeats). `family` and `outOfKey` are absent from older plug-in builds.
 struct EventJSON: Codable, Equatable, Identifiable {
   let id: Int
   let root: Int
   let type: String
   let symbol: String
   let roman: String
+  let family: String?
   let startBeat: Double
   let lengthBeats: Double
   let velocity: Int
