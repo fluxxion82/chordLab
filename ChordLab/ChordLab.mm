@@ -33,9 +33,9 @@
 // preview stays armed and is released once blocks run again.
 //
 // Playback snapshots: the audio thread never reads the document; it plays a compiled copy. After every
-// accepted command and every state load (and once at construction), PublishSnapshotLocked compiles the
-// document under mModelMutex into the back slot of a chordlab::TripleBuffer (three preallocated slots of
-// kMaxSnapshotEvents NoteEvents) and publishes it with a fresh generation; ProcessBlock acquires the newest
+// accepted command and every state load (and once at construction), PublishSnapshotLocked runs
+// chordlab::fillSlot under mModelMutex on the back slot of a chordlab::TripleBuffer (three preallocated
+// chordlab::SnapshotSlots) and publishes it when anything changed; ProcessBlock acquires the newest
 // publish at the top of the block and calls Scheduler::adopt with a Snapshot that points into the front
 // slot. The buffer guarantees the front slot is not written until the next acquire, and the scheduler
 // never reads the previous array once the adopt that replaces it is entered (Snapshot in scheduler.h),
@@ -44,10 +44,12 @@
 // commands, the host's state thread for UnserializeState); the consumer side belongs to ProcessBlock.
 // Rapid edits coalesce: an unacquired publish is simply replaced by the next. The generation only moves
 // when the compiled content moved, so a browsed-key change or a followHost toggle does not make the
-// scheduler flush and re-chase the sounding chord. followHost itself travels as an atomic the same
-// publisher stores (mFollowHost) and ProcessBlock ANDs into BlockInfo.playing. The other way, ProcessBlock
-// stores the block's host position and playing flag in atomics (mTransportPpq, mTransportPlaying) and
-// OnIdle, on the main thread, pushes them to the editor as the playhead at ~15 Hz when they change.
+// scheduler flush and re-chase the sounding chord. followHost travels inside the slot, outside the
+// generation (publication.h): ProcessBlock ANDs the acquired slot's flag into BlockInfo.playing, so the
+// progression and the gate that was saved with it always arrive together (a separate atomic could let a
+// block chase an old progression with a newly loaded flag). The other way, ProcessBlock stores the
+// block's host position and playing flag in atomics (mTransportPpq, mTransportPlaying) and OnIdle, on
+// the main thread, pushes them to the editor as the playhead at ~15 Hz when they change.
 //
 // The Cocoa view controller: ARC is off for this file. OpenWindow's alloc/init returns the controller
 // at +1 and CocoaEditorDelegate::CloseWindow only forgets the pointer, so CloseWindow here releases it.
@@ -189,14 +191,18 @@ void ChordLab::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
   // The newest published progression, if any arrived since the last block. The pointer stays valid and
   // unchanged until the next acquire, which is the next block's, after which the scheduler no longer
   // reads it (Scheduler::adopt); a changed generation makes the scheduler release and re-chase.
-  if (const SnapshotSlot* s = mSnapshots.acquire())
+  if (const chordlab::SnapshotSlot* s = mSnapshots.acquire())
     mScheduler.adopt(chordlab::Snapshot{s->events.data(), s->count, s->endBeat, s->loop, mSnapshots.currentGeneration()});
 
   // Follow Live gates the progression only: previews are independent of the transport, and the scheduler
-  // releases the progression on the playing -> stopped edge, so turning it off mid-chord is clean.
+  // releases the progression on the playing -> stopped edge, so turning it off mid-chord is clean. The
+  // flag comes from the slot the scheduler is playing (the front slot; the document's default before the
+  // first acquire), never from somewhere the progression could outrun.
+  const chordlab::SnapshotSlot* front = mSnapshots.current();
+  const bool followHost = front ? front->followHost : true;
   const double ppq = GetPPQPos();
   const double bpm = GetTempo();
-  const bool playing = GetTransportIsRunning() && mFollowHost.load(std::memory_order_relaxed);
+  const bool playing = GetTransportIsRunning() && followHost;
   const chordlab::BlockInfo block{ppq, nFrames, GetSampleRate(), bpm, playing};
   mTransportPpq.store(ppq, std::memory_order_relaxed);             // the playhead, read by OnIdle
   mTransportPlaying.store(playing, std::memory_order_relaxed);
@@ -249,9 +255,12 @@ void ChordLab::OnIdle()
     if (now - mLastTransportPush >= kTransportPushInterval)
     {
       double ppq = mTransportPpq.load(std::memory_order_relaxed);
+      bool playing = mTransportPlaying.load(std::memory_order_relaxed);
       if (!std::isfinite(ppq))
-        ppq = 0.0;                                               // nlohmann would write null for NaN or inf
-      const bool playing = mTransportPlaying.load(std::memory_order_relaxed);
+      {
+        ppq = 0.0;                                               // nlohmann would write null for NaN or inf...
+        playing = false;                                         // ...and an unusable position hides the playhead
+      }
       if (!(std::fabs(ppq - mPushedPpq) <= 1e-6) || playing != mPushedPlaying)
       {
         mLastTransportPush = now;
@@ -458,27 +467,10 @@ void ChordLab::PublishSnapshotLocked()
 {
   // Caller holds mModelMutex: that serializes the producer side of mSnapshots across the main thread and
   // the hosts' state threads (the mutex hand-off orders one publish before the next). Never the audio
-  // thread: compile allocates.
-  const chordlab::Document& doc = mStore.doc();
-  mFollowHost.store(doc.followHost, std::memory_order_relaxed);  // live state, not part of the snapshot
-  chordlab::Compiled compiled = chordlab::compile(doc);
-  const bool unchanged = mGeneration != 0 && compiled.events == mPublished.events &&
-                         compiled.endBeat == mPublished.endBeat && doc.progressionLoop == mPublishedLoop;
-  if (unchanged)
-    return;                                                      // same content: no new generation, no flush
-
-  SnapshotSlot& slot = mSnapshots.beginWrite();
-  // kMaxChords bounds a compiled document to kMaxSnapshotEvents (document.h); a snapshot that did not fit
-  // would be adopted as empty by the scheduler anyway, so publish it as empty rather than truncated.
-  const bool fits = compiled.events.size() <= slot.events.size();
-  assert(fits && "a compiled document must fit one snapshot slot");
-  slot.count = fits ? compiled.events.size() : 0;
-  std::copy_n(compiled.events.begin(), slot.count, slot.events.begin());
-  slot.endBeat = fits ? compiled.endBeat : 0.0;
-  slot.loop = doc.progressionLoop;
-  mSnapshots.publish(++mGeneration);
-  mPublished = std::move(compiled);
-  mPublishedLoop = doc.progressionLoop;
+  // thread: fillSlot compiles, which allocates. fillSlot decides what counts as a change and whether the
+  // generation moves (content yes, followHost no); an unchanged document publishes nothing.
+  if (chordlab::fillSlot(mStore.doc(), mSnapshots.beginWrite(), mPublication))
+    mSnapshots.publish(mPublication.generation);
 }
 
 void ChordLab::OnMain(std::function<void()> fn)

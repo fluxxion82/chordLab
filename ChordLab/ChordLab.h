@@ -2,9 +2,9 @@
 
 #include "IPlug_include_in_plug_hdr.h"
 
-#include "chordlab/compiler.h"
 #include "chordlab/document.h"
 #include "chordlab/palette.h"
+#include "chordlab/publication.h"
 #include "chordlab/scheduler.h"
 #include "chordlab/triple_buffer.h"
 
@@ -48,9 +48,9 @@ private:
   // Palette of the browsed key annotated against the project key; call after anything that may have
   // changed either key (commands, undo/redo, a state load). The caller holds mModelMutex.
   void RebuildPaletteLocked();
-  // Compiles the document and, when the playback content changed, publishes it to the audio thread with a
-  // new generation (see "Playback snapshots" in ChordLab.mm). Call after every accepted command and
-  // state load. The caller holds mModelMutex, which is what makes it a single producer.
+  // Compiles the document and, when anything a slot carries changed (content or followHost), publishes
+  // it to the audio thread (see "Playback snapshots" in ChordLab.mm). Call after every accepted command
+  // and state load. The caller holds mModelMutex, which is what makes it a single producer.
   void PublishSnapshotLocked();
   // Pushes snapshotJson(doc, palette) to the editor, on the main thread; a no-op when no editor is open.
   void PushSnapshot();
@@ -82,33 +82,17 @@ private:
   chordlab::DocumentStore mStore;
   chordlab::Palette mPalette;
 
-  // Playback snapshots. PublishSnapshotLocked (the producer, under mModelMutex) compiles the document
-  // into the back slot of mSnapshots and publishes it; ProcessBlock (the consumer) acquires the newest one
-  // at the top of every block and hands the scheduler a Snapshot pointing into the front slot, which the
-  // triple buffer keeps unmodified until the next acquire: exactly the lifetime adopt requires. Every slot
-  // is preallocated, so the handoff never allocates, locks or blocks either thread. mGeneration is bumped
-  // on every publish and a publish happens only when the compiled content (events, endBeat or loop)
-  // differs from the last one, so the scheduler's rule "same generation, same content" holds and a
-  // command that leaves playback alone (browseKey, setFollowHost) causes no flush. mPublished keeps the
-  // last published content for that comparison; it belongs to the producer.
-  // Plain aggregate on purpose: a default member initializer here would make the nested type's
-  // implicit constructor unusable until ChordLab is complete, and TripleBuffer asserts on it when the
-  // member below is declared. The buffer value-initializes the slots and the producer writes every field.
-  struct SnapshotSlot
-  {
-    std::array<chordlab::NoteEvent, chordlab::kMaxSnapshotEvents> events;
-    std::size_t count;
-    double endBeat;
-    bool loop;
-  };
-  chordlab::TripleBuffer<SnapshotSlot> mSnapshots;
-  uint32_t mGeneration = 0;                                    // producer: 0 until the first publish
-  chordlab::Compiled mPublished;                               // producer: the content of generation mGeneration
-  bool mPublishedLoop = true;
-  // followHost, stored by PublishSnapshotLocked (so by every command and load) for ProcessBlock, which
-  // gates the progression with it: off means BlockInfo.playing is false whatever the host transport does,
-  // so the progression is silent (released on the edge by the scheduler) while previews go on.
-  std::atomic<bool> mFollowHost{true};
+  // Playback snapshots. PublishSnapshotLocked (the producer, under mModelMutex) runs chordlab::fillSlot
+  // on the back slot of mSnapshots and publishes it when anything changed; ProcessBlock (the consumer)
+  // acquires the newest slot at the top of every block and hands the scheduler a Snapshot pointing into
+  // it, which the triple buffer keeps unmodified until the next acquire: exactly the lifetime adopt
+  // requires. Every slot is preallocated, so the handoff never allocates, locks or blocks either thread.
+  // The generation (mPublication.generation) moves only with the content, so the scheduler's rule "same
+  // generation, same content" holds; followHost travels in the slot outside the generation, so a block
+  // always gates the progression it is playing with the flag that was saved with it, and a follow-only
+  // change costs the scheduler nothing (publication.h). mPublication belongs to the producer.
+  chordlab::TripleBuffer<chordlab::SnapshotSlot> mSnapshots;
+  chordlab::Publication mPublication;
 
   // The scheduler belongs to the audio thread (process, reset, panic); pushPreview is its one other-thread
   // entry and is called from the main thread only (OnMessage, CloseWindow). OnReset and panic requests
@@ -133,7 +117,7 @@ private:
   // The host tempo as ProcessBlock last saw it, for the MIDI export; 120 until the first block.
   std::atomic<double> mHostBpm{120.0};
   std::string mLastExportPath;                                 // main thread: deleted by the next export
-  static constexpr std::chrono::milliseconds kTransportPushInterval{66};   // ~15 Hz
+  static constexpr std::chrono::milliseconds kTransportPushInterval{67};   // at most ~15 Hz
   std::chrono::steady_clock::time_point mLastTransportPush{};               // main thread
   double mPushedPpq = std::numeric_limits<double>::quiet_NaN();              // main thread; NaN: nothing pushed yet
   bool mPushedPlaying = false;                                              // main thread

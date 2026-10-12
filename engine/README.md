@@ -7,8 +7,8 @@ exercised by a doctest suite.
 
 ```
 include/chordlab/   public headers, one per module (pitch, scale, chord, symbol, relations, voicing,
-                    palette, document, compiler, note_event, limits, scheduler, triple_buffer, smf,
-                    json_api)
+                    palette, document, compiler, note_event, limits, scheduler, triple_buffer,
+                    publication, smf, json_api)
 src/                the matching implementations
 tests/              doctest suite (tests/doctest.h is the vendored framework), one file per module;
                     tests/rt_alloc/ is a second executable that counts allocations (see below)
@@ -64,7 +64,11 @@ the next `adopt`, which never reads it (see `Snapshot` in `scheduler.h`). `kMaxC
 that a compiled snapshot always fits `kMaxSnapshotEvents` (`limits.h`). `TripleBuffer<T>`
 (`triple_buffer.h`) is the handoff that satisfies that lifetime rule without a lock: the producer fills
 and publishes preallocated slots, the consumer acquires the latest one per block, and the slot it holds
-is never written until its next acquire.
+is never written until its next acquire. `publication.h` is the producer's half as the plug-in uses it:
+`SnapshotSlot` (the compiled content plus `followHost`, the plug-in's transport gate, which travels with
+the progression it belongs to) and `fillSlot`, which compiles, compares with the last publication and
+fills a slot only when something changed, bumping the generation for content and keeping it for a
+follow-only change.
 
 ## Threading contract
 
