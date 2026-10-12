@@ -6,7 +6,7 @@ exercised by a doctest suite.
 ## Layout
 
 ```
-include/chordlab/   public headers, one per module (pitch, scale, chord, symbol, function, relations, voicing,
+include/chordlab/   public headers, one per module (pitch, scale, chord, symbol, function, applied, relations, voicing,
                     palette, document, compiler, note_event, limits, scheduler, triple_buffer,
                     publication, smf, json_api)
 src/                the matching implementations

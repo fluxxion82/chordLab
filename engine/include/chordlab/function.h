@@ -43,7 +43,7 @@ const char* functionShortName(Function function);
 ///       also the major V and V7 of a minor key (V/i). One exception: without a minor seventh, a chord
 ///       whose target would be the subtonic (bVII, a minor seventh above the tonic) is read as the
 ///       borrowed IV of its minor-family key under rule d (`D` in A minor is Dorian's IV, not V/VII);
-///       with the seventh it is V7/VII.
+///       with the seventh it is V7/VII, as `appliedChords` (applied.h) lists it.
 ///    b. applied leading-tone: a chord with a minor third and a diminished fifth (`dim`, `dim7`,
 ///       `m7b5`) whose root is a semitone below such a degree → Dominant (vii°7/V; vii° and vii°7 of a
 ///       minor key).
