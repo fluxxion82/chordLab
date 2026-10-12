@@ -23,17 +23,27 @@ std::array<int, 6> intervalVector(const std::vector<PitchClass>& pcs);
 /// `intervalVector`.
 int roughness(const std::vector<PitchClass>& pcs);
 
-/// Tension of `chord` heard in `projectKey`, 0..100 (Decision P2-D4). The raw score is
-/// `roughness(pcs) + 15 * (pitch classes outside the key's scale) + 8 * max(0, pcs - 3)`, so colour
-/// tones, chromaticism and density each add up; it is then scaled so that `kTensionRawCeiling`
-/// maps to 100 and anything above is clamped: `min(100, round(raw * 100 / 60))`. In C major this
-/// gives C 5, C6 32, CΔ7 37, C7 65, Cdim7 93, Ab 55. Deterministic. `chord.type` must be non-null.
+/// Tension of `chord` heard in `projectKey`, 0..100 (Decision P2-D4).
+///
+/// This is a colour/dissonance axis, not a "wants to resolve" axis: it measures how far the sound is
+/// from a plain diatonic triad (interval roughness, chromaticism against the project key, density)
+/// and says nothing about harmonic function, which is the function label's job (P2-D1). So in C major
+/// the borrowed Ab triad (two foreign pitch classes) scores 37 while the diatonic dominant G7 scores
+/// 27: Ab is the more colourful sound, G7 the one that pulls home.
+///
+/// The raw score is `roughness(pcs) + 15 * (pitch classes outside the key's scale) + 8 * max(0, pcs - 3)`,
+/// scaled so that `kTensionRawCeiling` maps to 100 and clamped above it:
+/// `min(100, round(raw * 100 / kTensionRawCeiling))`. In C major: C 3, C6 21, CΔ7 24, C7 43,
+/// Cdim7 62, Ab 37, Am 3, Am7 21, Bdim 10, G7 27, G9 50, C#9 100. Deterministic. `chord.type` must
+/// be non-null.
 int tension(const Chord& chord, const Key& projectKey);
 
-/// The raw score that maps to tension 100: a reference ceiling around a dominant seventh with a flat
-/// ninth on a foreign root (roughly "C7b9 out of key"), chosen so that diatonic triads sit near the
-/// bottom and chromatic seventh chords near the top. A tuning constant, not a measurement; revisit
-/// once the UI's tension bar has been looked at with real progressions.
-constexpr int kTensionRawCeiling = 60;
+/// The raw score that maps to tension 100. Chosen so that the top end spreads rather than saturates:
+/// a dominant seventh with a flat ninth (not in the dictionary; raw 81 in C major) lands at 90, the
+/// dictionary's dominant ninths on chromatic roots reach the 80s to 100 depending on how many of their
+/// tones are foreign, and only genuinely extreme sets clamp (a dominant ninth with four foreign pitch
+/// classes, e.g. F#9 in C major at raw 105). A tuning constant, not a measurement; revisit once the
+/// UI's tension bar has been looked at with real progressions.
+constexpr int kTensionRawCeiling = 90;
 
 }  // namespace chordlab

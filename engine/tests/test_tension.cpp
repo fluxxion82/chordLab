@@ -156,8 +156,8 @@ TEST_CASE("roughness: is transposition-invariant for every chord type") {
 
 // --- tension -------------------------------------------------------------------------
 
-TEST_CASE("tension: reference ceiling is documented as 60") {
-    CHECK(kTensionRawCeiling == 60);
+TEST_CASE("tension: reference ceiling is documented as 90") {
+    CHECK(kTensionRawCeiling == 90);
 }
 
 TEST_CASE("tension: ordering in C major C < C6 < CΔ7 < C7 < Cdim7") {
@@ -178,16 +178,28 @@ TEST_CASE("tension: ordering in C major C < C6 < CΔ7 < C7 < Cdim7") {
     CHECK(c7 < cDim7);
 }
 
-TEST_CASE("tension: exact values in C major from the P2-D4 formula") {
+TEST_CASE("tension: exact values from the P2-D4 formula with the 90 ceiling") {
     const Key cMajor = key('C', 0, Mode::Ionian);
-    // raw = roughness + 15 x foreign pcs + 8 x max(0, size - 3); tension = round(raw x 100 / 60).
-    CHECK(tension(chord(0, "maj"), cMajor) == 5);     // 3 + 0 + 0 = 3
-    CHECK(tension(chord(0, "6"), cMajor) == 32);      // 11 + 0 + 8 = 19
-    CHECK(tension(chord(0, "maj7"), cMajor) == 37);   // 14 + 0 + 8 = 22
-    CHECK(tension(chord(0, "7"), cMajor) == 65);      // 16 + 15 (Bb) + 8 = 39
-    CHECK(tension(chord(0, "dim7"), cMajor) == 93);   // 18 + 30 (Eb, F#) + 8 = 56
-    CHECK(tension(chord(8, "maj"), cMajor) == 55);    // 3 + 30 (Ab, Eb) + 0 = 33
-    CHECK(tension(chord(11, "dim"), cMajor) == 15);   // 9 + 0 + 0 = 9
+    // raw = roughness + 15 x foreign pcs + 8 x max(0, size - 3); tension = round(raw x 100 / 90).
+    CHECK(tension(chord(0, "maj"), cMajor) == 3);      // 3 + 0 + 0 = 3
+    CHECK(tension(chord(0, "6"), cMajor) == 21);       // 11 + 0 + 8 = 19
+    CHECK(tension(chord(0, "maj7"), cMajor) == 24);    // 14 + 0 + 8 = 22
+    CHECK(tension(chord(0, "7"), cMajor) == 43);       // 16 + 15 (Bb) + 8 = 39
+    CHECK(tension(chord(0, "dim7"), cMajor) == 62);    // 18 + 30 (Eb, F#) + 8 = 56
+    CHECK(tension(chord(8, "maj"), cMajor) == 37);     // 3 + 30 (Ab, Eb) + 0 = 33
+    CHECK(tension(chord(9, "min"), cMajor) == 3);      // Am: 3 + 0 + 0 = 3
+    CHECK(tension(chord(9, "m7"), cMajor) == 21);      // Am7: 11 + 0 + 8 = 19
+    CHECK(tension(chord(11, "dim"), cMajor) == 10);    // Bdim: 9 + 0 + 0 = 9
+    CHECK(tension(chord(7, "7"), cMajor) == 27);       // G7: 16 + 0 + 8 = 24
+    CHECK(tension(chord(7, "9"), cMajor) == 50);       // G9: 29 + 0 + 16 = 45
+    CHECK(tension(chord(0, "7"), key('F', 0, Mode::Ionian)) == 27);  // C7 in F: 16 + 0 + 8 = 24
+    CHECK(tension(chord(1, "9"), cMajor) == 100);      // C#9: 29 + 45 (C#, G#, D#) + 16 = 90, at the ceiling
+}
+
+TEST_CASE("tension: is a colour axis, not a resolution axis (borrowed Ab scores above diatonic G7)") {
+    // Documented in tension.h: chromaticism counts, harmonic function does not (that is P2-D1's job).
+    const Key cMajor = key('C', 0, Mode::Ionian);
+    CHECK(tension(chord(8, "maj"), cMajor) > tension(chord(7, "7"), cMajor));
 }
 
 TEST_CASE("tension: Am < Am7 in C major") {
@@ -208,7 +220,8 @@ TEST_CASE("tension: the out-of-key penalty depends on the project key") {
     CAPTURE(inC);
     CAPTURE(inF);
     CHECK(inC > inF);
-    CHECK(inC - inF == 25);  // one foreign pc = 15 raw = 25 tension points
+    CHECK(inC == 43);  // raw 39: one foreign pc adds 15 raw, about 17 tension points at the 90 ceiling
+    CHECK(inF == 27);  // raw 24
 }
 
 TEST_CASE("tension: diatonic triads score the same regardless of root") {
@@ -224,14 +237,18 @@ TEST_CASE("tension: diatonic triads score the same regardless of root") {
 TEST_CASE("tension: enharmonic project keys agree") {
     const Chord gFlat = chord(6, "maj");
     CHECK(tension(gFlat, key('G', -1, Mode::Ionian)) == tension(gFlat, key('F', +1, Mode::Ionian)));
-    CHECK(tension(gFlat, key('G', -1, Mode::Ionian)) == 5);
+    CHECK(tension(gFlat, key('G', -1, Mode::Ionian)) == 3);
 }
 
-TEST_CASE("tension: clamps at 100 for the densest dictionary type on a far-out root") {
-    // C#9 in C major: C# E# G# B D# -> three foreign pcs; raw = 29 + 45 + 16 = 90 -> 150 -> clamped.
+TEST_CASE("tension: clamps at 100 only for genuinely extreme sets") {
     const Key cMajor = key('C', 0, Mode::Ionian);
-    CHECK(tension(chord(1, "9"), cMajor) == 100);
-    CHECK(tension(chord(1, "m9"), cMajor) == 100);
+    // F#9 in C major: F# A# C# E G# -> four foreign pcs; raw = 29 + 60 + 16 = 105 -> 117 -> clamped.
+    CHECK(tension(chord(6, "9"), cMajor) == 100);
+    // Ab9: Ab C Eb Gb Bb -> four foreign pcs, raw 105 as well.
+    CHECK(tension(chord(8, "9"), cMajor) == 100);
+    // Just below the ceiling the scale still resolves: C#m9 (raw 89) is 99, Bb9 (two foreign, raw 75) 83.
+    CHECK(tension(chord(1, "m9"), cMajor) == 99);
+    CHECK(tension(chord(10, "9"), cMajor) == 83);
 }
 
 TEST_CASE("tension: deterministic and within 0..100 for every type x root x canonical key") {
@@ -262,7 +279,7 @@ TEST_CASE("tension: deterministic and within 0..100 for every type x root x cano
 }
 
 TEST_CASE("tension: a fully diatonic chord never exceeds the roughness-plus-density score") {
-    // Without the key penalty the densest in-key chord (a dominant ninth) is 29 + 16 = 45 raw -> 75.
+    // Without the key penalty the densest in-key chord (a dominant ninth) is 29 + 16 = 45 raw -> 50.
     int inKey = 0;
     for (const ChordType& t : allChordTypes()) {
         for (PitchClass root = 0; root < 12; ++root) {
@@ -274,7 +291,7 @@ TEST_CASE("tension: a fully diatonic chord never exceeds the roughness-plus-dens
                         ++inKey;
                         CAPTURE(t.id);
                         CAPTURE(root);
-                        CHECK(tension(c, k) <= 75);
+                        CHECK(tension(c, k) <= 50);
                     }
                 }
             }
