@@ -40,4 +40,21 @@ std::vector<std::vector<int>> voicings(const Document& doc);
 /// checked): a document that came from outside the process is validated by the store before it gets here.
 Compiled compile(const Document& doc);
 
+/// Compiles the `count` chords from `firstEvent` on, as they sound in the whole document, re-based to 0:
+/// each chord takes the voicing `voicings(doc)` gives it in the whole progression (the context of auto
+/// voice-leading is the whole progression, so a chord at the start of a range still follows the chord
+/// before the range; the voicings are sliced, never recomputed on the range alone), and the beats are
+/// accumulated from 0 (not the whole document's beats shifted, which could differ in the last bit), so
+/// the range starts at 0 and `endBeat` is its length. `compile(doc)` is `compileRange(doc, 0,
+/// events.size())`, and with auto voice-leading off a range compiles exactly as a document holding only
+/// its chords would. `firstEvent` must be in 0..events.size() and `count` in 0..events.size()-firstEvent
+/// (preconditions, asserted); the same document invariants as `compile`.
+Compiled compileRange(const Document& doc, int firstEvent, int count);
+
+/// Compiles the section at `sectionIndex` of `doc.sections` as `compileRange` would: from its first chord
+/// up to the next section's first chord, or to the end for the last one. A document without sections
+/// behaves as one unnamed section over every chord, and `sectionIndex` must then be 0; otherwise it must be
+/// in 0..sections.size()-1. The section invariants of `Document::sections` are preconditions (asserted).
+Compiled compileSection(const Document& doc, int sectionIndex);
+
 }  // namespace chordlab

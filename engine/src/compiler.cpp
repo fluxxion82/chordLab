@@ -73,14 +73,21 @@ std::vector<std::vector<int>> voicings(const Document& doc) {
     return result;
 }
 
-Compiled compile(const Document& doc) {
-    Compiled compiled;
+Compiled compileRange(const Document& doc, int firstEvent, int count) {
+    assert(firstEvent >= 0 && count >= 0);
+    assert(static_cast<std::size_t>(firstEvent) + static_cast<std::size_t>(count) <= doc.events.size());
+    // The voicings are those of the whole progression, sliced: under auto voice-leading a chord follows
+    // the chord before it, section boundary or not, so a range sounds as it does in the whole (header).
     const std::vector<std::vector<int>> chosen = voicings(doc);
+    Compiled compiled;
     // Start beats are accumulated in a single pass, in the same order and with the same additions as
-    // `Document::endBeat`. The running value is reused as the off beat of one chord and the on beat of
-    // the next, so adjacent events compare equal exactly rather than merely closely.
+    // `Document::endBeat` does for a document holding just these chords. The running value is reused as
+    // the off beat of one chord and the on beat of the next, so adjacent events compare equal exactly
+    // rather than merely closely.
     double beat = 0.0;
-    for (std::size_t i = 0; i < doc.events.size(); ++i) {
+    const std::size_t first = static_cast<std::size_t>(firstEvent);
+    const std::size_t last = first + static_cast<std::size_t>(count);
+    for (std::size_t i = first; i < last; ++i) {
         const ChordEvent& event = doc.events[i];
         const double start = beat;
         beat += event.lengthBeats;
@@ -91,11 +98,30 @@ Compiled compile(const Document& doc) {
         }
     }
     std::sort(compiled.events.begin(), compiled.events.end(), keyLess);
-    // The accumulated value is bit-identical to `doc.endBeat()`, which performs the same additions; it is
-    // taken from the accumulation so that the last off and `endBeat` can never drift apart.
+    // Taken from the accumulation so that the last off and `endBeat` can never drift apart.
     compiled.endBeat = beat;
+    return compiled;
+}
+
+Compiled compile(const Document& doc) {
+    Compiled compiled = compileRange(doc, 0, static_cast<int>(doc.events.size()));
+    // The accumulated value is bit-identical to `doc.endBeat()`, which performs the same additions.
     assert(compiled.endBeat == doc.endBeat());
     return compiled;
+}
+
+Compiled compileSection(const Document& doc, int sectionIndex) {
+    const int size = static_cast<int>(doc.events.size());
+    if (doc.sections.empty()) {
+        assert(sectionIndex == 0);
+        return compileRange(doc, 0, size);
+    }
+    assert(sectionIndex >= 0 && static_cast<std::size_t>(sectionIndex) < doc.sections.size());
+    const std::size_t at = static_cast<std::size_t>(sectionIndex);
+    const int first = doc.sections[at].firstEventIndex;
+    const int end = at + 1 < doc.sections.size() ? doc.sections[at + 1].firstEventIndex : size;
+    assert(first >= 0 && first < end && end <= size);
+    return compileRange(doc, first, end - first);
 }
 
 }  // namespace chordlab

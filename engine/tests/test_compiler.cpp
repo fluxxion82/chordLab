@@ -574,3 +574,181 @@ TEST_CASE("compile: random documents with auto voice-leading keep the event inva
         }
     }
 }
+
+// --- compileRange / compileSection -----------------------------------------------------
+
+TEST_CASE("compileRange: a middle section compiles exactly like a document holding only its chords") {
+    // Lengths that are not quarter multiples: the range's beats must be accumulated from 0, not taken from
+    // the whole document's accumulation and shifted, or the boundaries would differ in the last bit.
+    DocumentStore store;
+    store.appendChord(kC, 0.3, 100);
+    store.appendChord(kAm, 0.3, 90);
+    store.appendChord(kC, 0.7, 80);
+    store.appendChord(kAm, 1.1, 70);
+    store.appendChord(kC, 0.3, 60);
+    const Compiled range = compileRange(store.doc(), 1, 3);
+
+    DocumentStore only;
+    only.appendChord(kAm, 0.3, 90);
+    only.appendChord(kC, 0.7, 80);
+    only.appendChord(kAm, 1.1, 70);
+    const Compiled whole = compile(only.doc());
+
+    REQUIRE(range.events.size() == whole.events.size());
+    REQUIRE(range.events.size() == 18);
+    for (std::size_t i = 0; i < range.events.size(); ++i) {
+        CAPTURE(i);
+        CHECK(range.events[i] == whole.events[i]);
+        CHECK(bitsOf(range.events[i].beat) == bitsOf(whole.events[i].beat));
+    }
+    CHECK(bitsOf(range.endBeat) == bitsOf(whole.endBeat));
+    CHECK(range.events.front().beat == 0.0);  // re-based: the range starts at 0, not at 0.3
+    CHECK(bitsOf(range.events.back().beat) == bitsOf(range.endBeat));
+}
+
+TEST_CASE("compileRange: the whole document is what compile gives; an empty range is empty") {
+    DocumentStore store;
+    store.appendChord(kC, 4.0, 100);
+    store.appendChord(kAm, 2.0, 100);
+    const Compiled whole = compile(store.doc());
+    const Compiled all = compileRange(store.doc(), 0, 2);
+    CHECK(all.events == whole.events);
+    CHECK(bitsOf(all.endBeat) == bitsOf(whole.endBeat));
+
+    const Compiled none = compileRange(store.doc(), 1, 0);
+    CHECK(none.events.empty());
+    CHECK(none.endBeat == 0.0);
+    CHECK(compileRange(store.doc(), 2, 0).events.empty());  // one past the last chord, zero chords
+    CHECK(compileRange(Document{}, 0, 0).events.empty());
+}
+
+TEST_CASE("compileRange: the last chord alone starts at 0 with its own length as endBeat") {
+    DocumentStore store;
+    store.appendChord(kC, 4.0, 100);
+    store.appendChord(kAm, 2.0, 90);
+    const Compiled last = compileRange(store.doc(), 1, 1);
+    const Events expected{
+        {0.0, true, 69, 90}, {0.0, true, 72, 90}, {0.0, true, 76, 90},
+        {2.0, false, 69, 0}, {2.0, false, 72, 0}, {2.0, false, 76, 0},
+    };
+    CHECK(last.events == expected);
+    CHECK(last.endBeat == 2.0);
+}
+
+TEST_CASE("compileSection: without sections, section 0 is the whole document") {
+    DocumentStore store;
+    store.appendChord(kC, 4.0, 100);
+    store.appendChord(kAm, 2.0, 100);
+    const Compiled whole = compile(store.doc());
+    const Compiled section = compileSection(store.doc(), 0);
+    CHECK(section.events == whole.events);
+    CHECK(bitsOf(section.endBeat) == bitsOf(whole.endBeat));
+    CHECK(compileSection(Document{}, 0).events.empty());
+    CHECK(compileSection(Document{}, 0).endBeat == 0.0);
+}
+
+TEST_CASE("compileSection: each section runs to the next section's start, the last to the end") {
+    DocumentStore store;
+    for (int i = 1; i <= 5; ++i) {
+        store.appendChord(i % 2 == 1 ? kC : kAm, static_cast<double>(i), 100);  // lengths 1..5
+    }
+    store.addSection(0, "A");
+    store.addSection(2, "B");
+    store.addSection(3, "C");
+    const Document& doc = store.doc();
+
+    const Compiled a = compileSection(doc, 0);
+    CHECK(a.events == compileRange(doc, 0, 2).events);
+    CHECK(a.endBeat == 3.0);
+    const Compiled b = compileSection(doc, 1);
+    CHECK(b.events == compileRange(doc, 2, 1).events);
+    CHECK(b.endBeat == 3.0);
+    const Compiled c = compileSection(doc, 2);
+    CHECK(c.events == compileRange(doc, 3, 2).events);
+    CHECK(c.endBeat == 9.0);
+}
+
+TEST_CASE("compileSection: a section added at an inner chord of an unsectioned document gets a leading section") {
+    DocumentStore store;
+    for (int i = 0; i < 5; ++i) {
+        store.appendChord(kC, 1.0, 100);
+    }
+    store.addSection(1, "A");  // also creates "Section 1" at 0
+    store.addSection(3, "B");
+    const Document& doc = store.doc();
+    REQUIRE(doc.sections.size() == 3);
+    CHECK(compileSection(doc, 0).events == compileRange(doc, 0, 1).events);
+    CHECK(compileSection(doc, 0).endBeat == 1.0);
+    CHECK(compileSection(doc, 1).events == compileRange(doc, 1, 2).events);
+    CHECK(compileSection(doc, 1).endBeat == 2.0);
+    CHECK(compileSection(doc, 2).events == compileRange(doc, 3, 2).events);
+    CHECK(compileSection(doc, 2).endBeat == 2.0);
+}
+
+// --- compileRange / compileSection under auto voice-leading ----------------------------------
+
+TEST_CASE("compileRange: a middle section under auto voice-leading is the slice of the whole compile, re-based to 0") {
+    // C | F G | C Am, auto on: F follows the C before the section, G follows F, and the second C follows G.
+    DocumentStore store;
+    store.appendChord(kC, 4.0, 100);
+    store.appendChord(kF, 2.0, 90);
+    store.appendChord(kG, 2.0, 80);
+    store.appendChord(kC, 4.0, 70);
+    store.appendChord(kAm, 4.0, 60);
+    store.addSection(0, "A");
+    store.addSection(1, "B");
+    store.addSection(3, "C");
+    store.setAutoVoiceLead(true);
+    const Document& doc = store.doc();
+    const Voicings chosen = voicings(doc);
+    REQUIRE(chosen == Voicings{{60, 64, 67}, {60, 65, 69}, {59, 62, 67}, {60, 64, 67}, {60, 64, 69}});
+
+    const Compiled whole = compile(doc);
+    const Compiled range = compileRange(doc, 1, 2);
+    const Compiled section = compileSection(doc, 1);
+    CHECK(section.events == range.events);
+    CHECK(bitsOf(section.endBeat) == bitsOf(range.endBeat));
+
+    // The slice of the whole compile that belongs to chords 1..2, shifted back to 0 (quarter-multiple
+    // lengths, so the subtraction is exact).
+    const double base = doc.startBeatOf(1);
+    const double end = doc.startBeatOf(3);
+    Events expected;
+    for (const NoteEvent& e : whole.events) {
+        if (e.beat >= base && e.beat <= end && (e.on ? e.beat < end : e.beat > base)) {
+            expected.push_back(NoteEvent{e.beat - base, e.on, e.pitch, e.velocity});
+        }
+    }
+    REQUIRE(expected.size() == 12);
+    CHECK(range.events == expected);
+    CHECK(range.endBeat == 4.0);
+    CHECK(onsAt(range, 0.0) == std::vector<int>{60, 65, 69});  // F as it follows the C before the section
+    CHECK(onsAt(range, 2.0) == std::vector<int>{59, 62, 67});
+
+    // Not what the section's chords give on their own: alone, F would be the first chord, in root position.
+    DocumentStore alone;
+    alone.appendChord(kF, 2.0, 90);
+    alone.appendChord(kG, 2.0, 80);
+    alone.setAutoVoiceLead(true);
+    CHECK(onsAt(compile(alone.doc()), 0.0) == std::vector<int>{65, 69, 72});
+    CHECK(compile(alone.doc()).events != range.events);
+
+    // The last section follows the chord before it too.
+    CHECK(onsAt(compileSection(doc, 2), 0.0) == std::vector<int>{60, 64, 67});
+    CHECK(onsAt(compileSection(doc, 2), 4.0) == std::vector<int>{60, 64, 69});
+}
+
+TEST_CASE("compileRange: with auto voice-leading off a range still compiles as a document of its own chords") {
+    DocumentStore store;
+    store.appendChord(kC, 1.0, 100);
+    const int f = store.appendChord(kF, 1.0, 100);
+    store.appendChord(kG, 1.0, 100);
+    store.setInversion(f, 2);
+    store.setOctave(f, -1);
+    DocumentStore only;
+    only.appendChord(kF, 1.0, 100);
+    only.setInversion(only.doc().events[0].id, 2);
+    only.setOctave(only.doc().events[0].id, -1);
+    only.appendChord(kG, 1.0, 100);
+    CHECK(compileRange(store.doc(), 1, 2).events == compile(only.doc()).events);
+}
