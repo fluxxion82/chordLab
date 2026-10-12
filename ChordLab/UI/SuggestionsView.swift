@@ -96,6 +96,7 @@ struct SuggestionChip: View {
       Button("") { if shortcutArmed { append() } }
         .keyboardShortcut(shortcutArmed ? KeyboardShortcut(KeyEquivalent(Character(String(number))), modifiers: []) : nil)
         .buttonStyle(.plain)
+        .focusable(false)                                   // never a Tab stop: Space must not append
         .frame(width: 0, height: 0)
         .opacity(0)
         .allowsHitTesting(false)
