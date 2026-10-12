@@ -15,4 +15,16 @@ enum ChordSymbol {
       }
     })
   }
+
+  /// Pitch-class names with sharps for the black keys (the UI has no per-note spelling yet).
+  static let sharpNames = ["C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A", "A♯", "B"]
+
+  static func pitchClassName(_ pc: Int) -> String {
+    sharpNames[((pc % 12) + 12) % 12]
+  }
+
+  /// Note name with octave, middle C (MIDI 60) being C4: 60 → "C4", 61 → "C♯4", 59 → "B3".
+  static func noteName(midi: Int) -> String {
+    pitchClassName(midi) + String(Int((Double(midi) / 12).rounded(.down)) - 1)
+  }
 }

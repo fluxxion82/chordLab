@@ -83,3 +83,32 @@ enum KeyNames {
     ChordSymbol.glyphs(text(key.tonic)) + " " + modeDisplayName(key.mode)
   }
 }
+
+/// Scale pitch classes, mirroring `scalePitchClasses` in engine/src/scale.cpp. Used only to say which
+/// notes of a hovered chord lie outside the project key; the snapshot carries no scale.
+enum Scale {
+  /// Semitones above the tonic of each mode, keyed by the engine's mode name.
+  static let intervals: [String: [Int]] = [
+    "Ionian": [0, 2, 4, 5, 7, 9, 11],
+    "Dorian": [0, 2, 3, 5, 7, 9, 10],
+    "Phrygian": [0, 1, 3, 5, 7, 8, 10],
+    "Lydian": [0, 2, 4, 6, 7, 9, 11],
+    "Mixolydian": [0, 2, 4, 5, 7, 9, 10],
+    "Aeolian": [0, 2, 3, 5, 7, 8, 10],
+    "Locrian": [0, 1, 3, 5, 6, 8, 10],
+    "HarmonicMinor": [0, 2, 3, 5, 7, 8, 11],
+    "MelodicMinor": [0, 2, 3, 5, 7, 9, 11],
+  ]
+
+  /// The seven pitch classes of `mode` on `tonicPc`, in scale order. An unknown mode reads as Ionian.
+  static func pitchClasses(tonicPc: Int, mode: String) -> [Int] {
+    (intervals[mode] ?? intervals["Ionian"]!).map { ((tonicPc + $0) % 12 + 12) % 12 }
+  }
+
+  /// Pitch classes of `voicing` (MIDI notes) that are not in `key`'s scale, in voicing order, once each.
+  static func outOfKey(voicing: [Int], key: KeyJSON) -> [Int] {
+    let scale = Set(pitchClasses(tonicPc: KeyNames.pitchClass(of: key.tonic), mode: key.mode))
+    var seen = Set<Int>()
+    return voicing.map { (($0 % 12) + 12) % 12 }.filter { !scale.contains($0) && seen.insert($0).inserted }
+  }
+}

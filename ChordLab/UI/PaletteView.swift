@@ -20,15 +20,15 @@ struct PaletteView: View {
       let available = geometry.size.width - Self.spacing * CGFloat(Self.columns - 1)
       let cellSize = min(Self.maxCell, max(Self.minCell, available / CGFloat(Self.columns)))
       ScrollView(.vertical) {
-        if let palette = state.snapshot?.palette {
-          let rows = Self.layout(palette)
+        if let snapshot = state.snapshot {
+          let rows = Self.layout(snapshot.palette)
           VStack(spacing: Self.spacing) {
             ForEach(rows.indices.reversed(), id: \.self) { tier in
               HStack(spacing: Self.spacing) {
                 ForEach(0..<Self.columns, id: \.self) { degree in
                   if let cell = rows[tier][degree] {
                     PaletteCellView(cell: cell, size: cellSize, labelMode: labelMode,
-                                    isPressed: state.heldCellId == cell.id)
+                                    isPressed: state.heldCellId == cell.id, projectKey: snapshot.projectKey)
                       .pressAction(onPress: { state.pressCell(cell) },
                                    onRelease: { state.releaseCell(cell) })
                   } else {
@@ -62,12 +62,20 @@ struct PaletteView: View {
 
 /// One cell: a circle coloured by family, filled when every note is in the project key and a ring
 /// otherwise (a borrowed chord), with the symbol and/or roman numeral inside. While pressed it gets a
-/// white ring and a brighter fill (Klimper's selected look).
+/// white ring and a brighter fill (Klimper's selected look). Resting the mouse on it for a moment opens
+/// a popover with the chord's details; the popover goes away on hover exit and while the cell is pressed.
 struct PaletteCellView: View {
   let cell: CellJSON
   let size: CGFloat
   let labelMode: LabelMode
   var isPressed = false
+  var projectKey: KeyJSON? = nil
+
+  static let hoverDelay: TimeInterval = 0.25
+
+  @State private var hovering = false
+  @State private var showDetails = false
+  @State private var pendingDetails: DispatchWorkItem?
 
   static func color(family: String) -> Color {
     switch family {
@@ -108,6 +116,54 @@ struct PaletteCellView: View {
     .frame(width: size, height: size)
     .contentShape(Circle())
     .accessibilityLabel("\(cell.symbol), \(cell.roman)")
+    .onHover { over in
+      hovering = over
+      pendingDetails?.cancel()
+      if over && !isPressed {
+        let work = DispatchWorkItem { if hovering && !isPressed { showDetails = true } }
+        pendingDetails = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.hoverDelay, execute: work)
+      } else {
+        showDetails = false
+      }
+    }
+    .onChange(of: isPressed) { _, pressed in
+      if pressed {
+        pendingDetails?.cancel()
+        showDetails = false
+      }
+    }
+    .popover(isPresented: $showDetails, arrowEdge: .top) {
+      ChordDetailView(cell: cell, projectKey: projectKey).padding(12)
+    }
+  }
+}
+
+/// Popover body: symbol and numeral, family, the voicing as note names, and whether every note is in
+/// the project key (computed here from the voicing; it agrees with the engine's `filled`).
+struct ChordDetailView: View {
+  let cell: CellJSON
+  let projectKey: KeyJSON?
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 6) {
+      HStack(alignment: .firstTextBaseline, spacing: 10) {
+        Text(ChordSymbol.glyphs(cell.symbol)).font(.title2.weight(.semibold))
+        Text(ChordSymbol.glyphs(cell.roman)).font(.title3).foregroundStyle(.secondary)
+      }
+      Text(cell.family).font(.callout).foregroundStyle(.secondary)
+      Text(cell.voicing.map(ChordSymbol.noteName(midi:)).joined(separator: "  ")).font(.body.monospacedDigit())
+      if let key = projectKey {
+        let outside = Scale.outOfKey(voicing: cell.voicing, key: key)
+        if outside.isEmpty {
+          Text("In key").font(.callout).foregroundStyle(.secondary)
+        } else {
+          Text("Out of key: " + outside.map(ChordSymbol.pitchClassName).joined(separator: ", "))
+            .font(.callout).foregroundStyle(.orange)
+        }
+      }
+    }
+    .frame(minWidth: 160, alignment: .leading)
   }
 }
 
