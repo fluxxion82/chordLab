@@ -38,8 +38,20 @@ enum class Reason {
     /// The chord's own function in the project key (`functionOf`); `Function::Other` adds no reason.
     Tonic,
     Predominant,
-    Dominant
+    Dominant,
+    /// Not in the project key, in no parallel mode of its tonic, and not an applied chord: a colour
+    /// chord with nothing else to say for it. Diatonic, Borrowed and Chromatic are exclusive, and a
+    /// chord that is not applied always has exactly one of them, so no suggestion is without a reason.
+    Chromatic
 };
+
+constexpr int kNumReasons = 12;
+
+/// A stable, serialisable name for each reason: "resolves", "cadence", "prepares", "commonTones",
+/// "smooth", "diatonic", "borrowed", "appliedDominant", "tonic", "predominant", "dominant",
+/// "chromatic". The pointer is to a string literal and never goes stale. `reason` must be a declared
+/// enumerator.
+const char* reasonName(Reason reason);
 
 /// One ranked candidate for the next chord.
 struct Suggestion {
@@ -53,14 +65,14 @@ struct Suggestion {
     std::string roman;
     /// The ranking score; see `suggestNext`. Higher is better; comparable only within one call.
     double score;
-    /// Why, as data, in the order Resolves, Cadence, Prepares, CommonTones, Smooth, Diatonic or
-    /// Borrowed, AppliedDominant, then the function. Never contains both Diatonic and Borrowed.
+    /// Why, as data, in the order Resolves, Cadence, Prepares, CommonTones, Smooth, one of Diatonic /
+    /// Borrowed / Chromatic, AppliedDominant, then the function. Never empty.
     std::vector<Reason> reasons;
     /// One sentence per entry of `reasons`, for the UI: "resolves (D→T)", "cadence (V7→I)",
     /// "prepares (PD→D)", "2 common tones (C, E)" (spelled in the project key), "smooth voice leading
-    /// (cost 2)", "diatonic", "borrowed from C Aeolian", "secondary dominant of ii (V7/ii)" or
-    /// "leading-tone chord of V (vii°7/V)", "tonic" / "predominant" / "dominant". The arrows are the
-    /// literal UTF-8 character.
+    /// (cost 2)", "diatonic", "borrowed from C Aeolian", "outside the key — colour chord", "secondary
+    /// dominant of ii (V7/ii)" or "leading-tone chord of V (vii°7/V)", "tonic" / "predominant" /
+    /// "dominant". The arrows and the dash are literal UTF-8 characters.
     std::vector<std::string> reasonTexts;
 };
 
@@ -75,8 +87,8 @@ struct Suggestion {
 /// Score, in hundredths so that equal scores are exactly equal, with f() = `functionOf` in the project
 /// key and an applied chord counted as a Dominant whatever `functionOf` says:
 /// - after a chord: `transition[f(previous)][f(candidate)]` for the style, plus 0.1 per common tone
-///   counting at most two (a third shared tone means the candidate contains the previous chord, which
-///   is the same sonority dressed up, not a progression), minus 0.05 per unit of
+///   counting at most two (beyond two shared tones the candidate is mostly the previous sonority, and
+///   counting them all would let a chord's extensions outrank its triad), minus 0.05 per unit of
 ///   `pcVoiceLeadingCost`, plus a cadence bonus of 0.3 when f(previous) is Dominant and the candidate
 ///   is the in-key triad on the project tonic (its extensions still "resolve" but are not the
 ///   cadence chord);
@@ -111,9 +123,10 @@ struct Suggestion {
 /// that contains the previous triad does not outrank a plain triad. Several of those orderings hold
 /// by a single hundredth: change one weight and re-run the suite.
 ///
-/// Sorted by score descending, then label ascending (byte order), so the order is total and the same
-/// input always gives the same vector; the first `maxCount` are returned (fewer when there are fewer
-/// candidates). Allocates; not for the audio thread.
+/// Sorted by score descending (compared as the integer hundredths, so equal scores are exactly equal),
+/// then label ascending (byte order), so the order is total and the same input always gives the same
+/// vector; the first `maxCount` are returned (fewer when there are fewer candidates). Allocates; not
+/// for the audio thread.
 ///
 /// Preconditions: `previous` null or a chord with a non-null type and a root in 0..11; both keys as
 /// documented in pitch.h; `style` a declared enumerator.

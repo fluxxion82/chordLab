@@ -102,6 +102,7 @@ void checkWellFormed(const std::vector<Suggestion>& s, const Chord* previous, st
         for (const std::string& text : x.reasonTexts) {
             CHECK_FALSE(text.empty());
         }
+        CHECK(has(x, Reason::Diatonic) + has(x, Reason::Borrowed) + has(x, Reason::Chromatic) <= 1);
         if (previous != nullptr) {
             CHECK(x.chord != *previous);
         }
@@ -464,6 +465,63 @@ TEST_CASE("an applied chord that is also a palette cell is listed once, as the c
     CHECK(count == 1);
 }
 
+TEST_CASE("a chord outside the key that no parallel mode holds is a colour chord") {
+    // Browsing E major from C major: E and B are dominants of vi and iii by function and F#m has
+    // none; none of the three is in any parallel mode of C, and none is an appliedChords entry.
+    // G#m (Ab, B, Eb) is C harmonic minor's and stays borrowed.
+    const auto s = suggestNext(nullptr, kCIonian, key('E', 0, Mode::Ionian), Style::Pop, 64);
+    const Suggestion* e = find(s, chord(E, "maj"));
+    const Suggestion* b = find(s, chord(B, "maj"));
+    const Suggestion* fsm = find(s, chord(6, "min"));
+    const Suggestion* gsm = find(s, chord(Ab, "min"));
+    REQUIRE((e != nullptr && b != nullptr && fsm != nullptr && gsm != nullptr));
+    CHECK(e->reasons == std::vector<Reason>{Reason::Chromatic, Reason::Dominant});
+    CHECK(e->reasonTexts == std::vector<std::string>{"outside the key — colour chord", "dominant"});
+    CHECK(b->reasons == std::vector<Reason>{Reason::Chromatic, Reason::Dominant});
+    CHECK(fsm->reasons == std::vector<Reason>{Reason::Chromatic});
+    CHECK(fsm->reasonTexts == std::vector<std::string>{"outside the key — colour chord"});
+    CHECK(gsm->reasons == std::vector<Reason>{Reason::Borrowed});
+    CHECK(hasText(*gsm, "borrowed from C harmonic minor"));
+    // A cell of the browsed key that is in the project key is just diatonic, and an applied chord is
+    // explained by its target rather than called chromatic.
+    const Suggestion* a5 = find(s, chord(A, "5"));
+    const Suggestion* d7 = find(s, chord(D, "7"));
+    REQUIRE((a5 != nullptr && d7 != nullptr));
+    CHECK(a5->reasons == std::vector<Reason>{Reason::Diatonic, Reason::Tonic});
+    CHECK_FALSE(has(*d7, Reason::Chromatic));
+    CHECK_FALSE(has(*d7, Reason::Borrowed));
+}
+
+TEST_CASE("regression: F+ when browsing D harmonic minor from C Dorian has a reason") {
+    // F A C#: not in C Dorian, in no parallel mode of C, not an applied chord, and functionOf says
+    // Other (its would-be target Bb is the subtonic), so before Reason::Chromatic it had none.
+    const Key cDorian = key('C', 0, Mode::Dorian);
+    const auto s = suggestNext(nullptr, cDorian, key('D', 0, Mode::HarmonicMinor));
+    checkWellFormed(s, nullptr, 8);
+    REQUIRE(s.size() == 8);
+    const Suggestion* faug = find(s, chord(F, "aug"));
+    REQUIRE(faug != nullptr);
+    CHECK(faug->label == "F+");
+    CHECK(faug->reasons == std::vector<Reason>{Reason::Chromatic});
+    CHECK(faug->reasonTexts == std::vector<std::string>{"outside the key — colour chord"});
+}
+
+TEST_CASE("reasonName: every enumerator has a unique non-empty name") {
+    std::set<std::string> names;
+    for (int i = 0; i < kNumReasons; ++i) {
+        const char* name = reasonName(Reason(i));
+        REQUIRE(name != nullptr);
+        CAPTURE(i);
+        CHECK_FALSE(std::string(name).empty());
+        CHECK(names.insert(name).second);
+    }
+    CHECK(names.size() == static_cast<std::size_t>(kNumReasons));
+    CHECK(std::string(reasonName(Reason::Resolves)) == "resolves");
+    CHECK(std::string(reasonName(Reason::CommonTones)) == "commonTones");
+    CHECK(std::string(reasonName(Reason::AppliedDominant)) == "appliedDominant");
+    CHECK(std::string(reasonName(Reason::Chromatic)) == "chromatic");
+}
+
 // --- Contract -------------------------------------------------------------------------------
 
 TEST_CASE("maxCount is respected") {
@@ -558,6 +616,34 @@ TEST_CASE("every canonical key opens with its tonic triad and a fully diatonic l
                 CHECK_FALSE(has(x, Reason::Borrowed));
                 CHECK_FALSE(has(x, Reason::AppliedDominant));
                 CHECK_FALSE(hasRelationReason(x));
+            }
+        }
+    }
+}
+
+TEST_CASE("every project key x every browsed key: every suggestion carries at least one reason") {
+    std::vector<Key> keys;
+    for (PitchClass pc = 0; pc < 12; ++pc) {
+        for (int m = 0; m < kNumModes; ++m) {
+            keys.push_back(Key{canonicalTonic(pc, Mode(m)), Mode(m)});
+        }
+    }
+    for (const Key& project : keys) {
+        const Chord tonic = diatonicTriad(project, 0);
+        for (const Key& browsed : keys) {
+            CAPTURE(project.tonic.letter);
+            CAPTURE(static_cast<int>(project.mode));
+            CAPTURE(browsed.tonic.letter);
+            CAPTURE(static_cast<int>(browsed.mode));
+            for (const Chord* previous : {static_cast<const Chord*>(nullptr), &tonic}) {
+                for (const Suggestion& x : suggestNext(previous, project, browsed)) {
+                    CAPTURE(x.label);
+                    CHECK(x.reasons.size() >= 1);
+                    CHECK(x.reasons.size() == x.reasonTexts.size());
+                    CHECK(has(x, Reason::Diatonic) + has(x, Reason::Borrowed) + has(x, Reason::Chromatic) <= 1);
+                    CHECK_FALSE(x.label.empty());
+                    CHECK_FALSE(x.roman.empty());
+                }
             }
         }
     }

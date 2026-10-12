@@ -207,8 +207,14 @@ void addReason(Suggestion& s, Reason reason, std::string text) {
     s.reasonTexts.push_back(std::move(text));
 }
 
-Suggestion score(const Candidate& candidate, const Previous& previous, const Key& projectKey,
-                 const TransitionTable& table, const PriorTable& prior) {
+/// A suggestion with the integer score it is sorted by.
+struct Scored {
+    Suggestion suggestion;
+    int hundredths;
+};
+
+Scored score(const Candidate& candidate, const Previous& previous, const Key& projectKey,
+             const TransitionTable& table, const PriorTable& prior) {
     Suggestion s{candidate.chord, candidate.label, candidate.roman, 0.0, {}, {}};
     const bool applied = candidate.applied != nullptr;
     const Function function = applied ? Function::Dominant : functionOf(candidate.chord, projectKey);
@@ -252,6 +258,8 @@ Suggestion score(const Candidate& candidate, const Previous& previous, const Key
     } else if (!applied) {  // an applied chord's foreign notes are explained by its target, not by a mode
         if (const std::optional<Key> source = borrowedFrom(candidate.chord, projectKey)) {
             addReason(s, Reason::Borrowed, "borrowed from " + keyText(*source));
+        } else {
+            addReason(s, Reason::Chromatic, "outside the key — colour chord");
         }
     }
     hundredths += simplicity(*candidate.chord.type);
@@ -281,25 +289,58 @@ Suggestion score(const Candidate& candidate, const Previous& previous, const Key
     }
 
     s.score = hundredths / 100.0;
-    return s;
+    return Scored{std::move(s), hundredths};
 }
 
 /// Score descending, then label ascending; the chord itself last, for a total order even if two
 /// labels ever coincided.
-bool before(const Suggestion& a, const Suggestion& b) {
-    if (a.score != b.score) {
-        return a.score > b.score;
+bool before(const Scored& a, const Scored& b) {
+    if (a.hundredths != b.hundredths) {
+        return a.hundredths > b.hundredths;
     }
-    if (a.label != b.label) {
-        return a.label < b.label;
+    const Suggestion& x = a.suggestion;
+    const Suggestion& y = b.suggestion;
+    if (x.label != y.label) {
+        return x.label < y.label;
     }
-    if (a.chord.root != b.chord.root) {
-        return a.chord.root < b.chord.root;
+    if (x.chord.root != y.chord.root) {
+        return x.chord.root < y.chord.root;
     }
-    return std::string_view(a.chord.type->id) < std::string_view(b.chord.type->id);
+    return std::string_view(x.chord.type->id) < std::string_view(y.chord.type->id);
 }
 
 }  // namespace
+
+const char* reasonName(Reason reason) {
+    switch (reason) {
+        case Reason::Resolves:
+            return "resolves";
+        case Reason::Cadence:
+            return "cadence";
+        case Reason::Prepares:
+            return "prepares";
+        case Reason::CommonTones:
+            return "commonTones";
+        case Reason::Smooth:
+            return "smooth";
+        case Reason::Diatonic:
+            return "diatonic";
+        case Reason::Borrowed:
+            return "borrowed";
+        case Reason::AppliedDominant:
+            return "appliedDominant";
+        case Reason::Tonic:
+            return "tonic";
+        case Reason::Predominant:
+            return "predominant";
+        case Reason::Dominant:
+            return "dominant";
+        case Reason::Chromatic:
+            return "chromatic";
+    }
+    assert(false && "Reason outside the enum");
+    return "";
+}
 
 std::vector<Suggestion> suggestNext(const Chord* previous, const Key& projectKey, const Key& browsedKey, Style style,
                                     std::size_t maxCount) {
@@ -315,17 +356,22 @@ std::vector<Suggestion> suggestNext(const Chord* previous, const Key& projectKey
         prev.roman = romanNumeral(*previous, projectKey, SymbolStyle::Standard);
     }
 
-    std::vector<Suggestion> out;
-    out.reserve(candidates.size());
+    std::vector<Scored> scored;
+    scored.reserve(candidates.size());
     for (const Candidate& candidate : candidates) {
         if (previous != nullptr && candidate.chord == *previous) {
             continue;
         }
-        out.push_back(score(candidate, prev, projectKey, table, prior));
+        scored.push_back(score(candidate, prev, projectKey, table, prior));
     }
-    std::sort(out.begin(), out.end(), before);
-    if (out.size() > maxCount) {
-        out.resize(maxCount);
+    std::sort(scored.begin(), scored.end(), before);
+    if (scored.size() > maxCount) {
+        scored.resize(maxCount);
+    }
+    std::vector<Suggestion> out;
+    out.reserve(scored.size());
+    for (Scored& entry : scored) {
+        out.push_back(std::move(entry.suggestion));
     }
     return out;
 }
