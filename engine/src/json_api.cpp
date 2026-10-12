@@ -19,6 +19,7 @@
 #include <string_view>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace chordlab {
 
@@ -70,8 +71,13 @@ const ChordType* findChordType(std::string_view id) {
     return nullptr;
 }
 
+/// ASCII spelling of a tonic: "C", "Db", "F#".
+std::string tonicText(const Tonic& tonic) {
+    return Spelling{tonic.letter, tonic.alter}.text();
+}
+
 std::string keyName(const Key& key) {
-    return Spelling{key.tonic.letter, key.tonic.alter}.text() + " " + modeName(key.mode);
+    return tonicText(key.tonic) + " " + modeName(key.mode);
 }
 
 // --- Writing ---------------------------------------------------------------------------
@@ -79,6 +85,46 @@ std::string keyName(const Key& key) {
 json keyToJson(const Key& key) {
     return json{{"tonic", {{"letter", std::string(1, key.tonic.letter)}, {"alter", key.tonic.alter}}},
                 {"mode", modeName(key.mode)}};
+}
+
+/// The `modes` list of the snapshot: every mode name in enum order, so the UI never hardcodes it.
+json modesJson() {
+    json modes = json::array();
+    for (const char* name : kModeNames) {
+        modes.push_back(name);
+    }
+    return modes;
+}
+
+/// The `tonics` table of the snapshot: per mode (keyed by name), the canonical tonic of each pitch
+/// class 0..11 as `{"letter","alter","text"}`, `text` being its ASCII spelling.
+json tonicsJson() {
+    json tonics = json::object();
+    for (int m = 0; m < kNumModes; ++m) {
+        const Mode mode = static_cast<Mode>(m);
+        json row = json::array();
+        for (PitchClass pc = 0; pc < 12; ++pc) {
+            const Tonic tonic = canonicalTonic(pc, mode);
+            row.push_back(
+                {{"letter", std::string(1, tonic.letter)}, {"alter", tonic.alter}, {"text", tonicText(tonic)}});
+        }
+        tonics[kModeNames[m]] = std::move(row);
+    }
+    return tonics;
+}
+
+/// The pitch classes of `chord` outside the scale of `key`, ascending and without repeats: empty exactly
+/// when `fullyInKey(chord, key)`.
+json outOfKeyJson(const Chord& chord, const Key& key) {
+    std::vector<PitchClass> out;
+    for (const PitchClass pc : pitchClasses(chord)) {
+        if (!inScale(pc, key.tonicPc(), key.mode)) {
+            out.push_back(pc);
+        }
+    }
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    return json(out);
 }
 
 // --- Reading ---------------------------------------------------------------------------
@@ -668,7 +714,8 @@ std::string snapshotJson(const Document& doc, const Palette& palette) {
                       {"startBeat", beat},
                       {"lengthBeats", e.lengthBeats},
                       {"velocity", e.velocity},
-                      {"voicing", closeVoicing(e.chord)}};
+                      {"voicing", closeVoicing(e.chord)},
+                      {"outOfKey", outOfKeyJson(e.chord, doc.projectKey)}};
         events.push_back(std::move(event));
         beat += e.lengthBeats;
     }
@@ -683,7 +730,8 @@ std::string snapshotJson(const Document& doc, const Palette& palette) {
                      {"roman", c.roman},
                      {"family", familyName(c.chord.type->family)},
                      {"filled", c.filled},
-                     {"voicing", closeVoicing(c.chord)}};
+                     {"voicing", closeVoicing(c.chord)},
+                     {"outOfKey", outOfKeyJson(c.chord, doc.projectKey)}};
         cells.push_back(std::move(cell));
     }
 
@@ -695,6 +743,8 @@ std::string snapshotJson(const Document& doc, const Palette& palette) {
                            {"progressionLoop", doc.progressionLoop},
                            {"followHost", doc.followHost},
                            {"endBeat", beat},
+                           {"modes", modesJson()},
+                           {"tonics", tonicsJson()},
                            {"events", std::move(events)},
                            {"palette", {{"tiers", palette.tiers}, {"cells", std::move(cells)}}}};
     return snapshot.dump();
