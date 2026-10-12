@@ -32,13 +32,18 @@ bool keyLess(const NoteEvent& a, const NoteEvent& b) {
 
 }  // namespace
 
-Compiled compile(const Document& doc) {
+Compiled compileRange(const Document& doc, int firstEvent, int count) {
+    assert(firstEvent >= 0 && count >= 0);
+    assert(static_cast<std::size_t>(firstEvent) + static_cast<std::size_t>(count) <= doc.events.size());
     Compiled compiled;
     // Start beats are accumulated in a single pass, in the same order and with the same additions as
-    // `Document::endBeat`. The running value is reused as the off beat of one chord and the on beat of
-    // the next, so adjacent events compare equal exactly rather than merely closely.
+    // `Document::endBeat` does for a document holding just these chords. The running value is reused as
+    // the off beat of one chord and the on beat of the next, so adjacent events compare equal exactly
+    // rather than merely closely.
     double beat = 0.0;
-    for (const ChordEvent& event : doc.events) {
+    const auto begin = doc.events.begin() + firstEvent;
+    for (auto it = begin; it != begin + count; ++it) {
+        const ChordEvent& event = *it;
         assertValidEvent(event);
         const double start = beat;
         beat += event.lengthBeats;
@@ -49,11 +54,30 @@ Compiled compile(const Document& doc) {
         }
     }
     std::sort(compiled.events.begin(), compiled.events.end(), keyLess);
-    // The accumulated value is bit-identical to `doc.endBeat()`, which performs the same additions; it is
-    // taken from the accumulation so that the last off and `endBeat` can never drift apart.
+    // Taken from the accumulation so that the last off and `endBeat` can never drift apart.
     compiled.endBeat = beat;
+    return compiled;
+}
+
+Compiled compile(const Document& doc) {
+    Compiled compiled = compileRange(doc, 0, static_cast<int>(doc.events.size()));
+    // The accumulated value is bit-identical to `doc.endBeat()`, which performs the same additions.
     assert(compiled.endBeat == doc.endBeat());
     return compiled;
+}
+
+Compiled compileSection(const Document& doc, int sectionIndex) {
+    const int size = static_cast<int>(doc.events.size());
+    if (doc.sections.empty()) {
+        assert(sectionIndex == 0);
+        return compileRange(doc, 0, size);
+    }
+    assert(sectionIndex >= 0 && static_cast<std::size_t>(sectionIndex) < doc.sections.size());
+    const std::size_t at = static_cast<std::size_t>(sectionIndex);
+    const int first = doc.sections[at].firstEventIndex;
+    const int end = at + 1 < doc.sections.size() ? doc.sections[at + 1].firstEventIndex : size;
+    assert(first >= 0 && first < end && end <= size);
+    return compileRange(doc, first, end - first);
 }
 
 }  // namespace chordlab

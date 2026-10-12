@@ -31,4 +31,17 @@ struct Compiled {
 /// the store before it gets here.
 Compiled compile(const Document& doc);
 
+/// Compiles the `count` chords from `firstEvent` on, exactly as `compile` would a document holding only
+/// those chords: the same voicings, the beats accumulated from 0 (not the whole document's beats shifted,
+/// which could differ in the last bit), so the range starts at 0 and `endBeat` is its length. `compile(doc)`
+/// is `compileRange(doc, 0, events.size())`. `firstEvent` must be in 0..events.size() and `count` in
+/// 0..events.size()-firstEvent (preconditions, asserted); the same document invariants as `compile`.
+Compiled compileRange(const Document& doc, int firstEvent, int count);
+
+/// Compiles the section at `sectionIndex` of `doc.sections` as `compileRange` would: from its first chord
+/// up to the next section's first chord, or to the end for the last one. A document without sections
+/// behaves as one unnamed section over every chord, and `sectionIndex` must then be 0; otherwise it must be
+/// in 0..sections.size()-1. The section invariants of `Document::sections` are preconditions (asserted).
+Compiled compileSection(const Document& doc, int sectionIndex);
+
 }  // namespace chordlab
