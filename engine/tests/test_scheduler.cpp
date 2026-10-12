@@ -4,6 +4,7 @@
 #include "chordlab/compiler.h"
 #include "chordlab/document.h"
 #include "chordlab/scheduler.h"
+#include "chordlab/triple_buffer.h"
 
 #include <algorithm>
 #include <array>
@@ -1568,4 +1569,104 @@ TEST_CASE("regression: a changed adopt that abandons overdue occurrences reports
     }
     CHECK(host.run(2.0 + 512.0 / kSamplesPerBeat, 512, true) == kNone);
     CHECK(host.lastOk);
+}
+
+// --- Snapshot lifetime: the array an adopt replaces is never read by that adopt ---------------------
+
+TEST_CASE("regression: adopt judges the abandoned backlog without reading the previous array") {
+    // From the review of the triple-buffer handoff: `acquire` hands the old front slot back to the producer
+    // before `adopt` runs, so the array the scheduler last adopted may already be overwritten. `adopt`
+    // used to read it (the cursor's next occurrence) to decide whether an overdue backlog was abandoned,
+    // and a recycled slot could flip that verdict. Both runs must now agree with the preserved-array one.
+    const auto run = [](bool recycle) {
+        std::vector<NoteEvent> old{{0.0, true, 60, 100}, {2.0, false, 60, 0}, {2.0, true, 64, 100}, {4.0, false, 64, 0}};
+        Host host;
+        host.adopt(snapshotOf(old, 4.0, true, 1));
+        host.run(0.0, kSamplesPerBeat, true);  // one beat: the cursor rests on the off at beat 2, nothing overdue
+        REQUIRE(host.lastOk);
+        if (recycle) {
+            for (NoteEvent& e : old) {
+                e = NoteEvent{0.0, true, 1, 1};  // garbage, every event now "overdue" if anyone looked
+            }
+        }
+        const std::vector<NoteEvent> fresh{{0.0, true, 62, 100}, {4.0, false, 62, 0}};
+        host.adopt(snapshotOf(fresh, 4.0, true, 2));
+        std::vector<std::vector<Ev>> blocks;
+        std::vector<bool> ok;
+        for (int i = 0; i < 4; ++i) {
+            blocks.push_back(host.run(1.0 + i * 512.0 / kSamplesPerBeat, 512, true));
+            ok.push_back(host.lastOk);
+        }
+        return std::make_pair(blocks, ok);
+    };
+    const auto control = run(false);
+    const auto recycled = run(true);
+    CHECK(control.second == std::vector<bool>{true, true, true, true});
+    CHECK(recycled.second == control.second);
+    CHECK(recycled.first == control.first);
+    REQUIRE(!control.first.empty());
+    CHECK(control.first[0] == std::vector<Ev>{off(0, 60), on(0, 62)});  // the flush releases, the chase attacks
+}
+
+TEST_CASE("regression: a slot released by acquire may be rewritten before adopt without affecting playback") {
+    // TripleBuffer + Scheduler as ProcessBlock uses them: acquire, then adopt. Between the two the
+    // producer may publish twice, which makes the released front its back slot and overwrites it. The
+    // poisoned run must play exactly like the clean one.
+    struct Slot {
+        std::array<NoteEvent, 8> events;
+        std::size_t count;
+        double endBeat;
+        bool loop;
+    };
+    const auto publish = [](TripleBuffer<Slot>& buffer, std::uint32_t generation, int pitch) {
+        Slot& back = buffer.beginWrite();
+        back.events = {{{0.0, true, pitch, 100}, {2.0, false, pitch, 0}, {2.0, true, pitch + 4, 100}, {4.0, false, pitch + 4, 0}}};
+        back.count = 4;
+        back.endBeat = 4.0;
+        back.loop = true;
+        buffer.publish(generation);
+    };
+    const auto snapshotOfSlot = [](const Slot* slot, std::uint32_t generation) {
+        return Snapshot{slot->events.data(), slot->count, slot->endBeat, slot->loop, generation};
+    };
+    const auto run = [&](bool poison) {
+        TripleBuffer<Slot> buffer;
+        Host host;
+        publish(buffer, 1, 60);
+        const Slot* first = buffer.acquire();
+        REQUIRE(first != nullptr);
+        host.adopt(snapshotOfSlot(first, buffer.currentGeneration()));
+        host.run(0.0, kSamplesPerBeat, true);
+        REQUIRE(host.lastOk);
+
+        publish(buffer, 2, 62);
+        const Slot* fresh = buffer.acquire();  // releases `first` to the producer
+        REQUIRE(fresh != nullptr);
+        REQUIRE(fresh != first);
+        if (poison) {
+            publish(buffer, 3, 64);  // the producer's back slot is now `first`
+            Slot& back = buffer.beginWrite();
+            REQUIRE(&back == first);
+            for (NoteEvent& e : back.events) {
+                e = NoteEvent{0.0, true, 1, 1};
+            }
+            back.count = back.events.size();
+            back.endBeat = 0.25;
+        }
+        host.adopt(snapshotOfSlot(fresh, buffer.currentGeneration()));  // generation 2, never 3: not acquired
+        std::vector<std::vector<Ev>> blocks;
+        std::vector<bool> ok;
+        for (int i = 0; i < 4; ++i) {
+            blocks.push_back(host.run(1.0 + i * 512.0 / kSamplesPerBeat, 512, true));
+            ok.push_back(host.lastOk);
+        }
+        return std::make_pair(blocks, ok);
+    };
+    const auto clean = run(false);
+    const auto poisoned = run(true);
+    CHECK(clean.second == std::vector<bool>{true, true, true, true});
+    CHECK(poisoned.second == clean.second);
+    CHECK(poisoned.first == clean.first);
+    REQUIRE(!clean.first.empty());
+    CHECK(clean.first[0] == std::vector<Ev>{off(0, 60), on(0, 62)});
 }

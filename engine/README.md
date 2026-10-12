@@ -10,7 +10,8 @@ include/chordlab/   public headers, one per module (pitch, scale, chord, symbol,
                     palette, document, compiler, note_event, limits, scheduler, triple_buffer, smf,
                     json_api)
 src/                the matching implementations
-tests/              doctest suite (tests/doctest.h is the vendored framework), one file per module
+tests/              doctest suite (tests/doctest.h is the vendored framework), one file per module;
+                    tests/rt_alloc/ is a second executable that counts allocations (see below)
 fixtures/           golden files the tests compare against (cmaj-1bar.mid)
 third_party/        vendored headers; see third_party/README.md for provenance and hashes
 build/              CMake output, ignored by git
@@ -19,10 +20,12 @@ build/              CMake output, ignored by git
 ## Build and test
 
 ```
-cmake -S engine -B engine/build && cmake --build engine/build && timeout 300 engine/build/engine_tests
+cmake -S engine -B engine/build && cmake --build engine/build && ctest --test-dir engine/build
 ```
 
-C++17, `-Wall -Wextra -Wpedantic`, zero warnings expected. The suite must report `0 failed`.
+That runs two executables, `engine_tests` (the suite) and `engine_rt_alloc_test` (below); either can be run
+directly, e.g. `timeout 300 engine/build/engine_tests`. C++17, `-Wall -Wextra -Wpedantic`, zero warnings
+expected. Both must report `0 failed`.
 
 ## Error handling
 
@@ -48,12 +51,15 @@ What may run on the audio thread is exactly the `Scheduler` surface: `process`, 
 `currentGeneration`). After construction neither allocates, throws, locks or logs; the scheduler's only
 headers are `limits.h` and `note_event.h` plus `<array>`, `<atomic>`, `<cstddef>`, `<cstdint>`, and
 `triple_buffer.h` adds `<type_traits>`, so a translation unit that includes them pulls in nothing that
-allocates.
+allocates. `engine_rt_alloc_test` proves it from the outside: a separate process whose global
+`operator new`/`delete` are replaced by counting versions runs the scheduler through ten thousand random
+blocks (starts, stops, seeks, tempo changes, previews, panics, adopts) and both sides of the triple buffer,
+and asserts that nothing allocated.
 
 Everything else (`DocumentStore`, `compile`, the palette and symbols, `json_api`, `smf`) is ordinary
 allocating code for the UI/message thread. The hand-over is a `Snapshot`: `compile` produces the
 `NoteEvent` array off the audio thread, and the caller keeps it alive and unchanged from `adopt` until
-the next `adopt` (see `Snapshot` in `scheduler.h`). `kMaxChords` (`document.h`) bounds the document so
+the next `adopt`, which never reads it (see `Snapshot` in `scheduler.h`). `kMaxChords` (`document.h`) bounds the document so
 that a compiled snapshot always fits `kMaxSnapshotEvents` (`limits.h`). `TripleBuffer<T>`
 (`triple_buffer.h`) is the handoff that satisfies that lifetime rule without a lock: the producer fills
 and publishes preallocated slots, the consumer acquires the latest one per block, and the slot it holds

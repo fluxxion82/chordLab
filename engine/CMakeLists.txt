@@ -14,3 +14,9 @@ target_link_libraries(engine_tests PRIVATE chordlab_engine Threads::Threads)  # 
 target_include_directories(engine_tests PRIVATE tests third_party)  # test_json_api.cpp parses with nlohmann
 add_test(NAME engine_tests COMMAND engine_tests)
 target_compile_definitions(engine_tests PRIVATE CHORDLAB_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
+# Its own process: it replaces the global operator new/delete to count allocations on the real-time surface.
+add_executable(engine_rt_alloc_test tests/rt_alloc/test_rt_alloc.cpp)
+target_link_libraries(engine_rt_alloc_test PRIVATE chordlab_engine)
+target_include_directories(engine_rt_alloc_test PRIVATE tests)
+target_compile_options(engine_rt_alloc_test PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME engine_rt_alloc_test COMMAND engine_rt_alloc_test)

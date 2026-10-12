@@ -31,9 +31,12 @@ struct MidiOut {
 
 /// The compiled progression as the scheduler plays it. `events` must be sorted by
 /// `(beat, off before on, pitch)` with every beat in `[0, endBeat]` and at most
-/// `Scheduler::kMaxSnapshotEvents` of them, as `compile` produces. The array must stay valid and
-/// unchanged during `adopt` and during every `process` call until the next `adopt`; after that `adopt`
-/// returns it is never read again. `generation` changes whenever the content changes.
+/// `Scheduler::kMaxSnapshotEvents` of them, as `compile` produces. Lifetime: the array must stay valid
+/// and unchanged from its `adopt` through every `process` call until the next `adopt`. That next `adopt`
+/// never reads the previous array (everything it needs from the old timeline is kept in scheduler state
+/// that `process` maintains), so the memory may be reused as soon as the next `adopt` is entered: the
+/// plug-in's triple buffer relies on this, since `acquire` hands the old slot back to the producer before
+/// `adopt` runs. `generation` changes whenever the content changes.
 struct Snapshot {
     const NoteEvent* events;
     std::size_t count;
@@ -136,7 +139,8 @@ public:
 
     /// Replaces the progression. A changed `generation` marks a pending flush (release all, then chase on
     /// the next block), and if that abandons occurrences of the old timeline that were overdue, the next
-    /// block reports it (returns false). The same generation means the same content: playback goes on
+    /// block reports it (returns false); that verdict comes from state `process` keeps, never from the
+    /// previous array (see `Snapshot`). The same generation means the same content: playback goes on
     /// exactly as if `adopt` had not been called. A snapshot with more than `kMaxSnapshotEvents` events is
     /// adopted as an empty one (and asserts in a debug build).
     void adopt(const Snapshot& snapshot) noexcept;
@@ -215,7 +219,9 @@ private:
     void pushExpiries(int nFrames, std::int64_t previewSamples) noexcept;
     void chase(double samplesPerBeat) noexcept;
     void seekCursor(std::int64_t targetSample, double samplesPerBeat) noexcept;
+    void placeCursor(std::int64_t targetSample, double samplesPerBeat) noexcept;
     bool cursorNext(std::int64_t& wrap, std::size_t& index) const noexcept;
+    void refreshNext() noexcept;
     void enumerate(std::int64_t windowHi, double samplesPerBeat) noexcept;
     bool snapshotUsable() const noexcept;
     double canonicalBeat(std::int64_t wrap, std::size_t index) const noexcept;
@@ -252,6 +258,11 @@ private:
     bool mHasCursor;
     std::int64_t mCursorWrap;
     std::size_t mCursorIndex;
+    // The cursor's next unconsumed occurrence, as `cursorNext` normalises it, resolved to its canonical
+    // beat whenever the cursor moves (`refreshNext`). The backlog checks in `process` and `adopt` read
+    // this rather than the array, so `adopt` never touches the array it is replacing.
+    bool mHasNext;
+    double mNextBeat;
     bool mBacklogAbandoned;  // an `adopt` dropped overdue occurrences: the next block reports it
 
     // Per-block scratch.

@@ -124,6 +124,8 @@ Scheduler::Scheduler() noexcept
       mHasCursor(false),
       mCursorWrap(0),
       mCursorIndex(0),
+      mHasNext(false),
+      mNextBeat(0.0),
       mBacklogAbandoned(false),
       mScratch{},
       mScratchCount(0),
@@ -162,15 +164,14 @@ void Scheduler::adopt(const Snapshot& snapshot) noexcept {
     const bool changed = !mHasSnapshot || snapshot.generation != mSnapshot.generation;
     if (changed) {
         // Occurrences of the old timeline that are overdue but not yet emitted are abandoned with it;
-        // the next block says so.
-        std::int64_t wrap = 0;
-        std::size_t index = 0;
-        if (mWasPlaying && mHasAnchor && cursorNext(wrap, index) &&
-            sampleOf(canonicalBeat(wrap, index), mSamplesPerBeat) < mBlockSample) {
+        // the next block says so. Judged from `mNextBeat`, kept by `process`: the old array may already
+        // belong to the producer again (Snapshot, scheduler.h) and is not read here.
+        if (mWasPlaying && mHasAnchor && mHasNext && sampleOf(mNextBeat, mSamplesPerBeat) < mBlockSample) {
             mBacklogAbandoned = true;
         }
         mPendingFlush = true;
         mHasCursor = false;  // the pending flush re-seeks it
+        mHasNext = false;
     }
     // With the generation unchanged the content is the same by contract: the cursor and everything else
     // stay as they are, and playback does not notice.
@@ -369,6 +370,13 @@ void Scheduler::chase(double samplesPerBeat) noexcept {
 
 /// Points the cursor at the first occurrence on or after clock sample `targetSample`.
 void Scheduler::seekCursor(std::int64_t targetSample, double samplesPerBeat) noexcept {
+    placeCursor(targetSample, samplesPerBeat);
+    refreshNext();
+}
+
+/// `seekCursor` without the refresh: every return path leaves the cursor placed, and the one caller
+/// resolves `mNextBeat` afterwards.
+void Scheduler::placeCursor(std::int64_t targetSample, double samplesPerBeat) noexcept {
     mHasCursor = true;
     mCursorWrap = 0;
     mCursorIndex = 0;
@@ -414,6 +422,16 @@ bool Scheduler::cursorNext(std::int64_t& wrap, std::size_t& index) const noexcep
     return mSnapshot.loop || wrap == 0;
 }
 
+/// Resolves the cursor's next occurrence to `mHasNext` / `mNextBeat`. Called whenever the cursor moves,
+/// while the array is valid, so that the backlog checks never need the array (and `adopt`, which may run
+/// after the array has been reclaimed, can still judge the old timeline).
+void Scheduler::refreshNext() noexcept {
+    std::int64_t wrap = 0;
+    std::size_t index = 0;
+    mHasNext = cursorNext(wrap, index);
+    mNextBeat = mHasNext ? canonicalBeat(wrap, index) : 0.0;
+}
+
 /// Emits occurrences from the cursor on, in playback order, up to the first one at or past `windowHi`
 /// (deferred to a later block) or until the scratch is full (the rest is carried over, in order; the
 /// block is then incomplete). Occurrences behind the block start are emitted late, at offset 0.
@@ -448,6 +466,7 @@ void Scheduler::enumerate(std::int64_t windowHi, double samplesPerBeat) noexcept
     }
     mCursorWrap = wrap;
     mCursorIndex = index;
+    refreshNext();
 }
 
 // --- Ownership ---------------------------------------------------------------------------------
@@ -647,11 +666,8 @@ bool Scheduler::process(const BlockInfo& info, MidiOut* out, std::size_t capacit
     drainQueue();
 
     // Discontinuities, and the clock. Whether a carried-over timeline is pending is judged on the clock
-    // as it was, before any re-anchoring.
-    std::int64_t nextWrap = 0;
-    std::size_t nextIndex = 0;
-    const bool backlog = mWasPlaying && mHasAnchor && cursorNext(nextWrap, nextIndex) &&
-                         sampleOf(canonicalBeat(nextWrap, nextIndex), mSamplesPerBeat) < mBlockSample;
+    // as it was, before any re-anchoring, from the cursor's next occurrence as the last block left it.
+    const bool backlog = mWasPlaying && mHasAnchor && mHasNext && sampleOf(mNextBeat, mSamplesPerBeat) < mBlockSample;
     const bool stopped = !playing && mWasPlaying;
     const bool started = playing && !mWasPlaying;
     const double expected = mHasAnchor ? mAnchorPpq + static_cast<double>(mBlockSample) / mSamplesPerBeat : 0.0;
@@ -688,7 +704,7 @@ bool Scheduler::process(const BlockInfo& info, MidiOut* out, std::size_t capacit
         bool overloaded = false;
         if (!flush && !spansTooMuch && backlog) {
             const double position = mAnchorPpq + static_cast<double>(mBlockSample) / samplesPerBeat;
-            overloaded = position - canonicalBeat(nextWrap, nextIndex) > kMaxLagBeats;
+            overloaded = position - mNextBeat > kMaxLagBeats;
         }
         if (spansTooMuch || overloaded) {
             if (!flush) {
@@ -749,6 +765,7 @@ bool Scheduler::process(const BlockInfo& info, MidiOut* out, std::size_t capacit
     } else {
         mHasAnchor = false;
         mHasCursor = false;
+        mHasNext = false;
     }
     mWasPlaying = playing;
     mPendingFlush = false;

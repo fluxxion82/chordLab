@@ -23,7 +23,10 @@ namespace chordlab {
 /// unread middle is simply replaced, so the consumer always gets the latest publish, never a backlog.
 /// Generations: the producer passes a generation to each `publish`; if it passes increasing values the
 /// consumer sees them increase (it may skip some, never go back). The consumer learns a generation only
-/// through `currentGeneration`, so the content it belongs to is always the one in `current`.
+/// through `currentGeneration`, so the content it belongs to is always the one in `current`. The
+/// generation is a `uint32_t`: a producer that counts up wraps after 2^32 publications (one per edit in
+/// the plug-in, so never in practice); the scheduler compares generations for equality only, so even a
+/// wrap could at worst make one publish look unchanged.
 ///
 /// Threads: `beginWrite` and `publish` belong to one producer thread at a time (callers that switch
 /// producer threads must order the calls themselves, with a mutex for instance); `acquire`, `current`

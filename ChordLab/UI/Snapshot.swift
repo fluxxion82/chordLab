@@ -105,11 +105,8 @@ struct ErrorJSON: Codable {
 }
 
 /// `kMsgTagStatus` payload: `{"schema":1,"incompleteBlocks":n}`, audio blocks the scheduler could not
-/// complete (a debug aid; the count only grows). Debug builds of the plug-in add `allocatingBlocks`, the
-/// blocks whose ProcessBlock called operator new (expected 0 in the VST3; the standalone app allocates
-/// whenever it forwards MIDI).
+/// complete (a debug aid; the count only grows).
 struct StatusJSON: Codable {
   let schema: Int
   let incompleteBlocks: Int
-  let allocatingBlocks: Int?
 }

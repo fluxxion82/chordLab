@@ -23,6 +23,6 @@ static const NSInteger kMsgTagPanic = 13;            // no payload: silence ever
 // plugin -> UI
 static const NSInteger kMsgTagSnapshot = 20;         // payload: snapshotJson (document + palette)
 static const NSInteger kMsgTagError = 21;            // payload: {"schema":1,"error":"..."} for a rejected command or preview
-static const NSInteger kMsgTagStatus = 22;           // payload: {"schema":1,"incompleteBlocks":n[,"allocatingBlocks":m]} (debug aids; the latter in Debug builds only)
+static const NSInteger kMsgTagStatus = 22;           // payload: {"schema":1,"incompleteBlocks":n} (scheduler debug aid)
 
 #endif /* ChordLab_Shared_h */

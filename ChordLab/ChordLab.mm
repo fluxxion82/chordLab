@@ -38,8 +38,9 @@
 // kMaxSnapshotEvents NoteEvents) and publishes it with a fresh generation; ProcessBlock acquires the newest
 // publish at the top of the block and calls Scheduler::adopt with a Snapshot that points into the front
 // slot. The buffer guarantees the front slot is not written until the next acquire, and the scheduler
-// never reads a snapshot after the adopt that replaces it, so the array stays valid and unchanged for as
-// long as adopt requires. The producer side belongs to whoever holds mModelMutex (main thread for
+// never reads the previous array once the adopt that replaces it is entered (Snapshot in scheduler.h),
+// so the array stays valid and unchanged for exactly as long as adopt requires even though acquire has
+// already handed the old slot back to the producer. The producer side belongs to whoever holds mModelMutex (main thread for
 // commands, the host's state thread for UnserializeState); the consumer side belongs to ProcessBlock.
 // Rapid edits coalesce: an unacquired publish is simply replaced by the next. The generation only moves
 // when the compiled content moved, so a browsed-key change or a followHost toggle does not make the
@@ -59,8 +60,6 @@
 #include <climits>
 #include <cstddef>
 #include <cstdint>
-#include <cstdlib>
-#include <new>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -70,74 +69,6 @@
 #import <AUv3Framework/ChordLab-Shared.h>
 #else
 #import <ChordLab-Swift.h>
-#endif
-
-#if CHORDLAB_COUNT_ALLOCATIONS
-// Allocation check for ProcessBlock (plan M3.3), Debug builds only. This translation unit replaces the
-// global allocating operator new of the whole image (the plug-in bundle or the standalone app; the host's
-// own calls stay bound to libc++), counting calls per thread, and ProcessBlock compares the count before
-// and after its body. Memory comes from malloc, so the default operator delete (free) stays correct for
-// every variant; the over-aligned forms use posix_memalign, which free also accepts. Not replaced: the
-// nothrow over-aligned forms (nothing here over-aligns; they would simply go uncounted). The count is
-// per thread, so allocations on the main thread during a block are not blamed on it.
-namespace
-{
-thread_local int gNewCalls = 0;
-
-void* countedAlloc(std::size_t size)
-{
-  ++gNewCalls;
-  return std::malloc(size ? size : 1);
-}
-
-void* countedAlignedAlloc(std::size_t size, std::align_val_t alignment)
-{
-  ++gNewCalls;
-  void* p = nullptr;
-  const std::size_t align = std::max<std::size_t>((std::size_t) alignment, sizeof(void*));
-  if (posix_memalign(&p, align, size ? size : 1) != 0)
-    return nullptr;
-  return p;
-}
-}  // namespace
-
-void* operator new(std::size_t size)
-{
-  if (void* p = countedAlloc(size))
-    return p;
-  throw std::bad_alloc();
-}
-
-void* operator new[](std::size_t size)
-{
-  if (void* p = countedAlloc(size))
-    return p;
-  throw std::bad_alloc();
-}
-
-void* operator new(std::size_t size, const std::nothrow_t&) noexcept
-{
-  return countedAlloc(size);
-}
-
-void* operator new[](std::size_t size, const std::nothrow_t&) noexcept
-{
-  return countedAlloc(size);
-}
-
-void* operator new(std::size_t size, std::align_val_t alignment)
-{
-  if (void* p = countedAlignedAlloc(size, alignment))
-    return p;
-  throw std::bad_alloc();
-}
-
-void* operator new[](std::size_t size, std::align_val_t alignment)
-{
-  if (void* p = countedAlignedAlloc(size, alignment))
-    return p;
-  throw std::bad_alloc();
-}
 #endif
 
 ChordLab::ChordLab(const InstanceInfo& info)
@@ -231,9 +162,8 @@ void ChordLab::OnReset()
 void ChordLab::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
 {
   // Audio thread: nothing here may touch mStore, mPalette or mModelMutex (see the note at the top).
-#if CHORDLAB_COUNT_ALLOCATIONS
-  const int newCallsBefore = gNewCalls;
-#endif
+  // That it allocates nothing is checked engine-side (engine_rt_alloc_test covers the scheduler and the
+  // triple buffer); the iPlug2 forwarding below is outside that proof (see the capacity note).
   // MIDI-only plugin: Live requires an audio bus, so keep the outputs silent.
   // Not zeroing them leaves stale host buffers playing (iPlug2 Discourse, 2024).
   const int nOut = NOutChansConnected();
@@ -275,38 +205,22 @@ void ChordLab::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
 
   if (!complete)
     mIncompleteBlocks.fetch_add(1, std::memory_order_relaxed);   // no logging on the audio thread; OnIdle reports it
-#if CHORDLAB_COUNT_ALLOCATIONS
-  // Expected to stay 0 in the VST3 after warm-up. The standalone APP allocates on every block that
-  // forwards MIDI (its SendMidiMsg, see above), so there the count only shows that notes were sent.
-  if (gNewCalls != newCallsBefore)
-    mAllocatingBlocks.fetch_add(1, std::memory_order_relaxed);
-#endif
 }
 
 void ChordLab::OnUIOpen()
 {
   Plugin::OnUIOpen();
   PushSnapshot();
-  mReportedIncompleteBlocks = 0;                                 // make OnIdle resend the current counts
-  mReportedAllocatingBlocks = 0;
+  mReportedIncompleteBlocks = 0;                                 // make OnIdle resend the current count
 }
 
 void ChordLab::OnIdle()
 {
   const uint32_t incomplete = mIncompleteBlocks.load(std::memory_order_relaxed);
-  const uint32_t allocating = mAllocatingBlocks.load(std::memory_order_relaxed);
-#if CHORDLAB_COUNT_ALLOCATIONS
-  if (allocating != 0 && !mAllocationLogged)
-  {
-    mAllocationLogged = true;                                    // once per instance; the UI status carries the count
-    DBGMSG("ChordLab: a ProcessBlock called operator new\n");
-  }
-#endif
-  if ((incomplete != mReportedIncompleteBlocks || allocating != mReportedAllocatingBlocks) && mEditorOpen.load())
+  if (incomplete != mReportedIncompleteBlocks && mEditorOpen.load())
   {
     mReportedIncompleteBlocks = incomplete;
-    mReportedAllocatingBlocks = allocating;
-    PushStatus(incomplete, allocating);
+    PushStatus(incomplete);
   }
 }
 
@@ -509,18 +423,12 @@ void ChordLab::PushError(const std::string& message)
   });
 }
 
-void ChordLab::PushStatus(uint32_t incompleteBlocks, uint32_t allocatingBlocks)
+void ChordLab::PushStatus(uint32_t incompleteBlocks)
 {
-  OnMain([this, incompleteBlocks, allocatingBlocks] {
+  OnMain([this, incompleteBlocks] {
     if (!mEditorOpen.load())
       return;
-    nlohmann::json status{{"schema", chordlab::kJsonSchema}, {"incompleteBlocks", incompleteBlocks}};
-#if CHORDLAB_COUNT_ALLOCATIONS
-    status["allocatingBlocks"] = allocatingBlocks;               // Debug builds only; the UI treats it as optional
-#else
-    (void) allocatingBlocks;
-#endif
-    const std::string json = status.dump();
+    const std::string json = nlohmann::json{{"schema", chordlab::kJsonSchema}, {"incompleteBlocks", incompleteBlocks}}.dump();
     SendArbitraryMsgFromDelegate((int) kMsgTagStatus, (int) json.size(), json.data());
   });
 }
