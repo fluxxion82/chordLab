@@ -4,6 +4,7 @@
 #include "chordlab/chord.h"
 #include "chordlab/palette.h"
 #include "chordlab/pitch.h"
+#include "chordlab/relations.h"
 #include "chordlab/scale.h"
 #include "chordlab/suggest.h"
 
@@ -628,23 +629,39 @@ TEST_CASE("every project key x every browsed key: every suggestion carries at le
             keys.push_back(Key{canonicalTonic(pc, Mode(m)), Mode(m)});
         }
     }
+    std::vector<Key> ionian;
+    for (PitchClass pc = 0; pc < 12; ++pc) {
+        ionian.push_back(Key{canonicalTonic(pc, Mode::Ionian), Mode::Ionian});
+    }
+    const auto check = [](const Chord* previous, const Key& project, const Key& browsed) {
+        CAPTURE(project.tonic.letter);
+        CAPTURE(static_cast<int>(project.mode));
+        CAPTURE(browsed.tonic.letter);
+        CAPTURE(static_cast<int>(browsed.mode));
+        for (const Suggestion& x : suggestNext(previous, project, browsed)) {
+            CAPTURE(x.label);
+            CHECK(x.reasons.size() >= 1);
+            CHECK(x.reasons.size() == x.reasonTexts.size());
+            CHECK(has(x, Reason::Diatonic) + has(x, Reason::Borrowed) + has(x, Reason::Chromatic) <= 1);
+            CHECK_FALSE(x.label.empty());
+            CHECK_FALSE(x.roman.empty());
+        }
+    };
     for (const Key& project : keys) {
-        const Chord tonic = diatonicTriad(project, 0);
+        // Opening: every pair (cheap: no relation to a previous chord is computed).
         for (const Key& browsed : keys) {
-            CAPTURE(project.tonic.letter);
-            CAPTURE(static_cast<int>(project.mode));
-            CAPTURE(browsed.tonic.letter);
-            CAPTURE(static_cast<int>(browsed.mode));
-            for (const Chord* previous : {static_cast<const Chord*>(nullptr), &tonic}) {
-                for (const Suggestion& x : suggestNext(previous, project, browsed)) {
-                    CAPTURE(x.label);
-                    CHECK(x.reasons.size() >= 1);
-                    CHECK(x.reasons.size() == x.reasonTexts.size());
-                    CHECK(has(x, Reason::Diatonic) + has(x, Reason::Borrowed) + has(x, Reason::Chromatic) <= 1);
-                    CHECK_FALSE(x.label.empty());
-                    CHECK_FALSE(x.roman.empty());
-                }
-            }
+            check(nullptr, project, browsed);
+        }
+        // After the tonic: the guarantee is structural (a candidate that is not applied has exactly one of
+        // Diatonic, Borrowed and Chromatic whatever precedes it; the previous chord only adds reasons), so
+        // the browsed keys need only cover the candidate sources, the palette on the project tonic (its
+        // parallel modes) and on every other tonic (the twelve Ionian keys), rather than all 108 - the
+        // relation per candidate makes the full grid take ten seconds.
+        const Chord tonic = diatonicTriad(project, 0);
+        std::vector<Key> browsedKeys = parallelModes(project);
+        browsedKeys.insert(browsedKeys.end(), ionian.begin(), ionian.end());
+        for (const Key& browsed : browsedKeys) {
+            check(&tonic, project, browsed);
         }
     }
 }

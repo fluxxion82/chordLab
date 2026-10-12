@@ -35,6 +35,19 @@ frozen in `src/suggest.cpp`: it mirrors `suggestNext`'s scoring with the weights
 grid around the frozen values and reports, per point, the smallest margin by which the Pop expectations
 pinned in `tests/test_suggest.cpp` hold; run it after changing the formula or the expectations.
 
+## JSON surface
+
+`json_api.h` is the one description of what crosses the bridge to the UI, and the only place the field
+lists live: the snapshot (`snapshotJson`: the keys, the events with symbol, numeral, function, tension,
+the voicing `compile` gives them and the "why" of each against the chord before it, the palette cells,
+the sections, the live selection and the next-chord suggestions), the commands (`applyCommandJson`: keys
+and browsing, chord edits, voicing and auto voice-leading, sections, selection, undo/redo) and the
+persisted state (`stateJson` / `loadStateJson`). The rules behind the "why" sentence, the validation of
+each command and the defaults a loader applies are in that header's doc blocks and are not repeated
+here; `tests/test_json_api.cpp` pins every field. The schema number is 1 and stays 1 while fields are
+only added: a reader ignores what it does not know and `loadStateJson` defaults what an older state
+lacks.
+
 ## Error handling
 
 Three mechanisms, chosen by who can get it wrong:
@@ -43,7 +56,8 @@ Three mechanisms, chosen by who can get it wrong:
   missing, is reported, never thrown: `applyCommandJson` / `loadStateJson` return false with a message and
   leave the store untouched; `appendChord` returns `kNoEventId` when the document is full or the ids
   are exhausted, and `addSection` returns `kNoSectionId` for an index that is not a chord position or
-  already starts a section; `writeSmf0` returns an empty vector and `writeFile` false; `pushPreview` returns false
+  already starts a section (through JSON that index is a no-op and only exhausted ids are refused);
+  `writeSmf0` returns an empty vector and `writeFile` false; `pushPreview` returns false
   on a full queue and `process` returns false for a block it could not complete.
 - **Assertions for programmer preconditions.** A `Chord` with a null type, a `Key` with a bad letter, a
   `Mode` outside the enum, an unsorted `Snapshot`: these are contract violations, checked with `assert`

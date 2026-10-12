@@ -374,6 +374,12 @@ TEST_CASE("borrowedFrom: a minor-family key tries harmonic and melodic minor, th
     const Key dDorian = key('D', 0, Mode::Dorian);
     CHECK(borrowedFrom(chord(9, "maj"), dDorian) == key('D', 0, Mode::HarmonicMinor));  // A C# E
     CHECK(borrowedFrom(chord(2, "maj"), dDorian) == key('D', 0, Mode::Ionian));         // D F# A
+    // Dorian's bVI (Bb D F in D Dorian, Ab C Eb in C Dorian) is held by Aeolian and by harmonic minor;
+    // the order is a fixed priority, and harmonic minor comes first.
+    CHECK(borrowedFrom(chord(10, "maj"), dDorian) == key('D', 0, Mode::HarmonicMinor));
+    CHECK(borrowedFrom(chord(8, "maj"), key('C', 0, Mode::Dorian)) == key('C', 0, Mode::HarmonicMinor));
+    CHECK(borrowedFrom(chord(8, "maj7"), key('C', 0, Mode::Dorian)) == key('C', 0, Mode::HarmonicMinor));  // Ab C Eb G
+    CHECK(borrowedFrom(chord(8, "maj9"), key('C', 0, Mode::Dorian)) == key('C', 0, Mode::Aeolian));  // Ab C Eb G Bb: Bb rules harmonic minor out
     CHECK(borrowedFrom(chord(11, "maj"), key('E', 0, Mode::Phrygian)) == key('E', 0, Mode::HarmonicMinor));
     CHECK(borrowedFrom(chord(6, "maj"), key('B', 0, Mode::Locrian)) == key('B', 0, Mode::HarmonicMinor));
 }
