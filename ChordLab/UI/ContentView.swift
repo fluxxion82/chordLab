@@ -1,57 +1,53 @@
 import SwiftUI
 
-/// Key bar over a temporary M2.1 status area (replaced by the palette grid in Task 2.3), with the
-/// Spike 1 preview button and the Spike 3 drag-out label kept until their Live verification.
+/// Key bar over the palette grid, with a temporary status line, the Spike 1 preview button and the
+/// Spike 3 drag-out label along the bottom until their Live verification and M3/M4 replace them.
 struct ContentView: View {
   @EnvironmentObject var state: ChordLabState
   private let cMajor: [UInt8] = [60, 64, 67]
 
   var body: some View {
     ZStack {
-      Color(red: 0.04, green: 0.07, blue: 0.25)
-      VStack(spacing: 16) {
+      PaletteView.background
+      VStack(spacing: 12) {
         KeyBarView()
 
-        if let snapshot = state.snapshot {
-          Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 6) {
-            GridRow { Text("Project key"); Text(snapshot.projectKeyName) }
-            GridRow { Text("Browsed key"); Text(snapshot.browsedKeyName) }
-            GridRow { Text("Palette"); Text("\(snapshot.palette.cells.count) cells, \(snapshot.palette.tiers) tiers") }
-            GridRow { Text("Events"); Text("\(snapshot.events.count), ending at beat \(snapshot.endBeat, specifier: "%.2f")") }
+        PaletteView()
+
+        HStack(spacing: 16) {
+          if let snapshot = state.snapshot {
+            Text("\(snapshot.palette.cells.count) cells · \(snapshot.events.count) events · ends at beat \(snapshot.endBeat, specifier: "%.2f")")
+              .foregroundStyle(.gray).font(.callout.monospacedDigit())
+          } else {
+            Text("Waiting for a snapshot…").foregroundStyle(.gray).font(.callout)
           }
-          .foregroundStyle(.white)
-          .font(.body.monospacedDigit())
-        } else {
-          Text("Waiting for a snapshot…").foregroundStyle(.gray)
-        }
-
-        Button("Append C") { state.send(command: ["cmd": "appendChord", "root": 0, "type": "maj"]) }
-
-        if let error = state.lastError {
-          Text("Error: \(error)").foregroundStyle(.red).font(.callout)
-        }
-
-        Spacer()
-
-        // Spike 1: preview a chord while the mouse is held (Live verification still pending).
-        Text("C major (hold)")
-          .font(.title3).foregroundStyle(.white)
-          .padding(.horizontal, 28).padding(.vertical, 16)
-          .background(Circle().fill(Color(red: 0.11, green: 0.44, blue: 0.50)))
-          .pressAction(onPress: { state.sendChord(cMajor, on: true) },
-                       onRelease: { state.sendChord(cMajor, on: false) })
-
-        // Spike 3: drag a prepared .mid out to the DAW.
-        Text("♫ Drag MIDI clip to Live")
-          .foregroundStyle(.white)
-          .padding(12)
-          .background(RoundedRectangle(cornerRadius: 8).fill(Color(red: 0.20, green: 0.25, blue: 0.55)))
-          .onDrag {
-            guard let url = ExportFixture.prepareExportFile() else { return NSItemProvider() }
-            return NSItemProvider(contentsOf: url) ?? NSItemProvider()
+          Button("Append C") { state.send(command: ["cmd": "appendChord", "root": 0, "type": "maj"]) }
+          if let error = state.lastError {
+            Text("Error: \(error)").foregroundStyle(.red).font(.callout).lineLimit(2)
           }
+
+          Spacer()
+
+          // Spike 1: preview a chord while the mouse is held (Live verification still pending).
+          Text("C major (hold)")
+            .foregroundStyle(.white)
+            .padding(.horizontal, 16).padding(.vertical, 8)
+            .background(Capsule().fill(Color(red: 0.11, green: 0.44, blue: 0.50)))
+            .pressAction(onPress: { state.sendChord(cMajor, on: true) },
+                         onRelease: { state.sendChord(cMajor, on: false) })
+
+          // Spike 3: drag a prepared .mid out to the DAW.
+          Text("♫ Drag MIDI clip to Live")
+            .foregroundStyle(.white)
+            .padding(.horizontal, 12).padding(.vertical, 8)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color(red: 0.20, green: 0.25, blue: 0.55)))
+            .onDrag {
+              guard let url = ExportFixture.prepareExportFile() else { return NSItemProvider() }
+              return NSItemProvider(contentsOf: url) ?? NSItemProvider()
+            }
+        }
       }
-      .padding()
+      .padding(12)
     }
     .edgesIgnoringSafeArea(.all)
     .onAppear { state.requestSnapshot() }
