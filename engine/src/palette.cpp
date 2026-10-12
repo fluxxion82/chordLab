@@ -5,7 +5,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cassert>
 #include <cstddef>
 #include <string_view>
 
@@ -30,29 +29,6 @@ constexpr std::array<std::string_view, 7> kColourCandidates{"9", "maj9", "m9", "
 /// The chord types chosen for one degree, indexed by tier; nullptr where the tier is empty.
 using Column = std::array<const ChordType*, kPaletteTiers>;
 
-/// The triad with exactly the intervals `third` and `fifth` above the root.
-const ChordType& triadWith(int third, int fifth) {
-    if (third == 4 && fifth == 7) {
-        return chordType("maj");
-    }
-    if (third == 3 && fifth == 7) {
-        return chordType("min");
-    }
-    if (third == 3 && fifth == 6) {
-        return chordType("dim");
-    }
-    assert(third == 4 && fifth == 8 && "chordlab: stacked thirds do not form a dictionary triad");
-    return chordType("aug");
-}
-
-/// The stacked-third triad on degree `degree` of `scale`: degrees d, d+2, d+4.
-const ChordType& stackedThirdTriad(const std::array<PitchClass, 7>& scale, std::size_t degree) {
-    const PitchClass root = scale[degree];
-    const int third = pitchClassOf(scale[(degree + 2) % 7] - root);
-    const int fifth = pitchClassOf(scale[(degree + 4) % 7] - root);
-    return triadWith(third, fifth);
-}
-
 bool usedIn(const Column& column, const ChordType& type) {
     return std::find(column.begin(), column.end(), &type) != column.end();
 }
@@ -74,7 +50,7 @@ const ChordType* firstUnusedInKey(const std::array<std::string_view, N>& candida
 Column buildColumn(const Key& browsedKey, const std::array<PitchClass, 7>& scale, std::size_t degree) {
     const PitchClass root = scale[degree];
     Column column{};
-    column[kTriadTier] = &stackedThirdTriad(scale, degree);
+    column[kTriadTier] = diatonicTriad(browsedKey, static_cast<int>(degree)).type;
     if (inScale(root + 7, browsedKey.tonicPc(), browsedKey.mode)) {
         column[kPowerTier] = &chordType("5");
     }

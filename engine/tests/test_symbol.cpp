@@ -231,6 +231,54 @@ TEST_CASE("chordSymbol and romanNumeral: the symbol's accidental is letter-relat
     CHECK(romanNumeral(chord(Fs, "dim"), kCIonian, SymbolStyle::Standard) == "#iv°");
 }
 
+// --- numeralDegree ---------------------------------------------------------------------
+
+TEST_CASE("numeralDegree: major-scale roots are their degree with no alteration") {
+    CHECK(numeralDegree(chord(C, "maj"), kCIonian) == NumeralDegree{0, 0});
+    CHECK(numeralDegree(chord(D, "min"), kCIonian) == NumeralDegree{1, 0});
+    CHECK(numeralDegree(chord(B, "dim"), kCIonian) == NumeralDegree{6, 0});
+    CHECK(numeralDegree(chord(A, "7"), kCIonian) == NumeralDegree{5, 0});  // the quality does not matter
+    CHECK(numeralDegree(chord(Ab, "dim"), kAAeolian) == NumeralDegree{6, 0});  // G# is in A major
+}
+
+TEST_CASE("numeralDegree: chromatic roots take the parallel-mode degree and a single alteration") {
+    CHECK(numeralDegree(chord(Db, "maj"), kCIonian) == NumeralDegree{1, -1});
+    CHECK(numeralDegree(chord(Eb, "maj"), kCIonian) == NumeralDegree{2, -1});
+    CHECK(numeralDegree(chord(Fs, "dim"), kCIonian) == NumeralDegree{3, 1});
+    CHECK(numeralDegree(chord(Ab, "maj"), kCIonian) == NumeralDegree{5, -1});
+    CHECK(numeralDegree(chord(Bb, "maj"), kCIonian) == NumeralDegree{6, -1});
+    CHECK(numeralDegree(chord(G, "maj"), kAAeolian) == NumeralDegree{6, -1});
+    CHECK(numeralDegree(chord(C, "maj"), kAAeolian) == NumeralDegree{2, -1});
+    CHECK(numeralDegree(chord(Eb, "dim"), kAAeolian) == NumeralDegree{3, 1});  // D#
+    CHECK(numeralDegree(chord(F, "maj"), key('C', 0, Mode::Lydian)) == NumeralDegree{3, 0});  // mode ignored
+}
+
+TEST_CASE("numeralDegree: agrees with the prefix and numeral that romanNumeral writes") {
+    constexpr std::array<std::string_view, 7> kUpper{"I", "II", "III", "IV", "V", "VI", "VII"};
+    for (char letter = 'A'; letter <= 'G'; ++letter) {
+        for (int alter = -1; alter <= 1; ++alter) {
+            for (const Mode mode : kAllModes) {
+                const Key k = key(letter, alter, mode);
+                for (PitchClass root = 0; root < 12; ++root) {
+                    CAPTURE(letter);
+                    CAPTURE(alter);
+                    CAPTURE(static_cast<int>(mode));
+                    CAPTURE(root);
+                    const Chord c = chord(root, "maj");
+                    const NumeralDegree nd = numeralDegree(c, k);
+                    REQUIRE(nd.degree >= 0);
+                    REQUIRE(nd.degree < 7);
+                    REQUIRE(nd.alter >= -1);
+                    REQUIRE(nd.alter <= 1);
+                    std::string expected = nd.alter < 0 ? "b" : nd.alter > 0 ? "#" : "";
+                    expected += kUpper[static_cast<std::size_t>(nd.degree)];
+                    CHECK(romanNumeral(c, k) == expected);
+                }
+            }
+        }
+    }
+}
+
 // --- Suffix tables ---------------------------------------------------------------------
 
 namespace {

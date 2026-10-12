@@ -55,4 +55,10 @@ std::vector<PitchClass> pitchClasses(const Chord& chord);
 /// True if every pitch class of the chord belongs to the key's scale.
 bool fullyInKey(const Chord& chord, const Key& key);
 
+/// The stacked-third triad on scale degree `degree` of `key`: rooted on that degree, with the pitch
+/// classes of degrees d+2 and d+4 of the key's scale as its third and fifth, typed as whichever of
+/// `maj`/`min`/`dim`/`aug` has exactly those intervals (every supported mode yields one of the four).
+/// `degree` is taken modulo 7, so 7 is the tonic triad again and -1 the triad on the seventh degree.
+Chord diatonicTriad(const Key& key, int degree);
+
 }  // namespace chordlab

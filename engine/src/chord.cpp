@@ -1,10 +1,31 @@
 #include "chordlab/chord.h"
 
+#include <array>
 #include <cassert>
+#include <cstddef>
 #include <stdexcept>
 #include <string>
 
 namespace chordlab {
+
+namespace {
+
+/// The triad with exactly the intervals `third` and `fifth` above the root.
+const ChordType& triadWith(int third, int fifth) {
+    if (third == 4 && fifth == 7) {
+        return chordType("maj");
+    }
+    if (third == 3 && fifth == 7) {
+        return chordType("min");
+    }
+    if (third == 3 && fifth == 6) {
+        return chordType("dim");
+    }
+    assert(third == 4 && fifth == 8 && "chordlab: stacked thirds do not form a dictionary triad");
+    return chordType("aug");
+}
+
+}  // namespace
 
 const std::vector<ChordType>& allChordTypes() {
     // Function-local static: initialised once, lives for the program, so references into it are stable.
@@ -63,6 +84,15 @@ bool fullyInKey(const Chord& chord, const Key& key) {
         }
     }
     return true;
+}
+
+Chord diatonicTriad(const Key& key, int degree) {
+    const std::array<PitchClass, 7> scale = scalePitchClasses(key.tonicPc(), key.mode);
+    const auto d = static_cast<std::size_t>(((degree % 7) + 7) % 7);
+    const PitchClass root = scale[d];
+    const int third = pitchClassOf(scale[(d + 2) % 7] - root);
+    const int fifth = pitchClassOf(scale[(d + 4) % 7] - root);
+    return Chord{root, &triadWith(third, fifth)};
 }
 
 }  // namespace chordlab
