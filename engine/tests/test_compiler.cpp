@@ -433,16 +433,19 @@ TEST_CASE("compileSection: each section runs to the next section's start, the la
     CHECK(c.endBeat == 9.0);
 }
 
-TEST_CASE("compileSection: chords before the first section belong to no section") {
+TEST_CASE("compileSection: a section added at an inner chord of an unsectioned document gets a leading section") {
     DocumentStore store;
     for (int i = 0; i < 5; ++i) {
         store.appendChord(kC, 1.0, 100);
     }
-    store.addSection(1, "A");
+    store.addSection(1, "A");  // also creates "Section 1" at 0
     store.addSection(3, "B");
     const Document& doc = store.doc();
-    CHECK(compileSection(doc, 0).events == compileRange(doc, 1, 2).events);
-    CHECK(compileSection(doc, 0).endBeat == 2.0);
-    CHECK(compileSection(doc, 1).events == compileRange(doc, 3, 2).events);
+    REQUIRE(doc.sections.size() == 3);
+    CHECK(compileSection(doc, 0).events == compileRange(doc, 0, 1).events);
+    CHECK(compileSection(doc, 0).endBeat == 1.0);
+    CHECK(compileSection(doc, 1).events == compileRange(doc, 1, 2).events);
     CHECK(compileSection(doc, 1).endBeat == 2.0);
+    CHECK(compileSection(doc, 2).events == compileRange(doc, 3, 2).events);
+    CHECK(compileSection(doc, 2).endBeat == 2.0);
 }

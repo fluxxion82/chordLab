@@ -62,11 +62,12 @@ constexpr bool operator!=(const ChordEvent& a, const ChordEvent& b) noexcept {
 }
 
 /// A named, coloured stretch of the progression (P2-D6). It starts on the chord at `firstEventIndex` and
-/// runs up to the next section's start (or the end of the progression), so a section is never empty and
-/// the sections partition the sequence from the first one on. Chords before the first section belong to
-/// no section, and a document without sections behaves as one unnamed section (`compileSection`).
-/// `id` is stable for the life of the section and unique within a `DocumentStore`; it survives chord
-/// edits, undo and redo, and is never reused after a remove. `colourIndex` is in 0..kNumSectionColours-1.
+/// runs up to the next section's start (or the end of the progression), so a section is never empty.
+/// The first section always starts at 0, so when there are sections they partition the whole sequence
+/// and every chord is in exactly one; a document without sections behaves as one unnamed section
+/// (`compileSection`). `id` is stable for the life of the section and unique within a `DocumentStore`;
+/// it survives chord edits, undo and redo, and is never reused after a remove. `colourIndex` is in
+/// 0..kNumSectionColours-1.
 struct Section {
     int id;
     std::string name;
@@ -94,7 +95,7 @@ struct Document {
     Key projectKey{{'C', 0}, Mode::Ionian};
     Key browsedKey{{'C', 0}, Mode::Ionian};
     std::vector<ChordEvent> events;  // playback order; chords abut, no gaps
-    std::vector<Section> sections;   // sorted by firstEventIndex, strictly increasing, each in 0..events.size()-1
+    std::vector<Section> sections;   // sorted by firstEventIndex, strictly increasing from 0, each < events.size()
     bool progressionLoop = true;
     bool followHost = true;
 
@@ -106,8 +107,8 @@ struct Document {
     double endBeat() const;
 
     /// Position in `sections` of the section the event at `eventIndex` belongs to: the last section that
-    /// starts at or before it. -1 when there are no sections, or the event sits before the first one.
-    /// `eventIndex` must be in 0..events.size()-1.
+    /// starts at or before it. -1 when there are no sections (the first section starts at 0, so otherwise
+    /// every event is in one). `eventIndex` must be in 0..events.size()-1.
     int sectionIndexOf(int eventIndex) const;
 };
 
@@ -134,9 +135,11 @@ inline bool operator!=(const Document& a, const Document& b) noexcept {
 /// and is not part of the undoable state, so an id is never reused even after undo or redo. Section ids
 /// come from a second counter of their own (starting at 1) with the same rules.
 ///
-/// Sections follow the chords they start on: `moveChord` keeps every section on its start chord and
-/// re-sorts the list by the new indices; `removeChord` moves the sections after the removed chord up one
-/// index and drops a section whose start chord went, with one exception documented on `removeChord`.
+/// Sections follow the chords they start on, except that the first section is pinned to the start of the
+/// sequence: `moveChord` keeps every section on its start chord and re-sorts the list by the new indices,
+/// but keeps the first section at 0 when nothing else starts there; `removeChord` moves the sections
+/// after the removed chord up one index and drops a section whose start chord went, except the first,
+/// which stays on the new first chord. Details on each method.
 ///
 /// Exception safety: every mutation gives the strong guarantee. Each one does all of its allocating (the
 /// new document, the history entry) before it changes any member, and finishes with steps that cannot
@@ -164,7 +167,11 @@ public:
     /// Moves the event `id` so that it sits at `newIndex` in playback order; `newIndex` is clamped to
     /// 0..size-1. Every section keeps starting on the same chord as before (its index is recomputed from
     /// that chord's new position) and the list is re-sorted, so a section whose start chord is moved
-    /// travels with it. Unknown id: no-op.
+    /// travels with it, with one exception: the first section is pinned to the start. When no section's
+    /// start chord ends up at index 0 (the first section's own chord moved away, or a chord from inside a
+    /// section was moved to the front), the section that was first stays at 0 and takes the new first
+    /// chord in. Only another section's start chord moved to the front displaces it: that section becomes
+    /// the first and the old first follows its chord. Unknown id: no-op.
     void moveChord(int id, int newIndex);
 
     /// Sets the length of event `id`, clamped to [kMinLengthBeats, kMaxLengthBeats]. Unknown id, or a
@@ -175,10 +182,10 @@ public:
     void setVelocity(int id, int velocity);
 
     /// Removes event `id`; the events after it move up so the sequence stays contiguous, and so do the
-    /// sections starting after it. A section starting on the removed chord is removed with it, unless it
-    /// starts at index 0, other sections follow, and the next chord does not already start one: then it
-    /// stays at 0 and the new first chord inherits it, so the chords before the second section keep their
-    /// section. Unknown id: no-op.
+    /// sections starting after it. A section starting on the removed chord is removed with it (its other
+    /// chords join the section before it), except the first section, which is pinned to the start: it
+    /// stays at 0 on the new first chord, unless that chord already starts a section (then that section
+    /// becomes the first) or no chord is left (then no section is). Unknown id: no-op.
     void removeChord(int id);
 
     /// Undoable. `key.tonic` must satisfy the `Tonic` preconditions of pitch.h and `key.mode` be a
@@ -194,10 +201,14 @@ public:
 
     /// Starts a section on the chord at `firstEventIndex` and returns its new id; the list stays sorted.
     /// An empty `name` takes the default "Section <id>"; the colour is the id's turn in the cycle of
-    /// `kNumSectionColours` (id 1 gets colour 0). Undoable.
+    /// `kNumSectionColours` (id 1 gets colour 0). The first section always starts at 0: when the document
+    /// has no sections yet and `firstEventIndex` > 0, the chords before it get a section of their own
+    /// first (default name and colour, the lower id) in the same undoable step, and the returned id is
+    /// the requested section's. Undoable.
     /// Returns `kNoSectionId` and changes nothing (no section, no history, no id consumed) when
     /// `firstEventIndex` is not a position of the progression (so never on an empty document), when a
-    /// section already starts there, or when the section id counter has reached INT_MAX.
+    /// section already starts there, or when the section id counter cannot supply the one or two ids
+    /// needed (it stops at INT_MAX).
     int addSection(int firstEventIndex, std::string name = {});
 
     /// Sets the name of section `id` to `name`, any string. Unknown id: no-op.
@@ -206,13 +217,14 @@ public:
     /// Sets the colour of section `id`, clamped to 0..kNumSectionColours-1. Unknown id: no-op.
     void setSectionColour(int id, int colourIndex);
 
-    /// Removes section `id`; its chords stay and join the section before it (none if it was the first).
+    /// Removes section `id`; its chords stay and join the section before it. For the first section they
+    /// join the next one instead, which then starts at 0 (the last section's removal leaves none).
     /// Unknown id: no-op.
     void removeSection(int id);
 
     /// Moves the start of section `id` to the chord at `newFirstEventIndex`; the list is re-sorted.
-    /// No-op when the id is unknown, when the index is not a position of the progression, or when
-    /// another section already starts there.
+    /// No-op when the id is unknown, when the index is not a position of the progression, when another
+    /// section already starts there, or when `id` is the first section, which is pinned to index 0.
     void moveSectionStart(int id, int newFirstEventIndex);
 
     /// Restores the undoable state from before the most recent change, keeping the live state. Returns
@@ -227,8 +239,9 @@ public:
     /// Clears the undo and redo history and changes nothing else.
     /// `doc` must satisfy the store's invariants (valid chords and keys, finite lengths within
     /// [kMinLengthBeats, kMaxLengthBeats], velocities within [kMinVelocity, kMaxVelocity], distinct ids,
-    /// at most `kMaxChords` events; sections sorted strictly by `firstEventIndex` with every index a
-    /// position of the progression, colours in 0..kNumSectionColours-1, ids >= 1 and distinct) and
+    /// at most `kMaxChords` events; sections sorted strictly by `firstEventIndex` with the first at 0 and
+    /// every index a position of the progression, colours in 0..kNumSectionColours-1, ids >= 1 and
+    /// distinct) and
     /// `nextId` must be >= 1 and greater than every event id, so that ids stay unique. `nextSectionId`
     /// must likewise be >= 1 and greater than every section id, or 0 (the default): one past the largest
     /// section id in `doc`, 1 when it has none. Callers that take documents from outside the process

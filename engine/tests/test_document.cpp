@@ -962,8 +962,12 @@ DocumentStore twoSections() {
 }
 
 /// The section invariants: sorted strictly by `firstEventIndex` (so unique), every index a position of
-/// the progression, every colour in 0..kNumSectionColours-1, ids >= 1 and distinct.
+/// the progression, the first section (if any) at 0, every colour in 0..kNumSectionColours-1, ids >= 1
+/// and distinct.
 void checkSectionInvariants(const Document& doc) {
+    if (!doc.sections.empty()) {
+        CHECK(doc.sections.front().firstEventIndex == 0);
+    }
     int previousIndex = -1;
     std::vector<int> seenIds;
     for (const Section& s : doc.sections) {
@@ -1032,7 +1036,7 @@ TEST_CASE("addSection: an index out of range, already used, or on an empty docum
     CHECK(empty.nextSectionId() == 1);
 
     DocumentStore store = threeChords();
-    REQUIRE(store.addSection(1, "A") == 1);
+    REQUIRE(store.addSection(0, "A") == 1);
     store.renameSection(1, "B");
     REQUIRE(store.undo());  // leaves a pending redo of the rename
     const Document before = store.doc();
@@ -1040,7 +1044,7 @@ TEST_CASE("addSection: an index out of range, already used, or on an empty docum
     CHECK(store.addSection(-1, "X") == kNoSectionId);
     CHECK(store.addSection(3, "X") == kNoSectionId);  // one past the last chord
     CHECK(store.addSection(99, "X") == kNoSectionId);
-    CHECK(store.addSection(1, "X") == kNoSectionId);  // index 1 already starts a section
+    CHECK(store.addSection(0, "X") == kNoSectionId);  // index 0 already starts a section
     CHECK(store.doc() == before);
     CHECK(store.nextSectionId() == 2);  // no id consumed
 
@@ -1061,6 +1065,37 @@ TEST_CASE("addSection: ids never repeat across remove, undo and redo") {
     REQUIRE(store.redo());
     CHECK(store.addSection(1) == 4);
     CHECK(sectionStartsOf(store) == SectionStarts{{3, 0}, {4, 1}});
+}
+
+TEST_CASE("addSection: the first section added at an inner chord gets a leading section before it, in one step") {
+    DocumentStore store = threeChords();
+    store.appendChord(kC);  // four chords
+    CHECK(store.addSection(2, "Chorus") == 2);
+    REQUIRE(store.doc().sections.size() == 2);
+    CHECK(store.doc().sections[0] == Section{1, "Section 1", 0, 0});  // the chords before it
+    CHECK(store.doc().sections[1] == Section{2, "Chorus", 1, 2});
+    CHECK(store.nextSectionId() == 3);
+    REQUIRE(store.undo());  // one history entry for both
+    CHECK(store.doc().sections.empty());
+    REQUIRE(store.redo());
+    CHECK(sectionStartsOf(store) == SectionStarts{{1, 0}, {2, 2}});
+    CHECK(store.addSection(1, "Pre") == 3);  // with a section present, an inner add is just that one
+    CHECK(sectionStartsOf(store) == SectionStarts{{1, 0}, {3, 1}, {2, 2}});
+}
+
+TEST_CASE("addSection: a two-section add needs two ids and is refused when only one is left") {
+    Document doc;
+    doc.events.push_back(ChordEvent{1, kC, 4.0, 100});
+    doc.events.push_back(ChordEvent{2, kF, 4.0, 100});
+    DocumentStore store;
+    store.replace(doc, 3, INT_MAX - 1);
+    CHECK(store.addSection(1, "X") == kNoSectionId);  // would need INT_MAX - 1 and INT_MAX
+    CHECK(store.doc().sections.empty());
+    CHECK(store.nextSectionId() == INT_MAX - 1);
+    CHECK_FALSE(store.undo());
+    CHECK(store.addSection(0, "A") == INT_MAX - 1);  // one id: fine
+    CHECK(store.addSection(1, "X") == kNoSectionId);  // the counter is exhausted
+    CHECK(store.doc().sections.size() == 1);
 }
 
 TEST_CASE("appendChord: keeps the sections where they are") {
@@ -1112,39 +1147,52 @@ TEST_CASE("setSectionColour: clamps to 0..7; unknown id and an unchanged colour 
     CHECK(store.doc().sections.size() == 1);
 }
 
-TEST_CASE("removeSection: removes that section only; unknown id is a no-op with no undo entry") {
-    DocumentStore store = twoSections();
+TEST_CASE("removeSection: the chords join the neighbouring section; removing the first hands index 0 to the next") {
+    DocumentStore store = twoSections();  // A at 0, B at 2
     store.removeSection(1);
     REQUIRE(store.doc().sections.size() == 1);
-    CHECK(store.doc().sections[0] == Section{2, "B", 1, 2});
+    CHECK(store.doc().sections[0] == Section{2, "B", 1, 0});  // B now starts the sequence
     CHECK(store.doc().events.size() == 4);  // chords untouched
-    CHECK(store.doc().sectionIndexOf(0) == -1);
+    CHECK(store.doc().sectionIndexOf(0) == 0);
     const Document after = store.doc();
     store.removeSection(1);  // already gone
     store.removeSection(99);
     CHECK(store.doc() == after);
     REQUIRE(store.undo());  // the real remove
     CHECK(sectionStartsOf(store) == SectionStarts{{1, 0}, {2, 2}});
+    store.removeSection(2);  // a later section: the one before it absorbs its chords
+    CHECK(sectionStartsOf(store) == SectionStarts{{1, 0}});
+    store.removeSection(1);  // the only section
+    CHECK(store.doc().sections.empty());
+    REQUIRE(store.undo());
+    REQUIRE(store.undo());
+    CHECK(sectionStartsOf(store) == SectionStarts{{1, 0}, {2, 2}});
     REQUIRE(store.undo());  // pops the add of B, not a phantom remove
     CHECK(store.doc().sections.size() == 1);
 }
 
 TEST_CASE("moveSectionStart: moves the start and keeps the sections sorted by index") {
-    DocumentStore store = twoSections();  // A at 0, B at 2, four chords
+    DocumentStore store = twoSections();  // A at 0, B at 2
+    store.appendChord(kC);                // five chords
     store.moveSectionStart(2, 1);
     CHECK(sectionStartsOf(store) == SectionStarts{{1, 0}, {2, 1}});
-    store.moveSectionStart(1, 3);  // A jumps past B
-    CHECK(sectionStartsOf(store) == SectionStarts{{2, 1}, {1, 3}});
-    CHECK(store.doc().sections[1].name == "A");
-    CHECK(store.doc().sectionIndexOf(0) == -1);
-    CHECK(store.doc().sectionIndexOf(2) == 0);
-    CHECK(store.doc().sectionIndexOf(3) == 1);
+    store.moveSectionStart(2, 3);
+    CHECK(sectionStartsOf(store) == SectionStarts{{1, 0}, {2, 3}});
+    REQUIRE(store.addSection(4, "C") == 3);
+    store.moveSectionStart(3, 2);  // C jumps before B
+    CHECK(sectionStartsOf(store) == SectionStarts{{1, 0}, {3, 2}, {2, 3}});
+    CHECK(store.doc().sections[1].name == "C");
+    CHECK(store.doc().sectionIndexOf(1) == 0);
+    CHECK(store.doc().sectionIndexOf(2) == 1);
+    CHECK(store.doc().sectionIndexOf(4) == 2);
 }
 
-TEST_CASE("moveSectionStart: a collision, an index out of range, an unknown id and the same index are no-ops") {
+TEST_CASE("moveSectionStart: the first section is pinned; a collision, an index out of range, an unknown id and the same index are no-ops") {
     DocumentStore store = twoSections();
     const Document before = store.doc();
-    store.moveSectionStart(1, 2);  // B starts there
+    store.moveSectionStart(1, 1);  // the first section stays at 0
+    store.moveSectionStart(1, 3);
+    store.moveSectionStart(2, 0);  // the first section is there
     store.moveSectionStart(2, -1);
     store.moveSectionStart(2, 4);  // one past the last chord
     store.moveSectionStart(99, 1);
@@ -1161,29 +1209,31 @@ TEST_CASE("findSectionIndex: position in section order, -1 when absent") {
     CHECK(store.findSectionIndex(3) == -1);
     CHECK(store.findSectionIndex(0) == -1);
     CHECK(store.findSectionIndex(kNoSectionId) == -1);
-    store.moveSectionStart(1, 3);
-    CHECK(store.findSectionIndex(1) == 1);
-    CHECK(store.findSectionIndex(2) == 0);
-    store.removeSection(2);
-    CHECK(store.findSectionIndex(2) == -1);
+    store.addSection(1, "C");  // id 3, between A and B
+    CHECK(store.findSectionIndex(3) == 1);
+    CHECK(store.findSectionIndex(2) == 2);
+    store.removeSection(1);  // C takes the start
+    CHECK(store.findSectionIndex(1) == -1);
+    CHECK(store.findSectionIndex(3) == 0);
+    CHECK(store.findSectionIndex(2) == 1);
 }
 
 // --- sectionIndexOf --------------------------------------------------------------------------
 
-TEST_CASE("Document::sectionIndexOf: -1 without sections or before the first; else the containing section") {
+TEST_CASE("Document::sectionIndexOf: -1 without sections; else the section containing the event") {
     DocumentStore store = threeChords();
     store.appendChord(kC);
     for (int i = 0; i < 4; ++i) {
         CAPTURE(i);
         CHECK(store.doc().sectionIndexOf(i) == -1);
     }
-    store.addSection(1, "A");
+    store.addSection(0, "A");
     store.addSection(3, "B");
-    CHECK(store.doc().sectionIndexOf(0) == -1);  // before the first section: the unnamed prefix
+    CHECK(store.doc().sectionIndexOf(0) == 0);
     CHECK(store.doc().sectionIndexOf(1) == 0);
     CHECK(store.doc().sectionIndexOf(2) == 0);
     CHECK(store.doc().sectionIndexOf(3) == 1);
-    store.addSection(0, "Intro");
+    store.addSection(1, "Pre");
     CHECK(store.doc().sectionIndexOf(0) == 0);
     CHECK(store.doc().sectionIndexOf(1) == 1);
     CHECK(store.doc().sectionIndexOf(2) == 1);
@@ -1195,13 +1245,13 @@ TEST_CASE("Document::sectionIndexOf: -1 without sections or before the first; el
 TEST_CASE("removeChord: a section after the removed chord moves up one index and keeps its start chord") {
     DocumentStore store = threeChords();
     store.appendChord(kC);     // ids 1 2 3 4
-    store.addSection(2, "B");  // starts on chord 3
+    store.addSection(2, "B");  // starts on chord 3; "Section 1" (id 1) is created at 0 before it
     store.removeChord(2);
     CHECK(idsOf(store) == std::vector<int>{1, 3, 4});
-    CHECK(sectionStartsOf(store) == SectionStarts{{1, 1}});
-    CHECK(sectionChordIdsOf(store) == std::vector<int>{3});
+    CHECK(sectionStartsOf(store) == SectionStarts{{1, 0}, {2, 1}});
+    CHECK(sectionChordIdsOf(store) == std::vector<int>{1, 3});
     REQUIRE(store.undo());
-    CHECK(sectionStartsOf(store) == SectionStarts{{1, 2}});
+    CHECK(sectionStartsOf(store) == SectionStarts{{1, 0}, {2, 2}});
 }
 
 TEST_CASE("removeChord: removing a section's start chord removes the section") {
@@ -1238,11 +1288,17 @@ TEST_CASE("removeChord: the first chord's section goes when the next chord alrea
     CHECK(sectionStartsOf(store) == SectionStarts{{1, 0}, {2, 1}});
 }
 
-TEST_CASE("removeChord: a lone section at 0 goes with its start chord") {
+TEST_CASE("removeChord: a lone section at 0 survives on the new first chord until no chord is left") {
     DocumentStore store = threeChords();
     store.addSection(0, "A");
     store.removeChord(1);
     CHECK(idsOf(store) == std::vector<int>{2, 3});
+    CHECK(sectionStartsOf(store) == SectionStarts{{1, 0}});
+    CHECK(store.doc().sections[0].name == "A");
+    store.removeChord(2);
+    CHECK(sectionStartsOf(store) == SectionStarts{{1, 0}});
+    store.removeChord(3);  // the last chord: nothing left to be a section of
+    CHECK(store.doc().events.empty());
     CHECK(store.doc().sections.empty());
     REQUIRE(store.undo());
     CHECK(sectionStartsOf(store) == SectionStarts{{1, 0}});
@@ -1264,11 +1320,11 @@ TEST_CASE("removeChord: a chord inside a section leaves the sections alone; the 
     CHECK(one.doc().sections.empty());
 }
 
-TEST_CASE("moveChord: each section stays on its start chord; the list is re-sorted by the new indices") {
+TEST_CASE("moveChord: a section's start chord moved to the front makes that section the first") {
     DocumentStore store = twoSections();  // chords 1 2 3 4; A on 1 at 0, B on 3 at 2
     store.moveChord(3, 0);
     CHECK(idsOf(store) == std::vector<int>{3, 1, 2, 4});
-    CHECK(sectionStartsOf(store) == SectionStarts{{2, 0}, {1, 1}});
+    CHECK(sectionStartsOf(store) == SectionStarts{{2, 0}, {1, 1}});  // A follows its chord
     CHECK(sectionChordIdsOf(store) == std::vector<int>{3, 1});
     CHECK(store.doc().sections[0].name == "B");
     REQUIRE(store.undo());
@@ -1283,18 +1339,29 @@ TEST_CASE("moveChord: moving a chord that starts no section across a boundary sh
     CHECK(idsOf(store) == std::vector<int>{1, 3, 4, 2});
     CHECK(sectionStartsOf(store) == SectionStarts{{1, 0}, {2, 1}});
     CHECK(sectionChordIdsOf(store) == std::vector<int>{1, 3});
-    store.moveChord(4, 0);
+    store.moveChord(4, 0);  // to the front: the first section is pinned there and takes it in
     CHECK(idsOf(store) == std::vector<int>{4, 1, 3, 2});
-    CHECK(sectionStartsOf(store) == SectionStarts{{1, 1}, {2, 2}});
-    CHECK(store.doc().sectionIndexOf(0) == -1);  // the moved chord now sits before the first section
+    CHECK(sectionStartsOf(store) == SectionStarts{{1, 0}, {2, 2}});
+    CHECK(sectionChordIdsOf(store) == std::vector<int>{4, 3});
+    CHECK(store.doc().sectionIndexOf(0) == 0);
 }
 
-TEST_CASE("moveChord: moving the first section's start chord to the end carries the section along") {
-    DocumentStore store = twoSections();
+TEST_CASE("moveChord: the first section is pinned to the start when its own chord moves away") {
+    DocumentStore store = twoSections();  // chords 1 2 3 4; A on 1 at 0, B on 3 at 2
     store.moveChord(1, 99);
     CHECK(idsOf(store) == std::vector<int>{2, 3, 4, 1});
-    CHECK(sectionStartsOf(store) == SectionStarts{{2, 1}, {1, 3}});
-    CHECK(sectionChordIdsOf(store) == std::vector<int>{3, 1});
+    CHECK(sectionStartsOf(store) == SectionStarts{{1, 0}, {2, 1}});  // A keeps the start, B follows chord 3
+    CHECK(sectionChordIdsOf(store) == std::vector<int>{2, 3});
+    REQUIRE(store.undo());
+    store.moveChord(1, 1);  // within the first section
+    CHECK(idsOf(store) == std::vector<int>{2, 1, 3, 4});
+    CHECK(sectionStartsOf(store) == SectionStarts{{1, 0}, {2, 2}});
+
+    DocumentStore lone = threeChords();
+    lone.addSection(0, "A");
+    lone.moveChord(1, 2);
+    CHECK(idsOf(lone) == std::vector<int>{2, 3, 1});
+    CHECK(sectionStartsOf(lone) == SectionStarts{{1, 0}});
 }
 
 // --- Undo / redo of sections -------------------------------------------------------------------
@@ -1310,8 +1377,10 @@ TEST_CASE("undo / redo: every section operation round-trips") {
     checkRoundTrip(store, [](DocumentStore& s) { s.removeChord(2); });          // B re-indexed to 2
     checkRoundTrip(store, [](DocumentStore& s) { s.moveChord(4, 0); });         // B to 0, A to 1
     checkRoundTrip(store, [](DocumentStore& s) { s.removeSection(1); });
-    checkRoundTrip(store, [](DocumentStore& s) { s.removeChord(4); });          // B's start chord: B goes
+    checkRoundTrip(store, [](DocumentStore& s) { s.removeChord(4); });          // B's start chord: B stays first
     CHECK(idsOf(store) == std::vector<int>{1, 3});
+    CHECK(sectionStartsOf(store) == SectionStarts{{2, 0}});
+    checkRoundTrip(store, [](DocumentStore& s) { s.removeSection(2); });
     CHECK(store.doc().sections.empty());
 }
 
@@ -1439,7 +1508,7 @@ TEST_CASE("DocumentStore: 200 random chord and section operations keep the secti
         CAPTURE(i);
         checkSectionInvariants(store.doc());
     }
-    REQUIRE(addedSections > 10);        // the seed exercised the section ops
+    REQUIRE(addedSections >= 5);        // the seed exercised the section ops (10 with libc++)
     REQUIRE(removedStartChords > 0);    // and the re-indexing on remove
     const Document final = store.doc();
 
