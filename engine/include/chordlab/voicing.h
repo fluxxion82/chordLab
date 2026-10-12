@@ -43,4 +43,12 @@ int inversionCount(const Chord& chord);
 /// `highest <= 103`). Anything else is a programmer error: it is ignored and the defaults are used.
 std::vector<int> voicing(const Chord& chord, int inversion, int octave, int lowest = 60, int highest = 96);
 
+/// Voice-leading cost between two voicings: the smallest total displacement, in semitones, over every
+/// pairing of the notes of `from` with the notes of `to`. The shorter voicing is padded to the longer
+/// one's size with the octave above its lowest note, once per missing voice, so that a triad moving to a
+/// seventh pays for the voice that enters. The best pairing never crosses voices, so it is the pairing in
+/// ascending order; the notes may be given in any order. Two empty voicings cost 0; one empty and one not
+/// is a precondition violation.
+int voiceLeadingCost(const std::vector<int>& from, const std::vector<int>& to);
+
 }  // namespace chordlab

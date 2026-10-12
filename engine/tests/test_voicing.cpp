@@ -335,3 +335,39 @@ TEST_CASE("voicing: distinct inversions of one chord are distinct voicings") {
         }
     }
 }
+
+// --- voiceLeadingCost --------------------------------------------------------------------------
+
+TEST_CASE("voiceLeadingCost: total semitone displacement over the best pairing of two voicings") {
+    CHECK(voiceLeadingCost({60, 64, 67}, {60, 64, 67}) == 0);
+    CHECK(voiceLeadingCost({60, 64, 67}, {60, 65, 69}) == 3);   // C -> F/C: E up to F, G up to A
+    CHECK(voiceLeadingCost({60, 64, 67}, {59, 62, 67}) == 3);   // C -> G/B: C down to B, E down to D
+    CHECK(voiceLeadingCost({60, 64, 67}, {60, 64, 69}) == 2);   // C -> Am/C: G up to A
+    CHECK(voiceLeadingCost({60, 64, 67}, {65, 69, 72}) == 15);  // C -> F: every voice up a fourth
+    CHECK(voiceLeadingCost({60, 64, 67}, {64, 67, 72}) == 12);  // C -> C/E: the voices rotate upward
+}
+
+TEST_CASE("voiceLeadingCost: symmetric and independent of the order the notes are given in") {
+    CHECK(voiceLeadingCost({60, 65, 69}, {60, 64, 67}) == 3);
+    CHECK(voiceLeadingCost({67, 60, 64}, {69, 65, 60}) == 3);
+    CHECK(voiceLeadingCost({72, 76, 79}, {60, 64, 67}) == 36);
+}
+
+TEST_CASE("voiceLeadingCost: the best pairing never crosses voices") {
+    // Pairing in order costs 1 + 1; pairing crosswise would cost 3 + 3.
+    CHECK(voiceLeadingCost({60, 62}, {61, 63}) == 2);
+    CHECK(voiceLeadingCost({60, 62, 64}, {61, 63, 65}) == 3);
+}
+
+TEST_CASE("voiceLeadingCost: each missing voice of the shorter voicing is the octave above its lowest note") {
+    // C (60 64 67) -> C7 (60 64 67 70): the padding 72 moves down to 70.
+    CHECK(voiceLeadingCost({60, 64, 67}, {60, 64, 67, 70}) == 2);
+    CHECK(voiceLeadingCost({60, 64, 67, 70}, {60, 64, 67}) == 2);
+    // C5 (60 67) -> C9 (60 64 67 70 74): padded to 60 67 72 72 72.
+    CHECK(voiceLeadingCost({60, 67}, {60, 64, 67, 70, 74}) == 12);
+    CHECK(voiceLeadingCost({60, 64, 67}, {64, 67, 72, 76}) == 16);  // 60->64 64->67 67->72, padding 72->76
+}
+
+TEST_CASE("voiceLeadingCost: two empty voicings cost nothing") {
+    CHECK(voiceLeadingCost({}, {}) == 0);
+}

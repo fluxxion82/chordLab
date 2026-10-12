@@ -5,6 +5,7 @@
 #include "chordlab/limits.h"
 #include "chordlab/pitch.h"
 #include "chordlab/scale.h"
+#include "chordlab/voicing.h"
 
 #include <climits>
 #include <cstddef>
@@ -60,9 +61,9 @@ DocumentStore threeChords() {
     return store;
 }
 
-/// The undoable part of a document: the progression and the project key.
+/// The undoable part of a document: the progression, the project key and the auto voice-lead flag.
 bool sameUndoableState(const Document& a, const Document& b) {
-    return a.events == b.events && a.projectKey == b.projectKey;
+    return a.events == b.events && a.projectKey == b.projectKey && a.autoVoiceLead == b.autoVoiceLead;
 }
 
 /// The live (session) part of a document: browsed key and the two transport toggles.
@@ -95,6 +96,7 @@ TEST_CASE("Document: defaults to C Ionian, empty, looping and following the host
     CHECK(doc.events.empty());
     CHECK(doc.progressionLoop == true);
     CHECK(doc.followHost == true);
+    CHECK(doc.autoVoiceLead == false);
 }
 
 TEST_CASE("Document: empty document has endBeat 0 and startBeatOf(0) 0") {
@@ -122,6 +124,11 @@ TEST_CASE("ChordEvent / Document: equality compares every field") {
     CHECK(a != ChordEvent{1, kF, 4.0, 100});
     CHECK(a != ChordEvent{1, kC, 2.0, 100});
     CHECK(a != ChordEvent{1, kC, 4.0, 99});
+    CHECK(a.inversion == 0);  // the defaults: root position in the default register
+    CHECK(a.octave == 0);
+    CHECK(a == ChordEvent{1, kC, 4.0, 100, 0, 0});
+    CHECK(a != ChordEvent{1, kC, 4.0, 100, 1, 0});
+    CHECK(a != ChordEvent{1, kC, 4.0, 100, 0, -1});
 
     Document x;
     Document y;
@@ -139,6 +146,9 @@ TEST_CASE("ChordEvent / Document: equality compares every field") {
     CHECK(x != y);
     y = x;
     y.followHost = false;
+    CHECK(x != y);
+    y = x;
+    y.autoVoiceLead = true;
     CHECK(x != y);
 }
 
@@ -168,6 +178,13 @@ TEST_CASE("appendChord: defaults to four beats at velocity 100") {
     REQUIRE(store.findIndex(id) == 0);
     CHECK(store.doc().events[0].lengthBeats == 4.0);
     CHECK(store.doc().events[0].velocity == 100);
+}
+
+TEST_CASE("appendChord: a new chord is in root position at octave 0") {
+    DocumentStore store;
+    store.appendChord(kG, 4.0, 100);
+    CHECK(store.doc().events[0].inversion == 0);
+    CHECK(store.doc().events[0].octave == 0);
 }
 
 TEST_CASE("appendChord: returns ids 1 then 2 for two appends") {
@@ -446,6 +463,148 @@ TEST_CASE("setVelocity: unknown id and same value are no-ops with no undo entry"
     CHECK_FALSE(store.undo());
 }
 
+// --- setInversion / setOctave ------------------------------------------------------------------
+
+TEST_CASE("setInversion: sets one event's inversion, clamped to the chord's inversions") {
+    DocumentStore store = threeChords();  // C (3 inversions), F, G7 (4 inversions)
+    store.setInversion(1, 2);
+    CHECK(store.doc().events[0].inversion == 2);
+    CHECK(store.doc().events[1].inversion == 0);
+    CHECK(store.doc().events[2].inversion == 0);
+    store.setInversion(1, 3);  // C major has inversions 0..2
+    CHECK(store.doc().events[0].inversion == 2);
+    store.setInversion(1, 99);
+    CHECK(store.doc().events[0].inversion == 2);
+    store.setInversion(1, -1);
+    CHECK(store.doc().events[0].inversion == 0);
+    store.setInversion(1, INT_MIN);
+    CHECK(store.doc().events[0].inversion == 0);
+    store.setInversion(3, 3);  // G7 has inversions 0..3
+    CHECK(store.doc().events[2].inversion == 3);
+    store.setInversion(3, INT_MAX);
+    CHECK(store.doc().events[2].inversion == 3);
+    CHECK(inversionCount(kG) == 4);
+}
+
+TEST_CASE("setInversion: unknown id and an unchanged value are no-ops with no undo entry") {
+    DocumentStore store;
+    store.appendChord(kC, 4.0, 100);
+    const Document before = store.doc();
+    store.setInversion(42, 1);
+    store.setInversion(0, 1);
+    store.setInversion(-1, 1);
+    store.setInversion(1, 0);     // already 0
+    store.setInversion(1, -5);    // clamps to 0
+    CHECK(store.doc() == before);
+    store.setInversion(1, 7);     // clamps to 2: a real change
+    CHECK(store.doc().events[0].inversion == 2);
+    store.setInversion(1, 2);     // same
+    store.setInversion(1, 100);   // same after clamping
+    REQUIRE(store.undo());
+    CHECK(store.doc() == before);
+    REQUIRE(store.undo());  // the append, not a phantom entry
+    CHECK(store.doc().events.empty());
+    CHECK_FALSE(store.undo());
+}
+
+TEST_CASE("setOctave: sets one event's octave, clamped to -1..1") {
+    DocumentStore store = threeChords();
+    store.setOctave(2, 1);
+    CHECK(store.doc().events[1].octave == 1);
+    CHECK(store.doc().events[0].octave == 0);
+    CHECK(store.doc().events[2].octave == 0);
+    store.setOctave(2, 2);
+    CHECK(store.doc().events[1].octave == 1);
+    store.setOctave(2, INT_MAX);
+    CHECK(store.doc().events[1].octave == 1);
+    store.setOctave(2, -1);
+    CHECK(store.doc().events[1].octave == -1);
+    store.setOctave(2, INT_MIN);
+    CHECK(store.doc().events[1].octave == -1);
+    store.setOctave(2, 0);
+    CHECK(store.doc().events[1].octave == 0);
+    CHECK(kMinVoicingOctave == -1);
+    CHECK(kMaxVoicingOctave == 1);
+}
+
+TEST_CASE("setOctave: unknown id and an unchanged value are no-ops with no undo entry") {
+    DocumentStore store;
+    store.appendChord(kC, 4.0, 100);
+    const Document before = store.doc();
+    store.setOctave(42, 1);
+    store.setOctave(1, 0);
+    CHECK(store.doc() == before);
+    store.setOctave(1, 5);  // clamps to 1: a real change
+    store.setOctave(1, 1);
+    store.setOctave(1, 3);
+    CHECK(store.doc().events[0].octave == 1);
+    REQUIRE(store.undo());
+    CHECK(store.doc() == before);
+    REQUIRE(store.undo());
+    CHECK(store.doc().events.empty());
+    CHECK_FALSE(store.undo());
+}
+
+TEST_CASE("setInversion / setOctave: survive a move and a remove of another chord, and undo") {
+    DocumentStore store = threeChords();
+    store.setInversion(2, 1);
+    store.setOctave(2, -1);
+    store.moveChord(2, 0);
+    store.removeChord(1);
+    REQUIRE(idsOf(store) == std::vector<int>{2, 3});
+    CHECK(store.doc().events[0].inversion == 1);
+    CHECK(store.doc().events[0].octave == -1);
+    REQUIRE(store.undo());
+    REQUIRE(store.undo());
+    REQUIRE(store.undo());
+    CHECK(store.doc().events[1].inversion == 1);
+    CHECK(store.doc().events[1].octave == 0);
+    REQUIRE(store.undo());
+    CHECK(store.doc().events[1].inversion == 0);
+}
+
+// --- Auto voice-lead (undoable: it changes the compiled progression) ---------------------------
+
+TEST_CASE("setAutoVoiceLead: undoable, and the same value pushes no undo entry") {
+    DocumentStore store;
+    store.setAutoVoiceLead(false);  // already off
+    CHECK_FALSE(store.undo());
+    store.setAutoVoiceLead(true);
+    CHECK(store.doc().autoVoiceLead == true);
+    store.setAutoVoiceLead(true);
+    REQUIRE(store.undo());
+    CHECK(store.doc().autoVoiceLead == false);
+    CHECK_FALSE(store.undo());
+    REQUIRE(store.redo());
+    CHECK(store.doc().autoVoiceLead == true);
+    CHECK_FALSE(store.redo());
+}
+
+TEST_CASE("undo / redo: autoVoiceLead is restored with the progression, unlike the live toggles") {
+    DocumentStore store;
+    store.appendChord(kC);
+    store.setAutoVoiceLead(true);
+    store.appendChord(kF);
+    store.setFollowHost(false);
+
+    REQUIRE(store.undo());  // the second append
+    CHECK(idsOf(store) == std::vector<int>{1});
+    CHECK(store.doc().autoVoiceLead == true);
+    CHECK(store.doc().followHost == false);
+    REQUIRE(store.undo());  // the flag
+    CHECK(store.doc().autoVoiceLead == false);
+    CHECK(store.doc().followHost == false);  // live: kept
+    REQUIRE(store.undo());  // the first append
+    CHECK(store.doc().events.empty());
+    CHECK_FALSE(store.undo());
+    REQUIRE(store.redo());
+    REQUIRE(store.redo());
+    CHECK(store.doc().autoVoiceLead == true);
+    REQUIRE(store.redo());
+    CHECK(idsOf(store) == std::vector<int>{1, 2});
+    CHECK(store.doc().followHost == false);
+}
+
 // --- moveChord -------------------------------------------------------------------------
 
 TEST_CASE("moveChord: moving the last chord to the front gives order 3, 1, 2") {
@@ -701,6 +860,12 @@ TEST_CASE("undo / redo: every undoable operation round-trips") {
     checkRoundTrip(store, [](DocumentStore& s) { s.moveChord(1, 99); });
     checkRoundTrip(store, [](DocumentStore& s) { s.removeChord(2); });
     checkRoundTrip(store, [](DocumentStore& s) { s.setProjectKey(key('A', 0, Mode::Aeolian)); });
+    checkRoundTrip(store, [](DocumentStore& s) { s.setInversion(3, 2); });
+    checkRoundTrip(store, [](DocumentStore& s) { s.setInversion(1, 99); });
+    checkRoundTrip(store, [](DocumentStore& s) { s.setOctave(1, -1); });
+    checkRoundTrip(store, [](DocumentStore& s) { s.setOctave(3, 7); });
+    checkRoundTrip(store, [](DocumentStore& s) { s.setAutoVoiceLead(true); });
+    checkRoundTrip(store, [](DocumentStore& s) { s.setAutoVoiceLead(false); });
     CHECK(idsOf(store) == std::vector<int>{3, 1});
 }
 
@@ -785,10 +950,14 @@ TEST_CASE("replace: swaps in a document, resets the id counter and clears the wh
     doc.projectKey = key('D', 0, Mode::Dorian);
     doc.browsedKey = key('G', 0, Mode::Ionian);
     doc.progressionLoop = false;
-    doc.events.push_back(ChordEvent{7, kC, 2.0, 90});
+    doc.autoVoiceLead = true;
+    doc.events.push_back(ChordEvent{7, kC, 2.0, 90, 2, -1});
     store.replace(doc, 8);
 
     CHECK(store.doc() == doc);  // live state included: replace is a load, not an edit
+    CHECK(store.doc().events[0].inversion == 2);
+    CHECK(store.doc().events[0].octave == -1);
+    CHECK(store.doc().autoVoiceLead == true);
     CHECK_FALSE(store.undo());
     CHECK_FALSE(store.redo());
     CHECK(store.appendChord(kF) == 8);
@@ -815,7 +984,7 @@ TEST_CASE("DocumentStore: 200 random operations undo to the initial document and
         // Every argument is drawn here, in this fixed order and on every iteration regardless of the
         // operation chosen, so the trace cannot depend on the (unspecified) evaluation order of function
         // arguments or on the current document.
-        const int kind = randInt(0, 11);
+        const int kind = randInt(0, 14);
         const int root = randInt(0, 11);
         const std::size_t typeIndex = static_cast<std::size_t>(randInt(0, static_cast<int>(types.size()) - 1));
         const int lengthKind = randInt(0, 11);  // 10 and 11 inject non-finite lengths
@@ -829,6 +998,8 @@ TEST_CASE("DocumentStore: 200 random operations undo to the initial document and
         const int alter = randInt(-1, 1);
         const Mode mode = static_cast<Mode>(randInt(0, kNumModes - 1));
         const bool flag = randInt(0, 1) == 1;
+        const int inversion = randInt(-2, 6);
+        const int octave = randInt(-3, 3);
 
         const Chord chord{root, &types[typeIndex]};
         const double length = lengthKind == 10 ? kNaN : lengthKind == 11 ? kInf : finiteLength;
@@ -872,6 +1043,15 @@ TEST_CASE("DocumentStore: 200 random operations undo to the initial document and
             case 10:
                 store.setFollowHost(flag);
                 break;
+            case 11:
+                store.setInversion(id, inversion);
+                break;
+            case 12:
+                store.setOctave(id, octave);
+                break;
+            case 13:
+                store.setAutoVoiceLead(flag);
+                break;
             default:
                 store.undo();  // a neutral pair: exercises undo/redo mid-history
                 store.redo();
@@ -895,6 +1075,10 @@ TEST_CASE("DocumentStore: 200 random operations undo to the initial document and
             CHECK(e.lengthBeats <= kMaxLengthBeats);
             CHECK(e.velocity >= 1);
             CHECK(e.velocity <= 127);
+            CHECK(e.inversion >= 0);
+            CHECK(e.inversion < inversionCount(e.chord));
+            CHECK(e.octave >= kMinVoicingOctave);
+            CHECK(e.octave <= kMaxVoicingOctave);
         }
     }
 
@@ -905,7 +1089,7 @@ TEST_CASE("DocumentStore: 200 random operations undo to the initial document and
     }
     CHECK(undos > 0);
     CHECK(undos <= 200);
-    CHECK(sameUndoableState(store.doc(), initial));  // progression and project key fully unwound
+    CHECK(sameUndoableState(store.doc(), initial));  // progression, project key and auto flag fully unwound
     CHECK(sameLiveState(store.doc(), final));         // browsed key and toggles are live: kept
 
     int redos = 0;

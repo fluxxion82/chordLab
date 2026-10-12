@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstddef>
+#include <cstdlib>
 
 namespace chordlab {
 
@@ -103,6 +104,35 @@ std::vector<int> voicing(const Chord& chord, int inversion, int octave, int lowe
     assert(notes.back() <= highest + kOctave * (octave + 1));  // a lifted note may sit an octave above the register
     assert(notes.front() >= 0 && notes.back() <= kMidiMax);    // what `validVoicingRange` guarantees
     return notes;
+}
+
+int voiceLeadingCost(const std::vector<int>& from, const std::vector<int>& to) {
+    assert(from.empty() == to.empty());
+    std::vector<int> a(from);
+    std::vector<int> b(to);
+    std::sort(a.begin(), a.end());
+    std::sort(b.begin(), b.end());
+    // Each missing voice of the shorter voicing is the octave above its lowest note, inserted in order so
+    // that the sorted pairing below stays the optimal one.
+    const auto pad = [](std::vector<int>& shorter, std::size_t size) {
+        if (shorter.empty()) {
+            return;
+        }
+        const int doubling = shorter.front() + kOctave;
+        while (shorter.size() < size) {
+            shorter.insert(std::upper_bound(shorter.begin(), shorter.end(), doubling), doubling);
+        }
+    };
+    pad(a, b.size());
+    pad(b, a.size());
+    assert(a.size() == b.size());
+    // For one-dimensional points and an absolute-difference cost the pairing in ascending order is a
+    // minimum-cost pairing: swapping any two crossed voices never lowers the total.
+    int cost = 0;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        cost += std::abs(a[i] - b[i]);
+    }
+    return cost;
 }
 
 }  // namespace chordlab

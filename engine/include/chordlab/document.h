@@ -4,6 +4,7 @@
 #include "chordlab/limits.h"
 #include "chordlab/pitch.h"
 #include "chordlab/scale.h"
+#include "chordlab/voicing.h"
 
 #include <cstddef>
 #include <deque>
@@ -24,9 +25,9 @@ constexpr int kNoEventId = -1;
 
 /// The most chords a document may hold: `appendChord` refuses the next one (`kNoEventId`), `loadStateJson`
 /// rejects a state with more, and `replace` asserts. The bound exists so that a compiled document always
-/// fits one scheduler snapshot: kMaxChords chords x at most 8 voices (the Phase 2 voicings; `closeVoicing`
-/// today has at most 5, the ninths) x 2 events (on and off) = 4096 = `kMaxSnapshotEvents`. With today's
-/// voicings a full document compiles to 2560 events.
+/// fits one scheduler snapshot: kMaxChords chords x at most 8 voices (headroom; `voicing` has one note per
+/// chord tone, at most 5 today, the ninths) x 2 events (on and off) = 4096 = `kMaxSnapshotEvents`. With
+/// today's voicings a full document compiles to 2560 events.
 constexpr int kMaxChords = 256;
 static_assert(static_cast<std::size_t>(kMaxChords) * 8 * 2 <= kMaxSnapshotEvents,
               "a full document of eight-note chords must fit one scheduler snapshot");
@@ -38,31 +39,41 @@ static_assert(static_cast<std::size_t>(kMaxChords) * 8 * 2 <= kMaxSnapshotEvents
 /// `chord` holds only a pitch class and a dictionary type. Note spelling is derived at display time from
 /// the browsed key, so whatever enharmonic spelling the chord was entered with (Gb vs F#) is not preserved
 /// by the document: this is policy, not an omission.
+/// `inversion` (0..`inversionCount(chord) - 1`, 0 = root position) and `octave` (`kMinVoicingOctave`..
+/// `kMaxVoicingOctave`, 0 = the default register) are the chord's voicing as `voicing` in voicing.h reads
+/// them. Both 0, the defaults, also means "let auto voice-leading choose" when `Document::autoVoiceLead`
+/// is on (see compiler.h): a chord cannot be pinned to root position in the default register under auto.
 struct ChordEvent {
     int id;
     Chord chord;
     double lengthBeats;
     int velocity;
+    int inversion = 0;
+    int octave = 0;
 };
 
 constexpr bool operator==(const ChordEvent& a, const ChordEvent& b) noexcept {
-    return a.id == b.id && a.chord == b.chord && a.lengthBeats == b.lengthBeats && a.velocity == b.velocity;
+    return a.id == b.id && a.chord == b.chord && a.lengthBeats == b.lengthBeats && a.velocity == b.velocity &&
+           a.inversion == b.inversion && a.octave == b.octave;
 }
 
 constexpr bool operator!=(const ChordEvent& a, const ChordEvent& b) noexcept {
     return !(a == b);
 }
 
-/// The whole editable state of a project: the two keys, the progression and the transport toggles.
-/// Plain data so that `DocumentStore` can snapshot it for undo; mutate it through the store, not directly.
+/// The whole editable state of a project: the two keys, the progression, the voicing flag and the
+/// transport toggles. Plain data so that `DocumentStore` can snapshot it for undo; mutate it through the
+/// store, not directly.
 ///
-/// Undo scope: `events` and `projectKey` are undoable (they are what the user composes). `browsedKey`,
-/// `progressionLoop` and `followHost` are live session state: changing them never creates history, and
-/// undo/redo leave their current values alone while restoring the rest.
+/// Undo scope: `events`, `projectKey` and `autoVoiceLead` are undoable (they are what the user composes:
+/// the flag changes which notes `compile` produces, so toggling it is an edit of the progression, not a
+/// view of it). `browsedKey`, `progressionLoop` and `followHost` are live session state: changing them
+/// never creates history, and undo/redo leave their current values alone while restoring the rest.
 struct Document {
     Key projectKey{{'C', 0}, Mode::Ionian};
     Key browsedKey{{'C', 0}, Mode::Ionian};
     std::vector<ChordEvent> events;  // playback order; chords abut, no gaps
+    bool autoVoiceLead = false;      // compile picks each defaulted chord's inversion and octave (compiler.h)
     bool progressionLoop = true;
     bool followHost = true;
 
@@ -77,7 +88,8 @@ struct Document {
 /// Compares every field, live state included.
 inline bool operator==(const Document& a, const Document& b) noexcept {
     return a.projectKey == b.projectKey && a.browsedKey == b.browsedKey && a.events == b.events &&
-           a.progressionLoop == b.progressionLoop && a.followHost == b.followHost;
+           a.autoVoiceLead == b.autoVoiceLead && a.progressionLoop == b.progressionLoop &&
+           a.followHost == b.followHost;
 }
 
 inline bool operator!=(const Document& a, const Document& b) noexcept {
@@ -86,8 +98,9 @@ inline bool operator!=(const Document& a, const Document& b) noexcept {
 
 /// Owns a `Document` and its undo/redo history.
 ///
-/// Undoable state is `Document::events` and `Document::projectKey`. Every mutation that changes either
-/// pushes the previous document onto the undo stack and clears the redo stack. A call that changes nothing
+/// Undoable state is `Document::events`, `Document::projectKey` and `Document::autoVoiceLead`. Every
+/// mutation that changes any of them pushes the previous document onto the undo stack and clears the redo
+/// stack. A call that changes nothing
 /// (an unknown id, a value equal to the current one after clamping, a move to the chord's current
 /// position, a rejected argument) pushes nothing and leaves the redo stack intact.
 /// `browsedKey`, `progressionLoop` and `followHost` are live state: their setters never touch the history,
@@ -129,12 +142,21 @@ public:
     /// Sets the velocity of event `id`, clamped to [kMinVelocity, kMaxVelocity]. Unknown id: no-op.
     void setVelocity(int id, int velocity);
 
+    /// Sets the inversion of event `id`, clamped to 0..`inversionCount(chord) - 1`. Unknown id: no-op.
+    void setInversion(int id, int inversion);
+
+    /// Sets the octave of event `id`, clamped to [kMinVoicingOctave, kMaxVoicingOctave]. Unknown id: no-op.
+    void setOctave(int id, int octave);
+
     /// Removes event `id`; the events after it move up so the sequence stays contiguous. Unknown id: no-op.
     void removeChord(int id);
 
     /// Undoable. `key.tonic` must satisfy the `Tonic` preconditions of pitch.h and `key.mode` be a
     /// declared `Mode`.
     void setProjectKey(Key key);
+
+    /// Undoable: the flag changes what `compile` produces (see `Document`).
+    void setAutoVoiceLead(bool on);
 
     /// Live state, never recorded in the history. Same preconditions as `setProjectKey`.
     void setBrowsedKey(Key key);
@@ -154,10 +176,11 @@ public:
     /// Replaces the whole document, live state included, and restarts the id counter at `nextId`: what a
     /// load does. Clears the undo and redo history and changes nothing else.
     /// `doc` must satisfy the store's invariants (valid chords and keys, finite lengths within
-    /// [kMinLengthBeats, kMaxLengthBeats], velocities within [kMinVelocity, kMaxVelocity], distinct ids,
-    /// at most `kMaxChords` events) and `nextId` must be >= 1 and greater than every event id, so that ids
-    /// stay unique. Callers that
-    /// take documents from outside the process (`loadStateJson`) validate before calling.
+    /// [kMinLengthBeats, kMaxLengthBeats], velocities within [kMinVelocity, kMaxVelocity], inversions
+    /// within 0..`inversionCount(chord) - 1`, octaves within [kMinVoicingOctave, kMaxVoicingOctave],
+    /// distinct ids, at most `kMaxChords` events) and `nextId` must be >= 1 and greater than every event
+    /// id, so that ids stay unique. Callers that take documents from outside the process
+    /// (`loadStateJson`) validate before calling.
     void replace(Document doc, int nextId);
 
     /// The id the next successful append will get. Persisted by `stateJson` so that a reloaded document

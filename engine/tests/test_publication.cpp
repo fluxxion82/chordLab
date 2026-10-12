@@ -145,3 +145,49 @@ TEST_CASE("publication: an unchanged document leaves the slot untouched") {
     CHECK(slot->endBeat == -1.0);
     CHECK(slot->followHost == false);
 }
+
+TEST_CASE("publication: inversion, octave and auto voice-leading change the compiled content and bump the generation") {
+    DocumentStore store;
+    store.appendChord(chord(0, "maj"), 4.0, 100);
+    const int f = store.appendChord(chord(5, "maj"), 4.0, 100);
+    Publication last;
+    auto slot = newSlot();
+    REQUIRE(fillSlot(store.doc(), *slot, last));
+    REQUIRE(last.generation == 1);
+    const std::vector<NoteEvent> rootPositions = eventsOf(*slot);
+
+    store.setAutoVoiceLead(true);  // F moves to C F A
+    REQUIRE(fillSlot(store.doc(), *slot, last));
+    CHECK(last.generation == 2);
+    CHECK(eventsOf(*slot) == compile(store.doc()).events);
+    CHECK(eventsOf(*slot) != rootPositions);
+    CHECK(slot->count == 12);  // the same number of events, different pitches
+    CHECK(slot->endBeat == 8.0);
+    CHECK_FALSE(fillSlot(store.doc(), *slot, last));
+
+    REQUIRE(store.undo());  // auto off again: back to the root positions
+    REQUIRE(fillSlot(store.doc(), *slot, last));
+    CHECK(last.generation == 3);
+    CHECK(eventsOf(*slot) == rootPositions);
+
+    store.setInversion(f, 2);
+    REQUIRE(fillSlot(store.doc(), *slot, last));
+    CHECK(last.generation == 4);
+    store.setOctave(f, -1);  // now explicitly C F A
+    REQUIRE(fillSlot(store.doc(), *slot, last));
+    CHECK(last.generation == 5);
+
+    // Auto voice-leading would choose exactly that voicing, and the explicit one is honoured anyway: the
+    // compiled content is identical, so nothing is published.
+    store.setAutoVoiceLead(true);
+    CHECK_FALSE(fillSlot(store.doc(), *slot, last));
+    CHECK(last.generation == 5);
+    store.setInversion(f, 0);  // an unused inversion under auto: still the same content
+    store.setOctave(f, 0);
+    CHECK_FALSE(fillSlot(store.doc(), *slot, last));
+    CHECK(last.generation == 5);
+    store.setAutoVoiceLead(false);  // back to F in root position
+    REQUIRE(fillSlot(store.doc(), *slot, last));
+    CHECK(last.generation == 6);
+    CHECK(eventsOf(*slot) == rootPositions);
+}

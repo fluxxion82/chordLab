@@ -7,6 +7,7 @@
 #include "chordlab/voicing.h"
 
 #include <algorithm>
+#include <climits>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -338,4 +339,207 @@ TEST_CASE("compile: kMaxChords chords of the widest dictionary type fit a schedu
     const Compiled compiled = compile(store.doc());
     CHECK(compiled.events.size() == static_cast<std::size_t>(kMaxChords) * widest->intervals.size() * 2);
     CHECK(compiled.events.size() <= kMaxSnapshotEvents);
+}
+
+// --- Inversions, octaves and auto voice-leading ----------------------------------------
+
+namespace {
+
+using Voicings = std::vector<std::vector<int>>;
+
+const Chord kF = chord(5, "maj");
+const Chord kG = chord(7, "maj");
+
+/// Pitches of the ons at `beat`, in compiled (ascending) order.
+std::vector<int> onsAt(const Compiled& compiled, double beat) {
+    Events ons = eventsAt(compiled, beat);
+    ons.erase(std::remove_if(ons.begin(), ons.end(), [](const NoteEvent& n) { return !n.on; }), ons.end());
+    return pitchesOf(ons);
+}
+
+}  // namespace
+
+TEST_CASE("voicings: each chord is voiced with its own inversion and octave; the defaults are the close voicing") {
+    DocumentStore store;
+    const int c = store.appendChord(kC);
+    const int f = store.appendChord(kF);
+    CHECK(voicings(store.doc()) == Voicings{{60, 64, 67}, {65, 69, 72}});
+    store.setInversion(f, 2);
+    store.setOctave(f, -1);
+    CHECK(voicings(store.doc()) == Voicings{{60, 64, 67}, {60, 65, 69}});
+    CHECK(voicings(store.doc())[1] == voicing(kF, 2, -1));
+    store.setOctave(c, 1);
+    CHECK(voicings(store.doc())[0] == voicing(kC, 0, 1));
+    CHECK(voicings(Document{}).empty());
+}
+
+TEST_CASE("compile: the ons and offs of a chord follow its inversion and octave") {
+    DocumentStore store;
+    const int c = store.appendChord(kC, 4.0, 100);
+    store.setInversion(c, 1);
+    store.setOctave(c, -1);
+    const Compiled compiled = compile(store.doc());
+    REQUIRE(compiled.events.size() == 6);
+    CHECK(onsAt(compiled, 0.0) == std::vector<int>{52, 55, 60});
+    CHECK(pitchesOf(eventsAt(compiled, 4.0)) == std::vector<int>{52, 55, 60});
+    CHECK(allOn(eventsAt(compiled, 4.0), false));
+}
+
+TEST_CASE("compile: auto voice-leading takes F to its second inversion under the C: C E G -> C F A") {
+    DocumentStore store;
+    store.appendChord(kC);
+    store.appendChord(kF);
+    store.setAutoVoiceLead(true);
+    CHECK(voicings(store.doc()) == Voicings{{60, 64, 67}, {60, 65, 69}});
+    const Compiled compiled = compile(store.doc());
+    CHECK(onsAt(compiled, 0.0) == std::vector<int>{60, 64, 67});
+    CHECK(onsAt(compiled, 4.0) == std::vector<int>{60, 65, 69});
+    // The stored document is untouched: the choice is made at compile time.
+    CHECK(store.doc().events[1].inversion == 0);
+    CHECK(store.doc().events[1].octave == 0);
+}
+
+TEST_CASE("compile: auto voice-leading takes G to its first inversion under the C: C E G -> B D G") {
+    DocumentStore store;
+    store.appendChord(kC);
+    store.appendChord(kG);
+    store.setAutoVoiceLead(true);
+    CHECK(voicings(store.doc()) == Voicings{{60, 64, 67}, {59, 62, 67}});
+}
+
+TEST_CASE("compile: auto voice-leading takes Am to its first inversion under the C: C E G -> C E A") {
+    DocumentStore store;
+    store.appendChord(kC);
+    store.appendChord(kAm);
+    store.setAutoVoiceLead(true);
+    CHECK(voicings(store.doc()) == Voicings{{60, 64, 67}, {60, 64, 69}});
+}
+
+TEST_CASE("compile: auto voice-leading chains, each chord following the previous chosen voicing") {
+    DocumentStore store;
+    store.appendChord(kC);
+    store.appendChord(kF);
+    store.appendChord(kG);
+    store.appendChord(kC);
+    store.setAutoVoiceLead(true);
+    // From C F A, G/B (cost 6) and G/D (cost 6) tie: the smaller inversion wins. From B D G, C in root
+    // position costs 3 and nothing beats it.
+    CHECK(voicings(store.doc()) == Voicings{{60, 64, 67}, {60, 65, 69}, {59, 62, 67}, {60, 64, 67}});
+}
+
+TEST_CASE("compile: a repeated chord keeps its voicing under auto voice-leading") {
+    DocumentStore store;
+    store.appendChord(kC);
+    store.appendChord(kC);
+    store.setAutoVoiceLead(true);
+    CHECK(voicings(store.doc()) == Voicings{{60, 64, 67}, {60, 64, 67}});
+}
+
+TEST_CASE("compile: with auto voice-leading an explicit inversion or octave is honoured as stored") {
+    DocumentStore store;
+    store.appendChord(kC);
+    const int f = store.appendChord(kF);
+    store.setAutoVoiceLead(true);
+    store.setInversion(f, 1);
+    CHECK(voicings(store.doc())[1] == voicing(kF, 1, 0));
+    CHECK(voicings(store.doc())[1] == std::vector<int>{69, 72, 77});
+    store.setInversion(f, 0);
+    store.setOctave(f, -1);
+    CHECK(voicings(store.doc())[1] == std::vector<int>{53, 57, 60});
+    store.setOctave(f, 0);  // back to the defaults: auto decides again
+    CHECK(voicings(store.doc())[1] == std::vector<int>{60, 65, 69});
+}
+
+TEST_CASE("compile: the first chord keeps its own values under auto voice-leading and the rest follow it") {
+    DocumentStore store;
+    const int c = store.appendChord(kC);
+    store.appendChord(kF);
+    store.setAutoVoiceLead(true);
+    store.setInversion(c, 2);
+    // From G C E, F/A at octave 0 (A C F: cost 3) is the closest.
+    CHECK(voicings(store.doc()) == Voicings{{67, 72, 76}, {69, 72, 77}});
+}
+
+TEST_CASE("compile: with auto voice-leading off every chord is voiced as stored") {
+    DocumentStore store;
+    store.appendChord(kC);
+    store.appendChord(kF);
+    store.appendChord(kG);
+    store.setAutoVoiceLead(true);
+    store.setAutoVoiceLead(false);
+    CHECK(voicings(store.doc()) == Voicings{{60, 64, 67}, {65, 69, 72}, {67, 71, 74}});
+}
+
+TEST_CASE("compile: auto voice-leading chooses the cheapest of every inversion at octaves -1..1") {
+    // Brute-force oracle over the same candidate set, for a progression of mixed sizes.
+    DocumentStore store;
+    store.appendChord(chord(2, "m7"));
+    store.appendChord(chord(7, "7"));
+    store.appendChord(chord(0, "maj9"));
+    store.appendChord(chord(9, "min"));
+    store.appendChord(chord(5, "5"));
+    store.setAutoVoiceLead(true);
+    const Voicings chosen = voicings(store.doc());
+    REQUIRE(chosen.size() == 5);
+    CHECK(chosen[0] == closeVoicing(chord(2, "m7")));
+    for (std::size_t i = 1; i < chosen.size(); ++i) {
+        CAPTURE(i);
+        const Chord c = store.doc().events[i].chord;
+        int best = INT_MAX;
+        for (int inversion = 0; inversion < inversionCount(c); ++inversion) {
+            for (int octave = -1; octave <= 1; ++octave) {
+                best = std::min(best, voiceLeadingCost(chosen[i - 1], voicing(c, inversion, octave)));
+            }
+        }
+        CHECK(voiceLeadingCost(chosen[i - 1], chosen[i]) == best);
+        CHECK(chosen[i].size() == closeVoicing(c).size());
+    }
+}
+
+TEST_CASE("compile: random documents with auto voice-leading keep the event invariants") {
+    std::mt19937 rng(20261012u);
+    auto randInt = [&rng](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rng); };
+    const auto& types = allChordTypes();
+
+    for (int round = 0; round < 50; ++round) {
+        CAPTURE(round);
+        DocumentStore store;
+        store.setAutoVoiceLead(true);
+        const int count = randInt(1, 16);
+        for (int i = 0; i < count; ++i) {
+            const std::size_t typeIndex = static_cast<std::size_t>(randInt(0, static_cast<int>(types.size()) - 1));
+            const int id = store.appendChord(Chord{randInt(0, 11), &types[typeIndex]}, 1.0, 100);
+            if (randInt(0, 3) == 0) {
+                store.setInversion(id, randInt(0, 4));  // some explicit values among the defaults
+                store.setOctave(id, randInt(-1, 1));
+            }
+        }
+        const Document& doc = store.doc();
+        const Voicings chosen = voicings(doc);
+        REQUIRE(chosen.size() == doc.events.size());
+        const Compiled compiled = compile(doc);
+
+        std::size_t voicedPitches = 0;
+        double start = 0.0;
+        for (std::size_t i = 0; i < doc.events.size(); ++i) {
+            CAPTURE(i);
+            const ChordEvent& e = doc.events[i];
+            const std::vector<int>& v = chosen[i];
+            CHECK(v.size() == closeVoicing(e.chord).size());
+            CHECK(std::is_sorted(v.begin(), v.end()));
+            CHECK(std::adjacent_find(v.begin(), v.end()) == v.end());
+            CHECK(v.front() >= 48);
+            CHECK(v.back() <= 108);
+            if (e.inversion != 0 || e.octave != 0 || i == 0) {
+                CHECK(v == voicing(e.chord, e.inversion, e.octave));  // explicit values, and the first chord
+            }
+            CHECK(onsAt(compiled, start) == v);
+            voicedPitches += v.size();
+            start += e.lengthBeats;
+        }
+        CHECK(compiled.events.size() == 2 * voicedPitches);
+        for (std::size_t i = 1; i < compiled.events.size(); ++i) {
+            CHECK(keyLess(compiled.events[i - 1], compiled.events[i]));
+        }
+    }
 }
