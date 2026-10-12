@@ -77,9 +77,21 @@ constexpr bool operator!=(const Spelling& a, const Spelling& b) noexcept {
 /// `degree` is taken modulo 7, so 7 is the tonic again and -1 is the seventh.
 Spelling spellDegree(const Key& key, int degree);
 
-/// Spelling of any pitch class in `key`. Scale members spell as their degree. Chromatic tones keep
-/// their natural letter when they have one; otherwise they take a sharp in sharp-side keys
-/// (signatureOf >= 0) and a flat in flat-side keys.
+/// Degree (0..6) of the major scale that an interval of `semitones` above the tonic alters: a
+/// major-scale member is its own degree, and every other interval is the degree it holds in a parallel
+/// mode (1 is b2, 3 is b3, 6 is #4, 8 is b6, 10 is b7). The tritone is the only interval two modes spell
+/// differently (Lydian #4, Locrian b5); it is taken as #4. `semitones` is reduced modulo 12. This is
+/// the one table behind both chromatic spelling (`spell`) and the roman numerals (`romanNumeral`).
+int majorDegreeOfInterval(int semitones);
+
+/// Spelling of any pitch class in `key`. Scale members spell as their degree (`spellDegree`). A
+/// chromatic tone is read against the parallel major of the tonic through `majorDegreeOfInterval`: it
+/// takes the letter of the major degree it alters, with the accidental that reaches it from that
+/// letter, so in C major pc 1, 3, 6, 8 and 10 are Db, Eb, F#, Ab and Bb, in D major pc 10 is Bb (bVI)
+/// rather than A#, and in C Aeolian pc 4, 9 and 11 are E, A and B. A result on a white key with an
+/// accidental (Cb, Fb, E#, B#, or a double accidental such as Fx in C# major) folds to its natural
+/// name; a double accidental on a black key (Ex in B# major) falls back to the single accidental of
+/// the same sign (F#). Chromatic tones therefore never carry more than one accidental.
 Spelling spell(PitchClass pc, const Key& key);
 
 }  // namespace chordlab

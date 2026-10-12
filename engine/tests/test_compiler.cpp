@@ -11,6 +11,7 @@
 #include <cstring>
 #include <random>
 #include <string_view>
+#include <type_traits>
 #include <vector>
 
 using namespace chordlab;
@@ -87,6 +88,11 @@ Document documentOf(const std::vector<Chord>& chords, double lengthBeats = 4.0, 
 }  // namespace
 
 // --- NoteEvent -----------------------------------------------------------------------------
+
+// The scheduler snapshots an array of these with a memcpy and reads it from the audio thread, so the
+// type must stay plain data: no constructors, destructors or virtuals, and one access control.
+static_assert(std::is_trivially_copyable_v<NoteEvent>);
+static_assert(std::is_standard_layout_v<NoteEvent>);
 
 TEST_CASE("NoteEvent: equality compares every field") {
     const NoteEvent a{0.0, true, 48, 100};

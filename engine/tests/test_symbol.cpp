@@ -84,7 +84,12 @@ TEST_CASE("chordSymbol: root spelling follows the spelling key") {
     CHECK(chordSymbol(chord(Fs, "maj"), key('G', 0, Mode::Ionian)) == "F#");
     CHECK(chordSymbol(chord(Fs, "maj"), key('E', -1, Mode::Ionian)) == "Gb");
     CHECK(chordSymbol(chord(Fs, "dim"), key('E', -1, Mode::Ionian), SymbolStyle::Standard) == "Gb°");
-    CHECK(chordSymbol(chord(Bb, "maj"), key('D', 0, Mode::Ionian)) == "A#");
+    // Chromatic roots follow the parallel-major degree table, so symbol and numeral agree on the
+    // accidental: Bb in D major is bVI, not A#.
+    CHECK(chordSymbol(chord(Bb, "maj"), key('D', 0, Mode::Ionian)) == "Bb");
+    CHECK(chordSymbol(chord(Db, "maj"), kCIonian) == "Db");
+    CHECK(chordSymbol(chord(Fs, "dim"), kCIonian) == "F#mb5");
+    CHECK(chordSymbol(chord(Ab, "maj"), key('G', 0, Mode::Ionian)) == "Ab");
 }
 
 // --- romanNumeral ------------------------------------------------------------------
