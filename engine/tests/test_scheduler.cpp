@@ -41,19 +41,19 @@ Document documentOf(const std::vector<Chord>& chords, double lengthBeats = 4.0, 
     return store.doc();
 }
 
-/// One C chord of four beats: pitches 48, 52, 55 on at 0, off at 4, endBeat 4.
+/// One C chord of four beats: pitches 60, 64, 67 on at 0, off at 4, endBeat 4.
 const Compiled& cFour() {
     static const Compiled compiled = compile(documentOf({chord(0, "maj")}, 4.0, 100));
     return compiled;
 }
 
-/// C (48, 52, 55) for beats 0..4 then Am (57, 60, 64) for beats 4..8, endBeat 8.
+/// C (60, 64, 67) for beats 0..4 then Am (69, 72, 76) for beats 4..8, endBeat 8.
 const Compiled& cThenAm() {
     static const Compiled compiled = compile(documentOf({chord(0, "maj"), chord(9, "min")}, 4.0, 100));
     return compiled;
 }
 
-/// Am (57, 60, 64) alone for four beats.
+/// Am (69, 72, 76) alone for four beats.
 const Compiled& amFour() {
     static const Compiled compiled = compile(documentOf({chord(9, "min")}, 4.0, 100));
     return compiled;
@@ -175,11 +175,11 @@ TEST_CASE("scheduler: stopped -> playing at ppq 0 emits exactly three ons at off
     const std::vector<Ev> events = host.run(0.0, 512, true);
     CAPTURE(describe(events));
     CHECK(host.lastOk);
-    CHECK(events == std::vector<Ev>{on(0, 48), on(0, 52), on(0, 55)});
-    CHECK(host.owners(48) == kOwnerProgression);
-    CHECK(host.owners(52) == kOwnerProgression);
-    CHECK(host.owners(55) == kOwnerProgression);
-    CHECK(host.owners(60) == 0);
+    CHECK(events == std::vector<Ev>{on(0, 60), on(0, 64), on(0, 67)});
+    CHECK(host.owners(60) == kOwnerProgression);
+    CHECK(host.owners(64) == kOwnerProgression);
+    CHECK(host.owners(67) == kOwnerProgression);
+    CHECK(host.owners(48) == 0);  // a pitch outside the voicing
 }
 
 // --- 2. wrap inside a block ------------------------------------------------------------------
@@ -189,13 +189,13 @@ TEST_CASE("scheduler: block [3.9, 4.1) emits the offs at 2400 and the wrap's ons
     host.adopt(snapshotOf(cFour()));
     const std::vector<Ev> first = host.run(0.0, 93600, true);  // ends at 3.9
     CAPTURE(describe(first));
-    CHECK(first == std::vector<Ev>{on(0, 48), on(0, 52), on(0, 55)});
+    CHECK(first == std::vector<Ev>{on(0, 60), on(0, 64), on(0, 67)});
 
     const std::vector<Ev> events = host.run(3.9, 4800, true);  // [3.9, 4.1)
     CAPTURE(describe(events));
     CHECK(host.lastOk);
-    CHECK(events == std::vector<Ev>{off(2400, 48), off(2400, 52), off(2400, 55),  //
-                                    on(2400, 48), on(2400, 52), on(2400, 55)});
+    CHECK(events == std::vector<Ev>{off(2400, 60), off(2400, 64), off(2400, 67),  //
+                                    on(2400, 60), on(2400, 64), on(2400, 67)});
 }
 
 // --- 3. stop -----------------------------------------------------------------------------------
@@ -207,8 +207,8 @@ TEST_CASE("scheduler: playing -> stopped releases with three offs at offset 0 an
 
     const std::vector<Ev> events = host.run(0.5, 512, false);
     CAPTURE(describe(events));
-    CHECK(events == std::vector<Ev>{off(0, 48), off(0, 52), off(0, 55)});
-    CHECK(host.owners(48) == 0);
+    CHECK(events == std::vector<Ev>{off(0, 60), off(0, 64), off(0, 67)});
+    CHECK(host.owners(60) == 0);
 
     // Staying stopped emits nothing more.
     CHECK(host.run(0.5, 512, false) == kNone);
@@ -221,13 +221,13 @@ TEST_CASE("scheduler: host-loop wrap from 8.0 back to 2.0 releases then chases a
     host.adopt(snapshotOf(cFour()));
     const std::vector<Ev> first = host.run(0.0, 8 * kSamplesPerBeat, true);  // [0, 8): two passes
     CAPTURE(describe(first));
-    CHECK(first == std::vector<Ev>{on(0, 48), on(0, 52), on(0, 55),  //
-                                   off(96000, 48), off(96000, 52), off(96000, 55),  //
-                                   on(96000, 48), on(96000, 52), on(96000, 55)});
+    CHECK(first == std::vector<Ev>{on(0, 60), on(0, 64), on(0, 67),  //
+                                   off(96000, 60), off(96000, 64), off(96000, 67),  //
+                                   on(96000, 60), on(96000, 64), on(96000, 67)});
 
     const std::vector<Ev> events = host.run(2.0, 512, true);
     CAPTURE(describe(events));
-    CHECK(events == std::vector<Ev>{off(0, 48), off(0, 52), off(0, 55), on(0, 48), on(0, 52), on(0, 55)});
+    CHECK(events == std::vector<Ev>{off(0, 60), off(0, 64), off(0, 67), on(0, 60), on(0, 64), on(0, 67)});
 }
 
 // --- 5. forward seek ---------------------------------------------------------------------------
@@ -239,12 +239,12 @@ TEST_CASE("scheduler: forward seek 1.0 -> 9.0 with C then Am chases C again") {
 
     const std::vector<Ev> events = host.run(9.0, 512, true);  // 9 mod 8 = 1: still C
     CAPTURE(describe(events));
-    CHECK(events == std::vector<Ev>{off(0, 48), off(0, 52), off(0, 55), on(0, 48), on(0, 52), on(0, 55)});
+    CHECK(events == std::vector<Ev>{off(0, 60), off(0, 64), off(0, 67), on(0, 60), on(0, 64), on(0, 67)});
 
     // And a seek into the Am region picks Am.
     const std::vector<Ev> intoAm = host.run(13.5, 512, true);  // 13.5 mod 8 = 5.5
     CAPTURE(describe(intoAm));
-    CHECK(intoAm == std::vector<Ev>{off(0, 48), off(0, 52), off(0, 55), on(0, 57), on(0, 60), on(0, 64)});
+    CHECK(intoAm == std::vector<Ev>{off(0, 60), off(0, 64), off(0, 67), on(0, 69), on(0, 72), on(0, 76)});
 }
 
 // --- 6. tempo ----------------------------------------------------------------------------------
@@ -256,8 +256,8 @@ TEST_CASE("scheduler: at 90 bpm offsets scale by 120/90 and the order is unchang
 
     const std::vector<Ev> events = host.run(3.9, 6400, true, 90.0);  // [3.9, 4.1)
     CAPTURE(describe(events));
-    CHECK(events == std::vector<Ev>{off(3200, 48), off(3200, 52), off(3200, 55),  //
-                                    on(3200, 48), on(3200, 52), on(3200, 55)});
+    CHECK(events == std::vector<Ev>{off(3200, 60), off(3200, 64), off(3200, 67),  //
+                                    on(3200, 60), on(3200, 64), on(3200, 67)});
 }
 
 // --- 7. capacity -------------------------------------------------------------------------------
@@ -271,16 +271,16 @@ TEST_CASE("scheduler: capacity 4 with three releases and three attacks keeps eve
     CAPTURE(describe(events));
     CHECK_FALSE(host.lastOk);
     CHECK(host.lastWritten == 4);
-    CHECK(events == std::vector<Ev>{off(0, 48), off(0, 52), off(0, 55), on(0, 48)});
-    CHECK(host.owners(48) == kOwnerProgression);
-    CHECK(host.owners(52) == 0);
-    CHECK(host.owners(55) == 0);
+    CHECK(events == std::vector<Ev>{off(0, 60), off(0, 64), off(0, 67), on(0, 60)});
+    CHECK(host.owners(60) == kOwnerProgression);
+    CHECK(host.owners(64) == 0);
+    CHECK(host.owners(67) == 0);
 
-    // The dropped pitches are not sounding: stopping releases only 48.
+    // The dropped pitches are not sounding: stopping releases only 60.
     const std::vector<Ev> stop = host.run(2.0, 512, false);
     CAPTURE(describe(stop));
     CHECK(host.lastOk);
-    CHECK(stop == std::vector<Ev>{off(0, 48)});
+    CHECK(stop == std::vector<Ev>{off(0, 60)});
 }
 
 TEST_CASE("scheduler: capacity 0 drops the attacks, keeps nothing sounding and reports the drop") {
@@ -289,7 +289,7 @@ TEST_CASE("scheduler: capacity 0 drops the attacks, keeps nothing sounding and r
     const std::vector<Ev> events = host.run(0.0, 512, true, kBpm, 0);
     CHECK(events == kNone);
     CHECK_FALSE(host.lastOk);
-    CHECK(host.owners(48) == 0);
+    CHECK(host.owners(60) == 0);
     // Nothing to release on stop.
     CHECK(host.run(0.0, 512, false) == kNone);
     CHECK(host.lastOk);
@@ -434,11 +434,11 @@ TEST_CASE("scheduler: negative ppq while playing emits nothing until ppq 0") {
     const std::vector<Ev> before = host.run(-0.5, 4800, true);  // [-0.5, -0.3)
     CAPTURE(describe(before));
     CHECK(before == kNone);
-    CHECK(host.owners(48) == 0);
+    CHECK(host.owners(60) == 0);
 
     const std::vector<Ev> crossing = host.run(-0.3, 9600, true);  // [-0.3, 0.1)
     CAPTURE(describe(crossing));
-    CHECK(crossing == std::vector<Ev>{on(7200, 48), on(7200, 52), on(7200, 55)});
+    CHECK(crossing == std::vector<Ev>{on(7200, 60), on(7200, 64), on(7200, 67)});
 }
 
 TEST_CASE("scheduler: a seek to a negative ppq releases and chases nothing") {
@@ -447,7 +447,7 @@ TEST_CASE("scheduler: a seek to a negative ppq releases and chases nothing") {
     host.run(0.0, 512, true);
     const std::vector<Ev> events = host.run(-1.0, 512, true);
     CAPTURE(describe(events));
-    CHECK(events == std::vector<Ev>{off(0, 48), off(0, 52), off(0, 55)});
+    CHECK(events == std::vector<Ev>{off(0, 60), off(0, 64), off(0, 67)});
 }
 
 // --- 10. one-shot ------------------------------------------------------------------------------
@@ -458,13 +458,13 @@ TEST_CASE("scheduler: loop=false emits nothing at or after endBeat and chases no
         host.adopt(snapshotOf(cThenAm(), /*loop=*/false));
         const std::vector<Ev> events = host.run(0.0, 8 * kSamplesPerBeat + 4800, true);  // [0, 8.2)
         CAPTURE(describe(events));
-        CHECK(events == std::vector<Ev>{on(0, 48), on(0, 52), on(0, 55),  //
-                                        off(96000, 48), off(96000, 52), off(96000, 55),  //
-                                        on(96000, 57), on(96000, 60), on(96000, 64),  //
-                                        off(192000, 57), off(192000, 60), off(192000, 64)});
+        CHECK(events == std::vector<Ev>{on(0, 60), on(0, 64), on(0, 67),  //
+                                        off(96000, 60), off(96000, 64), off(96000, 67),  //
+                                        on(96000, 69), on(96000, 72), on(96000, 76),  //
+                                        off(192000, 69), off(192000, 72), off(192000, 76)});
         CHECK(host.run(8.2, 4800, true) == kNone);
         CHECK(host.run(8.4, 4 * kSamplesPerBeat, true) == kNone);  // no wrap at 16 either
-        CHECK(host.owners(57) == 0);
+        CHECK(host.owners(69) == 0);
     }
     SUBCASE("chase at ppq 20 with endBeat 8") {
         Host host;
@@ -478,7 +478,7 @@ TEST_CASE("scheduler: loop=false emits nothing at or after endBeat and chases no
         host.run(20.0, 512, true);
         const std::vector<Ev> events = host.run(5.0, 512, true);
         CAPTURE(describe(events));
-        CHECK(events == std::vector<Ev>{on(0, 57), on(0, 60), on(0, 64)});
+        CHECK(events == std::vector<Ev>{on(0, 69), on(0, 72), on(0, 76)});
     }
 }
 
@@ -520,26 +520,26 @@ TEST_CASE("scheduler: preview start, progression retrigger, preview stop") {
 TEST_CASE("scheduler: a preview on a pitch the progression holds co-owns silently") {
     Host host;
     host.adopt(snapshotOf(cFour()));
-    host.run(0.0, 512, true);  // 48, 52, 55 sounding
+    host.run(0.0, 512, true);  // 60, 64, 67 sounding
 
-    CHECK(host.scheduler.pushPreview(previewStart(7, {52, 59})));
+    CHECK(host.scheduler.pushPreview(previewStart(7, {64, 71})));
     const std::vector<Ev> started = host.run(512.0 / kSamplesPerBeat, 512, true);
     CAPTURE(describe(started));
-    CHECK(started == std::vector<Ev>{on(0, 59, 90)});
-    CHECK(host.owners(52) == (kOwnerProgression | kOwnerPreview));
+    CHECK(started == std::vector<Ev>{on(0, 71, 90)});
+    CHECK(host.owners(64) == (kOwnerProgression | kOwnerPreview));
 
     CHECK(host.scheduler.pushPreview(previewStop(7)));
     const std::vector<Ev> stopped = host.run(1024.0 / kSamplesPerBeat, 512, true);
     CAPTURE(describe(stopped));
-    CHECK(stopped == std::vector<Ev>{off(0, 59)});
-    CHECK(host.owners(52) == kOwnerProgression);
+    CHECK(stopped == std::vector<Ev>{off(0, 71)});
+    CHECK(host.owners(64) == kOwnerProgression);
 
-    // The progression's own release of 52 is a physical off (the preview no longer holds it).
+    // The progression's own release of 64 is a physical off (the preview no longer holds it).
     const std::vector<Ev> offs = host.run(1536.0 / kSamplesPerBeat, 4 * kSamplesPerBeat, true);
     const int offset = 4 * kSamplesPerBeat - 1536;
     CAPTURE(describe(offs));
-    CHECK(offs == std::vector<Ev>{off(offset, 48), off(offset, 52), off(offset, 55),  //
-                                  on(offset, 48), on(offset, 52), on(offset, 55)});
+    CHECK(offs == std::vector<Ev>{off(offset, 60), off(offset, 64), off(offset, 67),  //
+                                  on(offset, 60), on(offset, 64), on(offset, 67)});
 }
 
 TEST_CASE("scheduler: a preview auto-releases after four seconds of blocks without a stop") {
@@ -655,7 +655,7 @@ TEST_CASE("scheduler: adopting a new generation mid-playback releases all then c
     host.adopt(snapshotOf(amFour(), true, 2));
     const std::vector<Ev> events = host.run(2.0, 512, true);
     CAPTURE(describe(events));
-    CHECK(events == std::vector<Ev>{off(0, 48), off(0, 52), off(0, 55), on(0, 57), on(0, 60), on(0, 64)});
+    CHECK(events == std::vector<Ev>{off(0, 60), off(0, 64), off(0, 67), on(0, 69), on(0, 72), on(0, 76)});
 
     // Re-adopting the same generation is not a discontinuity.
     host.adopt(snapshotOf(amFour(), true, 2));
@@ -670,7 +670,7 @@ TEST_CASE("scheduler: an empty snapshot only releases") {
     host.adopt(empty);
     const std::vector<Ev> events = host.run(512.0 / kSamplesPerBeat, 512, true);
     CAPTURE(describe(events));
-    CHECK(events == std::vector<Ev>{off(0, 48), off(0, 52), off(0, 55)});
+    CHECK(events == std::vector<Ev>{off(0, 60), off(0, 64), off(0, 67)});
     CHECK(host.run(1024.0 / kSamplesPerBeat, 4 * kSamplesPerBeat, true) == kNone);
 }
 
@@ -679,10 +679,10 @@ TEST_CASE("scheduler: reset keeps ownership and flushes on the next block") {
     host.adopt(snapshotOf(cFour()));
     host.run(0.0, 2 * kSamplesPerBeat, true);
     host.scheduler.reset(kSr);
-    CHECK(host.owners(48) == kOwnerProgression);
+    CHECK(host.owners(60) == kOwnerProgression);
     const std::vector<Ev> events = host.run(2.0, 512, true);
     CAPTURE(describe(events));
-    CHECK(events == std::vector<Ev>{off(0, 48), off(0, 52), off(0, 55), on(0, 48), on(0, 52), on(0, 55)});
+    CHECK(events == std::vector<Ev>{off(0, 60), off(0, 64), off(0, 67), on(0, 60), on(0, 64), on(0, 67)});
 }
 
 // --- 13. property test -------------------------------------------------------------------------
@@ -820,7 +820,7 @@ TEST_CASE("scheduler: absurd snapshots and host timing return promptly with rele
         host.adopt(snapshotOf(tiny, 1e-9, true, 2));
         const std::vector<Ev> adopted = host.run(512.0 / kSamplesPerBeat, 512, true);
         CAPTURE(describe(adopted));
-        CHECK(adopted == std::vector<Ev>{off(0, 48), off(0, 52), off(0, 55)});
+        CHECK(adopted == std::vector<Ev>{off(0, 60), off(0, 64), off(0, 67)});
         CHECK_FALSE(host.lastOk);  // the block's timeline was skipped: incomplete, never silent
         CHECK(host.run(1024.0 / kSamplesPerBeat, 2048, true) == kNone);
         CHECK_FALSE(host.lastOk);
@@ -832,10 +832,10 @@ TEST_CASE("scheduler: absurd snapshots and host timing return promptly with rele
     SUBCASE("bpm 1e-9: samples per beat beyond 1e9, so the block counts as stopped") {
         Host host;
         host.adopt(snapshotOf(cFour()));
-        REQUIRE(host.run(0.0, 512, true) == std::vector<Ev>{on(0, 48), on(0, 52), on(0, 55)});
+        REQUIRE(host.run(0.0, 512, true) == std::vector<Ev>{on(0, 60), on(0, 64), on(0, 67)});
         const std::vector<Ev> absurd = host.run(512.0 / kSamplesPerBeat, 512, true, 1e-9);
         CAPTURE(describe(absurd));
-        CHECK(absurd == std::vector<Ev>{off(0, 48), off(0, 52), off(0, 55)});
+        CHECK(absurd == std::vector<Ev>{off(0, 60), off(0, 64), off(0, 67)});
         CHECK_FALSE(host.lastOk);  // rejected timing on a non-empty block is reported
         CHECK(host.run(1e12, 512, true, 1e-9) == kNone);
         CHECK_FALSE(host.lastOk);
@@ -858,15 +858,15 @@ TEST_CASE("scheduler: absurd snapshots and host timing return promptly with rele
             CAPTURE(bad.what);
             Host host;
             host.adopt(snapshotOf(cFour()));
-            REQUIRE(host.run(0.0, 512, true) == std::vector<Ev>{on(0, 48), on(0, 52), on(0, 55)});
+            REQUIRE(host.run(0.0, 512, true) == std::vector<Ev>{on(0, 60), on(0, 64), on(0, 67)});
             const BlockInfo info{512.0 / kSamplesPerBeat, 512, bad.sampleRate, bad.bpm, true};
             std::size_t written = 0;
             const bool ok = host.scheduler.process(info, host.buffer.data(), kBig, written);
             const std::vector<Ev> events = decode(host.buffer.data(), written);
             CAPTURE(describe(events));
             CHECK_FALSE(ok);
-            CHECK(events == std::vector<Ev>{off(0, 48), off(0, 52), off(0, 55)});
-            CHECK(host.owners(48) == 0);
+            CHECK(events == std::vector<Ev>{off(0, 60), off(0, 64), off(0, 67)});
+            CHECK(host.owners(60) == 0);
         }
     }
     SUBCASE("a block at ppq 1e300 and one at the largest finite ppq") {
@@ -895,7 +895,7 @@ TEST_CASE("scheduler: absurd snapshots and host timing return promptly with rele
             CAPTURE(bad.what);
             Host host;
             host.adopt(snapshotOf(cFour()));
-            REQUIRE(host.run(0.0, 512, true) == std::vector<Ev>{on(0, 48), on(0, 52), on(0, 55)});
+            REQUIRE(host.run(0.0, 512, true) == std::vector<Ev>{on(0, 60), on(0, 64), on(0, 67)});
 
             const BlockInfo info{bad.ppq, bad.nFrames, bad.sampleRate, bad.bpm, true};
             std::size_t written = 0;
@@ -903,13 +903,13 @@ TEST_CASE("scheduler: absurd snapshots and host timing return promptly with rele
             const std::vector<Ev> events = decode(host.buffer.data(), written);
             CAPTURE(describe(events));
             CHECK_FALSE(ok);  // the block was not played as asked: reported
-            CHECK(events == std::vector<Ev>{off(0, 48), off(0, 52), off(0, 55)});
-            CHECK(host.owners(48) == 0);
+            CHECK(events == std::vector<Ev>{off(0, 60), off(0, 64), off(0, 67)});
+            CHECK(host.owners(60) == 0);
 
             // The next good block starts afresh and chases.
             const std::vector<Ev> resumed = host.run(2.0, 512, true);
             CAPTURE(describe(resumed));
-            CHECK(resumed == std::vector<Ev>{on(0, 48), on(0, 52), on(0, 55)});
+            CHECK(resumed == std::vector<Ev>{on(0, 60), on(0, 64), on(0, 67)});
         }
     }
     SUBCASE("a legitimately long block still plays every wrap it spans") {
@@ -921,7 +921,7 @@ TEST_CASE("scheduler: absurd snapshots and host timing return promptly with rele
         // One wrap more than the bound: skipped and released.
         const std::vector<Ev> skipped = host.run(256.0, 65 * 4 * kSamplesPerBeat + 4800, true);
         CAPTURE(describe(skipped));
-        CHECK(skipped == std::vector<Ev>{off(0, 48), off(0, 52), off(0, 55)});
+        CHECK(skipped == std::vector<Ev>{off(0, 60), off(0, 64), off(0, 67)});
         CHECK_FALSE(host.lastOk);  // skipped: reported, not silent
     }
 }
@@ -937,13 +937,13 @@ TEST_CASE("regression: a release refused by output capacity is owed and paid by 
     CHECK(refused == kNone);
     CHECK_FALSE(host.lastOk);
     CHECK(host.owners(48) == 0);         // the progression has let go...
-    CHECK(host.scheduler.sounding(48));  // ...but the note still physically sounds
+    CHECK(host.scheduler.sounding(60));  // ...but the note still physically sounds
 
     const std::vector<Ev> owed = host.run(0.5, 512, false);
     CAPTURE(describe(owed));
-    CHECK(owed == std::vector<Ev>{off(0, 48), off(0, 52), off(0, 55)});
+    CHECK(owed == std::vector<Ev>{off(0, 60), off(0, 64), off(0, 67)});
     CHECK(host.lastOk);
-    CHECK_FALSE(host.scheduler.sounding(48));
+    CHECK_FALSE(host.scheduler.sounding(60));
     CHECK(host.run(0.5, 512, false) == kNone);
 }
 
@@ -955,7 +955,7 @@ TEST_CASE("regression: owed releases are paid before anything else; an attack on
         REQUIRE(host.run(0.5, 512, false, kBpm, 0) == kNone);
         const std::vector<Ev> events = host.run(0.0, 512, true);
         CAPTURE(describe(events));
-        CHECK(events == std::vector<Ev>{off(0, 48), off(0, 52), off(0, 55), on(0, 48), on(0, 52), on(0, 55)});
+        CHECK(events == std::vector<Ev>{off(0, 60), off(0, 64), off(0, 67), on(0, 60), on(0, 64), on(0, 67)});
         CHECK(host.lastOk);
     }
     SUBCASE("a preview on an owed pitch sounds it afresh") {
@@ -963,11 +963,11 @@ TEST_CASE("regression: owed releases are paid before anything else; an attack on
         host.adopt(snapshotOf(cFour()));
         host.run(0.0, 512, true);
         REQUIRE(host.run(0.5, 512, false, kBpm, 0) == kNone);
-        CHECK(host.scheduler.pushPreview(previewStart(1, {48})));
+        CHECK(host.scheduler.pushPreview(previewStart(1, {60})));
         const std::vector<Ev> events = host.run(0.5, 512, false);
         CAPTURE(describe(events));
-        CHECK(events == std::vector<Ev>{off(0, 48), off(0, 52), off(0, 55), on(0, 48, 90)});
-        CHECK(host.owners(48) == kOwnerPreview);
+        CHECK(events == std::vector<Ev>{off(0, 60), off(0, 64), off(0, 67), on(0, 60, 90)});
+        CHECK(host.owners(60) == kOwnerPreview);
     }
     SUBCASE("a capacity of 128 pays every owed release at once") {
         std::vector<NoteEvent> all;
@@ -994,17 +994,17 @@ TEST_CASE("regression: mandatory releases survive a flood of preview commands") 
     host.run(0.0, 512, true);
     for (int id = 1; id <= 64; ++id) {
         CAPTURE(id);
-        REQUIRE(host.scheduler.pushPreview(previewStart(id, {60, 61, 62, 63, 64, 65, 66, 67})));
+        REQUIRE(host.scheduler.pushPreview(previewStart(id, {72, 73, 74, 75, 76, 77, 78, 79})));
     }
     const std::vector<Ev> events = host.run(0.5, 512, false);  // transport stops under the flood
     CAPTURE(describe(events));
-    for (const int pitch : {48, 52, 55}) {
+    for (const int pitch : {60, 64, 67}) {
         CAPTURE(pitch);
         CHECK(std::count(events.begin(), events.end(), off(0, pitch)) == 1);
         CHECK(host.owners(pitch) == 0);
         CHECK_FALSE(host.scheduler.sounding(pitch));
     }
-    CHECK(host.scheduler.sounding(60));
+    CHECK(host.scheduler.sounding(72));
     CHECK_FALSE(host.lastOk);  // only eight previews fit; the rest were refused
 }
 
@@ -1074,17 +1074,17 @@ TEST_CASE("regression: an empty block is a no-op") {
     Host host;
     host.adopt(snapshotOf(cFour()));
     host.run(0.0, 512, true);
-    CHECK(host.scheduler.pushPreview(previewStart(1, {60})));
+    CHECK(host.scheduler.pushPreview(previewStart(1, {48})));
 
     const std::vector<Ev> empty = host.run(0.5, 0, false);  // a stop with no frames
     CHECK(empty == kNone);
     CHECK(host.lastOk);
-    CHECK(host.owners(48) == kOwnerProgression);  // nothing released...
-    CHECK(host.owners(60) == 0);                  // ...and the preview still queued
+    CHECK(host.owners(60) == kOwnerProgression);  // nothing released...
+    CHECK(host.owners(48) == 0);                  // ...and the preview still queued
 
     const std::vector<Ev> events = host.run(0.5, 512, false);
     CAPTURE(describe(events));
-    CHECK(events == std::vector<Ev>{on(0, 60, 90), off(0, 48), off(0, 52), off(0, 55)});
+    CHECK(events == std::vector<Ev>{on(0, 48, 90), off(0, 60), off(0, 64), off(0, 67)});
 
     // An empty playing block advances nothing either: the next block is still contiguous.
     Host other;
@@ -1093,7 +1093,7 @@ TEST_CASE("regression: an empty block is a no-op") {
     CHECK(other.run(3.9, 0, true) == kNone);
     const std::vector<Ev> wrap = other.run(3.9, 4800, true);
     CAPTURE(describe(wrap));
-    CHECK(wrap == std::vector<Ev>{off(2400, 48), off(2400, 52), off(2400, 55), on(2400, 48), on(2400, 52), on(2400, 55)});
+    CHECK(wrap == std::vector<Ev>{off(2400, 60), off(2400, 64), off(2400, 67), on(2400, 60), on(2400, 64), on(2400, 67)});
 }
 
 TEST_CASE("regression: a stop in the same batch frees its preview slot for a start") {
@@ -1152,18 +1152,18 @@ TEST_CASE("scheduler: panic releases the progression and the previews, with no c
     Host host;
     host.adopt(snapshotOf(cFour()));
     host.run(0.0, 512, true);
-    CHECK(host.scheduler.pushPreview(previewStart(1, {60, 64})));
-    REQUIRE(host.run(512.0 / kSamplesPerBeat, 512, true) == std::vector<Ev>{on(0, 60, 90), on(0, 64, 90)});
+    CHECK(host.scheduler.pushPreview(previewStart(1, {48, 52})));
+    REQUIRE(host.run(512.0 / kSamplesPerBeat, 512, true) == std::vector<Ev>{on(0, 48, 90), on(0, 52, 90)});
 
     host.scheduler.panic();
-    CHECK(host.owners(48) == 0);
-    CHECK(host.owners(60) == 0);
-    CHECK(host.scheduler.sounding(48));  // owed until the next block
-    CHECK(host.scheduler.sounding(60));
+    CHECK(host.owners(60) == 0);  // the progression's
+    CHECK(host.owners(48) == 0);  // the preview's
+    CHECK(host.scheduler.sounding(60));  // owed until the next block
+    CHECK(host.scheduler.sounding(48));
 
     const std::vector<Ev> events = host.run(1024.0 / kSamplesPerBeat, 512, true);
     CAPTURE(describe(events));
-    CHECK(events == std::vector<Ev>{off(0, 48), off(0, 52), off(0, 55), off(0, 60), off(0, 64)});
+    CHECK(events == std::vector<Ev>{off(0, 48), off(0, 52), off(0, 60), off(0, 64), off(0, 67)});
     CHECK(host.lastOk);
     CHECK_FALSE(host.scheduler.sounding(48));
 
@@ -1171,7 +1171,7 @@ TEST_CASE("scheduler: panic releases the progression and the previews, with no c
     const std::vector<Ev> wrap = host.run(1536.0 / kSamplesPerBeat, 4 * kSamplesPerBeat, true);
     const int offset = 4 * kSamplesPerBeat - 1536;
     CAPTURE(describe(wrap));
-    CHECK(wrap == std::vector<Ev>{on(offset, 48), on(offset, 52), on(offset, 55)});
+    CHECK(wrap == std::vector<Ev>{on(offset, 60), on(offset, 64), on(offset, 67)});
 
     // The preview's slot is gone: its stop is a no-op.
     CHECK(host.scheduler.pushPreview(previewStop(1)));
