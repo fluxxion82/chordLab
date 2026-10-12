@@ -44,7 +44,10 @@
 // commands, the host's state thread for UnserializeState); the consumer side belongs to ProcessBlock.
 // Rapid edits coalesce: an unacquired publish is simply replaced by the next. The generation only moves
 // when the compiled content moved, so a browsed-key change or a followHost toggle does not make the
-// scheduler flush and re-chase the sounding chord.
+// scheduler flush and re-chase the sounding chord. followHost itself travels as an atomic the same
+// publisher stores (mFollowHost) and ProcessBlock ANDs into BlockInfo.playing. The other way, ProcessBlock
+// stores the block's host position and playing flag in atomics (mTransportPpq, mTransportPlaying) and
+// OnIdle, on the main thread, pushes them to the editor as the playhead at ~15 Hz when they change.
 //
 // The Cocoa view controller: ARC is off for this file. OpenWindow's alloc/init returns the controller
 // at +1 and CocoaEditorDelegate::CloseWindow only forgets the pointer, so CloseWindow here releases it.
@@ -57,7 +60,9 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <climits>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -183,8 +188,13 @@ void ChordLab::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
   if (const SnapshotSlot* s = mSnapshots.acquire())
     mScheduler.adopt(chordlab::Snapshot{s->events.data(), s->count, s->endBeat, s->loop, mSnapshots.currentGeneration()});
 
-  // followHost gating is Task 3.2; until then the progression follows the host transport unconditionally.
-  const chordlab::BlockInfo block{GetPPQPos(), nFrames, GetSampleRate(), GetTempo(), GetTransportIsRunning()};
+  // Follow Live gates the progression only: previews are independent of the transport, and the scheduler
+  // releases the progression on the playing -> stopped edge, so turning it off mid-chord is clean.
+  const double ppq = GetPPQPos();
+  const bool playing = GetTransportIsRunning() && mFollowHost.load(std::memory_order_relaxed);
+  const chordlab::BlockInfo block{ppq, nFrames, GetSampleRate(), GetTempo(), playing};
+  mTransportPpq.store(ppq, std::memory_order_relaxed);             // the playhead, read by OnIdle
+  mTransportPlaying.store(playing, std::memory_order_relaxed);
   std::size_t written = 0;
   const bool complete = mScheduler.process(block, mMidiOut.data(), mMidiOut.size(), written);
 
@@ -212,6 +222,7 @@ void ChordLab::OnUIOpen()
   Plugin::OnUIOpen();
   PushSnapshot();
   mReportedIncompleteBlocks = 0;                                 // make OnIdle resend the current count
+  mPushedPpq = std::numeric_limits<double>::quiet_NaN();         // ...and the playhead
 }
 
 void ChordLab::OnIdle()
@@ -221,6 +232,28 @@ void ChordLab::OnIdle()
   {
     mReportedIncompleteBlocks = incomplete;
     PushStatus(incomplete);
+  }
+
+  // The playhead: at most every kTransportPushInterval, only to an open editor, only when it moved more
+  // than a rounding error or started/stopped. mPushedPpq is NaN before the first push (or after an editor
+  // opened), and a NaN comparison is false, so that first push always happens.
+  if (mEditorOpen.load())
+  {
+    const auto now = std::chrono::steady_clock::now();
+    if (now - mLastTransportPush >= kTransportPushInterval)
+    {
+      double ppq = mTransportPpq.load(std::memory_order_relaxed);
+      if (!std::isfinite(ppq))
+        ppq = 0.0;                                               // nlohmann would write null for NaN or inf
+      const bool playing = mTransportPlaying.load(std::memory_order_relaxed);
+      if (!(std::fabs(ppq - mPushedPpq) <= 1e-6) || playing != mPushedPlaying)
+      {
+        mLastTransportPush = now;
+        mPushedPpq = ppq;
+        mPushedPlaying = playing;
+        PushTransport(ppq, playing);
+      }
+    }
   }
 }
 
@@ -361,6 +394,7 @@ void ChordLab::PublishSnapshotLocked()
   // the hosts' state threads (the mutex hand-off orders one publish before the next). Never the audio
   // thread: compile allocates.
   const chordlab::Document& doc = mStore.doc();
+  mFollowHost.store(doc.followHost, std::memory_order_relaxed);  // live state, not part of the snapshot
   chordlab::Compiled compiled = chordlab::compile(doc);
   const bool unchanged = mGeneration != 0 && compiled.events == mPublished.events &&
                          compiled.endBeat == mPublished.endBeat && doc.progressionLoop == mPublishedLoop;
@@ -430,6 +464,16 @@ void ChordLab::PushStatus(uint32_t incompleteBlocks)
       return;
     const std::string json = nlohmann::json{{"schema", chordlab::kJsonSchema}, {"incompleteBlocks", incompleteBlocks}}.dump();
     SendArbitraryMsgFromDelegate((int) kMsgTagStatus, (int) json.size(), json.data());
+  });
+}
+
+void ChordLab::PushTransport(double ppq, bool playing)
+{
+  OnMain([this, ppq, playing] {
+    if (!mEditorOpen.load())
+      return;
+    const std::string json = nlohmann::json{{"schema", chordlab::kJsonSchema}, {"ppq", ppq}, {"playing", playing}}.dump();
+    SendArbitraryMsgFromDelegate((int) kMsgTagTransport, (int) json.size(), json.data());
   });
 }
 

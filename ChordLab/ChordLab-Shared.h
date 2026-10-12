@@ -24,5 +24,6 @@ static const NSInteger kMsgTagPanic = 13;            // no payload: silence ever
 static const NSInteger kMsgTagSnapshot = 20;         // payload: snapshotJson (document + palette)
 static const NSInteger kMsgTagError = 21;            // payload: {"schema":1,"error":"..."} for a rejected command or preview
 static const NSInteger kMsgTagStatus = 22;           // payload: {"schema":1,"incompleteBlocks":n} (scheduler debug aid)
+static const NSInteger kMsgTagTransport = 23;        // payload: {"schema":1,"ppq":<beats>,"playing":true|false}, ~15 Hz while it changes
 
 #endif /* ChordLab_Shared_h */

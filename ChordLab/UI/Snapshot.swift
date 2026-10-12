@@ -110,3 +110,12 @@ struct StatusJSON: Codable {
   let schema: Int
   let incompleteBlocks: Int
 }
+
+/// `kMsgTagTransport` payload: `{"schema":1,"ppq":beats,"playing":bool}`, the host position at the start
+/// of the last audio block and whether the progression plays there (transport running and Follow Live
+/// on). Pushed at ~15 Hz while it changes; the sequence bar's playhead.
+struct TransportJSON: Codable, Equatable {
+  let schema: Int
+  let ppq: Double
+  let playing: Bool
+}

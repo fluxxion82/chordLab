@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// Key bar, sequence bar and palette grid, with a temporary status line and the Spike 3 drag-out label
-/// along the bottom until M3/M4 replace them.
+/// Key bar, transport row, sequence bar and palette grid, with a temporary status line and the Spike 3
+/// drag-out label along the bottom until M4 replaces them.
 struct ContentView: View {
   @EnvironmentObject var state: ChordLabState
 
@@ -11,20 +11,20 @@ struct ContentView: View {
       VStack(spacing: 12) {
         KeyBarView()
 
+        TransportBarView()
+
         SequenceBarView()
 
         PaletteView()
 
         HStack(spacing: 16) {
           if let snapshot = state.snapshot {
-            Text("\(snapshot.palette.cells.count) cells · \(snapshot.events.count) events · ends at beat \(snapshot.endBeat, specifier: "%.2f")")
+            Text("\(snapshot.palette.cells.count) cells · \(snapshot.events.count) events · ends at beat \(snapshot.endBeat, specifier: "%.2f") · follow \(snapshot.followHost ? "on" : "off") · loop \(snapshot.progressionLoop ? "on" : "off")")
               .foregroundStyle(.gray).font(.callout.monospacedDigit())
           } else {
             Text("Waiting for a snapshot…").foregroundStyle(.gray).font(.callout)
           }
           Button("Append C") { state.send(command: ["cmd": "appendChord", "root": 0, "type": "maj"]) }
-          Button("Panic") { state.panic() }
-            .accessibilityLabel("Silence every sounding note")
           if let snapshot = state.snapshot, !snapshot.hasTonicTable {
             Text("snapshot missing tonics").foregroundStyle(.orange).font(.callout)
           }

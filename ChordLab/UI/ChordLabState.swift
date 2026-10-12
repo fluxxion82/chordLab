@@ -11,6 +11,8 @@ class ChordLabState: NSObject, ObservableObject {
   @Published var lastError: String?
   /// Audio blocks the scheduler could not complete (debug aid from `kMsgTagStatus`).
   @Published var incompleteBlocks: Int = 0
+  /// The playhead (`kMsgTagTransport`); nil until the plug-in pushes one.
+  @Published var transport: TransportJSON?
   /// Id of the palette cell whose voicing is sounding (pressed), or nil.
   @Published private(set) var heldCellId: String?
   /// Preview id of the held cell: a per-press counter, so that Start and Stop pair up in the scheduler.
@@ -126,6 +128,13 @@ class ChordLabState: NSObject, ObservableObject {
   func applyStatus(json: Data) {
     if let status = try? JSONDecoder().decode(StatusJSON.self, from: json) {
       incompleteBlocks = status.incompleteBlocks
+    }
+  }
+
+  /// `kMsgTagTransport` payload.
+  func applyTransport(json: Data) {
+    if let transport = try? JSONDecoder().decode(TransportJSON.self, from: json) {
+      self.transport = transport
     }
   }
 

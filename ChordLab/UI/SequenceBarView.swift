@@ -12,6 +12,11 @@ import SwiftUI
 /// - drag a block sideways → `moveChord` to the index its centre lands on, sent when the drag ends
 ///   (only the dragged block moves meanwhile).
 /// Undo/redo are the key bar's buttons (⌘Z / ⇧⌘Z), so they work whatever has focus.
+///
+/// The playhead (`state.transport`, ~15 Hz from the plug-in) is a 2-pt line at the position's beat, folded
+/// into the progression when it loops; the block sounding there is drawn brighter. Hidden while the
+/// progression is not playing (transport stopped or Follow Live off), before beat 0, with no progression,
+/// or past the end when the loop is off.
 struct SequenceBarView: View {
   @EnvironmentObject var state: ChordLabState
   @AppStorage(LabelMode.storageKey) private var labelMode: LabelMode = .both
@@ -47,6 +52,16 @@ struct SequenceBarView: View {
 
   private var events: [EventJSON] { state.snapshot?.events ?? [] }
 
+  /// The beat the playhead sits at, or nil when it is hidden.
+  private var playheadBeat: Double? {
+    guard let transport = state.transport, transport.playing, let snapshot = state.snapshot,
+          snapshot.endBeat > 0, transport.ppq >= 0 else { return nil }
+    if snapshot.progressionLoop {
+      return transport.ppq.truncatingRemainder(dividingBy: snapshot.endBeat)
+    }
+    return transport.ppq < snapshot.endBeat ? transport.ppq : nil
+  }
+
   var body: some View {
     GeometryReader { geometry in
       let endBeat = state.snapshot?.endBeat ?? 0
@@ -54,6 +69,7 @@ struct SequenceBarView: View {
       let contentWidth = max(geometry.size.width,
                              CGFloat(endBeat + Double(Self.beatsPerBar)) * Self.pxPerBeat)
       ScrollView(.horizontal) {
+        ZStack(alignment: .topLeading) {
         VStack(alignment: .leading, spacing: 2) {
           ZStack(alignment: .leading) {
             Color.clear
@@ -73,6 +89,15 @@ struct SequenceBarView: View {
             }
           }
           ruler(width: contentWidth, endBeat: endBeat)
+        }
+        if let beat = playheadBeat {
+          Rectangle()
+            .fill(Color.white)
+            .frame(width: 2, height: Self.blockHeight + 2 + Self.rulerHeight)
+            .offset(x: CGFloat(beat) * Self.pxPerBeat - 1)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+        }
         }
         .padding(.vertical, 6)
         .padding(.horizontal, 4)
@@ -117,11 +142,15 @@ struct SequenceBarView: View {
     let selected = selectedEventId == event.id
     let moving = move?.id == event.id
     let offset = moving ? (move?.offset ?? 0) : 0
+    let sounding = playheadBeat.map { $0 >= event.startBeat && $0 < event.startBeat + event.lengthBeats } ?? false
     return ZStack {
       if filled {
         RoundedRectangle(cornerRadius: Self.cornerRadius).fill(color)
       } else {
         RoundedRectangle(cornerRadius: Self.cornerRadius).strokeBorder(color, lineWidth: 2)
+      }
+      if sounding {
+        RoundedRectangle(cornerRadius: Self.cornerRadius).fill(Color.white.opacity(filled ? 0.25 : 0.15))
       }
       if selected {
         RoundedRectangle(cornerRadius: Self.cornerRadius).strokeBorder(Color.white, lineWidth: 2)

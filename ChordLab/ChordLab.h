@@ -10,9 +10,11 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -62,6 +64,8 @@ private:
   void HandlePreview(std::string_view json);
   // Main thread: pushes {"schema":1,"incompleteBlocks":n} to the editor.
   void PushStatus(uint32_t incompleteBlocks);
+  // Main thread: pushes {"schema":1,"ppq":ppq,"playing":playing} (the playhead) to the editor.
+  void PushTransport(double ppq, bool playing);
 
   static constexpr uint8_t kStateVersion = 2;   // 1 was the M0 spike payload; it is not migrated
 
@@ -95,6 +99,10 @@ private:
   uint32_t mGeneration = 0;                                    // producer: 0 until the first publish
   chordlab::Compiled mPublished;                               // producer: the content of generation mGeneration
   bool mPublishedLoop = true;
+  // followHost, stored by PublishSnapshotLocked (so by every command and load) for ProcessBlock, which
+  // gates the progression with it: off means BlockInfo.playing is false whatever the host transport does,
+  // so the progression is silent (released on the edge by the scheduler) while previews go on.
+  std::atomic<bool> mFollowHost{true};
 
   // The scheduler belongs to the audio thread (process, reset, panic); pushPreview is its one other-thread
   // entry and is called from the main thread only (OnMessage, CloseWindow). OnReset and panic requests
@@ -111,6 +119,15 @@ private:
   std::atomic<bool> mPanicPending{false};
   std::atomic<uint32_t> mIncompleteBlocks{0};                  // blocks whose process() returned false
   uint32_t mReportedIncompleteBlocks = 0;                      // main thread: last value pushed to the UI
+
+  // The playhead. ProcessBlock stores the block's host position and whether the progression plays; OnIdle
+  // pushes them as kMsgTagTransport at most every kTransportPushInterval, and only when they changed.
+  std::atomic<double> mTransportPpq{0.0};
+  std::atomic<bool> mTransportPlaying{false};
+  static constexpr std::chrono::milliseconds kTransportPushInterval{66};   // ~15 Hz
+  std::chrono::steady_clock::time_point mLastTransportPush{};               // main thread
+  double mPushedPpq = std::numeric_limits<double>::quiet_NaN();              // main thread; NaN: nothing pushed yet
+  bool mPushedPlaying = false;                                              // main thread
   int mOpenPreviewId = -1;                                     // main thread: Start without a Stop yet
 
   // Whether an editor is attached: set at the end of OpenWindow, cleared in CloseWindow (both main
