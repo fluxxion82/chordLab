@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <climits>
+#include <cstddef>
 #include <functional>
 #include <string>
 #include <string_view>
@@ -218,6 +219,97 @@ TEST_CASE("snapshot: palette carries the C major grid with Klimper symbols, nume
         CAPTURE(cell.dump());
         CHECK(cell.at("filled") == true);
     }
+}
+
+// --- Snapshot: key tables and out-of-key notes -----------------------------------------
+
+namespace {
+
+/// The `Mode` enumerator names in enum order: what the snapshot's `modes` must list.
+const std::vector<std::string> kModeNames{"Ionian",  "Dorian",  "Phrygian",      "Lydian",      "Mixolydian",
+                                          "Aeolian", "Locrian", "HarmonicMinor", "MelodicMinor"};
+
+}  // namespace
+
+TEST_CASE("snapshot: modes lists the nine mode identifiers in enum order, under the unchanged schema") {
+    const DocumentStore store;
+    const json snap = snapshot(store);
+    CHECK(snap.at("schema") == 1);  // tonics, modes and outOfKey are additive: no schema bump
+    REQUIRE(snap.at("modes").size() == kNumModes);
+    CHECK(snap.at("modes").get<std::vector<std::string>>() == kModeNames);
+}
+
+TEST_CASE("snapshot: tonics carries the canonical tonic of every pitch class in every mode") {
+    const DocumentStore store;
+    const json snap = snapshot(store);
+    const json& tonics = snap.at("tonics");
+    CHECK(tonics.size() == kNumModes);
+
+    CHECK(tonics.at("Ionian")[6] == json({{"letter", "F"}, {"alter", 1}, {"text", "F#"}}));
+    CHECK(tonics.at("Ionian")[3] == json({{"letter", "E"}, {"alter", -1}, {"text", "Eb"}}));
+    CHECK(tonics.at("Locrian")[3].at("text") == "D#");  // sig +4, not Eb Locrian's -8
+    CHECK(tonics.at("Locrian")[5].at("text") == "F");   // F (-6) over E# (+6): the natural wins the tie
+
+    // Every mode has one entry per pitch class, and each is the engine's own canonicalTonic.
+    for (int m = 0; m < kNumModes; ++m) {
+        const std::string& name = kModeNames[static_cast<std::size_t>(m)];
+        CAPTURE(name);
+        const json& row = tonics.at(name);
+        REQUIRE(row.size() == 12);
+        for (PitchClass pc = 0; pc < 12; ++pc) {
+            const Tonic t = canonicalTonic(pc, static_cast<Mode>(m));
+            const json& entry = row.at(static_cast<std::size_t>(pc));
+            CHECK(entry.at("letter") == std::string(1, t.letter));
+            CHECK(entry.at("alter") == t.alter);
+            CHECK(entry.at("text") == Spelling{t.letter, t.alter}.text());
+        }
+    }
+}
+
+TEST_CASE("snapshot: outOfKey lists each chord's pitch classes outside the project key, sorted") {
+    DocumentStore store;
+    applyOk(store, {{"cmd", "browseKey"}, {"steps", 1}});                       // G major browsed from C major
+    applyOk(store, {{"cmd", "appendChord"}, {"root", 8}, {"type", "maj"}});   // Ab: Ab C Eb
+    applyOk(store, {{"cmd", "appendChord"}, {"root", 5}, {"type", "min"}});   // Fm: F Ab C
+    applyOk(store, {{"cmd", "appendChord"}, {"root", 7}, {"type", "maj"}});   // G: diatonic
+
+    json snap = snapshot(store);
+    const json fSharpDim = cellAt(snap, 6, 1);
+    REQUIRE_FALSE(fSharpDim.is_null());
+    CHECK(fSharpDim.at("symbol") == "F#mb5");
+    CHECK(fSharpDim.at("outOfKey") == json::array({6}));
+    CHECK(fSharpDim.at("filled") == false);
+    const json g = cellAt(snap, 0, 1);
+    CHECK(g.at("filled") == true);
+    CHECK(g.at("outOfKey") == json::array());
+
+    // `filled` and `outOfKey` are two views of one fact, and the list is the sorted set of chromatic notes.
+    for (const json& cell : snap.at("palette").at("cells")) {
+        CAPTURE(cell.dump());
+        const auto out = cell.at("outOfKey").get<std::vector<int>>();
+        CHECK(cell.at("filled") == out.empty());
+        CHECK(std::is_sorted(out.begin(), out.end()));
+        CHECK(std::adjacent_find(out.begin(), out.end()) == out.end());
+        const Chord ch = chord(cell.at("root").get<int>(), cell.at("type").get<std::string>());
+        for (const PitchClass pc : pitchClasses(ch)) {
+            const bool listed = std::find(out.begin(), out.end(), pc) != out.end();
+            CHECK(listed == !inScale(pc, 0, Mode::Ionian));
+        }
+    }
+
+    REQUIRE(snap.at("events").size() == 3);
+    CHECK(snap.at("events")[0].at("outOfKey") == json::array({3, 8}));  // sorted: the chord spells them 8, 0, 3
+    CHECK(snap.at("events")[1].at("outOfKey") == json::array({8}));
+    CHECK(snap.at("events")[2].at("outOfKey") == json::array());
+
+    // Relative to the project key, not the browsed key: moving the project key to Ab major flips them.
+    applyOk(store, {{"cmd", "setKey"}, {"letter", "A"}, {"alter", -1}, {"mode", "Ionian"}});
+    snap = snapshot(store);
+    CHECK(snap.at("events")[0].at("outOfKey") == json::array());
+    CHECK(snap.at("events")[1].at("outOfKey") == json::array());
+    CHECK(snap.at("events")[2].at("outOfKey") == json::array({2, 11}));  // G B D in Ab major: B and D
+    CHECK(cellAt(snap, 0, 1).at("outOfKey") == json::array({2, 11}));    // the browsed G cell, now borrowed
+    CHECK(cellAt(snap, 0, 1).at("filled") == false);
 }
 
 // --- browseKey -------------------------------------------------------------------------
@@ -487,6 +579,8 @@ TEST_CASE("state: shape") {
     CHECK(state.at("nextId") == 4);
     CHECK(state.at("editor") == json({{"width", 1024}, {"height", 768}}));
     CHECK_FALSE(state.contains("palette"));
+    CHECK_FALSE(state.contains("tonics"));  // the key tables are for display, not persistence
+    CHECK_FALSE(state.contains("modes"));
 
     REQUIRE(state.at("events").size() == 2);
     CHECK(state.at("events")[0] == json({{"id", 1}, {"root", 0}, {"type", "maj"}, {"lengthBeats", 4.0}, {"velocity", 100}}));
