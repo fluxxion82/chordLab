@@ -46,6 +46,36 @@ enum HarmonyText {
     voicing.map(ChordSymbol.noteName(midi:)).joined(separator: "  ")
   }
 
+  /// "Inversion 1 · bass E4" (the bass is the voicing's lowest note, what sounds).
+  static func inversionLabel(_ inversion: Int, bass: Int?) -> String {
+    "Inversion \(inversion)" + (bass.map { " · bass " + ChordSymbol.noteName(midi: $0) } ?? "")
+  }
+
+  /// "Octave +1", "Octave 0", "Octave −1".
+  static func octaveLabel(_ octave: Int) -> String {
+    "Octave " + (octave > 0 ? "+\(octave)" : octave < 0 ? "−\(-octave)" : "0")
+  }
+
+  /// Whether the stored `inversion` and `octave` are what sounds: for a manual chord always, and for any
+  /// chord while auto voice-leading is off (`compile` then voices `voicing(chord, inversion, octave)`).
+  /// With auto voice-leading on, a non-manual chord's stored fields are only what a stepper would start
+  /// from; the compiled `voicing` may be any inversion and octave.
+  static func storedVoicingSounds(manual: Bool, autoVoiceLead: Bool) -> Bool {
+    manual || !autoVoiceLead
+  }
+
+  /// One line on a chord's voicing, worded so that the stored fields are never shown as if they sounded:
+  /// "Manual voicing · Inversion 1 · bass E4 · Octave 0", "Default voicing · Inversion 0 · bass C4 ·
+  /// Octave 0" (auto off), or "Automatic voicing · bass E4" (auto on, not manual: the notes say the
+  /// rest, the stored inversion and octave are not what sounds).
+  static func voicingStatus(inversion: Int, octave: Int, manual: Bool, autoVoiceLead: Bool, bass: Int?) -> String {
+    if storedVoicingSounds(manual: manual, autoVoiceLead: autoVoiceLead) {
+      return (manual ? "Manual voicing" : "Default voicing") + " · " + inversionLabel(inversion, bass: bass) +
+             " · " + octaveLabel(octave)
+    }
+    return "Automatic voicing" + (bass.map { " · bass " + ChordSymbol.noteName(midi: $0) } ?? "")
+  }
+
   /// A suggestion's reasons as one hover line: the `reasonTexts` joined with " · ".
   static func reasonsLine(_ reasonTexts: [String]) -> String {
     reasonTexts.joined(separator: " · ")

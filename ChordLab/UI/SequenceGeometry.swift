@@ -94,6 +94,15 @@ enum SequenceGeometry {
     return best
   }
 
+  /// Where a section whose start is block `from` lands after its left edge is dragged `dx` points: the
+  /// boundary nearest to the ORIGINAL edge plus the translation, both measured in the strip's own
+  /// coordinates (never the edge as drawn mid-drag, which already includes `dx`). `from` outside the
+  /// layout: itself.
+  static func droppedBoundaryIndex(from: Int, draggedBy dx: CGFloat, in layout: Layout) -> Int {
+    guard layout.frames.indices.contains(from) else { return from }
+    return boundaryIndex(nearestTo: layout.frames[from].x + dx, in: layout)
+  }
+
   /// `lengthBeats` after dragging its handle by `dx` points: snapped to `snap` and clamped to `range`.
   static func resizedLength(_ lengthBeats: Double, by dx: CGFloat, pxPerBeat: CGFloat,
                             snap: Double, range: ClosedRange<Double>) -> Double {

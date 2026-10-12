@@ -7,10 +7,13 @@ import SwiftUI
 /// its digit) appends that chord (`appendChord`); resting the mouse on it shows the engine's reasons
 /// (`reasonTexts`). Nothing is shown for a snapshot without `suggestions` (an older plug-in build).
 ///
-/// The digit shortcuts are bare keys (no modifier) on the chip buttons themselves, withdrawn while a text
-/// field is being edited (`state.editingText`, a section rename) so typing a name appends nothing. Live
+/// The digit shortcuts are bare keys (no modifier) on hidden buttons beside the chips, armed only while
+/// the chip's own window is the key window (`controlActiveState == .key`: macOS offers a key equivalent
+/// to the key window and then to the main window, so without this a ChordLab main window would eat digits
+/// typed into another panel) and no text field is being edited (`state.editingText`, a section rename),
+/// and both conditions are checked again when the shortcut fires. Clicking a chip is never gated. Live
 /// may swallow bare digits before the plug-in window sees them (a Live check); in the standalone APP they
-/// work from any focus.
+/// work from any focus within the window.
 struct SuggestionsView: View {
   @EnvironmentObject var state: ChordLabState
 
@@ -32,7 +35,7 @@ struct SuggestionsView: View {
         .frame(minWidth: 64, alignment: .leading)
         .accessibilityHidden(true)
       ForEach(Array(suggestions.enumerated()), id: \.element.id) { index, suggestion in
-        SuggestionChip(suggestion: suggestion, number: index + 1, shortcutActive: !state.editingText) {
+        SuggestionChip(suggestion: suggestion, number: index + 1) {
           state.send(command: ["cmd": "appendChord", "root": suggestion.root, "type": suggestion.type])
         }
       }
@@ -48,15 +51,22 @@ struct SuggestionsView: View {
   }
 }
 
-/// One chip: a button that appends the chord, with the digit `number` as its bare-key shortcut while
-/// `shortcutActive`.
+/// One chip: a button that appends the chord on click, plus a hidden button carrying the digit `number`
+/// as a bare-key shortcut, armed only while this window is key and no text is being edited.
 struct SuggestionChip: View {
   let suggestion: SuggestionJSON
   let number: Int
-  var shortcutActive = true
   let append: () -> Void
 
+  @EnvironmentObject var state: ChordLabState
+  @Environment(\.controlActiveState) private var controlActiveState
   @State private var hovering = false
+
+  /// Whether the digit should act right now: the containing window is key (not merely the app's main
+  /// window) and no text field has the keyboard.
+  private var shortcutArmed: Bool {
+    controlActiveState == .key && !state.editingText
+  }
 
   var body: some View {
     Button(action: append) {
@@ -79,7 +89,17 @@ struct SuggestionChip: View {
       .contentShape(RoundedRectangle(cornerRadius: 8))
     }
     .buttonStyle(.plain)
-    .keyboardShortcut(shortcutActive ? KeyboardShortcut(KeyEquivalent(Character(String(number))), modifiers: []) : nil)
+    .background(
+      // The shortcut lives on a hidden button so that a click is never gated: the window may have become
+      // key on the very mouse-down, before this view saw the new state. The action re-checks at invocation
+      // because the environment can lag a window switch by a frame.
+      Button("") { if shortcutArmed { append() } }
+        .keyboardShortcut(shortcutArmed ? KeyboardShortcut(KeyEquivalent(Character(String(number))), modifiers: []) : nil)
+        .buttonStyle(.plain)
+        .frame(width: 0, height: 0)
+        .opacity(0)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true))
     .onHover { hovering = $0 }
     .hoverPopover(arrowEdge: .bottom) {
       SuggestionDetailView(suggestion: suggestion).padding(12)

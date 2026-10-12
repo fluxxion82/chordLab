@@ -85,6 +85,33 @@ expect(SequenceGeometry.boundaryIndex(nearestTo: 100, in: mixed) == 2 && Sequenc
 expect(SequenceGeometry.boundaryIndex(nearestTo: -50, in: mixed) == 0, "far left snaps to block 0")
 expect(SequenceGeometry.boundaryIndex(nearestTo: 10, in: empty) == 0, "no blocks: 0")
 
+// --- the complete edge drag: origin boundary + translation -> index (Codex: never the edge as drawn) ---
+let fourBars = SequenceGeometry.layout(lengths: [4, 4, 4, 4], pxPerBeat: px)   // starts 0, 96, 192, 288
+expect(SequenceGeometry.droppedBoundaryIndex(from: 1, draggedBy: 96, in: fourBars) == 2,
+       "boundary at 96 dragged +96 lands on index 2, not 3 (the drawn edge already carried the translation)")
+expect(SequenceGeometry.droppedBoundaryIndex(from: 1, draggedBy: 47, in: fourBars) == 1 &&
+       SequenceGeometry.droppedBoundaryIndex(from: 1, draggedBy: 49, in: fourBars) == 2, "+47 stays at 1, +49 snaps to 2")
+expect(SequenceGeometry.droppedBoundaryIndex(from: 2, draggedBy: -96, in: fourBars) == 1 &&
+       SequenceGeometry.droppedBoundaryIndex(from: 2, draggedBy: -1000, in: fourBars) == 0, "dragged left: 1, then clamped to 0")
+expect(SequenceGeometry.droppedBoundaryIndex(from: 1, draggedBy: 0, in: fourBars) == 1, "no drag: itself")
+expect(SequenceGeometry.droppedBoundaryIndex(from: 3, draggedBy: 1000, in: fourBars) == 3, "far right: the last block")
+expect(SequenceGeometry.droppedBoundaryIndex(from: 9, draggedBy: 50, in: fourBars) == 9, "a start outside the layout: itself")
+expect(SequenceGeometry.droppedBoundaryIndex(from: 1, draggedBy: -30, in: mixed) == 1 &&
+       SequenceGeometry.droppedBoundaryIndex(from: 1, draggedBy: -49, in: mixed) == 0, "mixed lengths: 96−30 stays at 1, 96−49 snaps to 0")
+
+// --- voicing status: the stored inversion/octave are shown only when they are what sounds ---
+expect(HarmonyText.storedVoicingSounds(manual: true, autoVoiceLead: true) && HarmonyText.storedVoicingSounds(manual: false, autoVoiceLead: false) &&
+       !HarmonyText.storedVoicingSounds(manual: false, autoVoiceLead: true), "stored fields sound when manual, or when auto is off")
+expect(HarmonyText.voicingStatus(inversion: 0, octave: 0, manual: false, autoVoiceLead: true, bass: 60) == "Automatic voicing · bass C4",
+       "auto on, not manual: no stored inversion/octave in the text (the chord may sound as [60,65,69], second inversion, octave −1)")
+expect(HarmonyText.voicingStatus(inversion: 2, octave: -1, manual: true, autoVoiceLead: true, bass: 53) == "Manual voicing · Inversion 2 · bass F3 · Octave −1",
+       "manual under auto: the stored fields, which are what sounds")
+expect(HarmonyText.voicingStatus(inversion: 1, octave: 1, manual: false, autoVoiceLead: false, bass: 76) == "Default voicing · Inversion 1 · bass E5 · Octave +1",
+       "auto off: the stored fields sound as they are")
+expect(HarmonyText.voicingStatus(inversion: 0, octave: 0, manual: false, autoVoiceLead: true, bass: nil) == "Automatic voicing", "no notes: no bass")
+expect(HarmonyText.inversionLabel(1, bass: 64) == "Inversion 1 · bass E4" && HarmonyText.octaveLabel(-1) == "Octave −1" && HarmonyText.octaveLabel(1) == "Octave +1",
+       "inversion and octave labels")
+
 // --- section names: the engine's 64-byte bound at a character boundary ---
 expect(HarmonyText.boundedSectionName("Verse") == "Verse", "a short name is untouched")
 expect(HarmonyText.boundedSectionName(String(repeating: "a", count: 64)) == String(repeating: "a", count: 64), "64 ASCII bytes pass")

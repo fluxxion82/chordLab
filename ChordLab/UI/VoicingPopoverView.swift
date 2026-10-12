@@ -1,11 +1,17 @@
 import SwiftUI
 
 /// A block's voicing controls (P2-D5), opened from the block's "v" badge or its context menu: an
-/// inversion stepper (0…n−1 for an n-note chord, labelled with the bass note that sounds, `voicing[0]`),
-/// an octave stepper (−1/0/+1) and "Auto", which drops the chord's manual voicing (`resetVoicing`) so
-/// that auto voice-leading, when on, chooses again. Every step is a command (`setInversion`,
+/// inversion stepper (0…n−1 for an n-note chord), an octave stepper (−1/0/+1), the notes that sound
+/// (`voicing`, the compiled result) and "Auto", which drops the chord's manual voicing (`resetVoicing`)
+/// so that auto voice-leading, when on, chooses again. Every step is a command (`setInversion`,
 /// `setOctave`); the values shown are the snapshot's, looked up by id so the popover follows the
-/// snapshot the plug-in answers with (and closes itself if the chord is gone).
+/// snapshot the plug-in answers with. The sequence bar dismisses it when the chord is gone.
+///
+/// The stored inversion and octave are what sounds only for a manual chord, or while auto voice-leading
+/// is off (`HarmonyText.storedVoicingSounds`); then the steppers are labelled with the effective values
+/// and the bass. With auto voice-leading on, a non-manual chord may sound in any inversion and octave the
+/// voice-leading chose, so the popover says "Automatic voicing", lists the notes, and labels the steppers
+/// as the *manual* settings they would become (changing one makes the chord manual).
 struct VoicingPopoverView: View {
   @EnvironmentObject var state: ChordLabState
   let eventId: Int
@@ -26,46 +32,47 @@ struct VoicingPopoverView: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 10) {
       if let event = event {
+        let manual = event.manualVoicing ?? false
+        let storedSounds = HarmonyText.storedVoicingSounds(manual: manual, autoVoiceLead: autoVoiceLead)
         HStack(alignment: .firstTextBaseline, spacing: 10) {
           Text(ChordSymbol.glyphs(event.symbol)).font(.title3.weight(.semibold))
-          Text(Self.status(manual: event.manualVoicing ?? false, autoVoiceLead: autoVoiceLead))
+          Text(Self.status(manual: manual, autoVoiceLead: autoVoiceLead))
             .font(.callout).foregroundStyle(.secondary)
+        }
+        Text(HarmonyText.voicingText(event.voicing)).font(.body.monospacedDigit())
+        if !storedSounds {
+          Text("Auto voice-leading chose these notes; changing a setting below makes the chord manual.")
+            .font(.caption).foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
         }
         let maxInversion = max(0, event.voicing.count - 1)
         Stepper(value: inversion, in: 0...maxInversion) {
-          Text(Self.inversionLabel(event.inversion ?? 0, bass: event.voicing.first))
+          Text(storedSounds ? HarmonyText.inversionLabel(event.inversion ?? 0, bass: event.voicing.first)
+                            : "Manual inversion \(event.inversion ?? 0)")
             .font(.body.monospacedDigit())
         }
-        .accessibilityLabel("Inversion")
+        .accessibilityLabel(storedSounds ? "Inversion" : "Manual inversion")
         Stepper(value: octave, in: -1...1) {
-          Text(Self.octaveLabel(event.octave ?? 0)).font(.body.monospacedDigit())
+          Text((storedSounds ? "" : "Manual ") + HarmonyText.octaveLabel(event.octave ?? 0))
+            .font(.body.monospacedDigit())
         }
-        .accessibilityLabel("Octave")
-        Text(HarmonyText.voicingText(event.voicing)).font(.callout.monospacedDigit()).foregroundStyle(.secondary)
+        .accessibilityLabel(storedSounds ? "Octave" : "Manual octave")
         Button("Auto") { state.send(command: ["cmd": "resetVoicing", "id": eventId]) }
-          .disabled(!(event.manualVoicing ?? false))
+          .disabled(!manual)
           .help("Forget the manual inversion and octave; auto voice-leading chooses when it is on")
           .accessibilityLabel("Reset to automatic voicing")
       } else {
+        // At most one frame: the sequence bar clears `voicingPopoverId` when the chord leaves the snapshot.
         Text("Chord removed").foregroundStyle(.secondary)
       }
     }
-    .frame(minWidth: 220, alignment: .leading)
+    .frame(minWidth: 220, maxWidth: 280, alignment: .leading)
   }
 
-  /// "Manual voicing" for a chord with its own inversion and octave; otherwise what decides its voicing.
+  /// "Manual voicing" for a chord with its own inversion and octave; "Automatic voicing" while auto
+  /// voice-leading chooses for it; "Default voicing" otherwise (the stored fields sound as they are).
   static func status(manual: Bool, autoVoiceLead: Bool) -> String {
-    manual ? "Manual voicing" : autoVoiceLead ? "Auto voice-led" : "Default voicing"
-  }
-
-  /// "Inversion 1 · bass E4" (the bass is the voicing's lowest note, what sounds).
-  static func inversionLabel(_ inversion: Int, bass: Int?) -> String {
-    "Inversion \(inversion)" + (bass.map { " · bass " + ChordSymbol.noteName(midi: $0) } ?? "")
-  }
-
-  /// "Octave +1", "Octave 0", "Octave −1".
-  static func octaveLabel(_ octave: Int) -> String {
-    "Octave " + (octave > 0 ? "+\(octave)" : octave < 0 ? "−\(-octave)" : "0")
+    manual ? "Manual voicing" : autoVoiceLead ? "Automatic voicing" : "Default voicing"
   }
 
   /// Menu wording of an inversion: "Root position", "1st inversion", "2nd inversion", "3rd inversion".

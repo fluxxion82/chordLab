@@ -146,6 +146,12 @@ struct SequenceBarView: View {
       state.send(command: ["cmd": "appendChord", "root": ref.root, "type": ref.type])
       return true
     } isTargeted: { dropTargeted = $0 }
+    .onChange(of: state.snapshot) { _, snapshot in
+      // The voicing popover belongs to a chord: removed or undone away, the popover goes with it.
+      if let id = voicingPopoverId, snapshot?.events.contains(where: { $0.id == id }) != true {
+        voicingPopoverId = nil
+      }
+    }
     .accessibilityLabel("Progression")
   }
 
@@ -214,7 +220,7 @@ struct SequenceBarView: View {
     .onTapGesture { select(event) }
     .gesture(moveGesture(event))
     .hoverPopover(suppressed: moving || resize?.id == event.id || voicingPopoverId == event.id) {
-      BlockDetailView(event: event).padding(12)
+      BlockDetailView(event: event, autoVoiceLead: state.snapshot?.autoVoiceLead ?? false).padding(12)
     }
     .popover(isPresented: voicingPresented(event), arrowEdge: .bottom) {
       VoicingPopoverView(eventId: event.id).environmentObject(state).padding(12)
@@ -299,7 +305,7 @@ struct SequenceBarView: View {
       }
       Menu("Octave") {
         ForEach([1, 0, -1], id: \.self) { octave in
-          Button(VoicingPopoverView.octaveLabel(octave) + ((event.octave ?? 0) == octave ? "  ✓" : "")) {
+          Button(HarmonyText.octaveLabel(octave) + ((event.octave ?? 0) == octave ? "  ✓" : "")) {
             state.send(command: ["cmd": "setOctave", "id": event.id, "octave": octave])
           }
         }
@@ -422,12 +428,15 @@ struct SequenceBarView: View {
 }
 
 /// A block's hover popover: symbol and numeral, family and function word, the voicing that sounds (note
-/// names, C4 = MIDI 60) with its inversion, octave and manual/auto, the tension bar, then the engine's
-/// "why" against the previous chord: its
+/// names, C4 = MIDI 60) with one line on how it was chosen (`HarmonyText.voicingStatus`: the stored
+/// inversion and octave only when they are what sounds), the tension bar, then the engine's "why"
+/// against the previous chord: its
 /// sentence (`why.text`; "first chord" on the first block) and the reason chips (`HarmonyText.whyChips`).
 /// Lines whose field an older plug-in build does not send are omitted.
 struct BlockDetailView: View {
   let event: EventJSON
+  /// The document's `autoVoiceLead`: decides whether the stored inversion and octave are what sounds.
+  var autoVoiceLead = false
 
   var body: some View {
     VStack(alignment: .leading, spacing: 6) {
@@ -444,9 +453,8 @@ struct BlockDetailView: View {
       }
       Text(HarmonyText.voicingText(event.voicing)).font(.body.monospacedDigit())
       if let inversion = event.inversion, let octave = event.octave {
-        Text(VoicingPopoverView.inversionLabel(inversion, bass: event.voicing.first) + " · " +
-             VoicingPopoverView.octaveLabel(octave) + " · " +
-             ((event.manualVoicing ?? false) ? "manual" : "auto"))
+        Text(HarmonyText.voicingStatus(inversion: inversion, octave: octave, manual: event.manualVoicing ?? false,
+                                       autoVoiceLead: autoVoiceLead, bass: event.voicing.first))
           .font(.caption).foregroundStyle(.secondary)
       }
       if let tension = event.tension {

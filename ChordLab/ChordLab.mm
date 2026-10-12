@@ -482,16 +482,28 @@ void ChordLab::HandleExportSection(std::string_view text)
   int id = -1;
   {
     const nlohmann::json message = nlohmann::json::parse(text, nullptr, /*allow_exceptions=*/false);
-    const auto schema = message.is_object() ? message.find("schema") : message.end();
-    const auto idField = message.is_object() ? message.find("id") : message.end();
-    if (!message.is_object() || schema == message.end() || !schema->is_number_integer() ||
-        schema->get<int>() != chordlab::kJsonSchema || idField == message.end() || !idField->is_number_integer() ||
-        idField->get<long long>() < 1 || idField->get<long long>() > INT_MAX)
+    // As HandlePreview's intField: read the full 64-bit value and range-check it BEFORE narrowing, so an
+    // oversized schema (4294967297, which narrows to 1) or id (2^31, -2^40) is refused with tag 21 rather
+    // than read as something in range. nlohmann stores a JSON integer as int64 (or uint64 beyond
+    // INT64_MAX, which get<int64_t> wraps negative: still out of both ranges).
+    const auto intField = [&](const char* name, std::int64_t lo, std::int64_t hi, int& out) {
+      if (!message.is_object())
+        return false;
+      const auto it = message.find(name);
+      if (it == message.end() || !it->is_number_integer())
+        return false;
+      const auto v = it->get<std::int64_t>();
+      if (v < lo || v > hi)
+        return false;
+      out = (int) v;
+      return true;
+    };
+    int schema = 0;
+    if (!intField("schema", chordlab::kJsonSchema, chordlab::kJsonSchema, schema) || !intField("id", 1, INT_MAX, id))
     {
       PushError("section export message needs schema 1 and a section id");
       return;
     }
-    id = idField->get<int>();
   }
   chordlab::Compiled compiled;
   std::string label;

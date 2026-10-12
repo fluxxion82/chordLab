@@ -40,6 +40,9 @@ struct SectionsHeaderView: View {
   static let height: CGFloat = 20
   static let edgeWidth: CGFloat = 8
   static let cornerRadius: CGFloat = 4
+  /// The header's own coordinate space: edge drags are measured in it, so the translation stays true
+  /// while the span under the mouse is redrawn at its dragged position.
+  static let coordinateSpace = "chordlab.sectionsHeader"
 
   /// A left-edge drag in progress: section `id`'s start is drawn `dx` points from its place.
   struct EdgeDrag: Equatable {
@@ -66,6 +69,7 @@ struct SectionsHeaderView: View {
       }
     }
     .frame(width: width, height: Self.height, alignment: .topLeading)
+    .coordinateSpace(name: Self.coordinateSpace)
     .accessibilityElement(children: .contain)
     .accessibilityLabel("Sections")
   }
@@ -105,7 +109,7 @@ struct SectionsHeaderView: View {
       .padding(.trailing, 4)
     }
     .clipped()
-    .overlay(alignment: .leading) { if !first { edgeHandle(section, frame: frame) } }
+    .overlay(alignment: .leading) { if !first { edgeHandle(section) } }
     .contentShape(Rectangle())
     .onTapGesture(count: 2) { beginRename(section) }
     .contextMenu { menu(section) }
@@ -115,19 +119,23 @@ struct SectionsHeaderView: View {
   }
 
   /// The grab area at the left edge: dragging it moves the section's start (`moveSectionStart`) to the
-  /// block boundary nearest to where it is dropped. A child of the span, so its gesture wins.
-  private func edgeHandle(_ section: SectionJSON, frame: SequenceGeometry.SpanFrame) -> some View {
+  /// block boundary nearest to where it is dropped, computed from the section's original boundary plus
+  /// the translation in the header's coordinate space (`SequenceGeometry.droppedBoundaryIndex`), as block
+  /// moves do; the span as drawn mid-drag already carries the translation and is never the origin. A child
+  /// of the span, so its gesture wins.
+  private func edgeHandle(_ section: SectionJSON) -> some View {
     RoundedRectangle(cornerRadius: 1)
       .fill(Color.white.opacity(edgeDrag?.id == section.id ? 0.7 : 0.3))
       .frame(width: 3, height: Self.height - 8)
       .padding(.horizontal, (Self.edgeWidth - 3) / 2)
       .contentShape(Rectangle())
       .gesture(
-        DragGesture(minimumDistance: 2)
+        DragGesture(minimumDistance: 2, coordinateSpace: .named(Self.coordinateSpace))
           .onChanged { value in edgeDrag = EdgeDrag(id: section.id, dx: value.translation.width) }
           .onEnded { value in
             edgeDrag = nil
-            let index = SequenceGeometry.boundaryIndex(nearestTo: frame.x + value.translation.width, in: layout)
+            let index = SequenceGeometry.droppedBoundaryIndex(from: section.firstEventIndex,
+                                                               draggedBy: value.translation.width, in: layout)
             if index != section.firstEventIndex {
               state.send(command: ["cmd": "moveSectionStart", "id": section.id, "index": index])
             }
