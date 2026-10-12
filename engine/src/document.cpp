@@ -92,6 +92,7 @@ void DocumentStore::replace(Document doc, int nextId) {
         assert(e.id >= 1 && e.id < nextId);
     }
     assert(idsAreDistinct(doc));
+    assert(doc.events.size() <= static_cast<std::size_t>(kMaxChords));
     // Nothing below can throw: `doc` arrived fully built, and the moves and clears are noexcept.
     doc_ = std::move(doc);
     undoStack_.clear();
@@ -129,7 +130,8 @@ bool DocumentStore::commit(Document next) {
 
 int DocumentStore::appendChord(Chord chord, double lengthBeats, int velocity) {
     assertValidChord(chord);
-    if (!std::isfinite(lengthBeats) || nextId_ == INT_MAX) {
+    if (!std::isfinite(lengthBeats) || nextId_ == INT_MAX ||
+        doc_.events.size() >= static_cast<std::size_t>(kMaxChords)) {
         return kNoEventId;
     }
     const int id = nextId_;

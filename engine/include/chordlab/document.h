@@ -1,6 +1,7 @@
 #pragma once
 
 #include "chordlab/chord.h"
+#include "chordlab/limits.h"
 #include "chordlab/pitch.h"
 #include "chordlab/scale.h"
 
@@ -20,6 +21,15 @@ constexpr int kMaxVelocity = 127;
 
 /// The id `DocumentStore::appendChord` returns when it appended nothing. No event ever has this id.
 constexpr int kNoEventId = -1;
+
+/// The most chords a document may hold: `appendChord` refuses the next one (`kNoEventId`), `loadStateJson`
+/// rejects a state with more, and `replace` asserts. The bound exists so that a compiled document always
+/// fits one scheduler snapshot: kMaxChords chords x at most 8 voices (the Phase 2 voicings; `closeVoicing`
+/// today has at most 5, the ninths) x 2 events (on and off) = 4096 = `kMaxSnapshotEvents`. With today's
+/// voicings a full document compiles to 2560 events.
+constexpr int kMaxChords = 256;
+static_assert(static_cast<std::size_t>(kMaxChords) * 8 * 2 <= kMaxSnapshotEvents,
+              "a full document of eight-note chords must fit one scheduler snapshot");
 
 /// One chord of the progression. There is no start field: the progression is a contiguous sequence (D9),
 /// so an event starts where the previous one ends (see `Document::startBeatOf`).
@@ -104,8 +114,8 @@ public:
     /// non-null and `chord.root` in 0..11. `lengthBeats` is clamped to [kMinLengthBeats, kMaxLengthBeats]
     /// and `velocity` to [kMinVelocity, kMaxVelocity].
     /// Returns `kNoEventId` and changes nothing (no event, no history, no id consumed) when `lengthBeats`
-    /// is NaN or infinite, or when the id counter has reached INT_MAX. The counter advances only once the
-    /// append is committed.
+    /// is NaN or infinite, when the document already holds `kMaxChords` chords, or when the id counter
+    /// has reached INT_MAX. The counter advances only once the append is committed.
     int appendChord(Chord chord, double lengthBeats = 4.0, int velocity = 100);
 
     /// Moves the event `id` so that it sits at `newIndex` in playback order; `newIndex` is clamped to
@@ -144,8 +154,9 @@ public:
     /// Replaces the whole document, live state included, and restarts the id counter at `nextId`: what a
     /// load does. Clears the undo and redo history and changes nothing else.
     /// `doc` must satisfy the store's invariants (valid chords and keys, finite lengths within
-    /// [kMinLengthBeats, kMaxLengthBeats], velocities within [kMinVelocity, kMaxVelocity], distinct ids)
-    /// and `nextId` must be >= 1 and greater than every event id, so that ids stay unique. Callers that
+    /// [kMinLengthBeats, kMaxLengthBeats], velocities within [kMinVelocity, kMaxVelocity], distinct ids,
+    /// at most `kMaxChords` events) and `nextId` must be >= 1 and greater than every event id, so that ids
+    /// stay unique. Callers that
     /// take documents from outside the process (`loadStateJson`) validate before calling.
     void replace(Document doc, int nextId);
 

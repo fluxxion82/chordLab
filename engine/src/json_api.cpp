@@ -1,6 +1,8 @@
 #include "chordlab/json_api.h"
 
 #include "chordlab/chord.h"
+#include "chordlab/document.h"
+#include "chordlab/palette.h"
 #include "chordlab/pitch.h"
 #include "chordlab/relations.h"
 #include "chordlab/scale.h"
@@ -564,53 +566,61 @@ bool parseCommand(std::string_view text, Command& out, std::string& error) {
     return false;
 }
 
+/// Why Phase B refused a validated command; `None` is success.
+enum class Refusal { None, DocumentFull, IdsExhausted };
+
 /// Phase B of `applyCommandJson`: applies a validated command through one store call, which gives the
 /// strong guarantee. Takes nothing but the store and plain data, so no JSON object can be alive here.
-/// Returns false only when the store refuses an append because its id counter is exhausted, which
-/// changes nothing.
-bool applyCommand(DocumentStore& store, const Command& command) {
+/// Refuses only an append, when the document already holds `kMaxChords` chords or the store's id counter
+/// is exhausted; either way nothing changes.
+Refusal applyCommand(DocumentStore& store, const Command& command) {
     const Document& doc = store.doc();
     switch (command.kind) {
         case Command::Kind::SetKey:
             store.setProjectKey(command.key);
-            return true;
+            return Refusal::None;
         case Command::Kind::BrowseSteps:
             store.setBrowsedKey(fifthsNeighbour(doc.browsedKey, command.steps));
-            return true;
+            return Refusal::None;
         case Command::Kind::BrowseMode:
             store.setBrowsedKey(Key{canonicalTonic(doc.browsedKey.tonicPc(), command.mode), command.mode});
-            return true;
+            return Refusal::None;
         case Command::Kind::BrowseHome:
             store.setBrowsedKey(doc.projectKey);
-            return true;
+            return Refusal::None;
         case Command::Kind::AppendChord:
-            return store.appendChord(command.chord, command.lengthBeats, command.velocity) != kNoEventId;
+            if (doc.events.size() >= static_cast<std::size_t>(kMaxChords)) {
+                return Refusal::DocumentFull;
+            }
+            return store.appendChord(command.chord, command.lengthBeats, command.velocity) != kNoEventId
+                       ? Refusal::None
+                       : Refusal::IdsExhausted;
         case Command::Kind::MoveChord:
             store.moveChord(command.id, command.index);
-            return true;
+            return Refusal::None;
         case Command::Kind::SetLength:
             store.setLength(command.id, command.lengthBeats);
-            return true;
+            return Refusal::None;
         case Command::Kind::SetVelocity:
             store.setVelocity(command.id, command.velocity);
-            return true;
+            return Refusal::None;
         case Command::Kind::RemoveChord:
             store.removeChord(command.id);
-            return true;
+            return Refusal::None;
         case Command::Kind::SetProgressionLoop:
             store.setProgressionLoop(command.on);
-            return true;
+            return Refusal::None;
         case Command::Kind::SetFollowHost:
             store.setFollowHost(command.on);
-            return true;
+            return Refusal::None;
         case Command::Kind::Undo:
             store.undo();  // nothing to undo is a no-op, not an error
-            return true;
+            return Refusal::None;
         case Command::Kind::Redo:
             store.redo();
-            return true;
+            return Refusal::None;
     }
-    return true;
+    return Refusal::None;
 }
 
 /// Phase A of `loadStateJson`: parses and validates `text` into a document, an id counter and an editor
@@ -631,6 +641,9 @@ bool parseState(std::string_view text, Document& doc, int& nextId, int& width, i
     const json* events = fields.getArray("events");
     if (events == nullptr) {
         return false;
+    }
+    if (events->size() > static_cast<std::size_t>(kMaxChords)) {
+        return fields.fail("events", "must hold at most " + std::to_string(kMaxChords) + " chords");
     }
     std::set<int> ids;
     int maxId = 0;
@@ -779,9 +792,16 @@ bool applyCommandJson(DocumentStore& store, std::string_view text, std::string& 
         if (!parseCommand(text, command, error)) {  // Phase A: the JSON tree is destroyed on return
             return false;
         }
-        if (!applyCommand(store, command)) {  // Phase B: only the store and plain data in scope
-            error = "\"appendChord\" refused: no event ids left";
-            return false;
+        switch (applyCommand(store, command)) {  // Phase B: only the store and plain data in scope
+            case Refusal::None:
+                return true;
+            case Refusal::DocumentFull:
+                error = "\"appendChord\" refused: the document already holds " + std::to_string(kMaxChords) +
+                        " chords";
+                return false;
+            case Refusal::IdsExhausted:
+                error = "\"appendChord\" refused: no event ids left";
+                return false;
         }
         return true;
     } catch (...) {

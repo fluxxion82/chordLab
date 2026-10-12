@@ -3,6 +3,7 @@
 #include "chordlab/chord.h"
 #include "chordlab/compiler.h"
 #include "chordlab/document.h"
+#include "chordlab/limits.h"
 #include "chordlab/voicing.h"
 
 #include <algorithm>
@@ -316,4 +317,25 @@ TEST_CASE("compile: random documents of up to 20 chords keep the event invariant
             CHECK(compiled.endBeat == 0.0);
         }
     }
+}
+
+// --- Capacity --------------------------------------------------------------------------
+
+TEST_CASE("compile: kMaxChords chords of the widest dictionary type fit a scheduler snapshot") {
+    const ChordType* widest = nullptr;
+    for (const ChordType& t : allChordTypes()) {
+        if (widest == nullptr || t.intervals.size() > widest->intervals.size()) {
+            widest = &t;
+        }
+    }
+    REQUIRE(widest != nullptr);
+    CHECK(widest->intervals.size() <= 8);  // the headroom kMaxChords is sized for
+
+    DocumentStore store;
+    for (int i = 0; i < kMaxChords; ++i) {
+        REQUIRE(store.appendChord(Chord{i % 12, widest}) != kNoEventId);
+    }
+    const Compiled compiled = compile(store.doc());
+    CHECK(compiled.events.size() == static_cast<std::size_t>(kMaxChords) * widest->intervals.size() * 2);
+    CHECK(compiled.events.size() <= kMaxSnapshotEvents);
 }

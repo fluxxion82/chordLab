@@ -3,6 +3,7 @@
 #include "chordlab/chord.h"
 #include "chordlab/document.h"
 #include "chordlab/json_api.h"
+#include "chordlab/limits.h"
 #include "chordlab/palette.h"
 #include "chordlab/pitch.h"
 #include "chordlab/scale.h"
@@ -869,4 +870,64 @@ TEST_CASE("boundary: an append refused by an exhausted id counter is reported, a
     CHECK(store.doc() == before);
     CHECK(store.nextId() == INT_MAX);
     CHECK_FALSE(store.undo());
+}
+
+// --- Capacity --------------------------------------------------------------------------
+
+namespace {
+
+/// A store holding kMaxChords C chords, ids 1..kMaxChords.
+DocumentStore fullStore() {
+    DocumentStore store;
+    for (int i = 0; i < kMaxChords; ++i) {
+        REQUIRE(store.appendChord(kC) == i + 1);
+    }
+    return store;
+}
+
+/// A state holding `count` C chords, ids 1..count, with a matching nextId.
+std::string stateWithChords(int count) {
+    json state = json::parse(stateJson(DocumentStore{}));
+    json events = json::array();
+    for (int i = 1; i <= count; ++i) {
+        events.push_back({{"id", i}, {"root", 0}, {"type", "maj"}, {"lengthBeats", 4.0}, {"velocity", 100}});
+    }
+    state["events"] = std::move(events);
+    state["nextId"] = count + 1;
+    return state.dump();
+}
+
+}  // namespace
+
+TEST_CASE("capacity: appendChord on a full document is refused with a clear error and no history entry") {
+    DocumentStore store = fullStore();
+    const Document before = store.doc();
+
+    std::string error;
+    CHECK_FALSE(apply(store, {{"cmd", "appendChord"}, {"root", 5}, {"type", "maj"}}, error));
+    CAPTURE(error);
+    CHECK(error.find(std::to_string(kMaxChords)) != std::string::npos);
+    CHECK(error.find("appendChord") != std::string::npos);
+    CHECK(store.doc() == before);
+    CHECK(store.nextId() == kMaxChords + 1);
+
+    REQUIRE(store.undo());  // the most recent real append, not a phantom entry
+    CHECK(store.doc().events.size() == static_cast<std::size_t>(kMaxChords) - 1);
+    applyOk(store, {{"cmd", "appendChord"}, {"root", 5}, {"type", "maj"}});  // room again
+    CHECK(store.doc().events.size() == static_cast<std::size_t>(kMaxChords));
+}
+
+TEST_CASE("capacity: a state with more than kMaxChords chords is rejected whole; exactly kMaxChords loads") {
+    DocumentStore store = threeChords();
+    checkStateRejected(store, stateWithChords(kMaxChords + 1));
+    checkStateRejected(store, stateWithChords(kMaxChords + 100));
+    REQUIRE(store.undo());  // history intact
+    CHECK(store.doc().events.size() == 2);
+
+    std::string error;
+    REQUIRE_MESSAGE(loadStateJson(store, stateWithChords(kMaxChords), error), error);
+    CHECK(store.doc().events.size() == static_cast<std::size_t>(kMaxChords));
+    CHECK(store.nextId() == kMaxChords + 1);
+    CHECK_FALSE(apply(store, {{"cmd", "appendChord"}, {"root", 0}, {"type", "maj"}}, error));
+    CHECK_FALSE(error.empty());
 }

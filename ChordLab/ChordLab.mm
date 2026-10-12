@@ -154,6 +154,9 @@ void ChordLab::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
 
   if (mResetPending.exchange(false, std::memory_order_acq_rel))
     mScheduler.reset(mResetSampleRate.load(std::memory_order_relaxed));
+  // panic() before process(): panic records the preview ring's tail as it sees it, and the drain inside
+  // process discards every command queued before that tail (Scheduler::panic), so a Start the UI pushed
+  // before pressing Panic never sounds, while commands pushed after the panic are served as usual.
   if (mPanicPending.exchange(false, std::memory_order_acq_rel))
     mScheduler.panic();
 
