@@ -41,12 +41,23 @@ constexpr std::array<RootMotion, 10> kAllMotions{
     RootMotion::ThirdUp, RootMotion::ThirdDown, RootMotion::Tritone, RootMotion::SemitoneUp, RootMotion::SemitoneDown,
 };
 
-/// The search order of `borrowedFrom`, mirrored here so the property test does not depend on the table
-/// under test: minor family first, then the other modes, the parallel major last.
-constexpr std::array<Mode, kNumModes> kBorrowOrder{
-    Mode::Aeolian,       Mode::Dorian,       Mode::Mixolydian, Mode::Lydian, Mode::Phrygian,
-    Mode::HarmonicMinor, Mode::MelodicMinor, Mode::Locrian,    Mode::Ionian,
+/// The search orders of `borrowedFrom`, mirrored here so the property test does not depend on the tables
+/// under test. A major-family project key (Ionian, Lydian, Mixolydian) tries the parallel minor first;
+/// every other project key tries the minor scales, then the parallel major.
+constexpr std::array<Mode, kNumModes> kMajorFamilyBorrowOrder{
+    Mode::Aeolian,  Mode::Mixolydian,    Mode::Lydian,       Mode::Dorian,  Mode::Phrygian,
+    Mode::HarmonicMinor, Mode::MelodicMinor, Mode::Locrian, Mode::Ionian,
 };
+constexpr std::array<Mode, kNumModes> kMinorFamilyBorrowOrder{
+    Mode::HarmonicMinor, Mode::MelodicMinor, Mode::Ionian,   Mode::Aeolian, Mode::Dorian,
+    Mode::Mixolydian,    Mode::Phrygian,     Mode::Lydian,   Mode::Locrian,
+};
+
+const std::array<Mode, kNumModes>& borrowOrderFor(Mode projectMode) {
+    const bool majorFamily =
+        projectMode == Mode::Ionian || projectMode == Mode::Lydian || projectMode == Mode::Mixolydian;
+    return majorFamily ? kMajorFamilyBorrowOrder : kMinorFamilyBorrowOrder;
+}
 
 /// The motion of the reversed pair: up becomes down; Same and Tritone are their own reverse.
 RootMotion reversed(RootMotion m) {
@@ -287,6 +298,122 @@ TEST_CASE("voiceLeadingCost: agrees with the sorted matching for same-size voici
     }
 }
 
+// --- pcVoiceLeadingCost ----------------------------------------------------------------------
+
+TEST_CASE("pcVoiceLeadingCost: plan cases") {
+    CHECK(pcVoiceLeadingCost({0, 4, 7}, {5, 9, 0}) == 3);      // C -> F: C stays, E->F 1, G->A 2
+    CHECK(pcVoiceLeadingCost({0, 4, 7}, {7, 11, 2}) == 3);     // C -> G: G stays, C->B 1, E->D 2
+    CHECK(pcVoiceLeadingCost({0, 4, 7}, {9, 0, 4}) == 2);      // C -> Am: C and E stay, G->A 2
+    CHECK(pcVoiceLeadingCost({0, 4, 7}, {8, 0, 3}) == 2);      // C -> Ab: C stays, E->Eb 1, G->Ab 1
+    CHECK(pcVoiceLeadingCost({0, 4, 7}, {1, 5, 8}) == 3);      // C -> Db: every voice up a semitone
+    CHECK(pcVoiceLeadingCost({0, 4, 7}, {7, 11, 2, 5}) == 4);  // C -> G7: {0 4 7 0}; G stays, C->B 1, E->F 1, C->D 2
+}
+
+TEST_CASE("pcVoiceLeadingCost: identical sets cost nothing, whatever the order") {
+    CHECK(pcVoiceLeadingCost({0, 4, 7}, {0, 4, 7}) == 0);
+    CHECK(pcVoiceLeadingCost({0, 4, 7}, {7, 0, 4}) == 0);
+    for (const Chord& c : allChords()) {
+        CAPTURE(c.type->id);
+        CAPTURE(c.root);
+        CHECK(pcVoiceLeadingCost(pitchClasses(c), pitchClasses(c)) == 0);
+    }
+}
+
+TEST_CASE("pcVoiceLeadingCost: distances are circular") {
+    CHECK(pcVoiceLeadingCost({11}, {0}) == 1);
+    CHECK(pcVoiceLeadingCost({0}, {11}) == 1);
+    CHECK(pcVoiceLeadingCost({0}, {6}) == 6);
+    CHECK(pcVoiceLeadingCost({0}, {7}) == 5);
+    CHECK(pcVoiceLeadingCost({1}, {10}) == 3);
+    CHECK(pcVoiceLeadingCost({0, 4, 7}, {11, 3, 6}) == 3);  // C -> B: every voice down a semitone
+    CHECK(pcVoiceLeadingCost({12, 16, 19}, {0, 4, 7}) == 0);  // reduced modulo 12
+}
+
+TEST_CASE("pcVoiceLeadingCost: is register-free where the MIDI cost is not") {
+    const Chord c = chord(0, "maj");
+    const Chord am = chord(9, "min");
+    CHECK(pcVoiceLeadingCost(pitchClasses(c), pitchClasses(am)) == 2);
+    CHECK(voiceLeadingCost(closeVoicing(c), closeVoicing(am)) == 26);  // Am sits a sixth above C
+}
+
+TEST_CASE("pcVoiceLeadingCost: the shorter set is padded by cycling through its pitch classes in order") {
+    // C5 {0 7} vs C9 {0 4 7 10 2}: C5 becomes {0 7 0 7 0}; C and G stay, G->E 3, C->Bb 2, C->D 2.
+    CHECK(pcVoiceLeadingCost({0, 7}, {0, 4, 7, 10, 2}) == 7);
+    CHECK(pcVoiceLeadingCost({0, 4, 7, 10, 2}, {0, 7}) == 7);  // whichever side is shorter
+    // Given as {7 0} it becomes {7 0 7 0 7}: one more G to move (G->E 3, G->Bb 3, C->D 2), so 8.
+    CHECK(pcVoiceLeadingCost({7, 0}, {0, 4, 7, 10, 2}) == 8);
+    // A single pitch class is repeated as often as needed.
+    CHECK(pcVoiceLeadingCost({0}, {0, 0, 0}) == 0);
+    CHECK(pcVoiceLeadingCost({0}, {11, 0, 1}) == 2);
+}
+
+TEST_CASE("pcVoiceLeadingCost: is symmetric and bounded for every pair of dictionary chords") {
+    const std::vector<Chord> onC = allChordsOnC();
+    const std::vector<Chord> all = allChords();
+    for (const Chord& a : onC) {
+        for (const Chord& b : all) {
+            CAPTURE(a.type->id);
+            CAPTURE(b.type->id);
+            CAPTURE(b.root);
+            const int cost = pcVoiceLeadingCost(pitchClasses(a), pitchClasses(b));
+            CHECK(cost >= 0);
+            CHECK(cost <= 6 * 5);  // at most five voices, each at most a tritone away
+            CHECK(pcVoiceLeadingCost(pitchClasses(b), pitchClasses(a)) == cost);
+        }
+    }
+}
+
+TEST_CASE("pcVoiceLeadingCost: is invariant under transposition") {
+    const std::vector<Chord> onC = allChordsOnC();
+    const std::vector<Chord> all = allChords();
+    for (const Chord& a : onC) {
+        for (const Chord& b : all) {
+            for (const int t : {1, 5, 7}) {
+                CAPTURE(a.type->id);
+                CAPTURE(b.type->id);
+                CAPTURE(b.root);
+                CAPTURE(t);
+                const Chord at{pitchClassOf(a.root + t), a.type};
+                const Chord bt{pitchClassOf(b.root + t), b.type};
+                CHECK(pcVoiceLeadingCost(pitchClasses(at), pitchClasses(bt)) ==
+                      pcVoiceLeadingCost(pitchClasses(a), pitchClasses(b)));
+            }
+        }
+    }
+}
+
+TEST_CASE("pcVoiceLeadingCost: agrees with the best cyclic shift of the sorted sets for same-size sets") {
+    // On a circle an optimal bijection between two sorted sequences of equal size is one of the n cyclic
+    // shifts (Werman, Peleg, Melter and Kong, 1986), which gives an independent oracle for the search.
+    const std::vector<Chord> onC = allChordsOnC();
+    const std::vector<Chord> all = allChords();
+    for (const Chord& a : onC) {
+        for (const Chord& b : all) {
+            Pcs pa = pitchClasses(a);
+            Pcs pb = pitchClasses(b);
+            if (pa.size() != pb.size()) {
+                continue;
+            }
+            CAPTURE(a.type->id);
+            CAPTURE(b.type->id);
+            CAPTURE(b.root);
+            std::sort(pa.begin(), pa.end());
+            std::sort(pb.begin(), pb.end());
+            const std::size_t n = pa.size();
+            int best = 6 * 6;
+            for (std::size_t shift = 0; shift < n; ++shift) {
+                int cost = 0;
+                for (std::size_t i = 0; i < n; ++i) {
+                    const int d = std::abs(pa[i] - pb[(i + shift) % n]);
+                    cost += std::min(d, 12 - d);
+                }
+                best = std::min(best, cost);
+            }
+            CHECK(pcVoiceLeadingCost(pa, pb) == best);
+        }
+    }
+}
+
 // --- borrowedFrom -----------------------------------------------------------------------------
 
 TEST_CASE("borrowedFrom: a diatonic chord is not borrowed") {
@@ -308,12 +435,14 @@ TEST_CASE("borrowedFrom: plan cases in C major") {
 }
 
 TEST_CASE("borrowedFrom: Bb in C major is Aeolian, which precedes Mixolydian in the search") {
-    // Bb D F is in both C Aeolian and C Mixolydian; the minor family is tried first.
+    // Bb D F is in both C Aeolian and C Mixolydian; the parallel minor is tried first.
     CHECK(borrowedFrom(chord(10, "maj"), kCIonian) == kCAeolian);
-    // Bb with a major seventh (Bb D F A) is not in Aeolian (no A); Dorian has it.
-    CHECK(borrowedFrom(chord(10, "maj7"), kCIonian) == key('C', 0, Mode::Dorian));
-    // C7 (C E G Bb) is in neither Aeolian nor Dorian (no E); Mixolydian has it.
+    // Bb with a major seventh (Bb D F A) is not in Aeolian (no A); Mixolydian has it, before Dorian.
+    CHECK(borrowedFrom(chord(10, "maj7"), kCIonian) == key('C', 0, Mode::Mixolydian));
+    // C7 (C E G Bb) is not in Aeolian (no E); Mixolydian has it.
     CHECK(borrowedFrom(chord(0, "7"), kCIonian) == key('C', 0, Mode::Mixolydian));
+    // Dm7b5 (D F Ab C) is in Aeolian.
+    CHECK(borrowedFrom(chord(2, "m7b5"), kCIonian) == kCAeolian);
 }
 
 TEST_CASE("borrowedFrom: a chord in no parallel mode is not attributed") {
@@ -323,28 +452,46 @@ TEST_CASE("borrowedFrom: a chord in no parallel mode is not attributed") {
     CHECK_FALSE(borrowedFrom(chord(6, "7"), kCIonian).has_value());     // F#7: F# A# C# E
 }
 
-TEST_CASE("borrowedFrom: the minor scales and Locrian are reached after the diatonic modes") {
+TEST_CASE("borrowedFrom: in a major key the minor scales and Locrian come after the diatonic modes") {
     // G#°7 (G# B D F): no diatonic mode on C has both G# and B; harmonic minor does.
     CHECK(borrowedFrom(chord(8, "dim7"), kCIonian) == key('C', 0, Mode::HarmonicMinor));
     // Cm(maj7) (C Eb G B): harmonic minor, which precedes melodic minor.
     CHECK(borrowedFrom(chord(0, "mMaj7"), kCIonian) == key('C', 0, Mode::HarmonicMinor));
     // F# major (F# A# C#, i.e. Gb Bb Db): only C Locrian holds all three.
     CHECK(borrowedFrom(chord(6, "maj"), kCIonian) == key('C', 0, Mode::Locrian));
-    // In C minor, G7 (G B D F) comes from harmonic minor and Bm7b5 (B D F A) from melodic minor.
-    CHECK(borrowedFrom(chord(7, "7"), kCAeolian) == key('C', 0, Mode::HarmonicMinor));
-    CHECK(borrowedFrom(chord(11, "m7b5"), kCAeolian) == key('C', 0, Mode::MelodicMinor));
-    CHECK(borrowedFrom(chord(7, "9"), kCAeolian) == key('C', 0, Mode::MelodicMinor));
 }
 
-TEST_CASE("borrowedFrom: the search order is fixed regardless of the project mode") {
-    // The order is the same for every project mode (only the project mode itself is skipped), so with a
-    // minor project key the parallel major is tried last and chords it shares with other modes are
-    // attributed to those: C major in C Aeolian is Mixolydian, G major in C Aeolian is Lydian (not
-    // harmonic minor, which comes later), and E major in A Aeolian is A Lydian.
-    CHECK(borrowedFrom(chord(0, "maj"), kCAeolian) == key('C', 0, Mode::Mixolydian));
-    CHECK(borrowedFrom(chord(7, "maj"), kCAeolian) == key('C', 0, Mode::Lydian));
-    CHECK(borrowedFrom(chord(4, "maj"), kAAeolian) == key('A', 0, Mode::Lydian));
-    CHECK_FALSE(borrowedFrom(chord(9, "min"), kAAeolian).has_value());  // diatonic: the project mode wins
+TEST_CASE("borrowedFrom: a minor-family key tries harmonic and melodic minor, then the parallel major") {
+    // C Aeolian: the dominant comes from harmonic minor, I from the parallel major (Ionian precedes
+    // Mixolydian, which also holds C E G), and ii (D F A) from melodic minor, which precedes Dorian.
+    CHECK(borrowedFrom(chord(7, "maj"), kCAeolian) == key('C', 0, Mode::HarmonicMinor));
+    CHECK(borrowedFrom(chord(7, "7"), kCAeolian) == key('C', 0, Mode::HarmonicMinor));
+    CHECK(borrowedFrom(chord(0, "maj"), kCAeolian) == key('C', 0, Mode::Ionian));
+    CHECK(borrowedFrom(chord(2, "min"), kCAeolian) == key('C', 0, Mode::MelodicMinor));
+    CHECK(borrowedFrom(chord(11, "m7b5"), kCAeolian) == key('C', 0, Mode::MelodicMinor));  // B D F A
+    CHECK(borrowedFrom(chord(7, "9"), kCAeolian) == key('C', 0, Mode::MelodicMinor));      // G B D F A
+    // A Aeolian: V is from A harmonic minor; i is diatonic.
+    CHECK(borrowedFrom(chord(4, "maj"), kAAeolian) == key('A', 0, Mode::HarmonicMinor));
+    CHECK_FALSE(borrowedFrom(chord(9, "min"), kAAeolian).has_value());
+    // The other minor-family modes and Locrian use the same order.
+    const Key dDorian = key('D', 0, Mode::Dorian);
+    CHECK(borrowedFrom(chord(9, "maj"), dDorian) == key('D', 0, Mode::HarmonicMinor));  // A C# E
+    CHECK(borrowedFrom(chord(2, "maj"), dDorian) == key('D', 0, Mode::Ionian));         // D F# A
+    CHECK(borrowedFrom(chord(11, "maj"), key('E', 0, Mode::Phrygian)) == key('E', 0, Mode::HarmonicMinor));
+    CHECK(borrowedFrom(chord(6, "maj"), key('B', 0, Mode::Locrian)) == key('B', 0, Mode::HarmonicMinor));
+}
+
+TEST_CASE("borrowedFrom: Lydian and Mixolydian keys use the major-family order") {
+    // F Lydian: Db (Db F Ab) is in F Aeolian, tried first; Bb (Bb D F) is not, and Mixolydian precedes
+    // Dorian and Ionian.
+    const Key fLydian = key('F', 0, Mode::Lydian);
+    CHECK(borrowedFrom(chord(1, "maj"), fLydian) == key('F', 0, Mode::Aeolian));
+    CHECK(borrowedFrom(chord(10, "maj"), fLydian) == key('F', 0, Mode::Mixolydian));
+    // G Mixolydian: C#° (C# E G) is in G Lydian, tried before Dorian; Bb (Bb D F) is in G Aeolian.
+    const Key gMixolydian = key('G', 0, Mode::Mixolydian);
+    CHECK(borrowedFrom(chord(1, "dim"), gMixolydian) == key('G', 0, Mode::Lydian));
+    CHECK(borrowedFrom(chord(10, "maj"), gMixolydian) == key('G', 0, Mode::Aeolian));
+    CHECK_FALSE(borrowedFrom(chord(5, "maj"), gMixolydian).has_value());  // F is diatonic
 }
 
 TEST_CASE("borrowedFrom: spells the parallel mode canonically") {
@@ -357,9 +504,16 @@ TEST_CASE("borrowedFrom: spells the parallel mode canonically") {
     CHECK(borrowedFrom(chord(2, "maj"), key('G', -1, Mode::Ionian)) == key('F', +1, Mode::Aeolian));
 }
 
-TEST_CASE("borrowedFrom: every answer is the first containing mode in the fixed order") {
-    const std::array<Key, 5> projectKeys{kCIonian, kAAeolian, key('D', 0, Mode::Dorian), key('E', -1, Mode::Ionian),
-                                         key('F', +1, Mode::Mixolydian)};
+TEST_CASE("borrowedFrom: every answer is the first containing mode in the family's order") {
+    const std::array<Key, 9> projectKeys{kCIonian,
+                                         kAAeolian,
+                                         key('D', 0, Mode::Dorian),
+                                         key('E', 0, Mode::Phrygian),
+                                         key('F', 0, Mode::Lydian),
+                                         key('E', -1, Mode::Ionian),
+                                         key('F', +1, Mode::Mixolydian),
+                                         key('A', 0, Mode::HarmonicMinor),
+                                         key('B', 0, Mode::Locrian)};
     for (const Key& projectKey : projectKeys) {
         const std::vector<Key> modes = parallelModes(projectKey);
         for (const Chord& c : allChords()) {
@@ -373,7 +527,7 @@ TEST_CASE("borrowedFrom: every answer is the first containing mode in the fixed 
                 continue;
             }
             std::optional<Key> expected;
-            for (const Mode mode : kBorrowOrder) {
+            for (const Mode mode : borrowOrderFor(projectKey.mode)) {
                 const Key& candidate = modes[static_cast<std::size_t>(mode)];
                 if (mode != projectKey.mode && fullyInKey(c, candidate)) {
                     expected = candidate;
@@ -398,7 +552,7 @@ TEST_CASE("relate: C to G7 in C major") {
     CHECK(r.commonTones == 1);
     CHECK(r.commonPcs == Pcs{7});
     CHECK(r.motion == RootMotion::UpFifth);
-    CHECK(r.voiceLeadingCost == 26);  // {60 64 67} padded with 72 against {67 71 74 77}
+    CHECK(r.voiceLeadingCost == 4);  // {0 4 7 0} vs {7 11 2 5}: G stays, C->B 1, E->F 1, C->D 2
     CHECK_FALSE(r.borrowedFrom.has_value());
 }
 
@@ -407,7 +561,7 @@ TEST_CASE("relate: G7 to C in C major") {
     CHECK(r.commonTones == 1);
     CHECK(r.commonPcs == Pcs{7});
     CHECK(r.motion == RootMotion::DownFifth);
-    CHECK(r.voiceLeadingCost == 26);
+    CHECK(r.voiceLeadingCost == 4);
     CHECK_FALSE(r.borrowedFrom.has_value());
 }
 
@@ -416,7 +570,7 @@ TEST_CASE("relate: C to Am shares two tones") {
     CHECK(r.commonTones == 2);
     CHECK(r.commonPcs == Pcs{0, 4});
     CHECK(r.motion == RootMotion::ThirdDown);
-    CHECK(r.voiceLeadingCost == 26);  // {60 64 67} -> {69 72 76}: every note moves up, 217 - 191
+    CHECK(r.voiceLeadingCost == 2);  // C and E stay, G -> A
     CHECK_FALSE(r.borrowedFrom.has_value());
 }
 
@@ -425,7 +579,7 @@ TEST_CASE("relate: C to Ab in C major is borrowed from C Aeolian") {
     CHECK(r.commonTones == 1);
     CHECK(r.commonPcs == Pcs{0});
     CHECK(r.motion == RootMotion::ThirdDown);
-    CHECK(r.voiceLeadingCost == 24);  // {60 64 67} -> {68 72 75}: 215 - 191
+    CHECK(r.voiceLeadingCost == 2);  // C stays, E -> Eb, G -> Ab
     CHECK(r.borrowedFrom == kCAeolian);
 }
 
@@ -435,15 +589,20 @@ TEST_CASE("relate: borrowedFrom describes the destination chord only") {
     CHECK(relate(chord(0, "maj"), chord(6, "dim"), kCIonian).borrowedFrom == key('C', 0, Mode::Lydian));
 }
 
-TEST_CASE("relate: the voice-leading cost is that of the default close voicings") {
+TEST_CASE("relate: the voice-leading cost is the octave-free pitch-class cost, root doubled first") {
     const std::array<Chord, 4> chords{chord(0, "maj"), chord(7, "7"), chord(2, "m7"), chord(10, "9")};
     for (const Chord& a : chords) {
         for (const Chord& b : chords) {
             CAPTURE(a.type->id);
             CAPTURE(b.type->id);
-            CHECK(relate(a, b, kCIonian).voiceLeadingCost == voiceLeadingCost(closeVoicing(a), closeVoicing(b)));
+            CHECK(relate(a, b, kCIonian).voiceLeadingCost == pcVoiceLeadingCost(pitchClasses(a), pitchClasses(b)));
         }
     }
+    // The same move transposed costs the same, whatever register the close voicings would land in.
+    CHECK(relate(chord(11, "maj"), chord(0, "maj"), kCIonian).voiceLeadingCost == 3);  // B -> C
+    CHECK(relate(chord(0, "maj"), chord(1, "maj"), kCIonian).voiceLeadingCost == 3);   // C -> Db
+    CHECK(relate(chord(0, "maj"), chord(5, "maj"), kCIonian).voiceLeadingCost == 3);   // C -> F
+    CHECK(relate(chord(0, "maj"), chord(7, "maj"), kCIonian).voiceLeadingCost == 3);   // C -> G
 }
 
 TEST_CASE("relate: common pitch classes are the ascending intersection") {
@@ -469,6 +628,7 @@ TEST_CASE("relate: common tones and cost are symmetric, and common tones match t
             CHECK(ab.commonTones == ba.commonTones);
             CHECK(ab.commonPcs == ba.commonPcs);
             CHECK(ab.voiceLeadingCost == ba.voiceLeadingCost);
+            CHECK(ab.voiceLeadingCost == pcVoiceLeadingCost(pitchClasses(a), pitchClasses(b)));
             CHECK(ab.motion == reversed(ba.motion));
             CHECK(ab.commonTones == static_cast<int>(ab.commonPcs.size()));
             CHECK(std::is_sorted(ab.commonPcs.begin(), ab.commonPcs.end()));
