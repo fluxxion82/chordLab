@@ -9,7 +9,8 @@ target_compile_options(chordlab_engine PRIVATE -Wall -Wextra -Wpedantic)
 enable_testing()
 file(GLOB TEST_SRC CONFIGURE_DEPENDS tests/*.cpp)
 add_executable(engine_tests ${TEST_SRC})
-target_link_libraries(engine_tests PRIVATE chordlab_engine)
+find_package(Threads REQUIRED)
+target_link_libraries(engine_tests PRIVATE chordlab_engine Threads::Threads)  # test_triple_buffer.cpp spawns a producer
 target_include_directories(engine_tests PRIVATE tests third_party)  # test_json_api.cpp parses with nlohmann
 add_test(NAME engine_tests COMMAND engine_tests)
 target_compile_definitions(engine_tests PRIVATE CHORDLAB_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")

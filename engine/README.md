@@ -7,7 +7,8 @@ exercised by a doctest suite.
 
 ```
 include/chordlab/   public headers, one per module (pitch, scale, chord, symbol, relations, voicing,
-                    palette, document, compiler, note_event, limits, scheduler, smf, json_api)
+                    palette, document, compiler, note_event, limits, scheduler, triple_buffer, smf,
+                    json_api)
 src/                the matching implementations
 tests/              doctest suite (tests/doctest.h is the vendored framework), one file per module
 fixtures/           golden files the tests compare against (cmaj-1bar.mid)
@@ -43,15 +44,20 @@ Three mechanisms, chosen by who can get it wrong:
 ## Real-time rules
 
 What may run on the audio thread is exactly the `Scheduler` surface: `process`, `reset`, `adopt`,
-`panic`, `ownersOf`, `sounding`. After construction the scheduler does not allocate, throw, lock or log;
-its only headers are `limits.h` and `note_event.h` plus `<array>`, `<atomic>`, `<cstddef>`, `<cstdint>`,
-so a translation unit that includes `scheduler.h` pulls in nothing that allocates.
+`panic`, `ownersOf`, `sounding`, plus the consumer side of `TripleBuffer` (`acquire`, `current`,
+`currentGeneration`). After construction neither allocates, throws, locks or logs; the scheduler's only
+headers are `limits.h` and `note_event.h` plus `<array>`, `<atomic>`, `<cstddef>`, `<cstdint>`, and
+`triple_buffer.h` adds `<type_traits>`, so a translation unit that includes them pulls in nothing that
+allocates.
 
 Everything else (`DocumentStore`, `compile`, the palette and symbols, `json_api`, `smf`) is ordinary
 allocating code for the UI/message thread. The hand-over is a `Snapshot`: `compile` produces the
 `NoteEvent` array off the audio thread, and the caller keeps it alive and unchanged from `adopt` until
 the next `adopt` (see `Snapshot` in `scheduler.h`). `kMaxChords` (`document.h`) bounds the document so
-that a compiled snapshot always fits `kMaxSnapshotEvents` (`limits.h`).
+that a compiled snapshot always fits `kMaxSnapshotEvents` (`limits.h`). `TripleBuffer<T>`
+(`triple_buffer.h`) is the handoff that satisfies that lifetime rule without a lock: the producer fills
+and publishes preallocated slots, the consumer acquires the latest one per block, and the slot it holds
+is never written until its next acquire.
 
 ## Threading contract
 
@@ -61,3 +67,5 @@ that a compiled snapshot always fits `kMaxSnapshotEvents` (`limits.h`).
   undoable and what is live state.
 - `json_api.h`, "Robustness of the two readers": transactional parsing, the size and depth guards, and
   that additive snapshot fields do not bump the schema.
+- `triple_buffer.h`, class comment: one producer thread and one consumer thread, which slot each owns,
+  coalescing, and that an acquired slot stays unmodified until the consumer's next acquire.
