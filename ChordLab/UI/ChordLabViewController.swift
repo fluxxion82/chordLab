@@ -10,9 +10,6 @@ public typealias MIDIVelocity = UInt8
     beginEdit: { [weak self] idx in self?.beginInformHostOfParamChangeFromUI(paramIdx: idx) },
     doEdit: { [weak self] idx, value in self?.sendParameterValueFromUI(paramIdx: idx, normalizedValue: value) },
     endEdit: { [weak self] idx in self?.endInformHostOfParamChangeFromUI(paramIdx: idx) },
-    sendMidi: { [weak self] status, data1, data2 in
-      self?.sendMidiMsgFromUI(status: status, data1: data1, data2: data2, offset: 0)
-    },
     sendCommand: { [weak self] tag, data in
       self?.sendArbitraryMsgFromUI(msgTag: tag, ctrlTag: kNoCtrlTag, msg: data)
     })
@@ -58,7 +55,7 @@ public typealias MIDIVelocity = UInt8
     hostingController.view.pinToSuperviewEdges()
   }
 
-  /// Messages from C++ (SendArbitraryMsgFromDelegate): snapshots and command errors.
+  /// Messages from C++ (SendArbitraryMsgFromDelegate): snapshots, errors and scheduler status.
   override func onMessage(_ msgTag: Int, _ ctrlTag: Int, _ msg: Data!) -> Bool {
     guard let msg = msg else { return false }
     switch msgTag {
@@ -67,6 +64,9 @@ public typealias MIDIVelocity = UInt8
       return true
     case kMsgTagError:
       state.applyError(json: msg)
+      return true
+    case kMsgTagStatus:
+      state.applyStatus(json: msg)
       return true
     default:
       return false

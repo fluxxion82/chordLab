@@ -73,3 +73,10 @@ struct ErrorJSON: Codable {
   let schema: Int
   let error: String
 }
+
+/// `kMsgTagStatus` payload: `{"schema":1,"incompleteBlocks":n}`, audio blocks the scheduler could not
+/// complete (a debug aid; the count only grows).
+struct StatusJSON: Codable {
+  let schema: Int
+  let incompleteBlocks: Int
+}

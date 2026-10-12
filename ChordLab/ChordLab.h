@@ -4,13 +4,16 @@
 
 #include "chordlab/document.h"
 #include "chordlab/palette.h"
+#include "chordlab/scheduler.h"
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 
 using namespace iplug;
 
@@ -27,6 +30,8 @@ public:
   bool OnHostRequestingSupportedViewConfiguration(int width, int height) override;
 
   void OnUIOpen() override;
+  void OnIdle() override;
+  void OnReset() override;
   void ProcessBlock(sample** inputs, sample** outputs, int nFrames) override;
   bool OnMessage(int msgTag, int ctrlTag, int dataSize, const void* pData) override;
 
@@ -46,6 +51,10 @@ private:
   void OnMain(std::function<void()> fn);
   // Main thread: adopts a restored editor size, asking the host to resize an open editor.
   void RestoreEditorSize(int width, int height);
+  // Main thread: parses a kMsgTagPreview payload and queues it for the scheduler.
+  void HandlePreview(std::string_view json);
+  // Main thread: pushes {"schema":1,"incompleteBlocks":n} to the editor.
+  void PushStatus(uint32_t incompleteBlocks);
 
   static constexpr uint8_t kStateVersion = 2;   // 1 was the M0 spike payload; it is not migrated
 
@@ -55,6 +64,18 @@ private:
   mutable std::mutex mModelMutex;
   chordlab::DocumentStore mStore;
   chordlab::Palette mPalette;
+
+  // The scheduler belongs to the audio thread (process, reset, panic); pushPreview is its one other-thread
+  // entry and is called from the main thread only (OnMessage, CloseWindow). OnReset and panic requests
+  // are flagged here and consumed at the top of ProcessBlock.
+  chordlab::Scheduler mScheduler;
+  std::array<chordlab::MidiOut, 256> mMidiOut{};               // >= Scheduler::kCapacityForImmediateRelease
+  std::atomic<bool> mResetPending{false};
+  std::atomic<double> mResetSampleRate{44100.0};
+  std::atomic<bool> mPanicPending{false};
+  std::atomic<uint32_t> mIncompleteBlocks{0};                  // blocks whose process() returned false
+  uint32_t mReportedIncompleteBlocks = 0;                      // main thread: last value pushed to the UI
+  int mOpenPreviewId = -1;                                     // main thread: Start without a Stop yet
 
   // Whether an editor is attached: set at the end of OpenWindow, cleared in CloseWindow (both main
   // thread). Any thread may read it; mViewController itself is only touched on the main thread.

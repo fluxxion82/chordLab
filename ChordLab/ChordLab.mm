@@ -20,10 +20,15 @@
 // mViewController is written only on the main thread (OpenWindow / CloseWindow); other threads learn
 // whether an editor is attached from the atomic mEditorOpen.
 //
-// Chord preview (M2, Task 2.4) does not go through the model: the Swift palette sends note-ons/offs with
-// IPlugCocoaViewController::sendMidiMsgFromUI -> SendMidiMsgFromUI, which iPlug2 queues for the next
-// ProcessBlock's MIDI output; the UI guarantees one note-off per note-on. M3 replaces this with
-// Scheduler::pushPreview, which owns the sounding notes and adds a watchdog.
+// Chord preview goes through the engine's Scheduler, not iPlug2's MIDI-from-UI queue (which holds 32
+// messages and drops silently, so a note-off could be lost while the host had processing suspended).
+// The Swift palette sends kMsgTagPreview {id, on, pitches, velocity}; OnMessage (main thread) parses it
+// and calls Scheduler::pushPreview, the scheduler's single other-thread entry (an SPSC ring of 64; a full
+// ring is reported to the UI as an error). ProcessBlock owns everything else: it consumes the pending
+// reset/panic flags, runs Scheduler::process and forwards the events with SendMidiMsg. The scheduler
+// owns the sounding notes: one physical note per pitch, Start/Stop paired by id, and a 4 s watchdog
+// releases a preview whose Stop never arrives (editor closed mid-press: Swift's onDisappear sends the
+// Stop, CloseWindow pushes one for an outstanding Start as well, and the watchdog covers the rest).
 
 #include "ChordLab.h"
 #include "IPlug_include_in_plug_src.h"
@@ -32,6 +37,8 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <climits>
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -86,6 +93,14 @@ void ChordLab::CloseWindow()
 {
   CocoaEditorDelegate::CloseWindow();                            // drops mViewController
   mEditorOpen.store(false);
+  if (mOpenPreviewId >= 0)                                       // belt and braces: the UI's onDisappear sends this too
+  {
+    chordlab::PreviewCmd stop{};
+    stop.kind = chordlab::PreviewCmd::Stop;
+    stop.id = mOpenPreviewId;
+    mScheduler.pushPreview(stop);                                // a full ring is covered by the 4 s watchdog
+    mOpenPreviewId = -1;
+  }
 }
 
 void ChordLab::OnParentWindowResize(int width, int height)
@@ -112,6 +127,13 @@ bool ChordLab::OnHostRequestingSupportedViewConfiguration(int width, int height)
 #endif
 }
 
+void ChordLab::OnReset()
+{
+  // May run off the audio thread; the scheduler's reset is marshalled to the next ProcessBlock.
+  mResetSampleRate.store(GetSampleRate(), std::memory_order_relaxed);
+  mResetPending.store(true, std::memory_order_release);
+}
+
 void ChordLab::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
 {
   // Audio thread: nothing here may touch mStore, mPalette or mModelMutex (see the note at the top).
@@ -120,12 +142,48 @@ void ChordLab::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
   const int nOut = NOutChansConnected();
   for (int c = 0; c < nOut; ++c)
     std::fill(outputs[c], outputs[c] + nFrames, 0.0);
+
+  if (mResetPending.exchange(false, std::memory_order_acq_rel))
+    mScheduler.reset(mResetSampleRate.load(std::memory_order_relaxed));
+  if (mPanicPending.exchange(false, std::memory_order_acq_rel))
+    mScheduler.panic();
+
+  const chordlab::BlockInfo block{GetPPQPos(), nFrames, GetSampleRate(), GetTempo(), GetTransportIsRunning()};
+  std::size_t written = 0;
+  const bool complete = mScheduler.process(block, mMidiOut.data(), mMidiOut.size(), written);
+
+  // iPlug2's VST3 output queue grows by realloc the first time a block's burst exceeds its previous
+  // maximum (plan M3.3): a one-time cost per peak, bounded here by mMidiOut.size() events per block.
+  for (std::size_t i = 0; i < written; ++i)
+  {
+    const chordlab::MidiOut& e = mMidiOut[i];
+    IMidiMsg msg;
+    if ((e.status & 0xF0) == 0x90)
+      msg.MakeNoteOnMsg(e.data1, e.data2, e.sampleOffset);
+    else
+      msg.MakeNoteOffMsg(e.data1, e.sampleOffset);
+    SendMidiMsg(msg);
+  }
+
+  if (!complete)
+    mIncompleteBlocks.fetch_add(1, std::memory_order_relaxed);   // no logging on the audio thread; OnIdle reports it
 }
 
 void ChordLab::OnUIOpen()
 {
   Plugin::OnUIOpen();
   PushSnapshot();
+  mReportedIncompleteBlocks = 0;                                 // make OnIdle resend the current count
+}
+
+void ChordLab::OnIdle()
+{
+  const uint32_t incomplete = mIncompleteBlocks.load(std::memory_order_relaxed);
+  if (incomplete != mReportedIncompleteBlocks && mEditorOpen.load())
+  {
+    mReportedIncompleteBlocks = incomplete;
+    PushStatus(incomplete);
+  }
 }
 
 bool ChordLab::OnMessage(int msgTag, int ctrlTag, int dataSize, const void* pData)
@@ -160,7 +218,93 @@ bool ChordLab::OnMessage(int msgTag, int ctrlTag, int dataSize, const void* pDat
     return true;
   }
 
+  if (msgTag == kMsgTagPreview)
+  {
+    HandlePreview((pData && dataSize > 0) ? std::string_view((const char*) pData, (size_t) dataSize) : std::string_view());
+    return true;
+  }
+
+  if (msgTag == kMsgTagPanic)
+  {
+    mPanicPending.store(true, std::memory_order_release);        // panic must run on the audio thread
+    mOpenPreviewId = -1;                                         // the scheduler forgets every preview
+    return true;
+  }
+
   return CocoaEditorDelegate::OnMessage(msgTag, ctrlTag, dataSize, pData);
+}
+
+void ChordLab::HandlePreview(std::string_view text)
+{
+  // Main thread, never real-time: nlohmann parses here, the scheduler only ever sees plain PreviewCmd.
+  std::string problem;
+  chordlab::PreviewCmd cmd{};
+  try
+  {
+    const nlohmann::json message = nlohmann::json::parse(text, nullptr, /*allow_exceptions=*/false);
+    const auto intField = [&](const char* name, int lo, int hi, int& out) {
+      const auto it = message.find(name);
+      if (it == message.end() || !it->is_number_integer())
+        return false;
+      const auto v = it->get<std::int64_t>();
+      if (v < lo || v > hi)
+        return false;
+      out = (int) v;
+      return true;
+    };
+    int schema = 0;
+    int id = 0;
+    const auto on = message.is_object() ? message.find("on") : message.end();
+    if (!message.is_object() || !intField("schema", chordlab::kJsonSchema, chordlab::kJsonSchema, schema) ||
+        !intField("id", 0, INT_MAX, id) || on == message.end() || !on->is_boolean())
+      problem = "preview message needs schema 1, an id and on:true|false";
+    else if (on->get<bool>())
+    {
+      int velocity = 100;
+      const auto pitches = message.find("pitches");
+      if ((message.contains("velocity") && !intField("velocity", 1, 127, velocity)) || pitches == message.end() ||
+          !pitches->is_array() || pitches->empty() || pitches->size() > 8)
+        problem = "preview start needs 1..8 pitches and a velocity in 1..127";
+      else
+      {
+        cmd.kind = chordlab::PreviewCmd::Start;
+        cmd.id = id;
+        cmd.velocity = velocity;
+        cmd.count = 0;
+        for (const auto& p : *pitches)
+        {
+          if (!p.is_number_integer() || p.get<std::int64_t>() < 0 || p.get<std::int64_t>() > 127)
+          {
+            problem = "preview pitches must be integers in 0..127";
+            break;
+          }
+          cmd.pitches[cmd.count++] = (std::uint8_t) p.get<std::int64_t>();
+        }
+      }
+    }
+    else
+    {
+      cmd.kind = chordlab::PreviewCmd::Stop;
+      cmd.id = id;
+    }
+  }
+  catch (...)
+  {
+    problem = "preview message could not be parsed";
+  }
+
+  if (!problem.empty())
+  {
+    DBGMSG("ChordLab: %s\n", problem.c_str());
+    PushError(problem);
+    return;
+  }
+  if (!mScheduler.pushPreview(cmd))
+  {
+    PushError("preview queue full");                             // the 4 s watchdog still ends what is sounding
+    return;
+  }
+  mOpenPreviewId = cmd.kind == chordlab::PreviewCmd::Start ? cmd.id : (cmd.id == mOpenPreviewId ? -1 : mOpenPreviewId);
 }
 
 void ChordLab::RebuildPaletteLocked()
@@ -208,6 +352,16 @@ void ChordLab::PushError(const std::string& message)
     const std::string json = nlohmann::json{{"schema", chordlab::kJsonSchema}, {"error", message}}
                                .dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
     SendArbitraryMsgFromDelegate((int) kMsgTagError, (int) json.size(), json.data());
+  });
+}
+
+void ChordLab::PushStatus(uint32_t incompleteBlocks)
+{
+  OnMain([this, incompleteBlocks] {
+    if (!mEditorOpen.load())
+      return;
+    const std::string json = nlohmann::json{{"schema", chordlab::kJsonSchema}, {"incompleteBlocks", incompleteBlocks}}.dump();
+    SendArbitraryMsgFromDelegate((int) kMsgTagStatus, (int) json.size(), json.data());
   });
 }
 
