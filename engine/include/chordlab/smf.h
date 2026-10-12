@@ -31,7 +31,9 @@ std::vector<std::uint8_t> vlq(std::uint32_t value);
 /// positive, or so slow or fast that the tempo does not fit its three bytes (about 3.6 bpm to 1.2e8
 /// bpm); `num` outside 1..255; `den` not a power of two in 1..128; `tpqn` outside 1..32767; `channel`
 /// outside 0..15; an event whose pitch or velocity is outside 0..127; a beat or `endBeat` that is
-/// negative, NaN or infinite; or a tick beyond 0x0FFFFFFF, the largest four-byte delta.
+/// negative, NaN or infinite; a tick beyond 0x0FFFFFFF, the largest four-byte delta; or a track body
+/// longer than its four-byte chunk length can describe (4 GiB: some 600 million events, which no
+/// document reaches in practice, so this is a guard rather than a path the tests exercise).
 std::vector<std::uint8_t> writeSmf0(const Compiled& compiled, double bpm, int num = 4, int den = 4,
                                     int tpqn = 480, int channel = 0);
 

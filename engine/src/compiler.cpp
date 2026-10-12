@@ -13,11 +13,13 @@ namespace chordlab {
 namespace {
 
 /// Checks the `DocumentStore` invariants that the compiler relies on: a positive length keeps every off
-/// strictly after its on, and a velocity of at least 1 keeps an on from reading as a MIDI note-off.
+/// strictly after its on, the length cap bounds the accumulated beats to `kMaxLengthBeats` per chord,
+/// and a velocity of at least 1 keeps an on from reading as a MIDI note-off.
 void assertValidEvent([[maybe_unused]] const ChordEvent& event) {
     assert(event.chord.type != nullptr);
     assert(event.chord.root >= 0 && event.chord.root < 12);
-    assert(std::isfinite(event.lengthBeats) && event.lengthBeats >= kMinLengthBeats);
+    assert(std::isfinite(event.lengthBeats) && event.lengthBeats >= kMinLengthBeats &&
+           event.lengthBeats <= kMaxLengthBeats);
     assert(event.velocity >= kMinVelocity && event.velocity <= kMaxVelocity);
 }
 

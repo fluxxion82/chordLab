@@ -42,8 +42,10 @@ struct Compiled {
 /// and `endBeat` is the beat of the last off. Events are sorted by `(beat, off before on, pitch)`, which
 /// is a total order over the generated set, so the output is deterministic.
 ///
-/// `doc` must satisfy the `DocumentStore` invariants: every chord valid, every length finite and at least
-/// `kMinLengthBeats`, every velocity in `kMinVelocity`..`kMaxVelocity`.
+/// `doc` must satisfy the `DocumentStore` invariants: every chord valid, every length finite and within
+/// `kMinLengthBeats`..`kMaxLengthBeats`, every velocity in `kMinVelocity`..`kMaxVelocity`. These are
+/// preconditions (asserted, not checked): a document that came from outside the process is validated by
+/// the store before it gets here.
 Compiled compile(const Document& doc);
 
 }  // namespace chordlab

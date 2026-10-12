@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <fstream>
 #include <ios>
+#include <limits>
 #include <optional>
 #include <tuple>
 
@@ -151,6 +152,12 @@ Bytes writeSmf0(const Compiled& compiled, double bpm, int num, int den, int tpqn
     const long eotTick = std::max(*endTick, previous);
     append(track, vlq(static_cast<std::uint32_t>(eotTick - previous)));
     append(track, {0xFF, 0x2F, 0x00});
+
+    // The MTrk length is four bytes. Reaching this needs some 600 million events (each at most seven
+    // bytes), which no document produces in practice; it is a guard, not a path the tests exercise.
+    if (track.size() > std::numeric_limits<std::uint32_t>::max()) {
+        return {};
+    }
 
     Bytes file;
     file.reserve(14 + 8 + track.size());

@@ -5,6 +5,7 @@
 #include "chordlab/document.h"
 #include "chordlab/smf.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -175,6 +176,8 @@ Parsed parse(const Bytes& b) {
             }
         } else if (status == 0xF0 || status == 0xF7) {
             return fail("unexpected sysex");
+        } else if (status >= 0xF0) {
+            return fail("system common or real-time status in a track");
         } else if ((status & 0x80u) != 0) {
             const int dataCount = ((status & 0xF0u) == 0xC0u || (status & 0xF0u) == 0xD0u) ? 1 : 2;
             for (int i = 0; i < dataCount; ++i) {
@@ -260,6 +263,22 @@ std::vector<NoteEvent> oneBarEvents() {
 }
 
 }  // namespace
+
+// --- The reader itself -------------------------------------------------------------------------
+
+TEST_CASE("test reader: rejects system common and real-time statuses inside the track") {
+    // The writer never emits these; the check guards the reader, so a file that smuggled one through
+    // as a two-byte channel event could not pass `requireWellFormed`.
+    REQUIRE(parse(kGolden).ok);
+    for (const int status : {0xF0, 0xF1, 0xF6, 0xF7, 0xF8, 0xFE}) {
+        CAPTURE(status);
+        Bytes bytes = kGolden;
+        const auto firstOn = std::find(bytes.begin() + 22, bytes.end(), std::uint8_t{0x90});
+        REQUIRE(firstOn != bytes.end());
+        *firstOn = static_cast<std::uint8_t>(status);
+        CHECK_FALSE(parse(bytes).ok);
+    }
+}
 
 // --- vlq ---------------------------------------------------------------------------------------
 
@@ -394,6 +413,27 @@ TEST_CASE("writeSmf0: ticks are rounded from beats before the deltas are taken")
         CHECK(channel[i].tick == expectedTicks[i]);
     }
     CHECK(parsed.events.back().tick == 432);
+}
+
+TEST_CASE("writeSmf0: a third-of-a-beat grid rounds each boundary from its own absolute beat") {
+    // 0.333 beats at 480 tpqn is 159.84 ticks. The boundaries at 0.333, 0.666, 0.999 and 1.332 beats
+    // round to 160, 320, 480 and 639: the last is not 4 x 160 = 640, because each tick comes from the
+    // absolute beat, never from a running sum of rounded deltas.
+    DocumentStore store;
+    for (int i = 0; i < 4; ++i) {
+        store.appendChord(kC, 0.333, 100);
+    }
+    const Bytes bytes = writeSmf0(compile(store.doc()), 120.0);
+    const Parsed parsed = requireWellFormed(bytes);
+    const std::vector<ParsedEvent> channel = channelEvents(parsed);
+    REQUIRE(channel.size() == 24);
+    const std::vector<std::uint32_t> expectedTicks{0,   0,   0,   160, 160, 160, 160, 160, 160, 320, 320, 320,
+                                                   320, 320, 320, 480, 480, 480, 480, 480, 480, 639, 639, 639};
+    for (std::size_t i = 0; i < channel.size(); ++i) {
+        CAPTURE(i);
+        CHECK(channel[i].tick == expectedTicks[i]);
+    }
+    CHECK(parsed.events.back().tick == 639);
 }
 
 TEST_CASE("writeSmf0: an empty progression is tempo, time signature and end-of-track at tick 0") {
