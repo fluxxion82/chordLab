@@ -11,6 +11,10 @@ namespace chordlab {
 
 /// Version of the wire format. Every message (snapshot, command, state) carries `"schema": kJsonSchema`;
 /// a message with a different or missing schema is rejected.
+/// Adding a field is not a schema change: the readers here ignore members they do not know, and the UI
+/// reads only the members it needs, so a new field (the snapshot's `modes`, `tonics` and `outOfKey`
+/// were added under schema 1) costs nothing to a reader that has not heard of it. The number bumps only
+/// when an existing field changes meaning or shape, or a required one is removed.
 constexpr int kJsonSchema = 1;
 
 /// Editor window size written by `stateJson` when the caller gives none, and assumed by `loadStateJson`
@@ -56,17 +60,28 @@ constexpr int kMaxJsonDepth = 64;
 /// {"schema":1,
 ///  "projectKey":<key>, "browsedKey":<key>, "projectKeyName":"C Ionian", "browsedKeyName":"G Ionian",
 ///  "progressionLoop":true, "followHost":true, "endBeat":4.0,
+///  "modes":["Ionian","Dorian","Phrygian","Lydian","Mixolydian","Aeolian","Locrian","HarmonicMinor",
+///           "MelodicMinor"],
+///  "tonics":{"Ionian":[{"letter":"C","alter":0,"text":"C"},{"letter":"D","alter":-1,"text":"Db"}, ...],
+///            "Dorian":[...], ...},
 ///  "events":[{"id":1,"root":0,"type":"maj","symbol":"C","roman":"I","startBeat":0.0,
-///             "lengthBeats":4.0,"velocity":100,"voicing":[60,64,67]}, ...],
+///             "lengthBeats":4.0,"velocity":100,"voicing":[60,64,67],"outOfKey":[]}, ...],
 ///  "palette":{"tiers":5,
 ///             "cells":[{"degree":0,"tier":1,"root":0,"type":"maj","symbol":"C","roman":"I",
-///                       "family":"Major","filled":true,"voicing":[60,64,67]}, ...]}}
+///                       "family":"Major","filled":true,"voicing":[60,64,67],"outOfKey":[]}, ...]}}
 /// ```
 /// Events are in playback order with `startBeat` accumulated as `Document::startBeatOf` does; `symbol` is
 /// the Klimper-style symbol spelled in the project key, `roman` the Standard-style numeral relative to the
 /// project key, `voicing` the default `closeVoicing`. Palette cells carry the palette's own `symbol`
 /// (spelled in the browsed key) and `roman`, the type's `family` ("Major", "Minor" or "Other") and the
 /// same `voicing`, in the palette's order.
+/// `outOfKey`, on events and cells alike, is the chord's pitch classes that are not in the project key's
+/// scale, ascending and without repeats: what a hover popover lists as borrowed notes. It is empty
+/// exactly when a cell is `filled`.
+/// `modes` is every `Mode` name in enum order and `tonics` maps each of them to twelve entries indexed
+/// by pitch class, the `canonicalTonic` of that pitch class in that mode with its ASCII `text`
+/// ("Db", "F#"), so that the key pickers can label themselves without a copy of the theory. Both are
+/// constant for a given engine build and are repeated in every snapshot for simplicity.
 std::string snapshotJson(const Document& doc, const Palette& palette);
 
 /// Applies one UI command, `{"schema":1,"cmd":"<name>", ...fields}`, to the store:
