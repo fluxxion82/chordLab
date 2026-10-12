@@ -1,5 +1,6 @@
 #include "ChordLab.h"
 #include "IPlug_include_in_plug_src.h"
+#include "chordlab/json_api.h"
 #include <algorithm>
 #include <cstring>
 #include <cstdlib>
@@ -19,6 +20,15 @@ ChordLab::ChordLab(const InstanceInfo& info)
   GetParam(kParamGain)->InitDouble("Gain", 100., 0., 100.0, 0.01, "%");
   
   MakeDefaultPreset();
+
+  // Task 2.0 smoke: the engine links and runs. Replaced by the real model in Task 2.1.
+  {
+    const chordlab::DocumentStore store;
+    const chordlab::Palette palette = chordlab::buildPalette(store.doc().browsedKey, store.doc().projectKey);
+    const std::string snapshot = chordlab::snapshotJson(store.doc(), palette);
+    DBGMSG("ChordLab: engine linked; default snapshot is %zu bytes, %zu palette cells\n",
+           snapshot.size(), palette.cells.size());
+  }
 }
 
 void ChordLab::OnIdle()
