@@ -63,6 +63,11 @@ bool isLeadingToneQuality(const ChordType& type) {
     return hasInterval(type, 3) && hasInterval(type, 6);
 }
 
+/// A major third and a minor seventh: 7, 9, 7#11 and any dominant seventh added later (rule 3c).
+bool isDominantSeventhQuality(const ChordType& type) {
+    return hasInterval(type, 4) && hasInterval(type, 10);
+}
+
 /// True if `root` is a scale degree of `key` whose diatonic triad is not diminished: a degree an
 /// applied dominant or leading-tone chord can tonicise.
 bool isAppliedTarget(PitchClass root, const Key& key) {
@@ -78,7 +83,7 @@ bool isSubtonic(PitchClass pc, const Key& key) {
     return pitchClassOf(pc - key.tonicPc()) == 10;
 }
 
-/// True if some parallel mode of the key's tonic contains every note of the chord (rule 3d).
+/// True if some parallel mode of the key's tonic contains every note of the chord (rule 3e).
 bool isBorrowed(const Chord& chord, const Key& key) {
     for (int m = 0; m < kNumModes; ++m) {
         if (fullyInKey(chord, Key{key.tonic, Mode(m)})) {
@@ -134,7 +139,11 @@ Function functionOf(const Chord& chord, const Key& projectKey) {
     if (isLeadingToneQuality(*chord.type) && isAppliedTarget(pitchClassOf(chord.root + 1), projectKey)) {
         return Function::Dominant;
     }
-    // Rule 3c/3e: a chromatic root is one of the four borrowed major chords or nothing.
+    // Rule 3c: a dominant seventh on bII is the tritone substitute of V7.
+    if (position == NumeralDegree{1, -1} && isDominantSeventhQuality(*chord.type)) {
+        return Function::Dominant;
+    }
+    // Rule 3d/3f: a chromatic root is one of the four borrowed major chords or nothing.
     if (position.alter != 0) {
         if (hasInterval(*chord.type, 3)) {
             return Function::Other;
@@ -150,7 +159,7 @@ Function functionOf(const Chord& chord, const Key& projectKey) {
                 return Function::Other;
         }
     }
-    // Rule 3d/3e: a borrowed chord keeps its degree; anything else leads nowhere.
+    // Rule 3e/3f: a borrowed chord keeps its degree; anything else leads nowhere.
     return isBorrowed(chord, projectKey) ? byDegree(family, position.degree) : Function::Other;
 }
 

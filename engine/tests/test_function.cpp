@@ -101,8 +101,9 @@ TEST_CASE("functionOf: borrowed major chords on flat degrees in C major") {
                            {Eb, "maj", T, "bIII"},
                            {Ab, "maj", PD, "bVI"},
                            {Bb, "maj", T, "bVII"},
-                           // Any quality without a minor third rides the same rule.
-                           {Db, "7", PD, "bII7"},
+                           // Any quality without a minor third rides the same rule, except the dominant
+                           // sevenths on bII, which are tritone substitutes (see below).
+                           {Db, "7", Dom, "bII7 (tritone substitute of V7)"},
                            {Eb, "7", T, "bIII7"},
                            {Ab, "maj7", PD, "bVIΔ7"},
                            {Bb, "7", T, "bVII7"},
@@ -153,7 +154,7 @@ TEST_CASE("functionOf: diatonic roots with a foreign quality keep their degree i
                            {G, "min", Dom, "v"},
                            {B, "min", Dom, "vii"},
                            {C, "maj7", T, "IΔ7 (in key)"},
-                           {A, "dim", T, "vi° (Aeolian)"},
+                           {A, "dim", T, "vi° (melodic minor)"},
                            {E, "maj", Dom, "III is V/vi"},
                            {C, "aug", Dom, "I+ is V+/IV"},
                            // A chord no parallel mode of C holds is not borrowed: Other.
@@ -213,6 +214,51 @@ TEST_CASE("functionOf: chromatic chords in A Aeolian") {
                         });
 }
 
+// --- Tritone substitutes ----------------------------------------------------------------------------
+
+TEST_CASE("functionOf: dominant sevenths on bII are tritone substitutes in every key, the triad stays Neapolitan") {
+    struct KeyCase {
+        Key k;
+        PitchClass bII;
+        const char* name;
+    };
+    const std::vector<KeyCase> keys{
+        {kCIonian, Db, "C major"},
+        {key('E', 0, Mode::Ionian), F, "E major"},
+        {key('B', -1, Mode::Ionian), B, "Bb major (Cb)"},
+        {kAAeolian, Bb, "A minor"},
+        {key('F', 1, Mode::Aeolian), G, "F# minor"},
+        {key('F', 1, Mode::HarmonicMinor), G, "F# harmonic minor"},
+    };
+    for (const KeyCase& kc : keys) {
+        CAPTURE(kc.name);
+        checkAll(kc.k, {
+                           // A major third over a minor seventh: the tritone substitute of V7.
+                           {kc.bII, "7", Dom, "bII7"},
+                           {kc.bII, "9", Dom, "bII9"},
+                           {kc.bII, "7#11", Dom, "bII7#11 (the Lydian-dominant voicing of the substitute)"},
+                           // Without the seventh, or without the major third, it is the Neapolitan predominant.
+                           {kc.bII, "maj", PD, "bII"},
+                           {kc.bII, "maj7", PD, "bIIΔ7"},
+                           {kc.bII, "6", PD, "bII6"},
+                           {kc.bII, "add9", PD, "bIIadd9"},
+                           {kc.bII, "7sus4", PD, "bII7sus4: no major third"},
+                           {kc.bII, "min", O, "bii"},
+                       });
+    }
+}
+
+TEST_CASE("functionOf: Locrian keeps its override over the tritone substitute") {
+    checkAll(key('C', 0, Mode::Locrian), {
+                                             {Db, "7", O, "a dominant seventh on the diatonic II"},
+                                             {Db, "9", O, "II9"},
+                                             {Db, "maj", O, "II"},
+                                         });
+    checkAll(key('F', 1, Mode::Locrian), {
+                                             {G, "7", O, "II7"},
+                                         });
+}
+
 // --- Every mode's own scale ------------------------------------------------------------------------
 
 TEST_CASE("functionOf: D Dorian follows the minor-family table") {
@@ -241,7 +287,7 @@ TEST_CASE("functionOf: C Phrygian follows the minor-family table") {
                                               {Bb, "min", Dom, "vii"},
                                               {G, "maj", Dom, "V (chromatic B)"},
                                               {B, "dim", Dom, "vii° (chromatic)"},
-                                              {F, "maj", PD, "IV (Aeolian), not V/vii: the subtonic exception"},
+                                              {F, "maj", PD, "IV (Dorian), not V/vii: the subtonic exception"},
                                               {F, "7", Dom, "V7/vii"},
                                           });
 }

@@ -42,18 +42,22 @@ const char* functionShortName(Function function);
 ///       triad is not diminished → Dominant. This is V/x and V7/x of any non-diminished degree, and
 ///       also the major V and V7 of a minor key (V/i). One exception: without a minor seventh, a chord
 ///       whose target would be the subtonic (bVII, a minor seventh above the tonic) is read as the
-///       borrowed IV of its minor-family key under rule d (`D` in A minor is Dorian's IV, not V/VII);
+///       borrowed IV of its minor-family key under rule e (`D` in A minor is Dorian's IV, not V/VII);
 ///       with the seventh it is V7/VII, as `appliedChords` (applied.h) lists it.
 ///    b. applied leading-tone: a chord with a minor third and a diminished fifth (`dim`, `dim7`,
 ///       `m7b5`) whose root is a semitone below such a degree → Dominant (vii°7/V; vii° and vii°7 of a
 ///       minor key).
-///    c. a chromatic root (alteration ≠ 0) carrying no minor third: bII and bVI → Predominant
+///    c. tritone substitute: a chord on bII with a major third and a minor seventh (`7`, `9`, `7#11`,
+///       and any dominant-seventh type added later — the test is on the intervals) → Dominant. It
+///       shares its tritone with V7 and resolves the same way; the bII triad, bIIΔ7 and the other
+///       seventh-less chords on bII stay the Neapolitan predominant of rule d.
+///    d. a chromatic root (alteration ≠ 0) carrying no minor third: bII and bVI → Predominant
 ///       (Neapolitan, borrowed submediant); bIII and bVII → Tonic (borrowed mediant and subtonic are
 ///       tonic-group chords, labelled "T" like any other); #IV → Other.
-///    d. a diatonic root (alteration 0) whose chord some parallel mode of the tonic contains — a
+///    e. a diatonic root (alteration 0) whose chord some parallel mode of the tonic contains — a
 ///       borrowed chord such as iv, iiø7 or i in major, IV, ii or v in harmonic minor, iii or vi in
 ///       Aeolian → the degree table of rule 2.
-///    e. anything else (a minor or diminished chord on a chromatic root, or a chord no parallel mode
+///    f. anything else (a minor or diminished chord on a chromatic root, or a chord no parallel mode
 ///       holds, such as `F#` in A minor or `AΔ7` in C major) → Other.
 ///
 /// Preconditions: `chord.type` non-null and `chord.root` in 0..11; `projectKey` as documented in pitch.h.
