@@ -53,6 +53,10 @@ const std::vector<ChordType>& allChordTypes() {
         {"m9", "m9", {0, 3, 7, 10, 14}, Family::Minor},
         {"69", "6/9", {0, 4, 7, 9, 14}, Family::Major},
         {"7sus4", "7sus4", {0, 5, 7, 10}, Family::Other},
+        // Phase 2 colour chords: appended, so every id above keeps its position.
+        {"maj7#11", "Δ7#11", {0, 4, 7, 11, 18}, Family::Major},
+        {"mMaj9", "mΔ9", {0, 3, 7, 11, 14}, Family::Minor},
+        {"7#11", "7#11", {0, 4, 7, 10, 18}, Family::Major},
     };
     return kTypes;
 }

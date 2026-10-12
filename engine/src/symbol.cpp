@@ -30,8 +30,8 @@ constexpr std::array<StyledSuffix, 3> kSymbolOverrides{{
 }};
 
 /// Numeral suffixes: the minor quality moves into the numeral's case, so `m`, `m6`, `m7`, `mΔ7`,
-/// `madd9` and `m9` drop their `m`; the diminished qualities follow the style.
-constexpr std::array<StyledSuffix, 23> kNumeralSuffixes{{
+/// `madd9`, `m9` and `mΔ9` drop their `m`; the diminished qualities follow the style.
+constexpr std::array<StyledSuffix, 26> kNumeralSuffixes{{
     {"5", "5", "5"},
     {"maj", "", ""},
     {"min", "", ""},
@@ -55,6 +55,9 @@ constexpr std::array<StyledSuffix, 23> kNumeralSuffixes{{
     {"m9", "9", "9"},
     {"69", "6/9", "6/9"},
     {"7sus4", "7sus4", "7sus4"},
+    {"maj7#11", "Δ7#11", "Δ7#11"},
+    {"mMaj9", "Δ9", "Δ9"},
+    {"7#11", "7#11", "7#11"},
 }};
 
 std::string_view pick(const StyledSuffix& suffix, SymbolStyle style) {

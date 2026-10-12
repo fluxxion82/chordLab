@@ -27,7 +27,8 @@ struct ChordType {
 /// point at it.
 const ChordType& chordType(std::string_view id);
 
-/// Every chord type, in dictionary order (power chord, triads, sixths, sevenths, ninths, 7sus4).
+/// Every chord type, in dictionary order (power chord, triads, sixths, sevenths, ninths, 7sus4, then the
+/// Phase 2 colour chords maj7#11, mMaj9 and 7#11).
 /// The vector is stable until module unload / static destruction and `chordType(id)` returns references
 /// into it.
 const std::vector<ChordType>& allChordTypes();

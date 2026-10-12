@@ -55,15 +55,19 @@ const std::vector<ExpectedType> kExpected{
     {"m9", {0, 3, 7, 10, 14}, "m9", Family::Minor},
     {"69", {0, 4, 7, 9, 14}, "6/9", Family::Major},
     {"7sus4", {0, 5, 7, 10}, "7sus4", Family::Other},
+    // Phase 2 colour chords, appended so the ids above keep their positions.
+    {"maj7#11", {0, 4, 7, 11, 18}, "Δ7#11", Family::Major},
+    {"mMaj9", {0, 3, 7, 11, 14}, "mΔ9", Family::Minor},
+    {"7#11", {0, 4, 7, 10, 18}, "7#11", Family::Major},
 };
 
 }  // namespace
 
 // --- Dictionary ------------------------------------------------------------------
 
-TEST_CASE("allChordTypes: has 23 entries with unique ids") {
+TEST_CASE("allChordTypes: has 26 entries with unique ids") {
     const auto& types = allChordTypes();
-    CHECK(types.size() == 23);
+    CHECK(types.size() == 26);
     std::set<std::string> ids;
     for (const ChordType& t : types) {
         ids.insert(t.id);
@@ -123,6 +127,9 @@ TEST_CASE("chordType: symbols are Klimper-style suffixes") {
     CHECK(std::string_view(chordType("maj").symbol) == "");
     CHECK(std::string_view(chordType("mMaj7").symbol) == "mΔ7");
     CHECK(std::string_view(chordType("69").symbol) == "6/9");
+    CHECK(std::string_view(chordType("maj7#11").symbol) == "Δ7#11");
+    CHECK(std::string_view(chordType("mMaj9").symbol) == "mΔ9");
+    CHECK(std::string_view(chordType("7#11").symbol) == "7#11");
 }
 
 TEST_CASE("chordType: throws std::out_of_range for an unknown id") {
@@ -135,6 +142,7 @@ TEST_CASE("chordType: returns a stable reference into allChordTypes") {
     CHECK(&chordType("maj") == &allChordTypes()[1]);
     CHECK(&chordType("5") == &allChordTypes()[0]);
     CHECK(&chordType("7sus4") == &allChordTypes()[22]);
+    CHECK(&chordType("7#11") == &allChordTypes()[25]);
     for (const ChordType& t : allChordTypes()) {
         CAPTURE(t.id);
         CHECK(&chordType(t.id) == &t);
@@ -211,6 +219,13 @@ TEST_CASE("fullyInKey: extensions above the octave are checked too") {
     CHECK(fullyInKey(chord(0, "maj9"), cMajor));        // C E G B D
     CHECK(fullyInKey(chord(4, "m9"), cMajor) == false); // Em9 = E G B D F# (F# out)
     CHECK(fullyInKey(chord(2, "m9"), cMajor));          // Dm9 = D F A C E
+    CHECK(fullyInKey(chord(5, "maj7#11"), cMajor));                    // FΔ7#11 = F A C E B
+    CHECK(fullyInKey(chord(0, "maj7#11"), cMajor) == false);           // F# out
+    CHECK(fullyInKey(chord(0, "maj7#11"), key('C', 0, Mode::Lydian)));
+    CHECK(fullyInKey(chord(0, "mMaj9"), key('C', 0, Mode::MelodicMinor)));   // C Eb G B D
+    CHECK(fullyInKey(chord(0, "mMaj9"), key('C', 0, Mode::Aeolian)) == false);  // B out
+    CHECK(fullyInKey(chord(5, "7#11"), key('C', 0, Mode::MelodicMinor)));     // F A C Eb B
+    CHECK(fullyInKey(chord(0, "7#11"), key('C', 0, Mode::Mixolydian)) == false);  // F# out
 }
 
 // --- diatonicTriad --------------------------------------------------------------------

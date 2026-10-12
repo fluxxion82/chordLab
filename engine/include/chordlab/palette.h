@@ -9,7 +9,7 @@
 namespace chordlab {
 
 /// Number of rows in a palette grid: tier 0 is the power chord, 1 the triad, 2 the sixth/seventh,
-/// 3 the seventh/add9 and 4 the colour row (ninths, 6/9, suspended chords).
+/// 3 the seventh/add9 and 4 the colour row (ninths, #11 chords, 6/9, suspended chords).
 constexpr int kPaletteTiers = 5;
 
 /// One chord of the palette grid: the chord built on scale degree `degree` (0..6) of the browsed key, in
@@ -43,10 +43,13 @@ struct Palette {
 /// - Tier 2 is the first of [6, m6, m7, m7b5, 7, maj7, mMaj7, dim7, augMaj7] fully in the browsed key.
 /// - Tier 3 is the first of [maj7, 7, m7, mMaj7, dim7, augMaj7, add9, madd9, m7b5] fully in the browsed
 ///   key and not already used in the column.
-/// - Tier 4 is the first of [9, maj9, m9, 69, 7sus4, sus4, sus2] fully in the browsed key and not already
-///   used in the column.
-/// Tiers with no candidate are left out. Every cell is fully in the browsed key, and no chord type repeats
-/// within a column.
+/// - Tier 4 is the first of [9, maj9, m9, mMaj9, maj7#11, 7#11, 69, 7sus4, sus4, sus2] fully in the browsed
+///   key and not already used in the column.
+/// The tonic column (degree 0) leads with the browsed mode's characteristic chord in the tier that chord
+/// belongs to, ahead of that tier's list: Mixolydian `7` in tier 2 (so C Mixolydian shows C7 over C6) and
+/// Lydian `maj7#11` in tier 4 (CΔ7#11 over CΔ9). Dorian's m6, harmonic minor's mMaj7 and melodic minor's
+/// mMaj9 already win on the general order, and the Ionian column is unchanged. Tiers with no candidate are
+/// left out. Every cell is fully in the browsed key, and no chord type repeats within a column.
 Palette buildPalette(const Key& browsedKey, const Key& projectKey);
 
 }  // namespace chordlab

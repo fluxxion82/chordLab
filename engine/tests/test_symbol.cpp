@@ -292,7 +292,7 @@ struct ExpectedRendering {
 };
 
 // Every dictionary type on a C root in C Ionian.
-const std::array<ExpectedRendering, 23> kRenderings{{
+const std::array<ExpectedRendering, 26> kRenderings{{
     {"5", "C5", "C5", "I5", "I5"},
     {"maj", "C", "C", "I", "I"},
     {"min", "Cm", "Cm", "i", "i"},
@@ -316,6 +316,9 @@ const std::array<ExpectedRendering, 23> kRenderings{{
     {"m9", "Cm9", "Cm9", "i9", "i9"},
     {"69", "C6/9", "C6/9", "I6/9", "I6/9"},
     {"7sus4", "C7sus4", "C7sus4", "I7sus4", "I7sus4"},
+    {"maj7#11", "CΔ7#11", "CΔ7#11", "IΔ7#11", "IΔ7#11"},
+    {"mMaj9", "CmΔ9", "CmΔ9", "iΔ9", "iΔ9"},
+    {"7#11", "C7#11", "C7#11", "I7#11", "I7#11"},
 }};
 
 }  // namespace
