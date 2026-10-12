@@ -10,6 +10,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <climits>
 #include <functional>
 #include <string>
 #include <string_view>
@@ -763,4 +764,15 @@ TEST_CASE("boundary: a rejected append leaves the id counter alone") {
     CHECK(store.nextId() == 1);
     applyOk(store, {{"cmd", "appendChord"}, {"root", 0}, {"type", "maj"}});
     CHECK(store.nextId() == 2);
+}
+
+TEST_CASE("boundary: an append refused by an exhausted id counter is reported, and changes nothing") {
+    DocumentStore store(INT_MAX);
+    const Document before = store.doc();
+    std::string error;
+    CHECK_FALSE(applyCommandJson(store, kAppendC, error));
+    CHECK_FALSE(error.empty());
+    CHECK(store.doc() == before);
+    CHECK(store.nextId() == INT_MAX);
+    CHECK_FALSE(store.undo());
 }

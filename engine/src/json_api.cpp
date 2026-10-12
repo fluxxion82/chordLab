@@ -17,6 +17,7 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 
 namespace chordlab {
@@ -349,36 +350,57 @@ bool parseKeyField(Fields& fields, const char* name, Key& out, std::string& erro
 
 // --- Commands --------------------------------------------------------------------------
 
-bool applySetKey(DocumentStore& store, Fields& fields) {
-    Key key{};
-    if (!parseTonic(fields, key.tonic) || !parseModeField(fields, key.mode)) {
-        return false;
-    }
-    store.setProjectKey(key);
-    return true;
+/// A validated UI command: plain data, trivially destructible, so that nothing can throw while one goes
+/// out of scope (see the Readers section for why that matters). Only the fields its `kind` uses are
+/// meaningful; the chord type is resolved to its dictionary entry during validation.
+struct Command {
+    enum class Kind {
+        SetKey,
+        BrowseSteps,
+        BrowseMode,
+        BrowseHome,
+        AppendChord,
+        MoveChord,
+        SetLength,
+        SetVelocity,
+        RemoveChord,
+        SetProgressionLoop,
+        SetFollowHost,
+        Undo,
+        Redo
+    };
+    Kind kind = Kind::Undo;
+    Key key{};                 // SetKey
+    int steps = 0;             // BrowseSteps
+    Mode mode = Mode::Ionian;  // BrowseMode
+    Chord chord{0, nullptr};   // AppendChord
+    double lengthBeats = 4.0;  // AppendChord (optional, store default), SetLength
+    int velocity = 100;        // AppendChord (optional, store default), SetVelocity
+    int id = 0;                // MoveChord, SetLength, SetVelocity, RemoveChord
+    int index = 0;             // MoveChord
+    bool on = false;           // SetProgressionLoop, SetFollowHost
+};
+static_assert(std::is_trivially_destructible_v<Command>, "Command must be plain data: destroying one must not allocate");
+
+// Phase A parsers: each reads the fields of one command kind into `out`, reporting through `Fields`.
+
+bool parseSetKey(Fields& fields, Command& out) {
+    out.kind = Command::Kind::SetKey;
+    return parseTonic(fields, out.key.tonic) && parseModeField(fields, out.key.mode);
 }
 
-bool applyBrowseKey(DocumentStore& store, Fields& fields) {
+bool parseBrowseKey(Fields& fields, Command& out) {
     const int selectors = (fields.has("steps") ? 1 : 0) + (fields.has("mode") ? 1 : 0) + (fields.has("home") ? 1 : 0);
     if (selectors != 1) {
         return fields.fail("browseKey", "needs exactly one of \"steps\", \"mode\" or \"home\"");
     }
-    const Document& doc = store.doc();
     if (fields.has("steps")) {
-        int steps = 0;
-        if (!fields.getInt("steps", steps)) {
-            return false;
-        }
-        store.setBrowsedKey(fifthsNeighbour(doc.browsedKey, steps));
-        return true;
+        out.kind = Command::Kind::BrowseSteps;
+        return fields.getInt("steps", out.steps);
     }
     if (fields.has("mode")) {
-        Mode mode{};
-        if (!parseModeField(fields, mode)) {
-            return false;
-        }
-        store.setBrowsedKey(Key{canonicalTonic(doc.browsedKey.tonicPc(), mode), mode});
-        return true;
+        out.kind = Command::Kind::BrowseMode;
+        return parseModeField(fields, out.mode);
     }
     bool home = false;
     if (!fields.getBool("home", home)) {
@@ -387,15 +409,14 @@ bool applyBrowseKey(DocumentStore& store, Fields& fields) {
     if (!home) {
         return fields.fail("home", "must be true");
     }
-    store.setBrowsedKey(doc.projectKey);
+    out.kind = Command::Kind::BrowseHome;
     return true;
 }
 
-bool applyAppendChord(DocumentStore& store, Fields& fields) {
+bool parseAppendChord(Fields& fields, Command& out) {
+    out.kind = Command::Kind::AppendChord;
     int root = 0;
     std::string typeId;
-    double lengthBeats = 4.0;
-    int velocity = 100;
     if (!fields.getIntIn("root", 0, 11, root) || !fields.getString("type", typeId)) {
         return false;
     }
@@ -403,74 +424,52 @@ bool applyAppendChord(DocumentStore& store, Fields& fields) {
     if (type == nullptr) {
         return fields.fail("type", "\"" + typeId + "\" is not a chord type");
     }
-    if (fields.has("lengthBeats") && !fields.getNumber("lengthBeats", lengthBeats)) {
+    if (fields.has("lengthBeats") && !fields.getNumber("lengthBeats", out.lengthBeats)) {
         return false;
     }
-    if (fields.has("velocity") && !fields.getInt("velocity", velocity)) {
+    if (fields.has("velocity") && !fields.getInt("velocity", out.velocity)) {
         return false;
     }
-    if (store.appendChord(Chord{root, type}, lengthBeats, velocity) == kNoEventId) {
-        return fields.fail("appendChord", "refused: no event ids left");
-    }
+    out.chord = Chord{root, type};
     return true;
 }
 
-bool applyMoveChord(DocumentStore& store, Fields& fields) {
-    int id = 0;
-    int index = 0;
-    if (!fields.getInt("id", id) || !fields.getInt("index", index)) {
-        return false;
-    }
-    store.moveChord(id, index);
-    return true;
+bool parseMoveChord(Fields& fields, Command& out) {
+    out.kind = Command::Kind::MoveChord;
+    return fields.getInt("id", out.id) && fields.getInt("index", out.index);
 }
 
-bool applySetLength(DocumentStore& store, Fields& fields) {
-    int id = 0;
-    double lengthBeats = 0.0;
-    if (!fields.getInt("id", id) || !fields.getNumber("lengthBeats", lengthBeats)) {
-        return false;
-    }
-    store.setLength(id, lengthBeats);
-    return true;
+bool parseSetLength(Fields& fields, Command& out) {
+    out.kind = Command::Kind::SetLength;
+    return fields.getInt("id", out.id) && fields.getNumber("lengthBeats", out.lengthBeats);
 }
 
-bool applySetVelocity(DocumentStore& store, Fields& fields) {
-    int id = 0;
-    int velocity = 0;
-    if (!fields.getInt("id", id) || !fields.getInt("velocity", velocity)) {
-        return false;
-    }
-    store.setVelocity(id, velocity);
-    return true;
+bool parseSetVelocity(Fields& fields, Command& out) {
+    out.kind = Command::Kind::SetVelocity;
+    return fields.getInt("id", out.id) && fields.getInt("velocity", out.velocity);
 }
 
-bool applyRemoveChord(DocumentStore& store, Fields& fields) {
-    int id = 0;
-    if (!fields.getInt("id", id)) {
-        return false;
-    }
-    store.removeChord(id);
-    return true;
+bool parseRemoveChord(Fields& fields, Command& out) {
+    out.kind = Command::Kind::RemoveChord;
+    return fields.getInt("id", out.id);
 }
 
-/// `setProgressionLoop` / `setFollowHost`: reads `on` and hands it to `setter`.
-template <typename Setter>
-bool applyToggle(DocumentStore& store, Fields& fields, Setter setter) {
-    bool on = false;
-    if (!fields.getBool("on", on)) {
-        return false;
-    }
-    (store.*setter)(on);
-    return true;
+/// `setProgressionLoop` / `setFollowHost`.
+bool parseToggle(Fields& fields, Command::Kind kind, Command& out) {
+    out.kind = kind;
+    return fields.getBool("on", out.on);
 }
 
 // --- Readers ---------------------------------------------------------------------------
+//
+// Each reader runs in two phases, and the JSON tree must be gone before the store is touched: nlohmann's
+// destructor is noexcept but allocates (json_value::destroy flattens the children onto a heap-allocated
+// std::vector), so a json object still alive after a mutation could turn an allocation failure during
+// its cleanup into std::terminate with the mutation already applied. Phase A parses and validates into
+// plain data and returns with the tree destroyed; Phase B takes nothing but the store and that data.
 
-/// `applyCommandJson` without the exception guard. The store is touched last, by one call that gives
-/// the strong guarantee, so a throw from anywhere in here leaves it untouched.
-bool applyCommand(DocumentStore& store, std::string_view text, std::string& error) {
-    error.clear();
+/// Phase A of `applyCommandJson`: parses and validates `text` into `out`.
+bool parseCommand(std::string_view text, Command& out, std::string& error) {
     json message;
     if (!parseMessage(text, message, error)) {
         return false;
@@ -481,55 +480,102 @@ bool applyCommand(DocumentStore& store, std::string_view text, std::string& erro
         return false;
     }
     if (cmd == "setKey") {
-        return applySetKey(store, fields);
+        return parseSetKey(fields, out);
     }
     if (cmd == "browseKey") {
-        return applyBrowseKey(store, fields);
+        return parseBrowseKey(fields, out);
     }
     if (cmd == "appendChord") {
-        return applyAppendChord(store, fields);
+        return parseAppendChord(fields, out);
     }
     if (cmd == "moveChord") {
-        return applyMoveChord(store, fields);
+        return parseMoveChord(fields, out);
     }
     if (cmd == "setLength") {
-        return applySetLength(store, fields);
+        return parseSetLength(fields, out);
     }
     if (cmd == "setVelocity") {
-        return applySetVelocity(store, fields);
+        return parseSetVelocity(fields, out);
     }
     if (cmd == "removeChord") {
-        return applyRemoveChord(store, fields);
+        return parseRemoveChord(fields, out);
     }
     if (cmd == "setProgressionLoop") {
-        return applyToggle(store, fields, &DocumentStore::setProgressionLoop);
+        return parseToggle(fields, Command::Kind::SetProgressionLoop, out);
     }
     if (cmd == "setFollowHost") {
-        return applyToggle(store, fields, &DocumentStore::setFollowHost);
+        return parseToggle(fields, Command::Kind::SetFollowHost, out);
     }
     if (cmd == "undo") {
-        store.undo();  // nothing to undo is a no-op, not an error
+        out.kind = Command::Kind::Undo;
         return true;
     }
     if (cmd == "redo") {
-        store.redo();
+        out.kind = Command::Kind::Redo;
         return true;
     }
     error = "unknown cmd \"" + cmd + "\"";
     return false;
 }
 
-/// `loadStateJson` without the exception guard. Everything is parsed into locals first; the store and
-/// the out-params are written last, by steps that cannot throw.
-bool loadState(DocumentStore& store, std::string_view text, std::string& error, int* editorWidth, int* editorHeight) {
-    error.clear();
+/// Phase B of `applyCommandJson`: applies a validated command through one store call, which gives the
+/// strong guarantee. Takes nothing but the store and plain data, so no JSON object can be alive here.
+/// Returns false only when the store refuses an append because its id counter is exhausted, which
+/// changes nothing.
+bool applyCommand(DocumentStore& store, const Command& command) {
+    const Document& doc = store.doc();
+    switch (command.kind) {
+        case Command::Kind::SetKey:
+            store.setProjectKey(command.key);
+            return true;
+        case Command::Kind::BrowseSteps:
+            store.setBrowsedKey(fifthsNeighbour(doc.browsedKey, command.steps));
+            return true;
+        case Command::Kind::BrowseMode:
+            store.setBrowsedKey(Key{canonicalTonic(doc.browsedKey.tonicPc(), command.mode), command.mode});
+            return true;
+        case Command::Kind::BrowseHome:
+            store.setBrowsedKey(doc.projectKey);
+            return true;
+        case Command::Kind::AppendChord:
+            return store.appendChord(command.chord, command.lengthBeats, command.velocity) != kNoEventId;
+        case Command::Kind::MoveChord:
+            store.moveChord(command.id, command.index);
+            return true;
+        case Command::Kind::SetLength:
+            store.setLength(command.id, command.lengthBeats);
+            return true;
+        case Command::Kind::SetVelocity:
+            store.setVelocity(command.id, command.velocity);
+            return true;
+        case Command::Kind::RemoveChord:
+            store.removeChord(command.id);
+            return true;
+        case Command::Kind::SetProgressionLoop:
+            store.setProgressionLoop(command.on);
+            return true;
+        case Command::Kind::SetFollowHost:
+            store.setFollowHost(command.on);
+            return true;
+        case Command::Kind::Undo:
+            store.undo();  // nothing to undo is a no-op, not an error
+            return true;
+        case Command::Kind::Redo:
+            store.redo();
+            return true;
+    }
+    return true;
+}
+
+/// Phase A of `loadStateJson`: parses and validates `text` into a document, an id counter and an editor
+/// size. `Document` holds a vector, whose destruction frees but never allocates.
+bool parseState(std::string_view text, Document& doc, int& nextId, int& width, int& height, std::string& error) {
     json message;
     if (!parseMessage(text, message, error)) {
         return false;
     }
     Fields fields(message, "", error);
 
-    Document doc;
     if (!parseKeyField(fields, "projectKey", doc.projectKey, error) ||
         !parseKeyField(fields, "browsedKey", doc.browsedKey, error) ||
         !fields.getBool("progressionLoop", doc.progressionLoop) || !fields.getBool("followHost", doc.followHost)) {
@@ -573,7 +619,6 @@ bool loadState(DocumentStore& store, std::string_view text, std::string& error, 
         doc.events.push_back(event);
     }
 
-    int nextId = 0;
     if (!fields.getIntIn("nextId", 1, INT_MAX, nextId)) {
         return false;
     }
@@ -581,8 +626,8 @@ bool loadState(DocumentStore& store, std::string_view text, std::string& error, 
         return fields.fail("nextId", "must exceed every event id (" + std::to_string(maxId) + ")");
     }
 
-    int width = kDefaultEditorWidth;
-    int height = kDefaultEditorHeight;
+    width = kDefaultEditorWidth;
+    height = kDefaultEditorHeight;
     if (fields.has("editor")) {
         const json* editorObject = fields.getObject("editor");
         if (editorObject == nullptr) {
@@ -594,13 +639,6 @@ bool loadState(DocumentStore& store, std::string_view text, std::string& error, 
         }
     }
 
-    store.replace(std::move(doc), nextId);
-    if (editorWidth != nullptr) {
-        *editorWidth = width;
-    }
-    if (editorHeight != nullptr) {
-        *editorHeight = height;
-    }
     return true;
 }
 
@@ -686,7 +724,16 @@ std::string stateJson(const DocumentStore& store, int editorWidth, int editorHei
 
 bool applyCommandJson(DocumentStore& store, std::string_view text, std::string& error) noexcept {
     try {
-        return applyCommand(store, text, error);
+        error.clear();
+        Command command;
+        if (!parseCommand(text, command, error)) {  // Phase A: the JSON tree is destroyed on return
+            return false;
+        }
+        if (!applyCommand(store, command)) {  // Phase B: only the store and plain data in scope
+            error = "\"appendChord\" refused: no event ids left";
+            return false;
+        }
+        return true;
     } catch (...) {
         setInternalError(error);
         return false;
@@ -696,7 +743,22 @@ bool applyCommandJson(DocumentStore& store, std::string_view text, std::string& 
 bool loadStateJson(DocumentStore& store, std::string_view text, std::string& error, int* editorWidth,
                    int* editorHeight) noexcept {
     try {
-        return loadState(store, text, error, editorWidth, editorHeight);
+        error.clear();
+        Document doc;
+        int nextId = 0;
+        int width = kDefaultEditorWidth;
+        int height = kDefaultEditorHeight;
+        if (!parseState(text, doc, nextId, width, height, error)) {  // Phase A: the JSON tree is destroyed on return
+            return false;
+        }
+        store.replace(std::move(doc), nextId);  // Phase B: cannot throw, nor can the writes below
+        if (editorWidth != nullptr) {
+            *editorWidth = width;
+        }
+        if (editorHeight != nullptr) {
+            *editorHeight = height;
+        }
+        return true;
     } catch (...) {
         setInternalError(error);
         return false;

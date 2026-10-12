@@ -36,11 +36,13 @@ constexpr int kMaxJsonDepth = 64;
 ///
 /// Robustness of the two readers (`applyCommandJson`, `loadStateJson`)
 /// --------------------------------------------------------------------
-/// Both are noexcept and transactional: the whole message is parsed and validated first, and the store
-/// is touched last through calls that give the strong exception guarantee (document.h), so a false
-/// result always means the store, its history and its id counter are exactly as they were. An exception
-/// the validation did not anticipate (an allocation failure, say) is reported as `error == "internal
-/// error"`; by construction, not by test, it too leaves the store unchanged.
+/// Both are noexcept and transactional: the whole message is parsed and validated into plain data first,
+/// the parsed JSON tree is destroyed (nlohmann's destructor allocates, so it must not be the thing that
+/// fails after a change), and only then is the store touched, through calls that give the strong
+/// exception guarantee (document.h). A false result therefore always means the store, its history and
+/// its id counter are exactly as they were. An exception the validation did not anticipate (an
+/// allocation failure, say) is reported as `error == "internal error"`; by construction, not by test, it
+/// too leaves the store unchanged.
 /// Before parsing, the raw text is checked cheaply: longer than `kMaxJsonBytes`, nested deeper than
 /// `kMaxJsonDepth`, or containing a raw NUL byte (nlohmann's lexer would read it as end of input and
 /// silently drop whatever follows) is rejected. An escaped `\u0000` inside a string is just a
