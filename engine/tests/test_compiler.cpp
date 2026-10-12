@@ -446,8 +446,36 @@ TEST_CASE("compile: with auto voice-leading an explicit inversion or octave is h
     store.setInversion(f, 0);
     store.setOctave(f, -1);
     CHECK(voicings(store.doc())[1] == std::vector<int>{53, 57, 60});
-    store.setOctave(f, 0);  // back to the defaults: auto decides again
+    store.setOctave(f, 0);  // still manual: root position in the default register, not auto's C F A
+    CHECK(voicings(store.doc())[1] == std::vector<int>{65, 69, 72});
+    store.resetVoicing(f);  // auto decides again
     CHECK(voicings(store.doc())[1] == std::vector<int>{60, 65, 69});
+}
+
+TEST_CASE("compile: a chord pinned to root position with setInversion(id, 0) stays there under auto voice-leading") {
+    DocumentStore store;
+    store.appendChord(kC);
+    const int f = store.appendChord(kF);
+    store.setAutoVoiceLead(true);
+    REQUIRE(voicings(store.doc())[1] == std::vector<int>{60, 65, 69});
+    store.setInversion(f, 0);
+    CHECK(store.doc().events[1].manualVoicing == true);
+    CHECK(voicings(store.doc()) == Voicings{{60, 64, 67}, {65, 69, 72}});
+    store.resetVoicing(f);
+    CHECK(voicings(store.doc()) == Voicings{{60, 64, 67}, {60, 65, 69}});
+    store.setOctave(f, 0);  // pinning through the octave works the same way
+    CHECK(voicings(store.doc())[1] == std::vector<int>{65, 69, 72});
+}
+
+TEST_CASE("compile: with auto voice-leading off a manual and a reset chord sound the same at the defaults") {
+    DocumentStore store;
+    store.appendChord(kC);
+    const int f = store.appendChord(kF);
+    const Voicings stored = voicings(store.doc());
+    store.setInversion(f, 0);
+    CHECK(voicings(store.doc()) == stored);
+    store.resetVoicing(f);
+    CHECK(voicings(store.doc()) == stored);
 }
 
 TEST_CASE("compile: the first chord keeps its own values under auto voice-leading and the rest follow it") {
@@ -510,8 +538,11 @@ TEST_CASE("compile: random documents with auto voice-leading keep the event inva
             const std::size_t typeIndex = static_cast<std::size_t>(randInt(0, static_cast<int>(types.size()) - 1));
             const int id = store.appendChord(Chord{randInt(0, 11), &types[typeIndex]}, 1.0, 100);
             if (randInt(0, 3) == 0) {
-                store.setInversion(id, randInt(0, 4));  // some explicit values among the defaults
+                store.setInversion(id, randInt(0, 4));  // some manual voicings among the automatic ones
                 store.setOctave(id, randInt(-1, 1));
+                if (randInt(0, 2) == 0) {
+                    store.resetVoicing(id);
+                }
             }
         }
         const Document& doc = store.doc();
@@ -530,8 +561,8 @@ TEST_CASE("compile: random documents with auto voice-leading keep the event inva
             CHECK(std::adjacent_find(v.begin(), v.end()) == v.end());
             CHECK(v.front() >= 48);
             CHECK(v.back() <= 108);
-            if (e.inversion != 0 || e.octave != 0 || i == 0) {
-                CHECK(v == voicing(e.chord, e.inversion, e.octave));  // explicit values, and the first chord
+            if (e.manualVoicing || i == 0) {
+                CHECK(v == voicing(e.chord, e.inversion, e.octave));  // manual chords, and the first chord
             }
             CHECK(onsAt(compiled, start) == v);
             voicedPitches += v.size();

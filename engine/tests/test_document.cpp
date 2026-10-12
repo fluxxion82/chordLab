@@ -126,9 +126,11 @@ TEST_CASE("ChordEvent / Document: equality compares every field") {
     CHECK(a != ChordEvent{1, kC, 4.0, 99});
     CHECK(a.inversion == 0);  // the defaults: root position in the default register
     CHECK(a.octave == 0);
-    CHECK(a == ChordEvent{1, kC, 4.0, 100, 0, 0});
-    CHECK(a != ChordEvent{1, kC, 4.0, 100, 1, 0});
-    CHECK(a != ChordEvent{1, kC, 4.0, 100, 0, -1});
+    CHECK(a.manualVoicing == false);
+    CHECK(a == ChordEvent{1, kC, 4.0, 100, 0, 0, false});
+    CHECK(a != ChordEvent{1, kC, 4.0, 100, 1, 0, false});
+    CHECK(a != ChordEvent{1, kC, 4.0, 100, 0, -1, false});
+    CHECK(a != ChordEvent{1, kC, 4.0, 100, 0, 0, true});
 
     Document x;
     Document y;
@@ -185,6 +187,7 @@ TEST_CASE("appendChord: a new chord is in root position at octave 0") {
     store.appendChord(kG, 4.0, 100);
     CHECK(store.doc().events[0].inversion == 0);
     CHECK(store.doc().events[0].octave == 0);
+    CHECK(store.doc().events[0].manualVoicing == false);
 }
 
 TEST_CASE("appendChord: returns ids 1 then 2 for two appends") {
@@ -463,13 +466,15 @@ TEST_CASE("setVelocity: unknown id and same value are no-ops with no undo entry"
     CHECK_FALSE(store.undo());
 }
 
-// --- setInversion / setOctave ------------------------------------------------------------------
+// --- setInversion / setOctave / resetVoicing -------------------------------------------------
 
-TEST_CASE("setInversion: sets one event's inversion, clamped to the chord's inversions") {
+TEST_CASE("setInversion: sets one event's inversion, clamped to the chord's inversions, and marks it manual") {
     DocumentStore store = threeChords();  // C (3 inversions), F, G7 (4 inversions)
     store.setInversion(1, 2);
     CHECK(store.doc().events[0].inversion == 2);
+    CHECK(store.doc().events[0].manualVoicing == true);
     CHECK(store.doc().events[1].inversion == 0);
+    CHECK(store.doc().events[1].manualVoicing == false);
     CHECK(store.doc().events[2].inversion == 0);
     store.setInversion(1, 3);  // C major has inversions 0..2
     CHECK(store.doc().events[0].inversion == 2);
@@ -477,6 +482,7 @@ TEST_CASE("setInversion: sets one event's inversion, clamped to the chord's inve
     CHECK(store.doc().events[0].inversion == 2);
     store.setInversion(1, -1);
     CHECK(store.doc().events[0].inversion == 0);
+    CHECK(store.doc().events[0].manualVoicing == true);  // root position by choice stays manual
     store.setInversion(1, INT_MIN);
     CHECK(store.doc().events[0].inversion == 0);
     store.setInversion(3, 3);  // G7 has inversions 0..3
@@ -486,32 +492,45 @@ TEST_CASE("setInversion: sets one event's inversion, clamped to the chord's inve
     CHECK(inversionCount(kG) == 4);
 }
 
-TEST_CASE("setInversion: unknown id and an unchanged value are no-ops with no undo entry") {
+TEST_CASE("setInversion: setting the current value on a fresh event is a change: it marks the event manual") {
     DocumentStore store;
     store.appendChord(kC, 4.0, 100);
+    store.setInversion(1, 0);
+    CHECK(store.doc().events[0].inversion == 0);
+    CHECK(store.doc().events[0].manualVoicing == true);
+    REQUIRE(store.undo());
+    CHECK(store.doc().events[0].manualVoicing == false);
+    REQUIRE(store.redo());
+    CHECK(store.doc().events[0].manualVoicing == true);
+}
+
+TEST_CASE("setInversion: unknown id, and the current value on a manual event, are no-ops with no undo entry") {
+    DocumentStore store;
+    store.appendChord(kC, 4.0, 100);
+    store.setInversion(1, 2);
     const Document before = store.doc();
+    REQUIRE(before.events[0].manualVoicing == true);
     store.setInversion(42, 1);
     store.setInversion(0, 1);
     store.setInversion(-1, 1);
-    store.setInversion(1, 0);     // already 0
-    store.setInversion(1, -5);    // clamps to 0
+    store.setInversion(1, 2);    // already 2
+    store.setInversion(1, 100);  // clamps to 2
     CHECK(store.doc() == before);
-    store.setInversion(1, 7);     // clamps to 2: a real change
-    CHECK(store.doc().events[0].inversion == 2);
-    store.setInversion(1, 2);     // same
-    store.setInversion(1, 100);   // same after clamping
-    REQUIRE(store.undo());
-    CHECK(store.doc() == before);
-    REQUIRE(store.undo());  // the append, not a phantom entry
+    REQUIRE(store.undo());  // the real setInversion, not a phantom entry
+    CHECK(store.doc().events[0].inversion == 0);
+    CHECK(store.doc().events[0].manualVoicing == false);
+    REQUIRE(store.undo());  // the append
     CHECK(store.doc().events.empty());
     CHECK_FALSE(store.undo());
 }
 
-TEST_CASE("setOctave: sets one event's octave, clamped to -1..1") {
+TEST_CASE("setOctave: sets one event's octave, clamped to -1..1, and marks it manual") {
     DocumentStore store = threeChords();
     store.setOctave(2, 1);
     CHECK(store.doc().events[1].octave == 1);
+    CHECK(store.doc().events[1].manualVoicing == true);
     CHECK(store.doc().events[0].octave == 0);
+    CHECK(store.doc().events[0].manualVoicing == false);
     CHECK(store.doc().events[2].octave == 0);
     store.setOctave(2, 2);
     CHECK(store.doc().events[1].octave == 1);
@@ -523,26 +542,62 @@ TEST_CASE("setOctave: sets one event's octave, clamped to -1..1") {
     CHECK(store.doc().events[1].octave == -1);
     store.setOctave(2, 0);
     CHECK(store.doc().events[1].octave == 0);
+    CHECK(store.doc().events[1].manualVoicing == true);
     CHECK(kMinVoicingOctave == -1);
     CHECK(kMaxVoicingOctave == 1);
 }
 
-TEST_CASE("setOctave: unknown id and an unchanged value are no-ops with no undo entry") {
+TEST_CASE("setOctave: the current value on a fresh event marks it manual; on a manual event it is a no-op") {
     DocumentStore store;
     store.appendChord(kC, 4.0, 100);
-    const Document before = store.doc();
-    store.setOctave(42, 1);
+    const Document fresh = store.doc();
+    store.setOctave(42, 1);  // unknown id
+    CHECK(store.doc() == fresh);
+    store.setOctave(1, 0);   // the current value, but the event was not manual yet
+    CHECK(store.doc().events[0].manualVoicing == true);
+    const Document manual = store.doc();
     store.setOctave(1, 0);
-    CHECK(store.doc() == before);
-    store.setOctave(1, 5);  // clamps to 1: a real change
+    store.setOctave(1, 5);   // clamps to 1: a real change
     store.setOctave(1, 1);
     store.setOctave(1, 3);
     CHECK(store.doc().events[0].octave == 1);
     REQUIRE(store.undo());
-    CHECK(store.doc() == before);
+    CHECK(store.doc() == manual);
+    REQUIRE(store.undo());
+    CHECK(store.doc().events[0].manualVoicing == false);
     REQUIRE(store.undo());
     CHECK(store.doc().events.empty());
     CHECK_FALSE(store.undo());
+}
+
+TEST_CASE("resetVoicing: returns an event to root position in the default register and clears the flag") {
+    DocumentStore store = threeChords();
+    store.setInversion(2, 1);
+    store.setOctave(2, -1);
+    store.setInversion(3, 0);  // manual root position
+    store.resetVoicing(2);
+    CHECK(store.doc().events[1] == ChordEvent{2, kF, 4.0, 100, 0, 0, false});
+    CHECK(store.doc().events[2] == ChordEvent{3, kG, 4.0, 100, 0, 0, true});
+    store.resetVoicing(3);
+    CHECK(store.doc().events[2].manualVoicing == false);
+    REQUIRE(store.undo());
+    CHECK(store.doc().events[2].manualVoicing == true);
+    REQUIRE(store.undo());
+    CHECK(store.doc().events[1] == ChordEvent{2, kF, 4.0, 100, 1, -1, true});
+    REQUIRE(store.redo());
+    CHECK(store.doc().events[1].manualVoicing == false);
+}
+
+TEST_CASE("resetVoicing: unknown id and an event already at the defaults are no-ops with no undo entry") {
+    DocumentStore store = threeChords();
+    const Document before = store.doc();
+    store.resetVoicing(99);
+    store.resetVoicing(0);
+    store.resetVoicing(-1);
+    store.resetVoicing(1);  // fresh: already 0, 0, not manual
+    CHECK(store.doc() == before);
+    REQUIRE(store.undo());  // pops the third append, not a phantom reset
+    CHECK(idsOf(store) == std::vector<int>{1, 2});
 }
 
 TEST_CASE("setInversion / setOctave: survive a move and a remove of another chord, and undo") {
@@ -554,13 +609,16 @@ TEST_CASE("setInversion / setOctave: survive a move and a remove of another chor
     REQUIRE(idsOf(store) == std::vector<int>{2, 3});
     CHECK(store.doc().events[0].inversion == 1);
     CHECK(store.doc().events[0].octave == -1);
+    CHECK(store.doc().events[0].manualVoicing == true);
     REQUIRE(store.undo());
     REQUIRE(store.undo());
     REQUIRE(store.undo());
     CHECK(store.doc().events[1].inversion == 1);
     CHECK(store.doc().events[1].octave == 0);
+    CHECK(store.doc().events[1].manualVoicing == true);
     REQUIRE(store.undo());
     CHECK(store.doc().events[1].inversion == 0);
+    CHECK(store.doc().events[1].manualVoicing == false);
 }
 
 // --- Auto voice-lead (undoable: it changes the compiled progression) ---------------------------
@@ -864,6 +922,8 @@ TEST_CASE("undo / redo: every undoable operation round-trips") {
     checkRoundTrip(store, [](DocumentStore& s) { s.setInversion(1, 99); });
     checkRoundTrip(store, [](DocumentStore& s) { s.setOctave(1, -1); });
     checkRoundTrip(store, [](DocumentStore& s) { s.setOctave(3, 7); });
+    checkRoundTrip(store, [](DocumentStore& s) { s.resetVoicing(1); });
+    checkRoundTrip(store, [](DocumentStore& s) { s.setInversion(1, 0); });  // the flag alone changes
     checkRoundTrip(store, [](DocumentStore& s) { s.setAutoVoiceLead(true); });
     checkRoundTrip(store, [](DocumentStore& s) { s.setAutoVoiceLead(false); });
     CHECK(idsOf(store) == std::vector<int>{3, 1});
@@ -951,12 +1011,15 @@ TEST_CASE("replace: swaps in a document, resets the id counter and clears the wh
     doc.browsedKey = key('G', 0, Mode::Ionian);
     doc.progressionLoop = false;
     doc.autoVoiceLead = true;
-    doc.events.push_back(ChordEvent{7, kC, 2.0, 90, 2, -1});
+    doc.events.push_back(ChordEvent{7, kC, 2.0, 90, 2, -1, true});
+    doc.events.push_back(ChordEvent{5, kF, 2.0, 90, 0, 0, false});
     store.replace(doc, 8);
 
     CHECK(store.doc() == doc);  // live state included: replace is a load, not an edit
     CHECK(store.doc().events[0].inversion == 2);
     CHECK(store.doc().events[0].octave == -1);
+    CHECK(store.doc().events[0].manualVoicing == true);
+    CHECK(store.doc().events[1].manualVoicing == false);
     CHECK(store.doc().autoVoiceLead == true);
     CHECK_FALSE(store.undo());
     CHECK_FALSE(store.redo());
@@ -984,7 +1047,7 @@ TEST_CASE("DocumentStore: 200 random operations undo to the initial document and
         // Every argument is drawn here, in this fixed order and on every iteration regardless of the
         // operation chosen, so the trace cannot depend on the (unspecified) evaluation order of function
         // arguments or on the current document.
-        const int kind = randInt(0, 14);
+        const int kind = randInt(0, 15);
         const int root = randInt(0, 11);
         const std::size_t typeIndex = static_cast<std::size_t>(randInt(0, static_cast<int>(types.size()) - 1));
         const int lengthKind = randInt(0, 11);  // 10 and 11 inject non-finite lengths
@@ -1052,6 +1115,9 @@ TEST_CASE("DocumentStore: 200 random operations undo to the initial document and
             case 13:
                 store.setAutoVoiceLead(flag);
                 break;
+            case 14:
+                store.resetVoicing(id);
+                break;
             default:
                 store.undo();  // a neutral pair: exercises undo/redo mid-history
                 store.redo();
@@ -1079,6 +1145,10 @@ TEST_CASE("DocumentStore: 200 random operations undo to the initial document and
             CHECK(e.inversion < inversionCount(e.chord));
             CHECK(e.octave >= kMinVoicingOctave);
             CHECK(e.octave <= kMaxVoicingOctave);
+            if (!e.manualVoicing) {  // what the store's own operations maintain
+                CHECK(e.inversion == 0);
+                CHECK(e.octave == 0);
+            }
         }
     }
 

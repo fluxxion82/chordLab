@@ -65,8 +65,7 @@ std::vector<std::vector<int>> voicings(const Document& doc) {
     result.reserve(doc.events.size());
     for (const ChordEvent& event : doc.events) {
         assertValidEvent(event);
-        const bool defaults = event.inversion == 0 && event.octave == 0;
-        if (doc.autoVoiceLead && defaults && !result.empty()) {
+        if (doc.autoVoiceLead && !event.manualVoicing && !result.empty()) {
             result.push_back(closestVoicing(event.chord, result.back()));
         } else {
             result.push_back(voicing(event.chord, event.inversion, event.octave));

@@ -41,8 +41,12 @@ static_assert(static_cast<std::size_t>(kMaxChords) * 8 * 2 <= kMaxSnapshotEvents
 /// by the document: this is policy, not an omission.
 /// `inversion` (0..`inversionCount(chord) - 1`, 0 = root position) and `octave` (`kMinVoicingOctave`..
 /// `kMaxVoicingOctave`, 0 = the default register) are the chord's voicing as `voicing` in voicing.h reads
-/// them. Both 0, the defaults, also means "let auto voice-leading choose" when `Document::autoVoiceLead`
-/// is on (see compiler.h): a chord cannot be pinned to root position in the default register under auto.
+/// them, and `manualVoicing` says the user chose them. `DocumentStore::setInversion` and `setOctave` set
+/// the flag along with the value (root position in the default register is a choice like any other), and
+/// `resetVoicing` clears all three, so an event the store was never asked to voice is at 0, 0, not manual.
+/// With `Document::autoVoiceLead` on, `compile` chooses the voicing of every chord whose flag is clear and
+/// keeps the stored values of every chord whose flag is set; with it off every chord keeps its stored
+/// values, flag or not (see compiler.h).
 struct ChordEvent {
     int id;
     Chord chord;
@@ -50,11 +54,12 @@ struct ChordEvent {
     int velocity;
     int inversion = 0;
     int octave = 0;
+    bool manualVoicing = false;
 };
 
 constexpr bool operator==(const ChordEvent& a, const ChordEvent& b) noexcept {
     return a.id == b.id && a.chord == b.chord && a.lengthBeats == b.lengthBeats && a.velocity == b.velocity &&
-           a.inversion == b.inversion && a.octave == b.octave;
+           a.inversion == b.inversion && a.octave == b.octave && a.manualVoicing == b.manualVoicing;
 }
 
 constexpr bool operator!=(const ChordEvent& a, const ChordEvent& b) noexcept {
@@ -73,7 +78,7 @@ struct Document {
     Key projectKey{{'C', 0}, Mode::Ionian};
     Key browsedKey{{'C', 0}, Mode::Ionian};
     std::vector<ChordEvent> events;  // playback order; chords abut, no gaps
-    bool autoVoiceLead = false;      // compile picks each defaulted chord's inversion and octave (compiler.h)
+    bool autoVoiceLead = false;      // compile picks each non-manual chord's inversion and octave (compiler.h)
     bool progressionLoop = true;
     bool followHost = true;
 
@@ -142,11 +147,18 @@ public:
     /// Sets the velocity of event `id`, clamped to [kMinVelocity, kMaxVelocity]. Unknown id: no-op.
     void setVelocity(int id, int velocity);
 
-    /// Sets the inversion of event `id`, clamped to 0..`inversionCount(chord) - 1`. Unknown id: no-op.
+    /// Sets the inversion of event `id`, clamped to 0..`inversionCount(chord) - 1`, and marks its voicing
+    /// manual, in one undoable step. Unknown id: no-op. The current value on an event already manual: no-op.
     void setInversion(int id, int inversion);
 
-    /// Sets the octave of event `id`, clamped to [kMinVoicingOctave, kMaxVoicingOctave]. Unknown id: no-op.
+    /// Sets the octave of event `id`, clamped to [kMinVoicingOctave, kMaxVoicingOctave], and marks its
+    /// voicing manual, in one undoable step. Unknown id: no-op. The current value on an event already
+    /// manual: no-op.
     void setOctave(int id, int octave);
+
+    /// Returns event `id` to root position in the default register and clears its manual flag, so that
+    /// auto voice-leading decides for it again. Unknown id, or an event already so: no-op.
+    void resetVoicing(int id);
 
     /// Removes event `id`; the events after it move up so the sequence stays contiguous. Unknown id: no-op.
     void removeChord(int id);

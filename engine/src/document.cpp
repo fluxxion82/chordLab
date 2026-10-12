@@ -206,6 +206,7 @@ void DocumentStore::setInversion(int id, int inversion) {
     Document next = doc_;
     ChordEvent& event = next.events[static_cast<std::size_t>(index)];
     event.inversion = clampInversion(event.chord, inversion);
+    event.manualVoicing = true;
     commit(std::move(next));
 }
 
@@ -215,7 +216,22 @@ void DocumentStore::setOctave(int id, int octave) {
         return;
     }
     Document next = doc_;
-    next.events[static_cast<std::size_t>(index)].octave = clampOctave(octave);
+    ChordEvent& event = next.events[static_cast<std::size_t>(index)];
+    event.octave = clampOctave(octave);
+    event.manualVoicing = true;
+    commit(std::move(next));
+}
+
+void DocumentStore::resetVoicing(int id) {
+    const int index = findIndex(id);
+    if (index < 0) {
+        return;
+    }
+    Document next = doc_;
+    ChordEvent& event = next.events[static_cast<std::size_t>(index)];
+    event.inversion = 0;
+    event.octave = 0;
+    event.manualVoicing = false;
     commit(std::move(next));
 }
 

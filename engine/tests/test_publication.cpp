@@ -177,17 +177,58 @@ TEST_CASE("publication: inversion, octave and auto voice-leading change the comp
     REQUIRE(fillSlot(store.doc(), *slot, last));
     CHECK(last.generation == 5);
 
-    // Auto voice-leading would choose exactly that voicing, and the explicit one is honoured anyway: the
+    // Auto voice-leading would choose exactly that voicing, and the manual one is honoured anyway: the
     // compiled content is identical, so nothing is published.
     store.setAutoVoiceLead(true);
     CHECK_FALSE(fillSlot(store.doc(), *slot, last));
     CHECK(last.generation == 5);
-    store.setInversion(f, 0);  // an unused inversion under auto: still the same content
+    store.setInversion(f, 0);  // manual root position under auto: F E A -> F A C
     store.setOctave(f, 0);
-    CHECK_FALSE(fillSlot(store.doc(), *slot, last));
-    CHECK(last.generation == 5);
-    store.setAutoVoiceLead(false);  // back to F in root position
     REQUIRE(fillSlot(store.doc(), *slot, last));
     CHECK(last.generation == 6);
     CHECK(eventsOf(*slot) == rootPositions);
+    store.resetVoicing(f);  // auto decides again: C F A
+    REQUIRE(fillSlot(store.doc(), *slot, last));
+    CHECK(last.generation == 7);
+    CHECK(eventsOf(*slot) != rootPositions);
+    store.setAutoVoiceLead(false);  // back to F in root position
+    REQUIRE(fillSlot(store.doc(), *slot, last));
+    CHECK(last.generation == 8);
+    CHECK(eventsOf(*slot) == rootPositions);
+}
+
+TEST_CASE("publication: the manual flag alone publishes only when it changes the compiled content") {
+    DocumentStore store;
+    store.appendChord(chord(0, "maj"), 4.0, 100);
+    const int f = store.appendChord(chord(5, "maj"), 4.0, 100);
+    Publication last;
+    auto slot = newSlot();
+    REQUIRE(fillSlot(store.doc(), *slot, last));
+    REQUIRE(last.generation == 1);
+
+    // Auto off: a manual root position compiles exactly like the default one. The flag flips, the
+    // document differs, nothing is published.
+    store.setInversion(f, 0);
+    REQUIRE(store.doc().events[1].manualVoicing == true);
+    CHECK_FALSE(fillSlot(store.doc(), *slot, last));
+    store.resetVoicing(f);
+    REQUIRE(store.doc().events[1].manualVoicing == false);
+    CHECK_FALSE(fillSlot(store.doc(), *slot, last));
+    CHECK(last.generation == 1);
+
+    // Auto on: the same flag flip moves F between C F A (chosen) and F A C (manual): content, published.
+    store.setAutoVoiceLead(true);
+    REQUIRE(fillSlot(store.doc(), *slot, last));
+    CHECK(last.generation == 2);
+    const std::vector<NoteEvent> chosen = eventsOf(*slot);
+    store.setInversion(f, 0);
+    REQUIRE(fillSlot(store.doc(), *slot, last));
+    CHECK(last.generation == 3);
+    CHECK(eventsOf(*slot) != chosen);
+    CHECK(eventsOf(*slot) == compile(store.doc()).events);
+    store.resetVoicing(f);
+    REQUIRE(fillSlot(store.doc(), *slot, last));
+    CHECK(last.generation == 4);
+    CHECK(eventsOf(*slot) == chosen);
+    CHECK_FALSE(fillSlot(store.doc(), *slot, last));
 }

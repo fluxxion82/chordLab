@@ -15,11 +15,11 @@ struct Compiled {
 };
 
 /// The voicing `compile` gives each chord of `doc`, in playback order: `voicing(chord, inversion, octave)`
-/// at the default range. With `doc.autoVoiceLead` on, every chord after the first whose stored inversion
-/// and octave are both 0 (the defaults) instead takes, over all of its inversions at octaves -1, 0 and 1,
-/// the pair with the smallest `voiceLeadingCost` from the previous chord's voicing as chosen here; a tie
-/// goes to the smaller |octave|, then the smaller inversion, then the lower octave. A chord with an
-/// explicit (non-zero) inversion or octave is voiced as stored, auto or not, and so is the first chord.
+/// at the default range. With `doc.autoVoiceLead` on, every chord after the first whose `manualVoicing`
+/// is clear instead takes, over all of its inversions at octaves -1, 0 and 1, the pair with the smallest
+/// `voiceLeadingCost` from the previous chord's voicing as chosen here; a tie goes to the smaller
+/// |octave|, then the smaller inversion, then the lower octave. A chord whose `manualVoicing` is set is
+/// voiced as stored, auto or not (so a manual root position stays put), and so is the first chord.
 /// Same preconditions as `compile`.
 std::vector<std::vector<int>> voicings(const Document& doc);
 
