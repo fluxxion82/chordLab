@@ -1364,6 +1364,20 @@ TEST_CASE("moveChord: the first section is pinned to the start when its own chor
     CHECK(sectionStartsOf(lone) == SectionStarts{{1, 0}});
 }
 
+TEST_CASE("moveChord: when the first chord moves away and the next section's start chord slides into 0, that section is first") {
+    DocumentStore store = threeChords();  // chords 1 2 3
+    store.addSection(0, "A");
+    store.addSection(1, "B");
+    store.moveChord(1, 2);
+    CHECK(idsOf(store) == std::vector<int>{2, 3, 1});
+    CHECK(sectionStartsOf(store) == SectionStarts{{2, 0}, {1, 2}});  // B's chord is first now; A follows its chord
+    CHECK(sectionChordIdsOf(store) == std::vector<int>{2, 1});
+    REQUIRE(store.undo());
+    CHECK(sectionStartsOf(store) == SectionStarts{{1, 0}, {2, 1}});
+    REQUIRE(store.redo());
+    CHECK(sectionStartsOf(store) == SectionStarts{{2, 0}, {1, 2}});
+}
+
 // --- Undo / redo of sections -------------------------------------------------------------------
 
 TEST_CASE("undo / redo: every section operation round-trips") {
@@ -1427,6 +1441,72 @@ TEST_CASE("replace: takes the sections along and restarts the section id counter
     none.replace(Document{}, 1);
     CHECK(none.doc().sections.empty());
     CHECK(none.nextSectionId() == 1);
+}
+
+TEST_CASE("sectionsWellFormed: the section invariants replace asserts, with ids bounded so the derived counter cannot overflow") {
+    Document doc;
+    CHECK(sectionsWellFormed(doc));  // no chords, no sections
+    doc.events.push_back(ChordEvent{1, kC, 4.0, 100});
+    doc.events.push_back(ChordEvent{2, kF, 4.0, 100});
+    CHECK(sectionsWellFormed(doc));  // chords, no sections
+    doc.sections.push_back(Section{1, "A", 0, 0});
+    CHECK(sectionsWellFormed(doc));
+
+    Document ok = doc;
+    ok.sections.push_back(Section{INT_MAX - 1, "B", 7, 1});  // the largest id allowed
+    CHECK(sectionsWellFormed(ok));
+
+    Document bad = doc;
+    bad.sections[0].id = INT_MAX;  // max(id) + 1 would overflow
+    CHECK_FALSE(sectionsWellFormed(bad));
+    bad = doc;
+    bad.sections[0].id = 0;
+    CHECK_FALSE(sectionsWellFormed(bad));
+    bad = doc;
+    bad.sections[0].id = kNoSectionId;
+    CHECK_FALSE(sectionsWellFormed(bad));
+    bad = doc;
+    bad.sections[0].firstEventIndex = 1;  // the first section must start at 0
+    CHECK_FALSE(sectionsWellFormed(bad));
+    bad = doc;
+    bad.sections.push_back(Section{2, "B", 0, 2});  // one past the last chord
+    CHECK_FALSE(sectionsWellFormed(bad));
+    bad = doc;
+    bad.sections.push_back(Section{2, "B", 0, 0});  // not strictly increasing
+    CHECK_FALSE(sectionsWellFormed(bad));
+    bad = doc;
+    bad.sections.push_back(Section{1, "B", 0, 1});  // duplicate id
+    CHECK_FALSE(sectionsWellFormed(bad));
+    bad = doc;
+    bad.sections[0].colourIndex = kNumSectionColours;
+    CHECK_FALSE(sectionsWellFormed(bad));
+    bad = doc;
+    bad.sections[0].colourIndex = -1;
+    CHECK_FALSE(sectionsWellFormed(bad));
+    bad = doc;
+    bad.events.clear();  // a section with no chord to start on
+    CHECK_FALSE(sectionsWellFormed(bad));
+}
+
+TEST_CASE("replace: a section id of INT_MAX - 1 derives the counter INT_MAX, and the next addSection is refused unchanged") {
+    Document doc;
+    doc.events.push_back(ChordEvent{1, kC, 4.0, 100});
+    doc.events.push_back(ChordEvent{2, kF, 4.0, 100});
+    doc.sections.push_back(Section{INT_MAX - 1, "A", 0, 0});
+    REQUIRE(sectionsWellFormed(doc));
+    DocumentStore store;
+    store.replace(doc, 3);
+    CHECK(store.nextSectionId() == INT_MAX);
+
+    CHECK(store.addSection(1, "B") == kNoSectionId);
+    CHECK(store.doc() == doc);
+    CHECK_FALSE(store.undo());
+    CHECK(store.nextSectionId() == INT_MAX);
+
+    store.renameSection(INT_MAX - 1, "Z");  // the existing section is still editable
+    CHECK(store.doc().sections[0].name == "Z");
+    REQUIRE(store.undo());
+    CHECK(store.doc() == doc);
 }
 
 // --- Property test -----------------------------------------------------------------------------

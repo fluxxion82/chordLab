@@ -66,8 +66,9 @@ constexpr bool operator!=(const ChordEvent& a, const ChordEvent& b) noexcept {
 /// The first section always starts at 0, so when there are sections they partition the whole sequence
 /// and every chord is in exactly one; a document without sections behaves as one unnamed section
 /// (`compileSection`). `id` is stable for the life of the section and unique within a `DocumentStore`;
-/// it survives chord edits, undo and redo, and is never reused after a remove. `colourIndex` is in
-/// 0..kNumSectionColours-1.
+/// it survives chord edits, undo and redo, and is never reused after a remove. It is in 1..INT_MAX-1:
+/// the store derives its next id as the largest plus one (`replace`), which must not overflow.
+/// `colourIndex` is in 0..kNumSectionColours-1.
 struct Section {
     int id;
     std::string name;
@@ -122,6 +123,12 @@ inline bool operator!=(const Document& a, const Document& b) noexcept {
     return !(a == b);
 }
 
+/// True when `doc.sections` satisfies the section invariants: sorted strictly by `firstEventIndex` with
+/// the first at 0 and every index a position of the progression (so no sections on an empty one),
+/// colours in 0..kNumSectionColours-1, ids in 1..INT_MAX-1 and distinct. What `DocumentStore::replace`
+/// asserts, and what a loader taking a document from outside the process must check before calling it.
+bool sectionsWellFormed(const Document& doc);
+
 /// Owns a `Document` and its undo/redo history.
 ///
 /// Undoable state is `Document::events`, `Document::sections` and `Document::projectKey`. Every mutation
@@ -170,8 +177,9 @@ public:
     /// travels with it, with one exception: the first section is pinned to the start. When no section's
     /// start chord ends up at index 0 (the first section's own chord moved away, or a chord from inside a
     /// section was moved to the front), the section that was first stays at 0 and takes the new first
-    /// chord in. Only another section's start chord moved to the front displaces it: that section becomes
-    /// the first and the old first follows its chord. Unknown id: no-op.
+    /// chord in. When another section's start chord does end up at 0, whether it was moved there or slid
+    /// there because the first chord moved away from in front of it, that section becomes the first and
+    /// the old first follows its chord. Unknown id: no-op.
     void moveChord(int id, int newIndex);
 
     /// Sets the length of event `id`, clamped to [kMinLengthBeats, kMaxLengthBeats]. Unknown id, or a
@@ -239,13 +247,12 @@ public:
     /// Clears the undo and redo history and changes nothing else.
     /// `doc` must satisfy the store's invariants (valid chords and keys, finite lengths within
     /// [kMinLengthBeats, kMaxLengthBeats], velocities within [kMinVelocity, kMaxVelocity], distinct ids,
-    /// at most `kMaxChords` events; sections sorted strictly by `firstEventIndex` with the first at 0 and
-    /// every index a position of the progression, colours in 0..kNumSectionColours-1, ids >= 1 and
-    /// distinct) and
-    /// `nextId` must be >= 1 and greater than every event id, so that ids stay unique. `nextSectionId`
-    /// must likewise be >= 1 and greater than every section id, or 0 (the default): one past the largest
-    /// section id in `doc`, 1 when it has none. Callers that take documents from outside the process
-    /// (`loadStateJson`) validate before calling.
+    /// at most `kMaxChords` events; sections as `sectionsWellFormed` requires, in particular ids in
+    /// 1..INT_MAX-1) and `nextId` must be >= 1 and greater than every event id, so that ids stay unique.
+    /// `nextSectionId` must likewise be >= 1 and greater than every section id, or 0 (the default): one
+    /// past the largest section id in `doc` (which the id bound keeps from overflowing), 1 when it has
+    /// none; a derived INT_MAX means the next `addSection` is refused. Callers that take documents from
+    /// outside the process (`loadStateJson`) validate before calling.
     void replace(Document doc, int nextId, int nextSectionId = 0);
 
     /// The id the next successful append will get. Persisted by `stateJson` so that a reloaded document

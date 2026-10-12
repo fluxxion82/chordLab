@@ -35,6 +35,23 @@ int Document::sectionIndexOf(int eventIndex) const {
     return found;
 }
 
+bool sectionsWellFormed(const Document& doc) {
+    if (!doc.sections.empty() && doc.sections.front().firstEventIndex != 0) {
+        return false;
+    }
+    std::set<int> seen;
+    int previousIndex = -1;
+    for (const Section& s : doc.sections) {
+        if (s.firstEventIndex <= previousIndex || static_cast<std::size_t>(s.firstEventIndex) >= doc.events.size() ||
+            s.colourIndex < 0 || s.colourIndex >= kNumSectionColours || s.id < 1 || s.id >= INT_MAX ||
+            !seen.insert(s.id).second) {
+            return false;
+        }
+        previousIndex = s.firstEventIndex;
+    }
+    return true;
+}
+
 // --- DocumentStore ---------------------------------------------------------------------
 
 namespace {
@@ -77,25 +94,8 @@ void assertValidKey([[maybe_unused]] const Key& key) {
     return true;
 }
 
-/// True when `doc.sections` satisfies the section invariants documented on `Document::sections` and
-/// `DocumentStore::replace`. Debug-only, for `replace`'s precondition check.
-[[maybe_unused]] bool sectionsWellFormed(const Document& doc) {
-    if (!doc.sections.empty() && doc.sections.front().firstEventIndex != 0) {
-        return false;
-    }
-    std::set<int> seen;
-    int previousIndex = -1;
-    for (const Section& s : doc.sections) {
-        if (s.firstEventIndex <= previousIndex || static_cast<std::size_t>(s.firstEventIndex) >= doc.events.size() ||
-            s.colourIndex < 0 || s.colourIndex >= kNumSectionColours || s.id < 1 || !seen.insert(s.id).second) {
-            return false;
-        }
-        previousIndex = s.firstEventIndex;
-    }
-    return true;
-}
-
-/// One past the largest section id in `doc`, or 1 when it has no sections.
+/// One past the largest section id in `doc`, or 1 when it has no sections. `doc` must satisfy
+/// `sectionsWellFormed`, whose id bound keeps the sum from overflowing.
 int sectionIdAfter(const Document& doc) {
     int next = 1;
     for (const Section& s : doc.sections) {
