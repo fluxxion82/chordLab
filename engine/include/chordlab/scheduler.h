@@ -1,6 +1,7 @@
 #pragma once
 
 #include "chordlab/compiler.h"
+#include "chordlab/limits.h"
 
 #include <array>
 #include <atomic>
@@ -114,8 +115,9 @@ public:
     /// The most progression wraps one block may span and still be played (16 beats of a 0.25-beat
     /// progression, far beyond any real block); beyond it the block only releases.
     static constexpr std::size_t kMaxWrapsPerBlock = 64;
-    /// The most events a snapshot may hold; a larger one is adopted as empty.
-    static constexpr std::size_t kMaxSnapshotEvents = 4096;
+    /// The most events a snapshot may hold; a larger one is adopted as empty. The value is
+    /// `chordlab::kMaxSnapshotEvents` of limits.h, which document.h sizes `kMaxChords` against.
+    static constexpr std::size_t kMaxSnapshotEvents = ::chordlab::kMaxSnapshotEvents;
     /// An output capacity that always pays every owed release in one block.
     static constexpr std::size_t kCapacityForImmediateRelease = 128;
     /// The largest sane sample-rate-to-tempo ratio; beyond it the block's timing is unusable.

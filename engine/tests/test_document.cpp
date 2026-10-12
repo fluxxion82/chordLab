@@ -2,6 +2,7 @@
 
 #include "chordlab/chord.h"
 #include "chordlab/document.h"
+#include "chordlab/limits.h"
 #include "chordlab/pitch.h"
 #include "chordlab/scale.h"
 
@@ -266,6 +267,41 @@ TEST_CASE("appendChord: returns -1 and changes nothing once the id counter reach
     CHECK(exhausted.appendChord(kC) == -1);
     CHECK(exhausted.doc().events.empty());
     CHECK_FALSE(exhausted.undo());
+}
+
+TEST_CASE("kMaxChords: plan value, and a full document of eight-note chords still fits a snapshot") {
+    CHECK(kMaxChords == 256);
+    CHECK(static_cast<std::size_t>(kMaxChords) * 8 * 2 <= kMaxSnapshotEvents);
+}
+
+TEST_CASE("appendChord: the chord past kMaxChords is refused, changing nothing and keeping the history") {
+    DocumentStore store;
+    for (int i = 0; i < kMaxChords; ++i) {
+        REQUIRE(store.appendChord(kC) == i + 1);
+    }
+    store.setLength(1, 2.0);
+    REQUIRE(store.undo());  // leaves a pending redo that the refusal must not clear
+    const Document before = store.doc();
+    REQUIRE(before.events.size() == static_cast<std::size_t>(kMaxChords));
+
+    CHECK(store.appendChord(kF) == kNoEventId);
+    CHECK(store.appendChord(kF) == kNoEventId);
+    CHECK(store.doc() == before);
+    CHECK(store.nextId() == kMaxChords + 1);  // no id consumed
+
+    REQUIRE(store.redo());  // the pending redo survived
+    CHECK(store.doc().events[0].lengthBeats == 2.0);
+    REQUIRE(store.undo());
+    CHECK(store.doc() == before);
+    REQUIRE(store.undo());  // pops a real append, not a phantom entry
+    CHECK(store.doc().events.size() == static_cast<std::size_t>(kMaxChords) - 1);
+
+    // Room for exactly one more once one is gone.
+    REQUIRE(store.redo());
+    store.removeChord(1);
+    CHECK(store.appendChord(kF) == kMaxChords + 1);
+    CHECK(store.appendChord(kF) == kNoEventId);
+    CHECK(store.doc().events.size() == static_cast<std::size_t>(kMaxChords));
 }
 
 // --- findIndex -------------------------------------------------------------------------

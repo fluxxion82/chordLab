@@ -90,7 +90,8 @@ std::string snapshotJson(const Document& doc, const Palette& palette);
 ///   `{"mode":"<Mode>"}` (the parallel mode on the same tonic pitch class, canonically spelled) or
 ///   `{"home":true}` (browsed key = project key).
 /// - `appendChord {root,type,lengthBeats?,velocity?}`: `appendChord`, with the store's defaults
-///   (4 beats, velocity 100) for the optional fields.
+///   (4 beats, velocity 100) for the optional fields. Refused (false, an error naming the reason, no
+///   change) when the document already holds `kMaxChords` chords or the id counter is exhausted.
 /// - `moveChord {id,index}`, `setLength {id,lengthBeats}`, `setVelocity {id,velocity}`,
 ///   `removeChord {id}`: the matching store call.
 /// - `setProgressionLoop {on}`, `setFollowHost {on}`: the matching live-state setter.
@@ -121,8 +122,8 @@ std::string stateJson(const DocumentStore& store, int editorWidth = kDefaultEdit
 
 /// Restores a document saved by `stateJson`. Atomic: the whole text is parsed and validated first; on any
 /// problem (malformed JSON, wrong schema, a missing or mistyped field, an unknown chord type or mode, a
-/// root outside 0..11, an id below 1 or repeated, a `nextId` below 1 or not above every event id, a
-/// non-positive editor size) it returns false with a description in `error` and the store, its history
+/// root outside 0..11, an id below 1 or repeated, more than `kMaxChords` events, a `nextId` below 1 or
+/// not above every event id, a non-positive editor size) it returns false with a description in `error` and the store, its history
 /// and the out-params are untouched. Otherwise it replaces the store's document and id counter
 /// (`DocumentStore::replace`, which clears the undo/redo history), writes the editor size into the
 /// out-params that are non-null, and returns true with `error` cleared.
