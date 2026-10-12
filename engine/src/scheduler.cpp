@@ -132,7 +132,9 @@ Scheduler::Scheduler() noexcept
       mBatchCount(0),
       mQueue{},
       mQueueHead(0),
-      mQueueTail(0) {
+      mQueueTail(0),
+      mCancelQueued(false),
+      mCancelTail(0) {
     mState.owners.fill(0);
     mState.owed.fill(false);
     for (Preview& preview : mState.previews) {
@@ -201,6 +203,11 @@ bool Scheduler::pushPreview(const PreviewCmd& cmd) noexcept {
 }
 
 void Scheduler::panic() noexcept {
+    // Everything in the ring right now is stale: remember where it ends and let the next drain skip it.
+    // Only the tail is read, so the producer is never waited for; commands it pushes from here on sit
+    // past the cut and are served.
+    mCancelTail = mQueueTail.load(std::memory_order_acquire);
+    mCancelQueued = true;
     for (int pitch = 0; pitch < kPitchCount; ++pitch) {
         if (mState.owners[static_cast<std::size_t>(pitch)] != 0) {
             mState.owners[static_cast<std::size_t>(pitch)] = 0;
@@ -270,6 +277,13 @@ void Scheduler::drainQueue() noexcept {
     mBatchCount = 0;
     std::uint32_t head = mQueueHead.load(std::memory_order_relaxed);
     const std::uint32_t tail = mQueueTail.load(std::memory_order_acquire);
+    if (mCancelQueued) {
+        // The cut lies in [head, tail]: `panic` and this drain run on the same thread, head moves only
+        // here, and the tail only grows. Indices are free-running, so the check is on differences.
+        assert(mCancelTail - head <= tail - head);
+        head = mCancelTail;
+        mCancelQueued = false;
+    }
     while (head != tail && mBatchCount < kPreviewQueueCapacity) {
         mBatch[mBatchCount] = mQueue[head % kPreviewQueueCapacity];
         ++mBatchCount;

@@ -1,6 +1,7 @@
 #pragma once
 
-#include "chordlab/compiler.h"
+#include "chordlab/limits.h"
+#include "chordlab/note_event.h"
 
 #include <array>
 #include <atomic>
@@ -114,8 +115,9 @@ public:
     /// The most progression wraps one block may span and still be played (16 beats of a 0.25-beat
     /// progression, far beyond any real block); beyond it the block only releases.
     static constexpr std::size_t kMaxWrapsPerBlock = 64;
-    /// The most events a snapshot may hold; a larger one is adopted as empty.
-    static constexpr std::size_t kMaxSnapshotEvents = 4096;
+    /// The most events a snapshot may hold; a larger one is adopted as empty. The value is
+    /// `chordlab::kMaxSnapshotEvents` of limits.h, which document.h sizes `kMaxChords` against.
+    static constexpr std::size_t kMaxSnapshotEvents = ::chordlab::kMaxSnapshotEvents;
     /// An output capacity that always pays every owed release in one block.
     static constexpr std::size_t kCapacityForImmediateRelease = 128;
     /// The largest sane sample-rate-to-tempo ratio; beyond it the block's timing is unusable.
@@ -127,8 +129,9 @@ public:
 
     /// Records the sample rate the preview timers use and marks a pending flush: the next `process`
     /// releases every progression note and chases the current position. Ownership state is kept, so the
-    /// notes that sound are released properly; previews are untouched. `sampleRate` must be positive and
-    /// finite (an unusable value is ignored).
+    /// notes that sound are released properly; previews are untouched, and so are the queued preview
+    /// commands, which the next block serves as usual (only `panic` discards them). `sampleRate` must be
+    /// positive and finite (an unusable value is ignored).
     void reset(double sampleRate) noexcept;
 
     /// Replaces the progression. A changed `generation` marks a pending flush (release all, then chase on
@@ -153,6 +156,10 @@ public:
     /// Silences everything: every sounding pitch, progression and preview alike, is released (its note-off
     /// is owed and paid by the next block) and every preview is forgotten. The progression is not chased
     /// afterwards: it stays silent until its next attack.
+    /// The preview commands queued before the call are discarded too, at the next block's drain: a start
+    /// that has not sounded yet never will, and a stop has nothing left to stop. Commands pushed after
+    /// `panic` returns are served as usual. The cut is the queue's tail as `panic` saw it (recorded, not
+    /// drained, so the pushing thread needs no lock); the last of several panics before one block wins.
     void panic() noexcept;
 
     /// The owners currently holding `pitch` (a combination of `kOwnerProgression` and `kOwnerPreview`).
@@ -257,6 +264,8 @@ private:
     std::array<PreviewCmd, kPreviewQueueCapacity> mQueue;
     std::atomic<std::uint32_t> mQueueHead;
     std::atomic<std::uint32_t> mQueueTail;
+    bool mCancelQueued;           // a panic has cut the queue: the next drain discards up to mCancelTail
+    std::uint32_t mCancelTail;    // the queue's tail index as that panic saw it
 };
 
 }  // namespace chordlab

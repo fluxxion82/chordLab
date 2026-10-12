@@ -1179,6 +1179,58 @@ TEST_CASE("scheduler: panic releases the progression and the previews, with no c
     CHECK(host.lastOk);
 }
 
+TEST_CASE("regression: panic discards the preview commands queued before it and keeps those pushed after") {
+    Host host;
+    host.run(0.0, 512, false);
+
+    // The repro: a start queued before the panic must not sound in the block that follows it.
+    CHECK(host.scheduler.pushPreview(previewStart(1, {48, 52})));
+    host.scheduler.panic();
+    CHECK(host.run(0.0, 0, false) == kNone);  // an empty block drains nothing and must not consume the cut
+    const std::vector<Ev> after = host.run(0.0, 512, false);
+    CAPTURE(describe(after));
+    CHECK(after == kNone);
+    CHECK(host.lastOk);
+    CHECK(host.owners(48) == 0);
+    CHECK(host.owners(52) == 0);
+    CHECK_FALSE(host.scheduler.sounding(48));
+
+    // A command pushed after panic returned is served as usual: the cut is consumed by one drain.
+    CHECK(host.scheduler.pushPreview(previewStart(2, {55})));
+    CHECK(host.run(0.0, 512, false) == std::vector<Ev>{on(0, 55, 90)});
+    CHECK(host.owners(55) == kOwnerPreview);
+
+    // Both sides of the cut in one ring: the queued start is dropped, the one pushed after plays, and the
+    // panic's own release of the running preview is paid first.
+    CHECK(host.scheduler.pushPreview(previewStart(3, {60})));
+    CHECK(host.scheduler.pushPreview(previewStop(2)));
+    host.scheduler.panic();
+    CHECK(host.scheduler.pushPreview(previewStart(4, {62})));
+    const std::vector<Ev> mixed = host.run(0.0, 512, false);
+    CAPTURE(describe(mixed));
+    CHECK(mixed == std::vector<Ev>{off(0, 55), on(0, 62, 90)});
+    CHECK(host.lastOk);
+    CHECK(host.owners(60) == 0);
+    CHECK(host.owners(62) == kOwnerPreview);
+
+    // Two panics before one drain: the later cut wins, so a start between them is dropped too.
+    CHECK(host.scheduler.pushPreview(previewStart(5, {64})));
+    host.scheduler.panic();
+    CHECK(host.scheduler.pushPreview(previewStart(6, {65})));
+    host.scheduler.panic();
+    CHECK(host.run(0.0, 512, false) == std::vector<Ev>{off(0, 62)});
+    CHECK(host.owners(64) == 0);
+    CHECK(host.owners(65) == 0);
+}
+
+TEST_CASE("scheduler: reset keeps the queued preview commands; only panic discards them") {
+    Host host;
+    CHECK(host.scheduler.pushPreview(previewStart(1, {48})));
+    host.scheduler.reset(kSr);
+    CHECK(host.run(0.0, 512, false) == std::vector<Ev>{on(0, 48, 90)});
+    CHECK(host.owners(48) == kOwnerPreview);
+}
+
 // --- Follow-up review regressions ------------------------------------------------------------------
 
 namespace {
