@@ -43,7 +43,28 @@ struct KeyBarView: View {
   }
 
   var body: some View {
-    HStack(spacing: 10) {
+    // One row when it fits (the 900-pt default), two at the 700-pt minimum.
+    ViewThatFits(in: .horizontal) {
+      HStack(spacing: 16) {
+        projectKeyControls
+        browseControls
+        Spacer(minLength: 0)
+        labelModeControl
+      }
+      VStack(alignment: .leading, spacing: 8) {
+        HStack(spacing: 16) {
+          projectKeyControls
+          Spacer(minLength: 0)
+          browseControls
+        }
+        labelModeControl
+      }
+    }
+    .font(.body)
+  }
+
+  private var projectKeyControls: some View {
+    HStack(spacing: 8) {
       Text("Key").foregroundStyle(.secondary)
       Picker("Tonic", selection: tonicSelection) {
         ForEach(0..<12, id: \.self) { pc in
@@ -51,31 +72,38 @@ struct KeyBarView: View {
         }
       }
       .labelsHidden().fixedSize()
+      .accessibilityLabel("Project key tonic")
       Picker("Mode", selection: modeSelection) {
         ForEach(KeyNames.modes, id: \.self) { mode in
           Text(KeyNames.modeDisplayName(mode)).tag(mode)
         }
       }
       .labelsHidden().fixedSize()
-      Text(KeyNames.displayName(projectKey)).foregroundStyle(.white).lineLimit(1)
+      .accessibilityLabel("Project key mode")
+    }
+  }
 
-      Spacer(minLength: 16)
-
+  private var browseControls: some View {
+    HStack(spacing: 8) {
       Text("Browse").foregroundStyle(.secondary)
       Button("<") { state.send(command: ["cmd": "browseKey", "steps": -1]) }
+        .accessibilityLabel("Browse a fifth down")
       Text(state.snapshot.map { KeyNames.displayName($0.browsedKey) } ?? "—")
-        .foregroundStyle(.white).lineLimit(1).frame(minWidth: 140)
+        .foregroundStyle(.white).lineLimit(1).frame(minWidth: 130)
+        .accessibilityLabel("Browsed key")
       Button(">") { state.send(command: ["cmd": "browseKey", "steps": 1]) }
+        .accessibilityLabel("Browse a fifth up")
       Button("Home") { state.send(command: ["cmd": "browseKey", "home": true]) }
-
-      Spacer(minLength: 16)
-
-      Picker("Labels", selection: $labelMode) {
-        ForEach(LabelMode.allCases) { mode in Text(mode.title).tag(mode) }
-      }
-      .pickerStyle(.segmented).labelsHidden().fixedSize()
+        .accessibilityLabel("Browse the project key")
     }
-    .font(.body)
+  }
+
+  private var labelModeControl: some View {
+    Picker("Labels", selection: $labelMode) {
+      ForEach(LabelMode.allCases) { mode in Text(mode.title).tag(mode) }
+    }
+    .pickerStyle(.segmented).labelsHidden().fixedSize()
+    .accessibilityLabel("Cell labels")
   }
 }
 

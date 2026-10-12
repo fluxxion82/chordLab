@@ -8,8 +8,12 @@
 // without re-entering the lock. The audio thread (ProcessBlock) never touches the model or the mutex.
 // Delivery to the Swift view controller (PushSnapshot, PushError, RestoreEditorSize) always happens on the
 // main thread: OnMain runs the block inline when already there and dispatches it otherwise. A dispatched
-// block captures mAlive, which the destructor clears, so a hop that outlives the plugin does nothing (the
-// hosts destroy plug-ins on the main thread, so the flag and the block are not racing each other).
+// block holds the Lifeline mutex while it runs and does nothing once `alive` is false; the destructor
+// flips `alive` under that mutex, so it blocks until a hop in flight has finished and every later hop is
+// a no-op. That matters because destruction is not always on the main thread (AUv3's dealloc deletes the
+// plug-in on whatever thread releases the audio unit, IPlugAUAudioUnit.mm). No deadlock: the destructor
+// never runs inside a queued hop, the inline main-thread path takes no Lifeline lock (so a hop calling
+// PushSnapshot does not re-enter it), and the lock order is always Lifeline::mutex then mModelMutex.
 //
 // Chord preview (M2, Task 2.4) does not go through the model: the Swift palette sends note-ons/offs with
 // IPlugCocoaViewController::sendMidiMsgFromUI -> SendMidiMsgFromUI, which iPlug2 queues for the next
@@ -48,7 +52,8 @@ ChordLab::ChordLab(const InstanceInfo& info)
 
 ChordLab::~ChordLab()
 {
-  mAlive->store(false);
+  std::lock_guard<std::mutex> guard(mLifeline->mutex);         // waits for a hop in flight; later hops do nothing
+  mLifeline->alive = false;
 }
 
 void* ChordLab::OpenWindow(void* pParent)
@@ -159,9 +164,10 @@ void ChordLab::OnMain(std::function<void()> fn)
     fn();
     return;
   }
-  const std::shared_ptr<std::atomic<bool>> alive = mAlive;
+  const std::shared_ptr<Lifeline> lifeline = mLifeline;
   dispatch_async(dispatch_get_main_queue(), ^{
-    if (alive->load())
+    std::lock_guard<std::mutex> guard(lifeline->mutex);
+    if (lifeline->alive)
       fn();
   });
 }
@@ -195,17 +201,31 @@ void ChordLab::PushError(const std::string& message)
 
 void ChordLab::RestoreEditorSize(int width, int height)
 {
-  // Main thread. With the editor open, ask the host first: the API classes' EditorResize skips the host
-  // call when the size already equals GetEditorWidth/Height, so SetEditorSize must come after it.
+  // Main thread, for a size restored while an editor is open (UnserializeState stores it directly when
+  // none is). The stored size must stay the actual size of the open editor: it changes only if the host
+  // resizes. VST3 and APP implement EditorResize (host window resize, true, and they record the size
+  // themselves after comparing with GetEditorWidth/Height, so it must run before any SetEditorSize);
+  // AUv2 and AUv3 inherit the default, which resizes nothing and returns false.
+  if (!mViewController)
+  {
+    std::lock_guard<std::mutex> lock(mModelMutex);
+    SetEditorSize(width, height);                                // closed since the load: next open uses it
+    return;
+  }
   bool differs = false;
   {
     std::lock_guard<std::mutex> lock(mModelMutex);
     differs = width != GetEditorWidth() || height != GetEditorHeight();
   }
-  if (differs && mViewController)
-    EditorResizeFromUI(width, height, true);                     // host-driven: ends in OnParentWindowResize
-  std::lock_guard<std::mutex> lock(mModelMutex);
-  SetEditorSize(width, height);                                  // next OpenWindow / getSize uses it
+  if (!differs)
+    return;
+  if (EditorResizeFromUI(width, height, true))                   // host-driven: ends in OnParentWindowResize
+  {
+    std::lock_guard<std::mutex> lock(mModelMutex);
+    SetEditorSize(width, height);
+  }
+  else
+    DBGMSG("ChordLab: the host cannot resize the open editor; keeping %dx%d\n", GetEditorWidth(), GetEditorHeight());
 }
 
 bool ChordLab::SerializeState(IByteChunk& chunk) const
@@ -247,15 +267,21 @@ int ChordLab::UnserializeState(const IByteChunk& chunk, int startPos)
     int width = 0;
     int height = 0;
     bool loaded = false;
+    bool editorOpen = false;
     {
       std::lock_guard<std::mutex> lock(mModelMutex);
       loaded = chordlab::loadStateJson(mStore, json, error, &width, &height);   // atomic: a failure changes nothing
       if (loaded)
+      {
         RebuildPaletteLocked();
+        editorOpen = mViewController != nullptr;
+        if (!editorOpen)
+          SetEditorSize(width, height);                          // synchronous: a save right after this load sees it
+      }
     }
-    if (loaded)
+    if (loaded && editorOpen)
       OnMain([this, width, height] { RestoreEditorSize(width, height); });
-    else
+    else if (!loaded)
       DBGMSG("ChordLab: state payload rejected, keeping the current document: %s\n", error.c_str());
   }
   else

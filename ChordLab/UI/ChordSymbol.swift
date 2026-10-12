@@ -16,6 +16,32 @@ enum ChordSymbol {
     })
   }
 
+  /// Spoken quality of each dictionary type id, for accessibility.
+  static let spokenQualities: [String: String] = [
+    "5": "power chord", "maj": "major", "min": "minor", "dim": "diminished", "aug": "augmented",
+    "sus2": "suspended second", "sus4": "suspended fourth", "6": "sixth", "m6": "minor sixth",
+    "maj7": "major seventh", "7": "dominant seventh", "m7": "minor seventh", "m7b5": "half-diminished seventh",
+    "dim7": "diminished seventh", "mMaj7": "minor major seventh", "augMaj7": "augmented major seventh",
+    "add9": "add nine", "madd9": "minor add nine", "9": "ninth", "maj9": "major ninth", "m9": "minor ninth",
+    "69": "six nine", "7sus4": "seventh suspended fourth",
+  ]
+
+  /// Spoken form of a chord for accessibility: "C major", "F sharp half-diminished seventh". The root is
+  /// read off the symbol (a letter plus at most one accidental); an unknown type id reads its suffix as is.
+  static func spokenName(symbol: String, type: String) -> String {
+    var rest = Substring(symbol)
+    var root = rest.first.map(String.init) ?? ""
+    rest = rest.dropFirst()
+    if rest.first == "b" {
+      root += " flat"
+      rest = rest.dropFirst()
+    } else if rest.first == "#" {
+      root += " sharp"
+      rest = rest.dropFirst()
+    }
+    return root + " " + (spokenQualities[type] ?? String(rest))
+  }
+
   /// Pitch-class names with sharps for the black keys (the UI has no per-note spelling yet).
   static let sharpNames = ["C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A", "A♯", "B"]
 

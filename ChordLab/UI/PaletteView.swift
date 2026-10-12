@@ -44,6 +44,7 @@ struct PaletteView: View {
           Text("Waiting for a snapshot…").foregroundStyle(.gray).frame(maxWidth: .infinity).padding()
         }
       }
+      .defaultScrollAnchor(.bottom)   // tier 0 visible first, and kept in view when the tier count changes
     }
     .background(Self.background)
   }
@@ -115,7 +116,7 @@ struct PaletteCellView: View {
     }
     .frame(width: size, height: size)
     .contentShape(Circle())
-    .accessibilityLabel("\(cell.symbol), \(cell.roman)")
+    .accessibilityLabel(ChordSymbol.spokenName(symbol: cell.symbol, type: cell.type) + (cell.filled ? ", in key" : ", borrowed"))
     .onHover { over in
       hovering = over
       pendingDetails?.cancel()

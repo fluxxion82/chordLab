@@ -5,7 +5,6 @@
 #include "chordlab/document.h"
 #include "chordlab/palette.h"
 
-#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -55,6 +54,13 @@ private:
   chordlab::DocumentStore mStore;
   chordlab::Palette mPalette;
 
-  // Cleared by the destructor so a main-thread hop queued from another thread finds nothing to do.
-  std::shared_ptr<std::atomic<bool>> mAlive = std::make_shared<std::atomic<bool>>(true);
+  // Shared with the main-thread hops OnMain queues. A hop runs under `mutex` and skips `fn` once `alive`
+  // is false; the destructor flips `alive` under the same mutex, so it waits for a hop that is running
+  // and makes later ones no-ops. Lock order: Lifeline::mutex, then mModelMutex (see ChordLab.mm).
+  struct Lifeline
+  {
+    std::mutex mutex;
+    bool alive = true;
+  };
+  std::shared_ptr<Lifeline> mLifeline = std::make_shared<Lifeline>();
 };
