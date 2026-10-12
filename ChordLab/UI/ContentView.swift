@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// Temporary M2.1 screen: proves the JSON bridge round-trips (commands in, snapshots and errors out).
-/// Replaced by the key bar and palette grid in Tasks 2.2–2.3.
+/// Key bar over a temporary M2.1 status area (replaced by the palette grid in Task 2.3), with the
+/// Spike 1 preview button and the Spike 3 drag-out label kept until their Live verification.
 struct ContentView: View {
   @EnvironmentObject var state: ChordLabState
   private let cMajor: [UInt8] = [60, 64, 67]
@@ -9,8 +9,8 @@ struct ContentView: View {
   var body: some View {
     ZStack {
       Color(red: 0.04, green: 0.07, blue: 0.25)
-      VStack(spacing: 18) {
-        Text("ChordLab — M2.1 bridge").font(.title2).foregroundStyle(.white)
+      VStack(spacing: 16) {
+        KeyBarView()
 
         if let snapshot = state.snapshot {
           Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 6) {
@@ -25,15 +25,13 @@ struct ContentView: View {
           Text("Waiting for a snapshot…").foregroundStyle(.gray)
         }
 
-        HStack(spacing: 12) {
-          Button("Append C") { state.send(command: ["cmd": "appendChord", "root": 0, "type": "maj"]) }
-          Button("Browse +1") { state.send(command: ["cmd": "browseKey", "steps": 1]) }
-          Button("Home") { state.send(command: ["cmd": "browseKey", "home": true]) }
-        }
+        Button("Append C") { state.send(command: ["cmd": "appendChord", "root": 0, "type": "maj"]) }
 
         if let error = state.lastError {
           Text("Error: \(error)").foregroundStyle(.red).font(.callout)
         }
+
+        Spacer()
 
         // Spike 1: preview a chord while the mouse is held (Live verification still pending).
         Text("C major (hold)")
@@ -63,6 +61,6 @@ struct ContentView: View {
 struct SwiftUIView_Previews: PreviewProvider {
   static var previews: some View {
     ContentView().environmentObject(ChordLabState(numParams: kNumParams))
-      .frame(width: 600, height: 400)
+      .frame(width: 900, height: 620)
   }
 }
