@@ -4,7 +4,7 @@ import Foundation
 /// written by engine/src/json_api.cpp). The UI never computes theory: everything it shows is in here.
 /// Fields the engine added under schema 1 (`modes`, `tonics`, `outOfKey`, and the Phase 2 fields:
 /// `function`, `tension`, the voicing fields, `why`, `sections`, `suggestions`, `autoVoiceLead`,
-/// `selectedEventId`) are optional so that a UI built against this file still decodes a snapshot from an
+/// `selectedEventId`, and P2-M3's `homeTriads`) are optional so that a UI built against this file still decodes a snapshot from an
 /// older plug-in build.
 
 /// `{"letter":"C","alter":0}`: a spelled tonic, `alter` -1 flat, 0 natural, 1 sharp.
@@ -73,6 +73,8 @@ struct EventJSON: Codable, Equatable, Identifiable {
 /// `filled` is false for a borrowed chord (a note outside the project key); `family` is "Major", "Minor"
 /// or "Other"; `outOfKey` lists the borrowed pitch classes (empty exactly when `filled`); `function` and
 /// `tension` as on events. `outOfKey`, `function` and `tension` are absent from older plug-in builds.
+/// The snapshot's `homeTriads` entries are cells too: the project key's triads (`degree` of the project
+/// scale, `tier` 1), with the engine's own `id` ("home-0" … "home-6"), which palette cells do not carry.
 struct CellJSON: Codable, Equatable, Identifiable {
   let degree: Int
   let tier: Int
@@ -86,9 +88,17 @@ struct CellJSON: Codable, Equatable, Identifiable {
   let outOfKey: [Int]?
   let function: String?
   let tension: Int?
+  /// The wire `id`: nil on palette cells, "home-<degree>" on `homeTriads` entries.
+  let engineId: String?
 
-  /// Grid position; unique within a palette (one cell per tier and degree).
-  var id: String { "\(tier)/\(degree)" }
+  /// The engine's id when it sent one, else the grid position ("1/0": unique within a palette, one cell
+  /// per tier and degree). The two forms cannot collide, so a held home cell never lights a palette cell.
+  var id: String { engineId ?? "\(tier)/\(degree)" }
+
+  enum CodingKeys: String, CodingKey {
+    case degree, tier, root, type, symbol, roman, family, filled, voicing, outOfKey, function, tension
+    case engineId = "id"
+  }
 }
 
 /// `tiers` is one more than the highest tier present; `cells` holds only the cells that exist, ordered by
@@ -153,6 +163,13 @@ struct Snapshot: Codable, Equatable {
   /// Up to 8 next-chord suggestions after the selected (else the last) chord, best first; the opening
   /// suggestions when the progression is empty.
   let suggestions: [SuggestionJSON]?
+  /// The project key's seven diatonic triads while another key is browsed, else empty; absent from older
+  /// plug-in builds. Read it through `homeRow`.
+  let homeTriads: [CellJSON]?
+
+  /// The cells of the home compare row: empty when the project key is the one browsed, and when an older
+  /// plug-in build sends no `homeTriads`.
+  var homeRow: [CellJSON] { homeTriads ?? [] }
 
   /// Whether the key pickers can be built from this snapshot.
   var hasTonicTable: Bool { modes != nil && tonics != nil }

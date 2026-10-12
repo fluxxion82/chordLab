@@ -31,7 +31,7 @@ import SwiftUI
 /// or past the end when the loop is off.
 struct SequenceBarView: View {
   @EnvironmentObject var state: ChordLabState
-  @AppStorage(LabelMode.storageKey) private var labelMode: LabelMode = .both
+  @AppStorage(LabelMode.storageKey) private var labelMode = LabelMode.defaultMode
 
   static let pxPerBeat: CGFloat = 24
   static let height: CGFloat = 118

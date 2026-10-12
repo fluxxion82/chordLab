@@ -1,6 +1,7 @@
 import SwiftUI
 
-/// Key bar, transport row, sequence bar, suggestions strip and palette grid, with a temporary status
+/// Key bar, transport row, sequence bar, suggestions strip, palette grid and (only while another key is
+/// browsed) the home-key compare row, with a temporary status
 /// line and the MIDI drag-out control along the bottom.
 struct ContentView: View {
   @EnvironmentObject var state: ChordLabState
@@ -18,6 +19,8 @@ struct ContentView: View {
         SuggestionsView()
 
         PaletteView()
+
+        HomeRowView()
 
         HStack(spacing: 16) {
           if let snapshot = state.snapshot {

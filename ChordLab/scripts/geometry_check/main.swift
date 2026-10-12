@@ -179,5 +179,29 @@ expect(decoded2?.sections?.first?.name == "Verse" && decoded2?.sections?.first?.
 expect(decoded2?.suggestions?.first?.symbol == "F" && decoded2?.suggestions?.first?.reasonTexts == ["1 common tone (C)"], "suggestions")
 expect(decoded2?.palette.cells[0].function == "T" && decoded2?.palette.cells[0].tension == 0, "cell function and tension")
 
+// --- homeTriads (P2-M3): absent in older builds, empty at home, seven identified cells when browsing away ---
+expect(decoded1?.homeTriads == nil && decoded1?.homeRow.isEmpty == true && decoded2?.homeRow.isEmpty == true,
+       "a snapshot without homeTriads decodes, and its home row is empty")
+expect(decoded2?.palette.cells[0].engineId == nil && decoded2?.palette.cells[0].id == "0/0", "a palette cell has no engine id: tier/degree")
+let homeEntries = zip(["C", "Dm", "Em", "F", "G", "Am", "Bmb5"], zip([0, 2, 4, 5, 7, 9, 11], ["maj", "min", "min", "maj", "maj", "min", "dim"]))
+  .enumerated().map { i, e in
+    "{\"id\":\"home-\(i)\",\"degree\":\(i),\"tier\":1,\"root\":\(e.1.0),\"type\":\"\(e.1.1)\",\"symbol\":\"\(e.0)\",\"roman\":\"I\"," +
+    "\"family\":\"Major\",\"function\":\"T\",\"tension\":3,\"filled\":true,\"voicing\":[60,64,67],\"outOfKey\":[]}"
+  }.joined(separator: ",")
+func withHome(_ json: String, _ entries: String) -> String {
+  json.replacingOccurrences(of: "\"palette\":", with: "\"homeTriads\":[\(entries)],\"palette\":")
+}
+let decodedAtHome = try? JSONDecoder().decode(Snapshot.self, from: Data(withHome(phase2, "").utf8))
+expect(decodedAtHome != nil && decodedAtHome?.homeTriads?.isEmpty == true && decodedAtHome?.homeRow.isEmpty == true,
+       "homeTriads [] (the project key is browsed): decodes, empty row")
+let decodedAway = try? JSONDecoder().decode(Snapshot.self, from: Data(withHome(phase2, homeEntries).utf8))
+expect(decodedAway?.homeRow.count == 7, "homeTriads with seven entries decodes")
+expect(decodedAway?.homeRow.map(\.id) == (0..<7).map { "home-\($0)" }, "home cells take the engine's ids, home-0 … home-6")
+expect(decodedAway?.homeRow.map(\.symbol) == ["C", "Dm", "Em", "F", "G", "Am", "Bmb5"] && decodedAway?.homeRow.last?.type == "dim",
+       "home cells carry the chord, in degree order")
+expect(Set((decodedAway?.homeRow ?? []).map(\.id)).isDisjoint(with: (decodedAway?.palette.cells ?? []).map(\.id)),
+       "no home id is a palette cell id")
+expect(decodedAway?.palette == decoded2?.palette && decodedAway?.events == decoded2?.events, "the rest of the snapshot is unaffected")
+
 print(failures == 0 ? "ALL OK" : "\(failures) FAILED")
 exit(failures == 0 ? 0 : 1)
