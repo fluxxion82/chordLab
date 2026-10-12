@@ -27,7 +27,8 @@ struct ChordType {
 /// point at it.
 const ChordType& chordType(std::string_view id);
 
-/// Every chord type, in dictionary order (power chord, triads, sixths, sevenths, ninths, 7sus4).
+/// Every chord type, in dictionary order (power chord, triads, sixths, sevenths, ninths, 7sus4, then the
+/// Phase 2 colour chords maj7#11, mMaj9 and 7#11).
 /// The vector is stable until module unload / static destruction and `chordType(id)` returns references
 /// into it.
 const std::vector<ChordType>& allChordTypes();
@@ -54,5 +55,11 @@ std::vector<PitchClass> pitchClasses(const Chord& chord);
 
 /// True if every pitch class of the chord belongs to the key's scale.
 bool fullyInKey(const Chord& chord, const Key& key);
+
+/// The stacked-third triad on scale degree `degree` of `key`: rooted on that degree, with the pitch
+/// classes of degrees d+2 and d+4 of the key's scale as its third and fifth, typed as whichever of
+/// `maj`/`min`/`dim`/`aug` has exactly those intervals (every supported mode yields one of the four).
+/// `degree` is taken modulo 7, so 7 is the tonic triad again and -1 the triad on the seventh degree.
+Chord diatonicTriad(const Key& key, int degree);
 
 }  // namespace chordlab

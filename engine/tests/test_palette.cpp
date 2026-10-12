@@ -97,6 +97,8 @@ TEST_CASE("C harmonic minor uses mMaj7, dim7 and the augmented III") {
 }
 
 // Derived by hand from the rule, not from a screenshot (Klimper's colour row has not been captured yet).
+// The Phase 2 tier-4 order (ninths, mΔ9, the #11 chords, 6/9, then the suspended chords) leaves both rows
+// as they were: no degree of either key holds a mΔ9 or a #11 chord that a ninth does not beat.
 TEST_CASE("C major and C minor colour rows follow the tier-4 rule") {
     const Palette major = buildPalette(kCIonian, kCIonian);
     CHECK(symbolsOnTier(major, 4) == std::vector<std::string>{"CΔ9", "Dm9", "E7sus4", "FΔ9", "G9", "Am9"});  // gap at vii
@@ -105,6 +107,47 @@ TEST_CASE("C major and C minor colour rows follow the tier-4 rule") {
     const Palette minor = buildPalette(kCAeolian, kCAeolian);
     CHECK(symbolsOnTier(minor, 4) == std::vector<std::string>{"Cm9", "EbΔ9", "Fm9", "G7sus4", "AbΔ9", "Bb9"});  // gap at ii°
     CHECK(minor.tiers == 5);
+}
+
+// The tonic column leads with the mode's characteristic chord in the tier that chord belongs to.
+TEST_CASE("modal tonic columns show the mode's characteristic chord") {
+    const Palette ionian = buildPalette(kCIonian, kCIonian);
+    CHECK(columnSymbols(ionian, 0) == std::vector<std::string>{"C5", "C", "C6", "CΔ7", "CΔ9"});  // unchanged
+
+    const Key cLydian = key('C', 0, Mode::Lydian);
+    const Palette lydian = buildPalette(cLydian, cLydian);
+    CHECK(columnSymbols(lydian, 0) == std::vector<std::string>{"C5", "C", "C6", "CΔ7", "CΔ7#11"});
+    CHECK(cell(lydian, 0, 4).roman == "IΔ7#11");
+
+    const Key cMixolydian = key('C', 0, Mode::Mixolydian);
+    const Palette mixolydian = buildPalette(cMixolydian, cMixolydian);
+    CHECK(columnSymbols(mixolydian, 0) == std::vector<std::string>{"C5", "C", "C7", "Cadd9", "C9"});
+    CHECK(symbolsOnTier(mixolydian, 2) ==
+          std::vector<std::string>{"C7", "Dm7", "Em7b5", "F6", "Gm6", "Am7", "Bb6"});  // only the tonic changes
+    CHECK(cell(mixolydian, 0, 2).roman == "I7");
+
+    const Key cMelodicMinor = key('C', 0, Mode::MelodicMinor);
+    const Palette melodic = buildPalette(cMelodicMinor, cMelodicMinor);
+    CHECK(columnSymbols(melodic, 0) == std::vector<std::string>{"C5", "Cm", "Cm6", "CmΔ7", "CmΔ9"});
+
+    const Key cHarmonicMinor = key('C', 0, Mode::HarmonicMinor);
+    const Palette harmonic = buildPalette(cHarmonicMinor, cHarmonicMinor);
+    CHECK(columnSymbols(harmonic, 0) == std::vector<std::string>{"C5", "Cm", "CmΔ7", "Cmadd9", "CmΔ9"});
+
+    // The Dorian tonic already led with its characteristic m6 and keeps doing so.
+    const Key cDorian = key('C', 0, Mode::Dorian);
+    const Palette dorian = buildPalette(cDorian, cDorian);
+    CHECK(columnSymbols(dorian, 0) == std::vector<std::string>{"C5", "Cm", "Cm6", "Cm7", "Cm9"});
+}
+
+TEST_CASE("the characteristic chord is only preferred on the tonic column") {
+    // F Lydian browsed from C major: its tonic F gets FΔ7#11, but the C column of C Lydian's
+    // palette (degree 4) does not get a Mixolydian 7 or anything but the general order.
+    const Key fLydian = key('F', 0, Mode::Lydian);
+    const Palette p = buildPalette(fLydian, kCIonian);
+    CHECK(cell(p, 0, 4).symbol == "FΔ7#11");
+    CHECK(cell(p, 0, 4).filled);  // F A C E B: all in C major
+    CHECK(cell(p, 4, 4).symbol == "CΔ9");
 }
 
 // --- Browsing a foreign key ---------------------------------------------------------------

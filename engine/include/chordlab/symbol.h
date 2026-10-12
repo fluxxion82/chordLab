@@ -18,6 +18,27 @@ enum class SymbolStyle { Standard, Klimper };
 /// by the type's suffix in the given style, e.g. `Bm7b5` / `Bø7`, `Eb`, `CmΔ7`.
 std::string chordSymbol(const Chord& chord, const Key& spellingKey, SymbolStyle style = SymbolStyle::Klimper);
 
+/// The key-relative position of a chord's root, as `romanNumeral` writes it: `degree` is the degree
+/// (0..6) of the parallel major of the project tonic that the root is or alters, and `alter` the single
+/// accidental the numeral carries (-1 for `b`, 0 for none, +1 for `#`). Numerals, function labels and
+/// applied chords all read this one derivation; see `romanNumeral` for the rules.
+struct NumeralDegree {
+    int degree;
+    int alter;
+};
+
+constexpr bool operator==(const NumeralDegree& a, const NumeralDegree& b) noexcept {
+    return a.degree == b.degree && a.alter == b.alter;
+}
+
+constexpr bool operator!=(const NumeralDegree& a, const NumeralDegree& b) noexcept {
+    return !(a == b);
+}
+
+/// The degree and alteration of `chord`'s root relative to `projectKey`, exactly as `romanNumeral`
+/// derives them (so `romanNumeral` is `b`/`#`/nothing for `alter`, then the numeral of `degree`).
+NumeralDegree numeralDegree(const Chord& chord, const Key& projectKey);
+
 /// The chord's roman numeral relative to `projectKey`, e.g. `vii°`, `V7`, `bVI`, `#iv°`, `IΔ7`.
 ///
 /// Numerals are relative to the parallel major of the project tonic (pop/Klimper/Hooktheory

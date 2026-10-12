@@ -55,15 +55,19 @@ const std::vector<ExpectedType> kExpected{
     {"m9", {0, 3, 7, 10, 14}, "m9", Family::Minor},
     {"69", {0, 4, 7, 9, 14}, "6/9", Family::Major},
     {"7sus4", {0, 5, 7, 10}, "7sus4", Family::Other},
+    // Phase 2 colour chords, appended so the ids above keep their positions.
+    {"maj7#11", {0, 4, 7, 11, 18}, "Δ7#11", Family::Major},
+    {"mMaj9", {0, 3, 7, 11, 14}, "mΔ9", Family::Minor},
+    {"7#11", {0, 4, 7, 10, 18}, "7#11", Family::Major},
 };
 
 }  // namespace
 
 // --- Dictionary ------------------------------------------------------------------
 
-TEST_CASE("allChordTypes: has 23 entries with unique ids") {
+TEST_CASE("allChordTypes: has 26 entries with unique ids") {
     const auto& types = allChordTypes();
-    CHECK(types.size() == 23);
+    CHECK(types.size() == 26);
     std::set<std::string> ids;
     for (const ChordType& t : types) {
         ids.insert(t.id);
@@ -123,6 +127,9 @@ TEST_CASE("chordType: symbols are Klimper-style suffixes") {
     CHECK(std::string_view(chordType("maj").symbol) == "");
     CHECK(std::string_view(chordType("mMaj7").symbol) == "mΔ7");
     CHECK(std::string_view(chordType("69").symbol) == "6/9");
+    CHECK(std::string_view(chordType("maj7#11").symbol) == "Δ7#11");
+    CHECK(std::string_view(chordType("mMaj9").symbol) == "mΔ9");
+    CHECK(std::string_view(chordType("7#11").symbol) == "7#11");
 }
 
 TEST_CASE("chordType: throws std::out_of_range for an unknown id") {
@@ -135,6 +142,7 @@ TEST_CASE("chordType: returns a stable reference into allChordTypes") {
     CHECK(&chordType("maj") == &allChordTypes()[1]);
     CHECK(&chordType("5") == &allChordTypes()[0]);
     CHECK(&chordType("7sus4") == &allChordTypes()[22]);
+    CHECK(&chordType("7#11") == &allChordTypes()[25]);
     for (const ChordType& t : allChordTypes()) {
         CAPTURE(t.id);
         CHECK(&chordType(t.id) == &t);
@@ -211,4 +219,60 @@ TEST_CASE("fullyInKey: extensions above the octave are checked too") {
     CHECK(fullyInKey(chord(0, "maj9"), cMajor));        // C E G B D
     CHECK(fullyInKey(chord(4, "m9"), cMajor) == false); // Em9 = E G B D F# (F# out)
     CHECK(fullyInKey(chord(2, "m9"), cMajor));          // Dm9 = D F A C E
+    CHECK(fullyInKey(chord(5, "maj7#11"), cMajor));                    // FΔ7#11 = F A C E B
+    CHECK(fullyInKey(chord(0, "maj7#11"), cMajor) == false);           // F# out
+    CHECK(fullyInKey(chord(0, "maj7#11"), key('C', 0, Mode::Lydian)));
+    CHECK(fullyInKey(chord(0, "mMaj9"), key('C', 0, Mode::MelodicMinor)));   // C Eb G B D
+    CHECK(fullyInKey(chord(0, "mMaj9"), key('C', 0, Mode::Aeolian)) == false);  // B out
+    CHECK(fullyInKey(chord(5, "7#11"), key('C', 0, Mode::MelodicMinor)));     // F A C Eb B
+    CHECK(fullyInKey(chord(0, "7#11"), key('C', 0, Mode::Mixolydian)) == false);  // F# out
+}
+
+// --- diatonicTriad --------------------------------------------------------------------
+
+TEST_CASE("diatonicTriad: the seven triads of C major and A harmonic minor") {
+    const Key cMajor = key('C', 0, Mode::Ionian);
+    CHECK(diatonicTriad(cMajor, 0) == chord(0, "maj"));
+    CHECK(diatonicTriad(cMajor, 1) == chord(2, "min"));
+    CHECK(diatonicTriad(cMajor, 2) == chord(4, "min"));
+    CHECK(diatonicTriad(cMajor, 3) == chord(5, "maj"));
+    CHECK(diatonicTriad(cMajor, 4) == chord(7, "maj"));
+    CHECK(diatonicTriad(cMajor, 5) == chord(9, "min"));
+    CHECK(diatonicTriad(cMajor, 6) == chord(11, "dim"));
+
+    const Key aHarmonic = key('A', 0, Mode::HarmonicMinor);
+    CHECK(diatonicTriad(aHarmonic, 0) == chord(9, "min"));
+    CHECK(diatonicTriad(aHarmonic, 1) == chord(11, "dim"));
+    CHECK(diatonicTriad(aHarmonic, 2) == chord(0, "aug"));
+    CHECK(diatonicTriad(aHarmonic, 3) == chord(2, "min"));
+    CHECK(diatonicTriad(aHarmonic, 4) == chord(4, "maj"));
+    CHECK(diatonicTriad(aHarmonic, 5) == chord(5, "maj"));
+    CHECK(diatonicTriad(aHarmonic, 6) == chord(8, "dim"));
+}
+
+TEST_CASE("diatonicTriad: the degree wraps modulo 7") {
+    const Key cMajor = key('C', 0, Mode::Ionian);
+    CHECK(diatonicTriad(cMajor, 7) == chord(0, "maj"));
+    CHECK(diatonicTriad(cMajor, -1) == chord(11, "dim"));
+    CHECK(diatonicTriad(cMajor, 15) == chord(2, "min"));
+}
+
+TEST_CASE("diatonicTriad: every degree of every key is a stacked third fully in key") {
+    for (PitchClass pc = 0; pc < 12; ++pc) {
+        for (int m = 0; m < kNumModes; ++m) {
+            const Key k{canonicalTonic(pc, Mode(m)), Mode(m)};
+            const auto scale = scalePitchClasses(k.tonicPc(), k.mode);
+            for (int d = 0; d < 7; ++d) {
+                CAPTURE(pc);
+                CAPTURE(m);
+                CAPTURE(d);
+                const Chord t = diatonicTriad(k, d);
+                const std::string_view id = t.type->id;
+                CHECK((id == "maj" || id == "min" || id == "dim" || id == "aug"));
+                const auto sd = static_cast<std::size_t>(d);
+                CHECK(pitchClasses(t) == std::vector<PitchClass>{scale[sd], scale[(sd + 2) % 7], scale[(sd + 4) % 7]});
+                CHECK(fullyInKey(t, k));
+            }
+        }
+    }
 }

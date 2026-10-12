@@ -6,9 +6,9 @@ exercised by a doctest suite.
 ## Layout
 
 ```
-include/chordlab/   public headers, one per module (pitch, scale, chord, symbol, relations, voicing,
-                    palette, document, compiler, note_event, limits, scheduler, triple_buffer,
-                    publication, smf, json_api)
+include/chordlab/   public headers, one per module (pitch, scale, chord, symbol, function, applied,
+                    harmony, tension, relations, voicing, palette, document, compiler, note_event,
+                    limits, scheduler, triple_buffer, publication, smf, json_api)
 src/                the matching implementations
 tests/              doctest suite (tests/doctest.h is the vendored framework), one file per module;
                     tests/rt_alloc/ is a second executable that counts allocations (see below)

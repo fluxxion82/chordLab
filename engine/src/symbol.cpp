@@ -30,8 +30,8 @@ constexpr std::array<StyledSuffix, 3> kSymbolOverrides{{
 }};
 
 /// Numeral suffixes: the minor quality moves into the numeral's case, so `m`, `m6`, `m7`, `mΔ7`,
-/// `madd9` and `m9` drop their `m`; the diminished qualities follow the style.
-constexpr std::array<StyledSuffix, 23> kNumeralSuffixes{{
+/// `madd9`, `m9` and `mΔ9` drop their `m`; the diminished qualities follow the style.
+constexpr std::array<StyledSuffix, 26> kNumeralSuffixes{{
     {"5", "5", "5"},
     {"maj", "", ""},
     {"min", "", ""},
@@ -55,6 +55,9 @@ constexpr std::array<StyledSuffix, 23> kNumeralSuffixes{{
     {"m9", "9", "9"},
     {"69", "6/9", "6/9"},
     {"7sus4", "7sus4", "7sus4"},
+    {"maj7#11", "Δ7#11", "Δ7#11"},
+    {"mMaj9", "Δ9", "Δ9"},
+    {"7#11", "7#11", "7#11"},
 }};
 
 std::string_view pick(const StyledSuffix& suffix, SymbolStyle style) {
@@ -111,10 +114,10 @@ std::string chordSymbol(const Chord& chord, const Key& spellingKey, SymbolStyle 
     return out;
 }
 
-std::string romanNumeral(const Chord& chord, const Key& projectKey, SymbolStyle style) {
+NumeralDegree numeralDegree(const Chord& chord, const Key& projectKey) {
     assertValidChord(chord);
     // Numerals are read against the parallel major of the project tonic, whatever the project mode, with
-    // the same degree selection as `spell` (pitch.h). The alteration below is key-relative, unlike the
+    // the same degree selection as `spell` (pitch.h). The alteration is key-relative, unlike the
     // symbol's letter-relative accidental, so the two need not be equal (see symbol.h).
     const PitchClass tonic = projectKey.tonicPc();
     const int degree = majorDegreeOfInterval(chord.root - tonic);
@@ -122,15 +125,19 @@ std::string romanNumeral(const Chord& chord, const Key& projectKey, SymbolStyle 
     // Zero for a major-scale member; otherwise +1 (#4) or -1 (b2, b3, b6, b7).
     const int alteration = signedSemitones(degreePc, chord.root);
     assert(alteration >= -1 && alteration <= 1);
+    return NumeralDegree{degree, alteration};
+}
 
+std::string romanNumeral(const Chord& chord, const Key& projectKey, SymbolStyle style) {
+    const NumeralDegree position = numeralDegree(chord, projectKey);
     std::string out;
-    if (alteration > 0) {
+    if (position.alter > 0) {
         out += '#';
-    } else if (alteration < 0) {
+    } else if (position.alter < 0) {
         out += 'b';
     }
     const auto& numerals = isMinorQuality(*chord.type) ? kLowerNumerals : kUpperNumerals;
-    out += numerals[static_cast<std::size_t>(degree)];
+    out += numerals[static_cast<std::size_t>(position.degree)];
     out += numeralSuffix(*chord.type, style);
     return out;
 }

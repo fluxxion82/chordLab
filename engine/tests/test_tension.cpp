@@ -275,12 +275,15 @@ TEST_CASE("tension: deterministic and within 0..100 for every type x root x cano
             }
         }
     }
-    CHECK(evaluated == 23 * 12 * 12 * kNumModes);  // the loop above only reports failures
+    CHECK(evaluated == static_cast<int>(allChordTypes().size()) * 12 * 12 * kNumModes);  // the loop only reports failures
 }
 
 TEST_CASE("tension: a fully diatonic chord never exceeds the roughness-plus-density score") {
-    // Without the key penalty the densest in-key chord (a dominant ninth) is 29 + 16 = 45 raw -> 50.
+    // Without the key penalty the roughest in-key chord is the dominant seventh with a sharp eleventh
+    // (the Lydian dominant on the fourth degree of melodic minor): 38 + 16 = 54 raw -> 60. A dominant
+    // ninth is 29 + 16 = 45 raw -> 50.
     int inKey = 0;
+    int highest = 0;
     for (const ChordType& t : allChordTypes()) {
         for (PitchClass root = 0; root < 12; ++root) {
             const Chord c{root, &t};
@@ -291,11 +294,16 @@ TEST_CASE("tension: a fully diatonic chord never exceeds the roughness-plus-dens
                         ++inKey;
                         CAPTURE(t.id);
                         CAPTURE(root);
-                        CHECK(tension(c, k) <= 50);
+                        const int score = tension(c, k);
+                        CHECK(score <= 60);
+                        if (score > highest) {
+                            highest = score;
+                        }
                     }
                 }
             }
         }
     }
     CHECK(inKey > 0);
+    CHECK(highest == 60);
 }
