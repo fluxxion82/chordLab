@@ -167,13 +167,15 @@ std::string keyName(const Key& key);
 /// - `setInversion {id,inversion}`, `setOctave {id,octave}`, `resetVoicing {id}`: the matching store
 ///   call (the values are clamped by the store and the event is marked manual; see document.h).
 /// - `setAutoVoiceLead {on}`: `setAutoVoiceLead`, undoable.
-/// - `addSection {index,name?}`: `addSection(index, name)`; `name` defaults to the store's "Section <id>".
-///   An `index` that is no chord position, or that already starts a section, is a valid no-op (the UI
-///   may name a chord an edit just moved). Refused (false, an error naming the reason, no change) only
-///   when the section id counter is exhausted, like `appendChord`.
-/// - `renameSection {id,name}`, `setSectionColour {id,colourIndex}`, `removeSection {id}`,
-///   `moveSectionStart {id,index}`: the matching store call (colours clamped, a move the store declines
-///   is a no-op).
+/// - `addSection {index,name?}`: `addSection(index, name)`; `name` defaults to the store's "Section <id>"
+///   and, given, must be at most `kMaxSectionNameBytes` UTF-8 bytes (longer is rejected, not cut: the UI
+///   limits its field and a longer name is a malformed message). An `index` that is no chord position,
+///   or that already starts a section, is a valid no-op (the UI may name a chord an edit just moved).
+///   Refused (false, an error naming the reason, no change) only when the section id counter is
+///   exhausted, like `appendChord`.
+/// - `renameSection {id,name}` (same bound on `name`), `setSectionColour {id,colourIndex}`,
+///   `removeSection {id}`, `moveSectionStart {id,index}`: the matching store call (colours clamped, a
+///   move the store declines is a no-op).
 /// - `selectEvent {id}`: `setSelectedEvent`, live state; `id` is an integer or null (null, like
 ///   `kNoEventId`, clears the selection; an id no event has is a no-op). Pass the store's
 ///   `selectedEventId()` to `snapshotJson` so that the snapshot's `selectedEventId` and `suggestions`
@@ -181,9 +183,9 @@ std::string keyName(const Key& key);
 /// - `undo`, `redo`: no fields.
 ///
 /// Every field is validated before anything is touched: an unknown `cmd`, a missing or mistyped field, a
-/// root outside 0..11, an unknown chord type or mode, a bad letter or alter, or a non-finite number makes
-/// the call return false with a description in `error`, leaving the document, its history and the
-/// selection exactly as they were. Fields the command does not use are ignored. Numbers are not
+/// root outside 0..11, an unknown chord type or mode, a bad letter or alter, a non-finite number or a
+/// section name over the bound makes the call return false with a description in `error`, leaving the
+/// document, its history and the selection exactly as they were. Fields the command does not use are ignored. Numbers are not
 /// range-checked beyond that: lengths, velocities, inversions, octaves, colours and move targets are
 /// clamped by the store, exactly as the direct calls do.
 ///
@@ -208,6 +210,9 @@ bool applyCommandJson(DocumentStore& store, std::string_view json, std::string& 
 /// `autoVoiceLead`, the events' `inversion`, `octave` and `manualVoicing`, `sections` and
 /// `nextSectionId` were added under schema 1 (Phase 2): a reader that predates them ignores them, and
 /// `loadStateJson` defaults them when they are missing, so states cross both ways.
+/// Size: the largest state the store can hold (`kMaxChords` chords, a section on each, every name at
+/// `kMaxSectionNameBytes` bytes of characters that escape to two) is pinned by test_json_api.cpp at
+/// well under a tenth of `kMaxJsonBytes`, so a saved state always loads.
 std::string stateJson(const DocumentStore& store, int editorWidth = kDefaultEditorWidth,
                       int editorHeight = kDefaultEditorHeight);
 
@@ -216,8 +221,8 @@ std::string stateJson(const DocumentStore& store, int editorWidth = kDefaultEdit
 /// root outside 0..11, an id below 1 or repeated, more than `kMaxChords` events, a `nextId` below 1 or
 /// not above every event id, a non-positive editor size, or sections that are not `sectionsWellFormed`
 /// (document.h): not starting at 0, unsorted or sharing a start, an index outside the progression, a
-/// section id outside 1..INT_MAX-1 or repeated; or a `nextSectionId` below 1 or not above every section
-/// id) it returns false with a description in `error` and the store, its history, its selection and the
+/// section id outside 1..INT_MAX-1 or repeated, a name over `kMaxSectionNameBytes` bytes; or a
+/// `nextSectionId` below 1 or not above every section id) it returns false with a description in `error` and the store, its history, its selection and the
 /// out-params are untouched. Otherwise it replaces the store's document and both id counters
 /// (`DocumentStore::replace`, which clears the undo/redo history and the selection), writes the editor
 /// size into the out-params that are non-null, and returns true with `error` cleared.

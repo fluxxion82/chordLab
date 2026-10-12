@@ -620,6 +620,17 @@ bool parseSetOctave(Fields& fields, Command& out) {
     return fields.getInt("id", out.id) && fields.getInt("octave", out.octave);
 }
 
+/// Reads a section `name` field: a string of at most `kMaxSectionNameBytes` UTF-8 bytes.
+bool getSectionName(Fields& fields, std::string& name) {
+    if (!fields.getString("name", name)) {
+        return false;
+    }
+    if (name.size() > static_cast<std::size_t>(kMaxSectionNameBytes)) {
+        return fields.fail("name", "must be at most " + std::to_string(kMaxSectionNameBytes) + " bytes");
+    }
+    return true;
+}
+
 /// `addSection {index, name?}`: the name, when given, goes to `name`; absent, it stays empty (the store's
 /// default name).
 bool parseAddSection(Fields& fields, Command& out, std::string& name) {
@@ -627,12 +638,12 @@ bool parseAddSection(Fields& fields, Command& out, std::string& name) {
     if (!fields.getInt("index", out.index)) {
         return false;
     }
-    return !fields.has("name") || fields.getString("name", name);
+    return !fields.has("name") || getSectionName(fields, name);
 }
 
 bool parseRenameSection(Fields& fields, Command& out, std::string& name) {
     out.kind = Command::Kind::RenameSection;
-    return fields.getInt("id", out.id) && fields.getString("name", name);
+    return fields.getInt("id", out.id) && getSectionName(fields, name);
 }
 
 bool parseSetSectionColour(Fields& fields, Command& out) {
@@ -874,7 +885,7 @@ bool parseSections(Fields& fields, Document& doc, int& maxSectionId, std::string
         }
         Fields sectionFields(sectionObject, where, error);
         Section section{};
-        if (!sectionFields.getIntIn("id", 1, INT_MAX - 1, section.id) || !sectionFields.getString("name", section.name) ||
+        if (!sectionFields.getIntIn("id", 1, INT_MAX - 1, section.id) || !getSectionName(sectionFields, section.name) ||
             !sectionFields.getInt("colourIndex", section.colourIndex) ||
             !sectionFields.getInt("firstEventIndex", section.firstEventIndex)) {
             return false;

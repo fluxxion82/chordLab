@@ -31,6 +31,12 @@ constexpr int kNumSectionColours = 8;
 /// The id `DocumentStore::addSection` returns when it added nothing. No section ever has this id.
 constexpr int kNoSectionId = -1;
 
+/// Longest section name, in UTF-8 bytes. `DocumentStore::addSection` and `renameSection` cut a longer
+/// name down to it at a character boundary; `loadStateJson` and `applyCommandJson` reject a longer one.
+/// The bound is what keeps the largest state (`kMaxChords` chords, a section on each) far inside
+/// `kMaxJsonBytes` (json_api.h) whatever the names hold; test_json_api.cpp pins that size.
+constexpr int kMaxSectionNameBytes = 64;
+
 /// The most chords a document may hold: `appendChord` refuses the next one (`kNoEventId`), `loadStateJson`
 /// rejects a state with more, and `replace` asserts. The bound exists so that a compiled document always
 /// fits one scheduler snapshot: kMaxChords chords x at most 8 voices (headroom; `voicing` has one note per
@@ -81,7 +87,8 @@ constexpr bool operator!=(const ChordEvent& a, const ChordEvent& b) noexcept {
 /// (`compileSection`). `id` is stable for the life of the section and unique within a `DocumentStore`;
 /// it survives chord edits, undo and redo, and is never reused after a remove. It is in 1..INT_MAX-1:
 /// the store derives its next id as the largest plus one (`replace`), which must not overflow.
-/// `colourIndex` is in 0..kNumSectionColours-1.
+/// `colourIndex` is in 0..kNumSectionColours-1. `name` is any UTF-8 string of at most
+/// `kMaxSectionNameBytes` bytes.
 struct Section {
     int id;
     std::string name;
@@ -141,8 +148,9 @@ inline bool operator!=(const Document& a, const Document& b) noexcept {
 
 /// True when `doc.sections` satisfies the section invariants: sorted strictly by `firstEventIndex` with
 /// the first at 0 and every index a position of the progression (so no sections on an empty one),
-/// colours in 0..kNumSectionColours-1, ids in 1..INT_MAX-1 and distinct. What `DocumentStore::replace`
-/// asserts, and what a loader taking a document from outside the process must check before calling it.
+/// colours in 0..kNumSectionColours-1, ids in 1..INT_MAX-1 and distinct, names of at most
+/// `kMaxSectionNameBytes` bytes. What `DocumentStore::replace` asserts, and what a loader taking a
+/// document from outside the process must check before calling it.
 bool sectionsWellFormed(const Document& doc);
 
 /// Owns a `Document` and its undo/redo history.
@@ -254,7 +262,9 @@ public:
     void setSelectedEvent(int id);
 
     /// Starts a section on the chord at `firstEventIndex` and returns its new id; the list stays sorted.
-    /// An empty `name` takes the default "Section <id>"; the colour is the id's turn in the cycle of
+    /// An empty `name` takes the default "Section <id>"; a name longer than `kMaxSectionNameBytes` bytes
+    /// is cut down to the bound at a UTF-8 character boundary (a character straddling it is dropped
+    /// whole); the colour is the id's turn in the cycle of
     /// `kNumSectionColours` (id 1 gets colour 0). The first section always starts at 0: when the document
     /// has no sections yet and `firstEventIndex` > 0, the chords before it get a section of their own
     /// first (default name and colour, the lower id) in the same undoable step, and the returned id is
@@ -265,7 +275,9 @@ public:
     /// needed (it stops at INT_MAX).
     int addSection(int firstEventIndex, std::string name = {});
 
-    /// Sets the name of section `id` to `name`, any string. Unknown id: no-op.
+    /// Sets the name of section `id` to `name`, any UTF-8 string, cut down to `kMaxSectionNameBytes`
+    /// bytes at a character boundary as `addSection` does. Unknown id, or a name that cuts down to the
+    /// current one: no-op.
     void renameSection(int id, std::string name);
 
     /// Sets the colour of section `id`, clamped to 0..kNumSectionColours-1. Unknown id: no-op.

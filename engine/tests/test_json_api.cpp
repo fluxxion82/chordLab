@@ -497,8 +497,7 @@ TEST_CASE("snapshot: why is null on the first event and relates every later one 
 }
 
 TEST_CASE("snapshot: the why sentence follows the documented rules clause by clause") {
-    // Each pair is appended after a leading C so that the relation is the pair's own; the leading chord
-    // of each pair is at index 1 and the one explained at index 2.
+    // Each pair is its own two-chord document; the sentence read is the second event's.
     const auto textOf = [](const Chord& from, const Chord& to, Key projectKey = key('C', 0, Mode::Ionian)) {
         DocumentStore store;
         store.setProjectKey(projectKey);
@@ -948,6 +947,23 @@ TEST_CASE("section commands: an index that is no chord position or already start
     CHECK(store.doc().sections.size() == 1);
 }
 
+TEST_CASE("addSection / renameSection: a name longer than kMaxSectionNameBytes is rejected whole; the bound itself passes") {
+    DocumentStore store = cG7Am();
+    const std::string atBound(kMaxSectionNameBytes, 'n');
+    const std::string over = atBound + "n";
+    applyOk(store, {{"cmd", "addSection"}, {"index", 0}, {"name", atBound}});
+    CHECK(store.doc().sections[0].name == atBound);
+
+    checkRejected(store, {{"cmd", "addSection"}, {"index", 1}, {"name", over}});
+    checkRejected(store, {{"cmd", "addSection"}, {"index", 1}, {"name", std::string(63, 'a') + "\xC3\xA9"}});  // 65 bytes
+    checkRejected(store, {{"cmd", "renameSection"}, {"id", 1}, {"name", over}});
+    checkRejected(store, {{"cmd", "renameSection"}, {"id", 1}, {"name", std::string(1000, 'z')}});
+    CHECK(store.nextSectionId() == 2);
+
+    applyOk(store, {{"cmd", "renameSection"}, {"id", 1}, {"name", std::string(62, 'a') + "\xC3\xA9"}});  // 64 bytes
+    CHECK(store.doc().sections[0].name.size() == static_cast<std::size_t>(kMaxSectionNameBytes));
+}
+
 TEST_CASE("addSection: refused with a clear error when the section ids are exhausted, changing nothing") {
     DocumentStore store;
     Document doc = cG7Am().doc();
@@ -1330,6 +1346,9 @@ TEST_CASE("state: bad Phase 2 fields reject the whole state, sections checked be
     rejects("section id zero", [](json& s) { s["sections"][0]["id"] = 0; });
     rejects("section id INT_MAX", [](json& s) { s["sections"][1]["id"] = INT_MAX; s["nextSectionId"] = INT_MAX; });
     rejects("section name not a string", [](json& s) { s["sections"][0]["name"] = 5; });
+    rejects("section name over the bound", [](json& s) { s["sections"][0]["name"] = std::string(kMaxSectionNameBytes + 1, 'n'); });
+    rejects("section name over the bound by a multi-byte character",
+            [](json& s) { s["sections"][1]["name"] = std::string(kMaxSectionNameBytes - 1, 'a') + "\xC3\xA9"; });
     rejects("section colour not an integer", [](json& s) { s["sections"][0]["colourIndex"] = "red"; });
     rejects("section index not an integer", [](json& s) { s["sections"][0]["firstEventIndex"] = "0"; });
     rejects("first section not at 0", [](json& s) { s["sections"].erase(0); });
@@ -1649,6 +1668,47 @@ TEST_CASE("capacity: a state with more than kMaxChords chords is rejected whole;
     CHECK(store.nextId() == kMaxChords + 1);
     CHECK_FALSE(apply(store, {{"cmd", "appendChord"}, {"root", 0}, {"type", "maj"}}, error));
     CHECK_FALSE(error.empty());
+}
+
+namespace {
+
+/// The largest state the engine can produce: kMaxChords chords, a section on every one of them, each
+/// name at the byte bound and made of the characters JSON escapes to two bytes.
+DocumentStore worstCaseStore() {
+    DocumentStore store = fullStore();
+    std::string name;
+    for (int i = 0; i < kMaxSectionNameBytes; ++i) {
+        name.push_back(i % 2 == 0 ? '"' : '\\');
+    }
+    for (int i = 0; i < kMaxChords; ++i) {
+        REQUIRE(store.addSection(i, name) == i + 1);
+    }
+    return store;
+}
+
+/// `stateJson` of `worstCaseStore()` at the default editor size, measured; pinned so that a change to the
+/// state's shape shows up here against `kMaxJsonBytes` (1 MiB) before it shows up as a state that will
+/// not load.
+constexpr std::size_t kWorstCaseStateBytes = 76770;
+
+}  // namespace
+
+TEST_CASE("capacity: the largest possible state is well under kMaxJsonBytes and round-trips") {
+    const DocumentStore original = worstCaseStore();
+    REQUIRE(original.doc().events.size() == static_cast<std::size_t>(kMaxChords));
+    REQUIRE(original.doc().sections.size() == static_cast<std::size_t>(kMaxChords));
+    const std::string text = stateJson(original);
+    MESSAGE("worst-case state: " << text.size() << " bytes");
+    CHECK(text.size() == kWorstCaseStateBytes);
+    CHECK(text.size() <= kMaxJsonBytes / 8);
+
+    DocumentStore loaded;
+    std::string error;
+    REQUIRE_MESSAGE(loadStateJson(loaded, text, error), error);
+    CHECK(loaded.doc() == original.doc());
+    CHECK(loaded.nextId() == kMaxChords + 1);
+    CHECK(loaded.nextSectionId() == kMaxChords + 1);
+    CHECK(loaded.doc().sections.back().name.size() == static_cast<std::size_t>(kMaxSectionNameBytes));
 }
 
 TEST_CASE("keyName: the spelled tonic and the mode name, as the snapshot's key names") {

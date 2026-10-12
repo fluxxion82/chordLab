@@ -1450,6 +1450,52 @@ TEST_CASE("appendChord: keeps the sections where they are") {
     CHECK(store.doc().sectionIndexOf(4) == 1);  // the new chord joins the last section
 }
 
+// --- Section names ----------------------------------------------------------------------------
+
+TEST_CASE("kMaxSectionNameBytes: plan value") {
+    CHECK(kMaxSectionNameBytes == 64);
+}
+
+TEST_CASE("addSection / renameSection: names longer than kMaxSectionNameBytes are cut at a UTF-8 boundary") {
+    DocumentStore store = threeChords();
+    const std::string sixtyFour(64, 'x');
+    REQUIRE(store.addSection(0, std::string(100, 'x')) == 1);
+    CHECK(store.doc().sections[0].name == sixtyFour);
+    REQUIRE(store.addSection(1, sixtyFour) == 2);  // exactly the bound: kept whole
+    CHECK(store.doc().sections[1].name == sixtyFour);
+
+    // A two-byte character straddling the bound is dropped whole, never split.
+    store.renameSection(1, std::string(63, 'a') + "\xC3\xA9");  // 63 a + e-acute = 65 bytes
+    CHECK(store.doc().sections[0].name == std::string(63, 'a'));
+    store.renameSection(1, std::string(62, 'a') + "\xC3\xA9");  // 64 bytes: kept
+    CHECK(store.doc().sections[0].name == std::string(62, 'a') + "\xC3\xA9");
+    // A four-byte character likewise.
+    store.renameSection(1, std::string(61, 'a') + "\xF0\x9F\x8E\xB5");  // 65 bytes
+    CHECK(store.doc().sections[0].name == std::string(61, 'a'));
+    store.renameSection(1, std::string(60, 'a') + "\xF0\x9F\x8E\xB5");  // 64 bytes
+    CHECK(store.doc().sections[0].name.size() == 64);
+}
+
+TEST_CASE("renameSection: a name that cuts down to the current one pushes no undo entry") {
+    DocumentStore store = threeChords();
+    REQUIRE(store.addSection(0, std::string(64, 'x')) == 1);
+    REQUIRE(store.undo());
+    REQUIRE(store.redo());
+    store.renameSection(1, std::string(300, 'x'));  // cuts to the current name
+    CHECK(store.doc().sections[0].name == std::string(64, 'x'));
+    REQUIRE(store.undo());  // the add, not a rename
+    CHECK(store.doc().sections.empty());
+}
+
+TEST_CASE("sectionsWellFormed: a name longer than kMaxSectionNameBytes breaks the invariants") {
+    Document doc;
+    doc.events.push_back(ChordEvent{1, kC, 4.0, 100});
+    doc.sections.push_back(Section{1, std::string(64, 'n'), 0, 0});
+    CHECK(sectionsWellFormed(doc));
+    doc.sections[0].name.push_back('n');
+    CHECK_FALSE(sectionsWellFormed(doc));
+}
+
 // --- renameSection / setSectionColour / removeSection / moveSectionStart -------------------
 
 TEST_CASE("renameSection: sets the name; unknown id and the same name push no undo entry") {

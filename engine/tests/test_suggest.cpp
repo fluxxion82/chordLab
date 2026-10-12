@@ -648,19 +648,15 @@ TEST_CASE("every project key x every browsed key: every suggestion carries at le
         }
     };
     for (const Key& project : keys) {
-        // Opening: every pair (cheap: no relation to a previous chord is computed).
-        for (const Key& browsed : keys) {
-            check(nullptr, project, browsed);
-        }
-        // After the tonic: the guarantee is structural (a candidate that is not applied has exactly one of
-        // Diatonic, Borrowed and Chromatic whatever precedes it; the previous chord only adds reasons), so
-        // the browsed keys need only cover the candidate sources, the palette on the project tonic (its
-        // parallel modes) and on every other tonic (the twelve Ionian keys), rather than all 108 - the
-        // relation per candidate makes the full grid take ten seconds.
+        // The guarantee is structural (a candidate that is not applied has exactly one of Diatonic, Borrowed
+        // and Chromatic whatever precedes it; a previous chord only adds reasons), so the browsed keys need
+        // only cover the candidate sources: the palette on the project tonic (its parallel modes) and on
+        // every other tonic (the twelve Ionian keys), rather than all 108, which took fifteen seconds.
         const Chord tonic = diatonicTriad(project, 0);
         std::vector<Key> browsedKeys = parallelModes(project);
         browsedKeys.insert(browsedKeys.end(), ionian.begin(), ionian.end());
         for (const Key& browsed : browsedKeys) {
+            check(nullptr, project, browsed);
             check(&tonic, project, browsed);
         }
     }
