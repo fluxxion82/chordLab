@@ -6,8 +6,10 @@ import SwiftUI
 /// previews its voicing through `ChordLabState.pressCell` / `releaseCell` (press, release, cancel and
 /// disappearance are all handled by `PressAction`); dragging a cell carries a `ChordRef` to the
 /// sequence bar. The press is a simultaneous gesture under `.draggable`: the preview starts on mouse
-/// down, and when AppKit begins the drag session the press gesture is cancelled (its `@GestureState`
-/// resets), which releases the preview; a press that never moves far enough simply releases on mouse up.
+/// down and ends when the press gesture ends or is cancelled. Starting the native drag session is
+/// expected, not guaranteed, to cancel it; if it does not, the preview lasts until the drop, and the
+/// scheduler's 4 s watchdog is the backstop either way. A press that never moves far enough simply
+/// releases on mouse up.
 struct PaletteView: View {
   @EnvironmentObject var state: ChordLabState
   @AppStorage(LabelMode.storageKey) private var labelMode: LabelMode = .both

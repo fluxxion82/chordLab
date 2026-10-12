@@ -158,7 +158,7 @@ TEST_CASE("rt alloc: the probe sees an allocation") {
     CHECK(probe.count() >= 1);
 }
 
-TEST_CASE("rt alloc: the scheduler allocates nothing across 10k random blocks with previews") {
+TEST_CASE("rt alloc: the scheduler allocates nothing across 10k random blocks with previews and resets") {
     // Everything that allocates is prepared first: the progressions, the random engine, the output.
     const Compiled a = compiled({chord(0, "maj"), chord(9, "min"), chord(5, "maj"), chord(7, "7")}, 4.0);
     const Compiled b = compiled({chord(2, "m7"), chord(7, "7"), chord(0, "maj9")}, 1.5);
@@ -213,6 +213,8 @@ TEST_CASE("rt alloc: the scheduler allocates nothing across 10k random blocks wi
             scheduler.adopt(snapshotOf(*current, ++generation));  // changed content
         } else if (roll == 19) {
             scheduler.adopt(snapshotOf(*current, generation));  // same generation: a no-op by contract
+        } else if (roll < 22) {
+            scheduler.reset(roll == 20 ? kSr : 44100.0);  // repeated resets, with and without a rate change
         }
         std::size_t written = 0;
         const BlockInfo info{ppq, nFrames, kSr, bpm, playing};
@@ -230,7 +232,7 @@ TEST_CASE("rt alloc: the scheduler allocates nothing across 10k random blocks wi
     (void) refusedPreviews;
 }
 
-TEST_CASE("rt alloc: the triple buffer allocates nothing on the producer or the consumer side") {
+TEST_CASE("rt alloc: the triple buffer allocates nothing on the producer or the consumer side, empty acquires included") {
     struct Slot {
         std::array<NoteEvent, kMaxSnapshotEvents> events;
         std::size_t count;
@@ -243,6 +245,7 @@ TEST_CASE("rt alloc: the triple buffer allocates nothing on the producer or the 
     int wrongGeneration = 0;
     int wrongCurrent = 0;
     int unexpectedNull = 0;
+    int unexpectedFresh = 0;
     std::uint32_t lastSeen = 0;
     for (std::uint32_t generation = 1; generation <= 10000; ++generation) {
         Slot& back = buffer->beginWrite();
@@ -266,12 +269,19 @@ TEST_CASE("rt alloc: the triple buffer allocates nothing on the producer or the 
                 ++wrongGeneration;
             }
             lastSeen = generation;
+            // Empty acquires: nothing new, so nullptr and nothing changes.
+            for (int i = 0; i < 3; ++i) {
+                if (buffer->acquire() != nullptr || buffer->current() != acquired || buffer->currentGeneration() != generation) {
+                    ++unexpectedFresh;
+                }
+            }
         } else if (buffer->acquire() != nullptr && buffer->currentGeneration() != generation) {
             ++wrongGeneration;  // an acquire between the scheduled ones still hands over the latest
         }
     }
     CHECK(probe.count() == 0);
     CHECK(unexpectedNull == 0);
+    CHECK(unexpectedFresh == 0);
     CHECK(wrongCurrent == 0);
     CHECK(wrongGeneration == 0);
 }

@@ -2,7 +2,9 @@ import SwiftUI
 
 /// The progression as a strip of blocks over a beat ruler, above the palette: one block per event,
 /// `lengthBeats × pxPerBeat` wide, coloured by family, a ring instead of a fill when the chord has notes
-/// outside the project key, labelled per the label mode. Everything drawn comes from the snapshot.
+/// outside the project key, labelled per the label mode. Everything drawn comes from the snapshot, and
+/// every position comes from `SequenceGeometry`: the blocks, the ruler, the playhead and the reorder
+/// arithmetic share one linear layout, so what is drawn is what is computed.
 ///
 /// Editing, every step a command to the plugin (the snapshot it answers with redraws the strip):
 /// - drop a palette cell anywhere on the strip → `appendChord`;
@@ -28,8 +30,7 @@ struct SequenceBarView: View {
   static let handleWidth: CGFloat = 6
   static let beatsPerBar = 4
   static let snapBeats = 0.25
-  static let minBeats = 0.25     // kMinLengthBeats
-  static let maxBeats = 64.0     // kMaxLengthBeats
+  static let lengthRange = 0.25...64.0   // kMinLengthBeats...kMaxLengthBeats
   static let cornerRadius: CGFloat = 6
 
   /// A resize in progress: the handle of `id` is being dragged and the block shows `lengthBeats`.
@@ -64,40 +65,41 @@ struct SequenceBarView: View {
 
   var body: some View {
     GeometryReader { geometry in
-      let endBeat = state.snapshot?.endBeat ?? 0
+      // The layout of what is drawn: the snapshot's lengths, except for a block being resized, which
+      // follows the mouse. The ruler's end marker and the content width follow it too.
+      let layout = SequenceGeometry.layout(lengths: events.map(displayedLength), pxPerBeat: Self.pxPerBeat)
       // Room for the progression plus a bar of slack to drop into; never narrower than the strip.
-      let contentWidth = max(geometry.size.width,
-                             CGFloat(endBeat + Double(Self.beatsPerBar)) * Self.pxPerBeat)
+      let contentWidth = max(geometry.size.width, layout.endX + CGFloat(Self.beatsPerBar) * Self.pxPerBeat)
       ScrollView(.horizontal) {
         ZStack(alignment: .topLeading) {
-        VStack(alignment: .leading, spacing: 2) {
-          ZStack(alignment: .leading) {
-            Color.clear
-              .frame(width: contentWidth, height: Self.blockHeight)
-              .contentShape(Rectangle())
-              .onTapGesture { selectedEventId = nil }       // click the empty strip: deselect
-            HStack(spacing: 0) {
-              ForEach(events) { event in
-                block(event)
+          VStack(alignment: .leading, spacing: 2) {
+            ZStack(alignment: .leading) {
+              Color.clear
+                .frame(width: contentWidth, height: Self.blockHeight)
+                .contentShape(Rectangle())
+                .onTapGesture { selectedEventId = nil }       // click the empty strip: deselect
+              HStack(spacing: 0) {
+                ForEach(Array(events.enumerated()), id: \.element.id) { index, event in
+                  block(event, frame: layout.frames[index])
+                }
+              }
+              if events.isEmpty {
+                Text("Drag chords here")
+                  .foregroundStyle(.gray)
+                  .frame(width: geometry.size.width, height: Self.blockHeight)
+                  .allowsHitTesting(false)
               }
             }
-            if events.isEmpty {
-              Text("Drag chords here")
-                .foregroundStyle(.gray)
-                .frame(width: geometry.size.width, height: Self.blockHeight)
-                .allowsHitTesting(false)
-            }
+            ruler(width: contentWidth, endX: layout.endX)
           }
-          ruler(width: contentWidth, endBeat: endBeat)
-        }
-        if let beat = playheadBeat {
-          Rectangle()
-            .fill(Color.white)
-            .frame(width: 2, height: Self.blockHeight + 2 + Self.rulerHeight)
-            .offset(x: CGFloat(beat) * Self.pxPerBeat - 1)
-            .allowsHitTesting(false)
-            .accessibilityHidden(true)
-        }
+          if let beat = playheadBeat {
+            Rectangle()
+              .fill(Color.white)
+              .frame(width: 2, height: Self.blockHeight + 2 + Self.rulerHeight)
+              .offset(x: SequenceGeometry.x(ofBeat: beat, pxPerBeat: Self.pxPerBeat) - 1)
+              .allowsHitTesting(false)
+              .accessibilityHidden(true)
+          }
         }
         .padding(.vertical, 6)
         .padding(.horizontal, 4)
@@ -127,7 +129,18 @@ struct SequenceBarView: View {
     .accessibilityLabel("Progression")
   }
 
-  // MARK: - Blocks
+  // MARK: - Geometry (SequenceGeometry, with this view's constants)
+
+  /// The strip's layout for `events` at the snapshot's lengths: what the ruler, the playhead and the
+  /// reorder arithmetic agree on.
+  static func layout(events: [EventJSON], pxPerBeat: CGFloat = pxPerBeat) -> SequenceGeometry.Layout {
+    SequenceGeometry.layout(lengths: events.map(\.lengthBeats), pxPerBeat: pxPerBeat)
+  }
+
+  /// `lengthBeats` after dragging its handle by `dx` points.
+  static func resizedLength(_ lengthBeats: Double, by dx: CGFloat) -> Double {
+    SequenceGeometry.resizedLength(lengthBeats, by: dx, pxPerBeat: pxPerBeat, snap: snapBeats, range: lengthRange)
+  }
 
   /// The length a block is drawn with: the resize in progress if it is this block's, else the snapshot's.
   private func displayedLength(_ event: EventJSON) -> Double {
@@ -135,8 +148,11 @@ struct SequenceBarView: View {
     return event.lengthBeats
   }
 
-  private func block(_ event: EventJSON) -> some View {
-    let width = max(Self.handleWidth + 2, CGFloat(displayedLength(event)) * Self.pxPerBeat)
+  // MARK: - Blocks
+
+  /// One block, exactly `frame.width` wide: the hairline between neighbours is inset inside that frame,
+  /// never added to it, so the HStack lands every block where the layout says.
+  private func block(_ event: EventJSON, frame: SequenceGeometry.BlockFrame) -> some View {
     let color = PaletteCellView.color(family: event.family ?? "Other")
     let filled = (event.outOfKey ?? []).isEmpty
     let selected = selectedEventId == event.id
@@ -157,10 +173,10 @@ struct SequenceBarView: View {
       }
       labels(event)
     }
-    .frame(width: width, height: Self.blockHeight)
+    .padding(.horizontal, 0.5)
+    .frame(width: frame.width, height: Self.blockHeight)
     .clipped()
-    .overlay(alignment: .trailing) { handle(event, selected: selected) }
-    .padding(.horizontal, 1)                                      // a hairline between abutting blocks
+    .overlay(alignment: .trailing) { handle(event, selected: selected, blockWidth: frame.width) }
     .contentShape(Rectangle())
     .onTapGesture { select(event) }
     .gesture(moveGesture(event))
@@ -188,13 +204,15 @@ struct SequenceBarView: View {
     .padding(.trailing, Self.handleWidth)
   }
 
-  /// The grab handle at the right edge. A child of the block, so its gesture wins over the block's
-  /// move gesture.
-  private func handle(_ event: EventJSON, selected: Bool) -> some View {
-    RoundedRectangle(cornerRadius: 2)
+  /// The grab handle at the right edge, inside the block's frame (narrower on a narrow block). A child
+  /// of the block, so its gesture wins over the block's move gesture.
+  private func handle(_ event: EventJSON, selected: Bool, blockWidth: CGFloat) -> some View {
+    let width = min(Self.handleWidth, max(2, blockWidth / 2))
+    let margin: CGFloat = blockWidth >= 4 * Self.handleWidth ? 3 : 0   // a wider hit area when there is room
+    return RoundedRectangle(cornerRadius: 2)
       .fill(Color.white.opacity(selected || resize?.id == event.id ? 0.6 : 0.25))
-      .frame(width: Self.handleWidth, height: Self.blockHeight - 16)
-      .padding(.horizontal, 3)                                    // a 12-pt hit area around a 6-pt handle
+      .frame(width: width, height: Self.blockHeight - 16)
+      .padding(.horizontal, margin)
       .contentShape(Rectangle())
       .gesture(resizeGesture(event))
       .onHover { over in
@@ -235,7 +253,8 @@ struct SequenceBarView: View {
         move = nil
         let events = self.events
         guard let from = events.firstIndex(where: { $0.id == event.id }) else { return }
-        let target = Self.targetIndex(from: from, droppedBy: value.translation.width, in: events)
+        let target = SequenceGeometry.targetIndex(from: from, droppedBy: value.translation.width,
+                                                  in: Self.layout(events: events))
         if target != from {
           state.send(command: ["cmd": "moveChord", "id": event.id, "index": target])
         }
@@ -249,41 +268,15 @@ struct SequenceBarView: View {
     return .handled
   }
 
-  // MARK: - Geometry (pure, so the rules are in one place)
-
-  /// `lengthBeats` after dragging its handle by `dx` points: snapped to quarter beats, clamped to the
-  /// engine's range.
-  static func resizedLength(_ lengthBeats: Double, by dx: CGFloat) -> Double {
-    let beats = lengthBeats + Double(dx / pxPerBeat)
-    let snapped = (beats / snapBeats).rounded() * snapBeats
-    return min(maxBeats, max(minBeats, snapped))
-  }
-
-  /// Where the block at `from` lands after being dragged `dx` points: its new index is the number of
-  /// other blocks whose centre lies left of the dragged block's dropped centre (block centres are
-  /// measured in the undragged layout, which is what the other blocks still show).
-  static func targetIndex(from: Int, droppedBy dx: CGFloat, in events: [EventJSON]) -> Int {
-    var x: CGFloat = 0
-    var centres: [CGFloat] = []
-    for event in events {
-      let width = CGFloat(event.lengthBeats) * pxPerBeat
-      centres.append(x + width / 2)
-      x += width
-    }
-    guard events.indices.contains(from) else { return from }
-    let dropped = centres[from] + dx
-    return centres.enumerated().filter { $0.offset != from && $0.element < dropped }.count
-  }
-
   // MARK: - Ruler
 
   /// A tick per beat (taller on bar lines) with the bar number at every bar, and a line where the
-  /// progression ends.
-  private func ruler(width: CGFloat, endBeat: Double) -> some View {
+  /// progression ends (`endX`, from the same layout as the blocks).
+  private func ruler(width: CGFloat, endX: CGFloat) -> some View {
     Canvas { context, size in
       let beats = Int(size.width / Self.pxPerBeat)
       for beat in 0...beats {
-        let x = CGFloat(beat) * Self.pxPerBeat + 0.5
+        let x = SequenceGeometry.x(ofBeat: Double(beat), pxPerBeat: Self.pxPerBeat) + 0.5
         let bar = beat % Self.beatsPerBar == 0
         var tick = Path()
         tick.move(to: CGPoint(x: x, y: 0))
@@ -294,8 +287,8 @@ struct SequenceBarView: View {
                        at: CGPoint(x: x + 3, y: 10), anchor: .topLeading)
         }
       }
-      if endBeat > 0 {
-        let x = CGFloat(endBeat) * Self.pxPerBeat + 0.5
+      if endX > 0 {
+        let x = endX + 0.5
         var end = Path()
         end.move(to: CGPoint(x: x, y: 0))
         end.addLine(to: CGPoint(x: x, y: size.height))

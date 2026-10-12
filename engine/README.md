@@ -51,10 +51,11 @@ What may run on the audio thread is exactly the `Scheduler` surface: `process`, 
 `currentGeneration`). After construction neither allocates, throws, locks or logs; the scheduler's only
 headers are `limits.h` and `note_event.h` plus `<array>`, `<atomic>`, `<cstddef>`, `<cstdint>`, and
 `triple_buffer.h` adds `<type_traits>`, so a translation unit that includes them pulls in nothing that
-allocates. `engine_rt_alloc_test` proves it from the outside: a separate process whose global
+allocates. `engine_rt_alloc_test` checks it from the outside: a separate process whose global
 `operator new`/`delete` are replaced by counting versions runs the scheduler through ten thousand random
-blocks (starts, stops, seeks, tempo changes, previews, panics, adopts) and both sides of the triple buffer,
-and asserts that nothing allocated.
+blocks (starts, stops, seeks, tempo changes, previews, panics, resets, adopts) and both sides of the triple
+buffer, and asserts zero intercepted C++ allocations on the exercised paths. It cannot see a direct
+`malloc` or a path the random walk never reaches, so it is evidence, not a proof.
 
 Everything else (`DocumentStore`, `compile`, the palette and symbols, `json_api`, `smf`) is ordinary
 allocating code for the UI/message thread. The hand-over is a `Snapshot`: `compile` produces the
