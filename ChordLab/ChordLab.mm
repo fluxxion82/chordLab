@@ -557,7 +557,7 @@ void ChordLab::PushSnapshot()
     std::string json;
     {
       std::lock_guard<std::mutex> lock(mModelMutex);
-      json = chordlab::snapshotJson(mStore.doc(), mPalette);
+      json = chordlab::snapshotJson(mStore.doc(), mPalette, mStore.selectedEventId());  // the live selection drives suggestions
     }
     SendArbitraryMsgFromDelegate((int) kMsgTagSnapshot, (int) json.size(), json.data());
   });

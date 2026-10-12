@@ -825,6 +825,71 @@ TEST_CASE("setProgressionLoop / setFollowHost: toggle independently and never pu
     CHECK_FALSE(store.redo());
 }
 
+TEST_CASE("setSelectedEvent: live state: selects an event, kNoEventId clears, an unknown id is a no-op, no history") {
+    DocumentStore store = threeChords();
+    CHECK(store.selectedEventId() == kNoEventId);
+    store.setSelectedEvent(2);
+    CHECK(store.selectedEventId() == 2);
+    store.setSelectedEvent(99);  // nothing to select: the selection stays
+    CHECK(store.selectedEventId() == 2);
+    store.setSelectedEvent(0);
+    CHECK(store.selectedEventId() == 2);
+    store.setSelectedEvent(3);
+    CHECK(store.selectedEventId() == 3);
+    store.setSelectedEvent(kNoEventId);
+    CHECK(store.selectedEventId() == kNoEventId);
+    store.setSelectedEvent(1);
+    CHECK(store.selectedEventId() == 1);
+
+    // Live state: the three appends are the whole history, and undoing them does not restore a selection.
+    REQUIRE(store.undo());
+    CHECK(store.selectedEventId() == 1);
+    REQUIRE(store.undo());
+    REQUIRE(store.undo());
+    CHECK_FALSE(store.undo());
+    CHECK(store.selectedEventId() == kNoEventId);  // event 1 is gone
+    REQUIRE(store.redo());
+    CHECK(store.selectedEventId() == kNoEventId);  // and does not come back selected
+}
+
+TEST_CASE("selectedEventId: kept across edits, undo and redo while the event exists; cleared the moment it goes") {
+    DocumentStore store = threeChords();
+    store.setSelectedEvent(2);
+    store.setLength(2, 1.0);
+    store.moveChord(2, 0);
+    store.setProjectKey(key('G', 0, Mode::Ionian));
+    CHECK(store.selectedEventId() == 2);
+    REQUIRE(store.undo());
+    REQUIRE(store.undo());
+    CHECK(store.selectedEventId() == 2);
+    REQUIRE(store.redo());
+    CHECK(store.selectedEventId() == 2);
+
+    store.removeChord(2);
+    CHECK(store.selectedEventId() == kNoEventId);
+    REQUIRE(store.undo());  // the chord is back, the selection is not
+    CHECK(store.findIndex(2) >= 0);
+    CHECK(store.selectedEventId() == kNoEventId);
+
+    store.setSelectedEvent(3);
+    store.removeChord(1);  // another chord: the selection survives
+    CHECK(store.selectedEventId() == 3);
+    REQUIRE(store.undo());
+    REQUIRE(store.undo());  // the removal of 1, then the move: event 3 is there throughout
+    CHECK(store.selectedEventId() == 3);
+}
+
+TEST_CASE("replace: clears the selection, even when the new document has an event with the same id") {
+    DocumentStore store = threeChords();
+    store.setSelectedEvent(2);
+    Document doc;
+    doc.events.push_back(ChordEvent{2, kC, 4.0, 100});
+    store.replace(doc, 3);
+    CHECK(store.selectedEventId() == kNoEventId);
+    store.setSelectedEvent(2);
+    CHECK(store.selectedEventId() == 2);
+}
+
 TEST_CASE("undo: browsing between two appends keeps the browsed key while the append is undone") {
     DocumentStore store;
     store.appendChord(kC);
@@ -1383,6 +1448,52 @@ TEST_CASE("appendChord: keeps the sections where they are") {
     store.appendChord(kF);
     CHECK(sectionStartsOf(store) == SectionStarts{{1, 0}, {2, 2}});
     CHECK(store.doc().sectionIndexOf(4) == 1);  // the new chord joins the last section
+}
+
+// --- Section names ----------------------------------------------------------------------------
+
+TEST_CASE("kMaxSectionNameBytes: plan value") {
+    CHECK(kMaxSectionNameBytes == 64);
+}
+
+TEST_CASE("addSection / renameSection: names longer than kMaxSectionNameBytes are cut at a UTF-8 boundary") {
+    DocumentStore store = threeChords();
+    const std::string sixtyFour(64, 'x');
+    REQUIRE(store.addSection(0, std::string(100, 'x')) == 1);
+    CHECK(store.doc().sections[0].name == sixtyFour);
+    REQUIRE(store.addSection(1, sixtyFour) == 2);  // exactly the bound: kept whole
+    CHECK(store.doc().sections[1].name == sixtyFour);
+
+    // A two-byte character straddling the bound is dropped whole, never split.
+    store.renameSection(1, std::string(63, 'a') + "\xC3\xA9");  // 63 a + e-acute = 65 bytes
+    CHECK(store.doc().sections[0].name == std::string(63, 'a'));
+    store.renameSection(1, std::string(62, 'a') + "\xC3\xA9");  // 64 bytes: kept
+    CHECK(store.doc().sections[0].name == std::string(62, 'a') + "\xC3\xA9");
+    // A four-byte character likewise.
+    store.renameSection(1, std::string(61, 'a') + "\xF0\x9F\x8E\xB5");  // 65 bytes
+    CHECK(store.doc().sections[0].name == std::string(61, 'a'));
+    store.renameSection(1, std::string(60, 'a') + "\xF0\x9F\x8E\xB5");  // 64 bytes
+    CHECK(store.doc().sections[0].name.size() == 64);
+}
+
+TEST_CASE("renameSection: a name that cuts down to the current one pushes no undo entry") {
+    DocumentStore store = threeChords();
+    REQUIRE(store.addSection(0, std::string(64, 'x')) == 1);
+    REQUIRE(store.undo());
+    REQUIRE(store.redo());
+    store.renameSection(1, std::string(300, 'x'));  // cuts to the current name
+    CHECK(store.doc().sections[0].name == std::string(64, 'x'));
+    REQUIRE(store.undo());  // the add, not a rename
+    CHECK(store.doc().sections.empty());
+}
+
+TEST_CASE("sectionsWellFormed: a name longer than kMaxSectionNameBytes breaks the invariants") {
+    Document doc;
+    doc.events.push_back(ChordEvent{1, kC, 4.0, 100});
+    doc.sections.push_back(Section{1, std::string(64, 'n'), 0, 0});
+    CHECK(sectionsWellFormed(doc));
+    doc.sections[0].name.push_back('n');
+    CHECK_FALSE(sectionsWellFormed(doc));
 }
 
 // --- renameSection / setSectionColour / removeSection / moveSectionStart -------------------

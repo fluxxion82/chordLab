@@ -46,7 +46,7 @@ bool sectionsWellFormed(const Document& doc) {
     for (const Section& s : doc.sections) {
         if (s.firstEventIndex <= previousIndex || static_cast<std::size_t>(s.firstEventIndex) >= doc.events.size() ||
             s.colourIndex < 0 || s.colourIndex >= kNumSectionColours || s.id < 1 || s.id >= INT_MAX ||
-            !seen.insert(s.id).second) {
+            !seen.insert(s.id).second || s.name.size() > static_cast<std::size_t>(kMaxSectionNameBytes)) {
             return false;
         }
         previousIndex = s.firstEventIndex;
@@ -164,8 +164,24 @@ void reindexSectionsForRemove(std::vector<Section>& sections, int removed, int e
 
 /// A section with `id`, `name` (or the default "Section <id>" when empty) and the id's turn in the colour
 /// cycle, starting at `firstEventIndex`.
+/// `name` cut down to `kMaxSectionNameBytes` bytes without splitting a UTF-8 character: the cut backs
+/// off over continuation bytes (10xxxxxx) to the start of the character that straddles the bound, which
+/// is then dropped whole. A name within the bound is returned as it is.
+std::string boundedSectionName(std::string name) {
+    const std::size_t bound = static_cast<std::size_t>(kMaxSectionNameBytes);
+    if (name.size() <= bound) {
+        return name;
+    }
+    std::size_t cut = bound;
+    while (cut > 0 && (static_cast<unsigned char>(name[cut]) & 0xC0) == 0x80) {
+        --cut;
+    }
+    name.resize(cut);
+    return name;
+}
+
 Section makeSection(int id, std::string name, int firstEventIndex) {
-    return Section{id, name.empty() ? "Section " + std::to_string(id) : std::move(name),
+    return Section{id, name.empty() ? "Section " + std::to_string(id) : boundedSectionName(std::move(name)),
                    (id - 1) % kNumSectionColours, firstEventIndex};
 }
 
@@ -211,6 +227,7 @@ void DocumentStore::replace(Document doc, int nextId, int nextSectionId) {
     undoStack_.clear();
     redoStack_.clear();
     nextId_ = nextId;
+    selectedEventId_ = kNoEventId;
 }
 
 int DocumentStore::nextId() const {
@@ -246,7 +263,24 @@ bool DocumentStore::commit(Document next) {
         undoStack_.pop_front();
     }
     redoStack_.clear();
+    dropStaleSelection();
     return true;
+}
+
+void DocumentStore::dropStaleSelection() noexcept {
+    if (selectedEventId_ != kNoEventId && indexOfEvent(doc_.events, selectedEventId_) < 0) {
+        selectedEventId_ = kNoEventId;
+    }
+}
+
+int DocumentStore::selectedEventId() const {
+    return selectedEventId_;
+}
+
+void DocumentStore::setSelectedEvent(int id) {
+    if (id == kNoEventId || indexOfEvent(doc_.events, id) >= 0) {
+        selectedEventId_ = id;
+    }
 }
 
 int DocumentStore::appendChord(Chord chord, double lengthBeats, int velocity) {
@@ -431,8 +465,8 @@ void DocumentStore::renameSection(int id, std::string name) {
         return;
     }
     Document next = doc_;
-    next.sections[static_cast<std::size_t>(index)].name = std::move(name);
-    commit(std::move(next));
+    next.sections[static_cast<std::size_t>(index)].name = boundedSectionName(std::move(name));
+    commit(std::move(next));  // a name that cuts down to the current one changes nothing
 }
 
 void DocumentStore::setSectionColour(int id, int colourIndex) {
@@ -482,6 +516,7 @@ bool DocumentStore::undo() {
     keepLiveState(restored, doc_);
     doc_ = std::move(restored);
     undoStack_.pop_back();
+    dropStaleSelection();
     return true;
 }
 
@@ -494,6 +529,7 @@ bool DocumentStore::redo() {
     keepLiveState(restored, doc_);
     doc_ = std::move(restored);
     redoStack_.pop_back();
+    dropStaleSelection();
     return true;
 }
 

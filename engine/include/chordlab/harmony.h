@@ -44,8 +44,10 @@ RootMotion rootMotion(PitchClass from, PitchClass to);
 /// (G->A) and C -> Db is 3, whatever register either chord would be voiced in. When the sets differ in
 /// size, the shorter is first padded to the longer's size by cycling through its own entries in the
 /// given order (C E G against a seventh chord becomes C E G C, against a ninth chord C E G C E), so with
-/// pitch classes root first, as `pitchClasses` returns them, the root is the first note doubled. The
-/// padding depends only on the shorter side, so the result is symmetric for any two sets. Entries are
+/// pitch classes root first, as `pitchClasses` returns them, the root is the first pitch class doubled
+/// (a pitch-class set has no bass to double; the register-aware `voiceLeadingCost` of voicing.h doubles
+/// the lowest note instead). The padding depends only on the shorter side, so the result is symmetric
+/// for any two sets. Entries are
 /// reduced modulo 12. Both sets must be non-empty and hold at most `kMaxVoiceLeadingNotes` (voicing.h)
 /// entries. The register-aware counterpart for two actual voicings is `voiceLeadingCost` in voicing.h.
 int pcVoiceLeadingCost(const std::vector<PitchClass>& a, const std::vector<PitchClass>& b);
@@ -54,7 +56,10 @@ int pcVoiceLeadingCost(const std::vector<PitchClass>& a, const std::vector<Pitch
 /// the first key on the project tonic, in the search order of the project mode's family (skipping
 /// `projectKey.mode` itself), whose scale holds every pitch class of the chord, spelled with
 /// `canonicalTonic` for that mode (as `parallelModes` does); or nullopt when no parallel mode holds it.
-/// The orders put the opposite family first and the closest modes before the remote ones:
+/// The orders are fixed, family-dependent priorities, not a distance measure: each puts the opposite
+/// family first and then the modes a chord is conventionally said to be borrowed from before the remote
+/// ones, so a chord two modes hold is attributed to the earlier one (Dorian's bVI goes to harmonic
+/// minor, which precedes Aeolian in the minor-family order):
 /// - major family (Ionian, Lydian, Mixolydian): Aeolian, Mixolydian, Lydian, Dorian, Phrygian,
 ///   HarmonicMinor, MelodicMinor, Locrian, Ionian — so in C major Ab and Bb are Aeolian's, F#° is
 ///   Lydian's and Db is Phrygian's;

@@ -62,23 +62,31 @@ constexpr int kMaxJsonDepth = 64;
 /// ```
 /// {"schema":1,
 ///  "projectKey":<key>, "browsedKey":<key>, "projectKeyName":"C Ionian", "browsedKeyName":"G Ionian",
-///  "progressionLoop":true, "followHost":true, "endBeat":4.0,
+///  "progressionLoop":true, "followHost":true, "autoVoiceLead":false, "endBeat":4.0,
+///  "selectedEventId":2|null,
 ///  "modes":["Ionian","Dorian","Phrygian","Lydian","Mixolydian","Aeolian","Locrian","HarmonicMinor",
 ///           "MelodicMinor"],
 ///  "tonics":{"Ionian":[{"letter":"C","alter":0,"text":"C"},{"letter":"D","alter":-1,"text":"Db"}, ...],
 ///            "Dorian":[...], ...},
-///  "events":[{"id":1,"root":0,"type":"maj","symbol":"C","roman":"I","family":"Major","startBeat":0.0,
-///             "lengthBeats":4.0,"velocity":100,"voicing":[60,64,67],"outOfKey":[]}, ...],
+///  "events":[{"id":1,"root":0,"type":"maj","symbol":"C","roman":"I","family":"Major","function":"T",
+///             "tension":3,"startBeat":0.0,"lengthBeats":4.0,"velocity":100,
+///             "inversion":0,"octave":0,"manualVoicing":false,"voicing":[60,64,67],"outOfKey":[],
+///             "why":null}, ...],
+///  "sections":[{"id":1,"name":"Verse","colourIndex":0,"firstEventIndex":0}, ...],
+///  "suggestions":[{"root":5,"type":"maj","symbol":"F","roman":"IV","function":"PD","score":2.35,
+///                  "reasons":["commonTones","smooth","diatonic","predominant"],
+///                  "reasonTexts":["1 common tone (C)", ...]}, ...],
 ///  "palette":{"tiers":5,
 ///             "cells":[{"degree":0,"tier":1,"root":0,"type":"maj","symbol":"C","roman":"I",
-///                       "family":"Major","filled":true,"voicing":[60,64,67],"outOfKey":[]}, ...]}}
+///                       "family":"Major","function":"T","tension":3,"filled":true,
+///                       "voicing":[60,64,67],"outOfKey":[]}, ...]}}
 /// ```
 /// Events are in playback order with `startBeat` accumulated as `Document::startBeatOf` does; `symbol` is
 /// the Klimper-style symbol spelled in the project key, `roman` the Standard-style numeral relative to the
-/// project key, `voicing` the default `closeVoicing`, `family` the type's family ("Major", "Minor" or
-/// "Other", the sequence bar's colour; additive, no schema bump). Palette cells carry the palette's own
-/// `symbol` (spelled in the browsed key) and `roman`, the same `family` and the same `voicing`, in the
-/// palette's order.
+/// project key, `family` the type's family ("Major", "Minor" or "Other", the sequence bar's colour;
+/// additive, no schema bump). Palette cells carry the palette's own `symbol` (spelled in the browsed key)
+/// and `roman`, the same `family`, and the default `closeVoicing` as their `voicing`, in the palette's
+/// order.
 /// `outOfKey`, on events and cells alike, is the chord's pitch classes that are not in the project key's
 /// scale, ascending and without repeats: what a hover popover lists as borrowed notes. It is empty
 /// exactly when a cell is `filled`.
@@ -86,7 +94,59 @@ constexpr int kMaxJsonDepth = 64;
 /// by pitch class, the `canonicalTonic` of that pitch class in that mode with its ASCII `text`
 /// ("Db", "F#"), so that the key pickers can label themselves without a copy of the theory. Both are
 /// constant for a given engine build and are repeated in every snapshot for simplicity.
-std::string snapshotJson(const Document& doc, const Palette& palette);
+///
+/// Phase 2 fields (P2-D8; all additive, schema still 1), events and cells alike:
+/// - `function`: `functionShortName(functionOf(chord, projectKey))`, "T", "PD", "D" or "O".
+/// - `tension`: `tension(chord, projectKey)`, 0..100.
+///
+/// Events only:
+/// - `inversion`, `octave`, `manualVoicing`: the event's stored voicing fields (document.h).
+/// - `voicing`: the notes `compile` gives the chord, `voicings(doc)[i]` (compiler.h): with
+///   `autoVoiceLead` on, the inversion and octave auto voice-leading chose; otherwise, and for a manual
+///   chord, `voicing(chord, inversion, octave)`. The sequence bar therefore shows what sounds.
+/// - `why`: null on the first event; on every later one the `relate` (harmony.h) of its chord against the
+///   chord before it, as data plus one sentence:
+///   ```
+///   {"commonTones":1, "commonPcs":[7], "commonNames":["G"], "rootMotion":"down a fifth",
+///    "voiceLeadingCost":4, "borrowedFrom":<key>|null, "borrowedFromName":"C Aeolian"|null,
+///    "text":"G7 → C: down a fifth, resolves (D→T), 1 common tone (G), smooth voice leading (cost 4)"}
+///   ```
+///   `commonNames` spells `commonPcs` in the project key; `rootMotion` is `rootMotionName`;
+///   `voiceLeadingCost` is the octave-free `pcVoiceLeadingCost`; `borrowedFrom` is the key the chord is
+///   borrowed from (`borrowedFrom`, harmony.h) and `borrowedFromName` its `keyName`, both null for a chord
+///   in the key or in no parallel mode.
+///   `text` is "<previous symbol> → <symbol>: <root motion>" (the symbols as the events' `symbol`, the
+///   arrow a literal UTF-8 character) followed by these clauses, in this order, each only when it holds:
+///     ", resolves (D→T)"                 `functionOf` the previous chord is Dominant and this one's Tonic;
+///     ", 1 common tone (G)"              commonTones >= 1: the count, "tone" or "tones", and the
+///     ", 2 common tones (C, E)"          `commonNames` comma-separated;
+///     ", smooth voice leading (cost c)"  voiceLeadingCost <= the number of voices it sums over, the
+///                                        larger of the two chords' pitch-class counts (every voice moves
+///                                        one semitone on average, or less: G7 → C costs 4 over four
+///                                        voices, C → D costs 6 over three). This is a looser bar than the
+///                                        suggestions' `Reason::Smooth` (cost <= 2), which ranks
+///                                        candidates rather than describes a move the user made;
+///     ", borrowed from C harmonic minor" borrowedFrom is set; the key in prose as the suggestions'
+///                                        `reasonTexts` write it (mode names as `Mode` spells them,
+///                                        except "harmonic minor" and "melodic minor"), so that the two
+///                                        popovers agree. `borrowedFromName` keeps the `keyName` form of
+///                                        `projectKeyName` for a UI that looks keys up by name.
+///
+/// Top level:
+/// - `autoVoiceLead`: `Document::autoVoiceLead`.
+/// - `sections`: `Document::sections` in order, each `{id, name, colourIndex, firstEventIndex}`; empty
+///   when the document has none.
+/// - `selectedEventId`: `selectedEventId` when an event has that id, else null (so `kNoEventId`, the
+///   default, and a stale id alike read as "no selection"). The plug-in passes the store's live
+///   selection (`DocumentStore::selectedEventId`).
+/// - `suggestions`: `suggestNext(previous, projectKey, browsedKey)` (suggest.h, Pop style, at most 8),
+///   where `previous` is the selected event's chord when `selectedEventId` names an event, else the last
+///   event's chord, else null (the opening suggestions of an empty document). Each entry carries the
+///   chord (`root`, `type`), the `Suggestion`'s `label` as `symbol` and its `roman`, `function` as the
+///   events do (the chord's `functionOf` in the project key), the `score`, the `reasons` as `reasonName`
+///   strings and the parallel `reasonTexts`.
+/// Allocates (compiles, ranks): the UI/message thread only.
+std::string snapshotJson(const Document& doc, const Palette& palette, int selectedEventId = -1);
 
 /// A key as the snapshot names it: the spelled tonic and the mode name, "C Ionian", "Bb HarmonicMinor"
 /// (the `projectKeyName` / `browsedKeyName` fields; the plug-in names its MIDI export after it).
@@ -104,40 +164,74 @@ std::string keyName(const Key& key);
 /// - `moveChord {id,index}`, `setLength {id,lengthBeats}`, `setVelocity {id,velocity}`,
 ///   `removeChord {id}`: the matching store call.
 /// - `setProgressionLoop {on}`, `setFollowHost {on}`: the matching live-state setter.
+/// - `setInversion {id,inversion}`, `setOctave {id,octave}`, `resetVoicing {id}`: the matching store
+///   call (the values are clamped by the store and the event is marked manual; see document.h).
+/// - `setAutoVoiceLead {on}`: `setAutoVoiceLead`, undoable.
+/// - `addSection {index,name?}`: `addSection(index, name)`; `name` defaults to the store's "Section <id>"
+///   and, given, must be at most `kMaxSectionNameBytes` UTF-8 bytes (longer is rejected, not cut: the UI
+///   limits its field and a longer name is a malformed message). An `index` that is no chord position,
+///   or that already starts a section, is a valid no-op (the UI may name a chord an edit just moved).
+///   Refused (false, an error naming the reason, no change) only when the section id counter is
+///   exhausted, like `appendChord`.
+/// - `renameSection {id,name}` (same bound on `name`), `setSectionColour {id,colourIndex}`,
+///   `removeSection {id}`, `moveSectionStart {id,index}`: the matching store call (colours clamped, a
+///   move the store declines is a no-op).
+/// - `selectEvent {id}`: `setSelectedEvent`, live state; `id` is an integer or null (null, like
+///   `kNoEventId`, clears the selection; an id no event has is a no-op). Pass the store's
+///   `selectedEventId()` to `snapshotJson` so that the snapshot's `selectedEventId` and `suggestions`
+///   follow it.
 /// - `undo`, `redo`: no fields.
 ///
 /// Every field is validated before anything is touched: an unknown `cmd`, a missing or mistyped field, a
-/// root outside 0..11, an unknown chord type or mode, a bad letter or alter, or a non-finite number makes
-/// the call return false with a description in `error`, leaving the document and its history exactly as
-/// they were. Fields the command does not use are ignored. Numbers are not range-checked beyond that:
-/// lengths, velocities and move targets are clamped by the store, exactly as the direct calls do.
+/// root outside 0..11, an unknown chord type or mode, a bad letter or alter, a non-finite number or a
+/// section name over the bound makes the call return false with a description in `error`, leaving the
+/// document, its history and the selection exactly as they were. Fields the command does not use are ignored. Numbers are not
+/// range-checked beyond that: lengths, velocities, inversions, octaves, colours and move targets are
+/// clamped by the store, exactly as the direct calls do.
 ///
 /// Returns true for every accepted command, including ones that change nothing: an edit naming an id no
-/// event has, a move to the chord's current position, and `undo`/`redo` with nothing to undo or redo are
-/// valid no-ops, not errors. `error` is cleared on success.
+/// event or section has, a move to the chord's current position, and `undo`/`redo` with nothing to undo
+/// or redo are valid no-ops, not errors. `error` is cleared on success.
 bool applyCommandJson(DocumentStore& store, std::string_view json, std::string& error) noexcept;
 
 /// The persistent form of the store's document, without the palette:
 /// ```
 /// {"schema":1, "projectKey":<key>, "browsedKey":<key>, "progressionLoop":true, "followHost":true,
-///  "events":[{"id":1,"root":0,"type":"maj","lengthBeats":4.0,"velocity":100}, ...],
-///  "nextId":2, "editor":{"width":900,"height":620}}
+///  "autoVoiceLead":false,
+///  "events":[{"id":1,"root":0,"type":"maj","lengthBeats":4.0,"velocity":100,
+///             "inversion":0,"octave":0,"manualVoicing":false}, ...],
+///  "sections":[{"id":1,"name":"Verse","colourIndex":0,"firstEventIndex":0}, ...],
+///  "nextId":2, "nextSectionId":2, "editor":{"width":900,"height":620}}
 /// ```
 /// `nextId` is the store's id counter (`DocumentStore::nextId`), so that a reloaded document keeps
-/// handing out ids no saved event ever had. `editorWidth` / `editorHeight` are the editor window size to
-/// remember; they are stored verbatim.
+/// handing out ids no saved event ever had, and `nextSectionId` the section counter likewise.
+/// `editorWidth` / `editorHeight` are the editor window size to remember; they are stored verbatim. The
+/// selection (`DocumentStore::selectedEventId`) is live state and is not written.
+/// `autoVoiceLead`, the events' `inversion`, `octave` and `manualVoicing`, `sections` and
+/// `nextSectionId` were added under schema 1 (Phase 2): a reader that predates them ignores them, and
+/// `loadStateJson` defaults them when they are missing, so states cross both ways.
+/// Size: the largest state the store can hold (`kMaxChords` chords, a section on each, every name at
+/// `kMaxSectionNameBytes` bytes of characters that escape to two) is pinned by test_json_api.cpp at
+/// well under a tenth of `kMaxJsonBytes`, so a saved state always loads.
 std::string stateJson(const DocumentStore& store, int editorWidth = kDefaultEditorWidth,
                       int editorHeight = kDefaultEditorHeight);
 
 /// Restores a document saved by `stateJson`. Atomic: the whole text is parsed and validated first; on any
 /// problem (malformed JSON, wrong schema, a missing or mistyped field, an unknown chord type or mode, a
 /// root outside 0..11, an id below 1 or repeated, more than `kMaxChords` events, a `nextId` below 1 or
-/// not above every event id, a non-positive editor size) it returns false with a description in `error` and the store, its history
-/// and the out-params are untouched. Otherwise it replaces the store's document and id counter
-/// (`DocumentStore::replace`, which clears the undo/redo history), writes the editor size into the
-/// out-params that are non-null, and returns true with `error` cleared.
-/// Lengths and velocities are clamped to the store's ranges rather than rejected. `editor` is optional
-/// and defaults to `kDefaultEditorWidth` x `kDefaultEditorHeight`; every other field is required.
+/// not above every event id, a non-positive editor size, or sections that are not `sectionsWellFormed`
+/// (document.h): not starting at 0, unsorted or sharing a start, an index outside the progression, a
+/// section id outside 1..INT_MAX-1 or repeated, a name over `kMaxSectionNameBytes` bytes; or a
+/// `nextSectionId` below 1 or not above every section id) it returns false with a description in `error` and the store, its history, its selection and the
+/// out-params are untouched. Otherwise it replaces the store's document and both id counters
+/// (`DocumentStore::replace`, which clears the undo/redo history and the selection), writes the editor
+/// size into the out-params that are non-null, and returns true with `error` cleared.
+/// Lengths, velocities, inversions, octaves and section colours are clamped to the store's ranges
+/// rather than rejected (a mistyped value is still rejected). Optional, with their defaults: `editor`
+/// (`kDefaultEditorWidth` x `kDefaultEditorHeight`), the events' `inversion` (0), `octave` (0) and
+/// `manualVoicing` (false), `autoVoiceLead` (false), `sections` (none) and `nextSectionId` (derived, one
+/// past the largest section id, 1 without sections; when given it must be at least that and is kept, like
+/// `nextId`). Every other field is required.
 bool loadStateJson(DocumentStore& store, std::string_view json, std::string& error, int* editorWidth = nullptr,
                    int* editorHeight = nullptr) noexcept;
 

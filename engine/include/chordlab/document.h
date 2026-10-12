@@ -31,6 +31,12 @@ constexpr int kNumSectionColours = 8;
 /// The id `DocumentStore::addSection` returns when it added nothing. No section ever has this id.
 constexpr int kNoSectionId = -1;
 
+/// Longest section name, in UTF-8 bytes. `DocumentStore::addSection` and `renameSection` cut a longer
+/// name down to it at a character boundary; `loadStateJson` and `applyCommandJson` reject a longer one.
+/// The bound is what keeps the largest state (`kMaxChords` chords, a section on each) far inside
+/// `kMaxJsonBytes` (json_api.h) whatever the names hold; test_json_api.cpp pins that size.
+constexpr int kMaxSectionNameBytes = 64;
+
 /// The most chords a document may hold: `appendChord` refuses the next one (`kNoEventId`), `loadStateJson`
 /// rejects a state with more, and `replace` asserts. The bound exists so that a compiled document always
 /// fits one scheduler snapshot: kMaxChords chords x at most 8 voices (headroom; `voicing` has one note per
@@ -81,7 +87,8 @@ constexpr bool operator!=(const ChordEvent& a, const ChordEvent& b) noexcept {
 /// (`compileSection`). `id` is stable for the life of the section and unique within a `DocumentStore`;
 /// it survives chord edits, undo and redo, and is never reused after a remove. It is in 1..INT_MAX-1:
 /// the store derives its next id as the largest plus one (`replace`), which must not overflow.
-/// `colourIndex` is in 0..kNumSectionColours-1.
+/// `colourIndex` is in 0..kNumSectionColours-1. `name` is any UTF-8 string of at most
+/// `kMaxSectionNameBytes` bytes.
 struct Section {
     int id;
     std::string name;
@@ -141,8 +148,9 @@ inline bool operator!=(const Document& a, const Document& b) noexcept {
 
 /// True when `doc.sections` satisfies the section invariants: sorted strictly by `firstEventIndex` with
 /// the first at 0 and every index a position of the progression (so no sections on an empty one),
-/// colours in 0..kNumSectionColours-1, ids in 1..INT_MAX-1 and distinct. What `DocumentStore::replace`
-/// asserts, and what a loader taking a document from outside the process must check before calling it.
+/// colours in 0..kNumSectionColours-1, ids in 1..INT_MAX-1 and distinct, names of at most
+/// `kMaxSectionNameBytes` bytes. What `DocumentStore::replace` asserts, and what a loader taking a
+/// document from outside the process must check before calling it.
 bool sectionsWellFormed(const Document& doc);
 
 /// Owns a `Document` and its undo/redo history.
@@ -153,7 +161,11 @@ bool sectionsWellFormed(const Document& doc);
 /// current one after clamping, a move to the chord's current position, a rejected argument) pushes nothing
 /// and leaves the redo stack intact.
 /// `browsedKey`, `progressionLoop` and `followHost` are live state: their setters never touch the history,
-/// and `undo()`/`redo()` keep their current values while restoring the undoable state.
+/// and `undo()`/`redo()` keep their current values while restoring the undoable state. So is the
+/// selection (`selectedEventId`), which lives in the store rather than the document: it is kept across
+/// edits, undo and redo for as long as the selected event exists and is cleared the moment no event has
+/// its id (a remove, an undo of the append, a `replace`); it is never restored by undo and never
+/// persisted (`stateJson` leaves it out).
 /// The history holds at most `kMaxUndoDepth` snapshots; beyond that the oldest is dropped.
 /// Event ids are handed out from a counter that starts at `firstId` (1 by default), only ever increases
 /// and is not part of the undoable state, so an id is never reused even after undo or redo. Section ids
@@ -240,8 +252,19 @@ public:
     void setProgressionLoop(bool loop);
     void setFollowHost(bool follow);
 
+    /// The id of the event the UI has selected, or `kNoEventId`. Live state (see the class comment): kept
+    /// while that event exists, whatever edits, undos and redos happen around it, and cleared as soon as
+    /// no event has the id. Never restored by undo and not persisted.
+    int selectedEventId() const;
+
+    /// Selects event `id`; `kNoEventId` clears the selection. An id no event has is a no-op (the UI may
+    /// name an event that an edit just removed). Never recorded in the history.
+    void setSelectedEvent(int id);
+
     /// Starts a section on the chord at `firstEventIndex` and returns its new id; the list stays sorted.
-    /// An empty `name` takes the default "Section <id>"; the colour is the id's turn in the cycle of
+    /// An empty `name` takes the default "Section <id>"; a name longer than `kMaxSectionNameBytes` bytes
+    /// is cut down to the bound at a UTF-8 character boundary (a character straddling it is dropped
+    /// whole); the colour is the id's turn in the cycle of
     /// `kNumSectionColours` (id 1 gets colour 0). The first section always starts at 0: when the document
     /// has no sections yet and `firstEventIndex` > 0, the chords before it get a section of their own
     /// first (default name and colour, the lower id) in the same undoable step, and the returned id is
@@ -252,7 +275,9 @@ public:
     /// needed (it stops at INT_MAX).
     int addSection(int firstEventIndex, std::string name = {});
 
-    /// Sets the name of section `id` to `name`, any string. Unknown id: no-op.
+    /// Sets the name of section `id` to `name`, any UTF-8 string, cut down to `kMaxSectionNameBytes`
+    /// bytes at a character boundary as `addSection` does. Unknown id, or a name that cuts down to the
+    /// current one: no-op.
     void renameSection(int id, std::string name);
 
     /// Sets the colour of section `id`, clamped to 0..kNumSectionColours-1. Unknown id: no-op.
@@ -277,7 +302,8 @@ public:
     bool redo();
 
     /// Replaces the whole document, live state included, and restarts the id counters: what a load does.
-    /// Clears the undo and redo history and changes nothing else.
+    /// Clears the undo and redo history and the selection (a loaded document starts unselected, even
+    /// when it holds an event with the selected id) and changes nothing else.
     /// `doc` must satisfy the store's invariants (valid chords and keys, finite lengths within
     /// [kMinLengthBeats, kMaxLengthBeats], velocities within [kMinVelocity, kMaxVelocity], inversions
     /// within 0..`inversionCount(chord) - 1`, octaves within [kMinVoicingOctave, kMaxVoicingOctave],
@@ -308,11 +334,16 @@ private:
     /// whether anything changed.
     bool commit(Document next);
 
+    /// Clears the selection when no event of the current document has its id. Called after every change
+    /// of `doc_` (a commit, an undo, a redo); `replace` clears unconditionally.
+    void dropStaleSelection() noexcept;
+
     Document doc_;
     std::deque<Document> undoStack_;
     std::deque<Document> redoStack_;
     int nextId_;
     int nextSectionId_ = 1;
+    int selectedEventId_ = kNoEventId;
 };
 
 }  // namespace chordlab

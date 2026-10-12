@@ -1,12 +1,17 @@
 #include "chordlab/json_api.h"
 
 #include "chordlab/chord.h"
+#include "chordlab/compiler.h"
 #include "chordlab/document.h"
+#include "chordlab/function.h"
+#include "chordlab/harmony.h"
 #include "chordlab/palette.h"
 #include "chordlab/pitch.h"
 #include "chordlab/relations.h"
 #include "chordlab/scale.h"
+#include "chordlab/suggest.h"
 #include "chordlab/symbol.h"
+#include "chordlab/tension.h"
 #include "chordlab/voicing.h"
 
 #include <nlohmann/json.hpp>
@@ -123,6 +128,86 @@ json outOfKeyJson(const Chord& chord, const Key& key) {
     std::sort(out.begin(), out.end());
     out.erase(std::unique(out.begin(), out.end()), out.end());
     return json(out);
+}
+
+/// Mode names as prose, for the sentences the UI shows: the `Mode` spelling except for the two altered
+/// minor scales. The same table as the suggestions' reason texts (suggest.cpp), so that "borrowed from"
+/// reads identically in the why popover and the suggestion popover.
+constexpr const char* kModeProse[kNumModes] = {"Ionian",  "Dorian",  "Phrygian",       "Lydian",       "Mixolydian",
+                                               "Aeolian", "Locrian", "harmonic minor", "melodic minor"};
+
+std::string keyProse(const Key& key) {
+    return tonicText(key.tonic) + " " + kModeProse[static_cast<int>(key.mode)];
+}
+
+/// The `why` object of event `to` against the event `from` before it: `relate` as data plus the sentence
+/// whose rules json_api.h spells out.
+json whyJson(const Chord& from, const Chord& to, const Key& projectKey) {
+    const Relation relation = relate(from, to, projectKey);
+
+    json commonNames = json::array();
+    std::string names;
+    for (const PitchClass pc : relation.commonPcs) {
+        const std::string name = spell(pc, projectKey).text();
+        commonNames.push_back(name);
+        names += (names.empty() ? "" : ", ") + name;
+    }
+
+    std::string text = chordSymbol(from, projectKey) + " → " + chordSymbol(to, projectKey) + ": " +
+                       rootMotionName(relation.motion);
+    if (functionOf(from, projectKey) == Function::Dominant && functionOf(to, projectKey) == Function::Tonic) {
+        text += ", resolves (D→T)";
+    }
+    if (relation.commonTones >= 1) {
+        text += ", " + std::to_string(relation.commonTones) + (relation.commonTones == 1 ? " common tone (" : " common tones (") +
+                names + ")";
+    }
+    // The cost sums over one voice per pitch class of the larger chord (the smaller is padded up to it).
+    const int voices = static_cast<int>(std::max(pitchClasses(from).size(), pitchClasses(to).size()));
+    if (relation.voiceLeadingCost <= voices) {
+        text += ", smooth voice leading (cost " + std::to_string(relation.voiceLeadingCost) + ")";
+    }
+    if (relation.borrowedFrom) {
+        text += ", borrowed from " + keyProse(*relation.borrowedFrom);
+    }
+
+    return json{{"commonTones", relation.commonTones},
+                {"commonPcs", relation.commonPcs},
+                {"commonNames", std::move(commonNames)},
+                {"rootMotion", rootMotionName(relation.motion)},
+                {"voiceLeadingCost", relation.voiceLeadingCost},
+                {"borrowedFrom", relation.borrowedFrom ? keyToJson(*relation.borrowedFrom) : json()},
+                {"borrowedFromName", relation.borrowedFrom ? json(keyName(*relation.borrowedFrom)) : json()},
+                {"text", std::move(text)}};
+}
+
+json sectionsJson(const Document& doc) {
+    json sections = json::array();
+    for (const Section& s : doc.sections) {
+        sections.push_back(
+            {{"id", s.id}, {"name", s.name}, {"colourIndex", s.colourIndex}, {"firstEventIndex", s.firstEventIndex}});
+    }
+    return sections;
+}
+
+/// `suggestNext` after `previous` (null to open), as the snapshot lists it.
+json suggestionsJson(const Chord* previous, const Document& doc) {
+    json suggestions = json::array();
+    for (const Suggestion& s : suggestNext(previous, doc.projectKey, doc.browsedKey)) {
+        json reasons = json::array();
+        for (const Reason r : s.reasons) {
+            reasons.push_back(reasonName(r));
+        }
+        suggestions.push_back({{"root", s.chord.root},
+                               {"type", s.chord.type->id},
+                               {"symbol", s.label},
+                               {"roman", s.roman},
+                               {"function", functionShortName(functionOf(s.chord, doc.projectKey))},
+                               {"score", s.score},
+                               {"reasons", std::move(reasons)},
+                               {"reasonTexts", s.reasonTexts}});
+    }
+    return suggestions;
 }
 
 // --- Reading ---------------------------------------------------------------------------
@@ -396,7 +481,9 @@ bool parseKeyField(Fields& fields, const char* name, Key& out, std::string& erro
 
 /// A validated UI command: plain data, trivially destructible, so that nothing can throw while one goes
 /// out of scope (see the Readers section for why that matters). Only the fields its `kind` uses are
-/// meaningful; the chord type is resolved to its dictionary entry during validation.
+/// meaningful; the chord type is resolved to its dictionary entry during validation. The one string a
+/// command can carry, a section name, travels beside it in a `std::string` owned by the reader's frame
+/// (destroying a string frees but never allocates, like the `Document` of `loadStateJson`).
 struct Command {
     enum class Kind {
         SetKey,
@@ -410,6 +497,16 @@ struct Command {
         RemoveChord,
         SetProgressionLoop,
         SetFollowHost,
+        SetInversion,
+        SetOctave,
+        ResetVoicing,
+        SetAutoVoiceLead,
+        AddSection,
+        RenameSection,
+        SetSectionColour,
+        RemoveSection,
+        MoveSectionStart,
+        SelectEvent,
         Undo,
         Redo
     };
@@ -420,9 +517,12 @@ struct Command {
     Chord chord{0, nullptr};   // AppendChord
     double lengthBeats = 4.0;  // AppendChord (optional, store default), SetLength
     int velocity = 100;        // AppendChord (optional, store default), SetVelocity
-    int id = 0;                // MoveChord, SetLength, SetVelocity, RemoveChord
-    int index = 0;             // MoveChord
-    bool on = false;           // SetProgressionLoop, SetFollowHost
+    int id = 0;                // MoveChord, SetLength, SetVelocity, RemoveChord, the voicing, section and selection commands
+    int index = 0;             // MoveChord, AddSection, MoveSectionStart
+    bool on = false;           // SetProgressionLoop, SetFollowHost, SetAutoVoiceLead
+    int inversion = 0;         // SetInversion
+    int octave = 0;            // SetOctave
+    int colourIndex = 0;       // SetSectionColour
 };
 static_assert(std::is_trivially_destructible_v<Command>, "Command must be plain data: destroying one must not allocate");
 
@@ -498,10 +598,76 @@ bool parseRemoveChord(Fields& fields, Command& out) {
     return fields.getInt("id", out.id);
 }
 
-/// `setProgressionLoop` / `setFollowHost`.
+/// `setProgressionLoop` / `setFollowHost` / `setAutoVoiceLead`.
 bool parseToggle(Fields& fields, Command::Kind kind, Command& out) {
     out.kind = kind;
     return fields.getBool("on", out.on);
+}
+
+/// `resetVoicing` / `removeSection`: an id and nothing else.
+bool parseIdOnly(Fields& fields, Command::Kind kind, Command& out) {
+    out.kind = kind;
+    return fields.getInt("id", out.id);
+}
+
+bool parseSetInversion(Fields& fields, Command& out) {
+    out.kind = Command::Kind::SetInversion;
+    return fields.getInt("id", out.id) && fields.getInt("inversion", out.inversion);
+}
+
+bool parseSetOctave(Fields& fields, Command& out) {
+    out.kind = Command::Kind::SetOctave;
+    return fields.getInt("id", out.id) && fields.getInt("octave", out.octave);
+}
+
+/// Reads a section `name` field: a string of at most `kMaxSectionNameBytes` UTF-8 bytes.
+bool getSectionName(Fields& fields, std::string& name) {
+    if (!fields.getString("name", name)) {
+        return false;
+    }
+    if (name.size() > static_cast<std::size_t>(kMaxSectionNameBytes)) {
+        return fields.fail("name", "must be at most " + std::to_string(kMaxSectionNameBytes) + " bytes");
+    }
+    return true;
+}
+
+/// `addSection {index, name?}`: the name, when given, goes to `name`; absent, it stays empty (the store's
+/// default name).
+bool parseAddSection(Fields& fields, Command& out, std::string& name) {
+    out.kind = Command::Kind::AddSection;
+    if (!fields.getInt("index", out.index)) {
+        return false;
+    }
+    return !fields.has("name") || getSectionName(fields, name);
+}
+
+bool parseRenameSection(Fields& fields, Command& out, std::string& name) {
+    out.kind = Command::Kind::RenameSection;
+    return fields.getInt("id", out.id) && getSectionName(fields, name);
+}
+
+bool parseSetSectionColour(Fields& fields, Command& out) {
+    out.kind = Command::Kind::SetSectionColour;
+    return fields.getInt("id", out.id) && fields.getInt("colourIndex", out.colourIndex);
+}
+
+bool parseMoveSectionStart(Fields& fields, Command& out) {
+    out.kind = Command::Kind::MoveSectionStart;
+    return fields.getInt("id", out.id) && fields.getInt("index", out.index);
+}
+
+/// `selectEvent {id}`: an integer, or null for no selection.
+bool parseSelectEvent(Fields& fields, Command& out) {
+    out.kind = Command::Kind::SelectEvent;
+    const json* id = fields.find("id");
+    if (id == nullptr) {
+        return fields.fail("id", "is missing");
+    }
+    if (id->is_null()) {
+        out.id = kNoEventId;
+        return true;
+    }
+    return toInt(*id, out.id) || fields.fail("id", "must be an integer or null");
 }
 
 // --- Readers ---------------------------------------------------------------------------
@@ -512,8 +678,8 @@ bool parseToggle(Fields& fields, Command::Kind kind, Command& out) {
 // its cleanup into std::terminate with the mutation already applied. Phase A parses and validates into
 // plain data and returns with the tree destroyed; Phase B takes nothing but the store and that data.
 
-/// Phase A of `applyCommandJson`: parses and validates `text` into `out`.
-bool parseCommand(std::string_view text, Command& out, std::string& error) {
+/// Phase A of `applyCommandJson`: parses and validates `text` into `out`, and a section name into `name`.
+bool parseCommand(std::string_view text, Command& out, std::string& name, std::string& error) {
     json message;
     if (!parseMessage(text, message, error)) {
         return false;
@@ -550,6 +716,36 @@ bool parseCommand(std::string_view text, Command& out, std::string& error) {
     if (cmd == "setFollowHost") {
         return parseToggle(fields, Command::Kind::SetFollowHost, out);
     }
+    if (cmd == "setInversion") {
+        return parseSetInversion(fields, out);
+    }
+    if (cmd == "setOctave") {
+        return parseSetOctave(fields, out);
+    }
+    if (cmd == "resetVoicing") {
+        return parseIdOnly(fields, Command::Kind::ResetVoicing, out);
+    }
+    if (cmd == "setAutoVoiceLead") {
+        return parseToggle(fields, Command::Kind::SetAutoVoiceLead, out);
+    }
+    if (cmd == "addSection") {
+        return parseAddSection(fields, out, name);
+    }
+    if (cmd == "renameSection") {
+        return parseRenameSection(fields, out, name);
+    }
+    if (cmd == "setSectionColour") {
+        return parseSetSectionColour(fields, out);
+    }
+    if (cmd == "removeSection") {
+        return parseIdOnly(fields, Command::Kind::RemoveSection, out);
+    }
+    if (cmd == "moveSectionStart") {
+        return parseMoveSectionStart(fields, out);
+    }
+    if (cmd == "selectEvent") {
+        return parseSelectEvent(fields, out);
+    }
     if (cmd == "undo") {
         out.kind = Command::Kind::Undo;
         return true;
@@ -563,13 +759,28 @@ bool parseCommand(std::string_view text, Command& out, std::string& error) {
 }
 
 /// Why Phase B refused a validated command; `None` is success.
-enum class Refusal { None, DocumentFull, IdsExhausted };
+enum class Refusal { None, DocumentFull, IdsExhausted, SectionIdsExhausted };
+
+/// True when `index` is a chord position of `doc` at which no section starts: the one case in which the
+/// store's `addSection` can still refuse, for want of ids.
+bool canStartSection(const Document& doc, int index) {
+    if (index < 0 || index >= static_cast<int>(doc.events.size())) {
+        return false;
+    }
+    for (const Section& s : doc.sections) {
+        if (s.firstEventIndex == index) {
+            return false;
+        }
+    }
+    return true;
+}
 
 /// Phase B of `applyCommandJson`: applies a validated command through one store call, which gives the
-/// strong guarantee. Takes nothing but the store and plain data, so no JSON object can be alive here.
-/// Refuses only an append, when the document already holds `kMaxChords` chords or the store's id counter
-/// is exhausted; either way nothing changes.
-Refusal applyCommand(DocumentStore& store, const Command& command) {
+/// strong guarantee. Takes nothing but the store, plain data and the section name, so no JSON object can
+/// be alive here. Refuses only an append, when the document already holds `kMaxChords` chords or the
+/// store's id counter is exhausted, and a section add when the section id counter is; either way nothing
+/// changes.
+Refusal applyCommand(DocumentStore& store, const Command& command, std::string& name) {
     const Document& doc = store.doc();
     switch (command.kind) {
         case Command::Kind::SetKey:
@@ -609,6 +820,39 @@ Refusal applyCommand(DocumentStore& store, const Command& command) {
         case Command::Kind::SetFollowHost:
             store.setFollowHost(command.on);
             return Refusal::None;
+        case Command::Kind::SetInversion:
+            store.setInversion(command.id, command.inversion);
+            return Refusal::None;
+        case Command::Kind::SetOctave:
+            store.setOctave(command.id, command.octave);
+            return Refusal::None;
+        case Command::Kind::ResetVoicing:
+            store.resetVoicing(command.id);
+            return Refusal::None;
+        case Command::Kind::SetAutoVoiceLead:
+            store.setAutoVoiceLead(command.on);
+            return Refusal::None;
+        case Command::Kind::AddSection:
+            if (!canStartSection(doc, command.index)) {
+                return Refusal::None;  // a valid no-op, like an unknown id
+            }
+            return store.addSection(command.index, std::move(name)) != kNoSectionId ? Refusal::None
+                                                                                     : Refusal::SectionIdsExhausted;
+        case Command::Kind::RenameSection:
+            store.renameSection(command.id, std::move(name));
+            return Refusal::None;
+        case Command::Kind::SetSectionColour:
+            store.setSectionColour(command.id, command.colourIndex);
+            return Refusal::None;
+        case Command::Kind::RemoveSection:
+            store.removeSection(command.id);
+            return Refusal::None;
+        case Command::Kind::MoveSectionStart:
+            store.moveSectionStart(command.id, command.index);
+            return Refusal::None;
+        case Command::Kind::SelectEvent:
+            store.setSelectedEvent(command.id);
+            return Refusal::None;
         case Command::Kind::Undo:
             store.undo();  // nothing to undo is a no-op, not an error
             return Refusal::None;
@@ -619,9 +863,49 @@ Refusal applyCommand(DocumentStore& store, const Command& command) {
     return Refusal::None;
 }
 
-/// Phase A of `loadStateJson`: parses and validates `text` into a document, an id counter and an editor
-/// size. `Document` holds a vector, whose destruction frees but never allocates.
-bool parseState(std::string_view text, Document& doc, int& nextId, int& width, int& height, std::string& error) {
+/// Reads the optional `sections` array of a state into `doc.sections` and checks the section invariants
+/// (`sectionsWellFormed`) on the whole: each entry needs `id`, `name`, `colourIndex` (clamped) and
+/// `firstEventIndex`. `maxSectionId` is the largest id read (0 without sections). `doc.events` must be
+/// complete, since the invariants bound the indices by it.
+bool parseSections(Fields& fields, Document& doc, int& maxSectionId, std::string& error) {
+    maxSectionId = 0;
+    if (!fields.has("sections")) {
+        return true;
+    }
+    const json* sections = fields.getArray("sections");
+    if (sections == nullptr) {
+        return false;
+    }
+    for (std::size_t i = 0; i < sections->size(); ++i) {
+        const std::string where = "sections[" + std::to_string(i) + "]";
+        const json& sectionObject = (*sections)[i];
+        if (!sectionObject.is_object()) {
+            error = where + " must be an object";
+            return false;
+        }
+        Fields sectionFields(sectionObject, where, error);
+        Section section{};
+        if (!sectionFields.getIntIn("id", 1, INT_MAX - 1, section.id) || !getSectionName(sectionFields, section.name) ||
+            !sectionFields.getInt("colourIndex", section.colourIndex) ||
+            !sectionFields.getInt("firstEventIndex", section.firstEventIndex)) {
+            return false;
+        }
+        section.colourIndex = std::clamp(section.colourIndex, 0, kNumSectionColours - 1);
+        maxSectionId = std::max(maxSectionId, section.id);
+        doc.sections.push_back(std::move(section));
+    }
+    if (!sectionsWellFormed(doc)) {
+        return fields.fail("sections", "must start at 0, be sorted by firstEventIndex with distinct starts inside "
+                                       "the progression, and have distinct ids");
+    }
+    return true;
+}
+
+/// Phase A of `loadStateJson`: parses and validates `text` into a document, the two id counters and an
+/// editor size. `Document` holds vectors and strings, whose destruction frees but never allocates.
+/// `nextSectionId` is 0 when the state carries none: `replace` then derives it.
+bool parseState(std::string_view text, Document& doc, int& nextId, int& nextSectionId, int& width, int& height,
+                std::string& error) {
     json message;
     if (!parseMessage(text, message, error)) {
         return false;
@@ -631,6 +915,9 @@ bool parseState(std::string_view text, Document& doc, int& nextId, int& width, i
     if (!parseKeyField(fields, "projectKey", doc.projectKey, error) ||
         !parseKeyField(fields, "browsedKey", doc.browsedKey, error) ||
         !fields.getBool("progressionLoop", doc.progressionLoop) || !fields.getBool("followHost", doc.followHost)) {
+        return false;
+    }
+    if (fields.has("autoVoiceLead") && !fields.getBool("autoVoiceLead", doc.autoVoiceLead)) {
         return false;
     }
 
@@ -670,6 +957,14 @@ bool parseState(std::string_view text, Document& doc, int& nextId, int& width, i
         event.chord = Chord{root, type};
         event.lengthBeats = std::clamp(lengthBeats, kMinLengthBeats, kMaxLengthBeats);
         event.velocity = std::clamp(event.velocity, kMinVelocity, kMaxVelocity);
+        // The voicing fields are optional (states saved before Phase 2 have none) and clamped like the store's setters.
+        if ((eventFields.has("inversion") && !eventFields.getInt("inversion", event.inversion)) ||
+            (eventFields.has("octave") && !eventFields.getInt("octave", event.octave)) ||
+            (eventFields.has("manualVoicing") && !eventFields.getBool("manualVoicing", event.manualVoicing))) {
+            return false;
+        }
+        event.inversion = std::clamp(event.inversion, 0, inversionCount(event.chord) - 1);
+        event.octave = std::clamp(event.octave, kMinVoicingOctave, kMaxVoicingOctave);
         maxId = std::max(maxId, event.id);
         doc.events.push_back(event);
     }
@@ -679,6 +974,20 @@ bool parseState(std::string_view text, Document& doc, int& nextId, int& width, i
     }
     if (nextId <= maxId) {
         return fields.fail("nextId", "must exceed every event id (" + std::to_string(maxId) + ")");
+    }
+
+    int maxSectionId = 0;
+    if (!parseSections(fields, doc, maxSectionId, error)) {
+        return false;
+    }
+    nextSectionId = 0;
+    if (fields.has("nextSectionId")) {
+        if (!fields.getIntIn("nextSectionId", 1, INT_MAX, nextSectionId)) {
+            return false;
+        }
+        if (nextSectionId <= maxSectionId) {
+            return fields.fail("nextSectionId", "must exceed every section id (" + std::to_string(maxSectionId) + ")");
+        }
     }
 
     width = kDefaultEditorWidth;
@@ -715,21 +1024,40 @@ std::string keyName(const Key& key) {
     return tonicText(key.tonic) + " " + modeName(key.mode);
 }
 
-std::string snapshotJson(const Document& doc, const Palette& palette) {
+static_assert(kNoEventId == -1, "snapshotJson's default selectedEventId must be kNoEventId");
+
+std::string snapshotJson(const Document& doc, const Palette& palette, int selectedEventId) {
+    // The selection counts only when an event has that id; the UI may hold a stale one for a moment.
+    int selectedIndex = -1;
+    for (std::size_t i = 0; i < doc.events.size(); ++i) {
+        if (doc.events[i].id == selectedEventId) {
+            selectedIndex = static_cast<int>(i);
+            break;
+        }
+    }
+
+    const std::vector<std::vector<int>> compiledVoicings = voicings(doc);
     json events = json::array();
     double beat = 0.0;  // accumulated left to right, exactly as Document::startBeatOf does
-    for (const ChordEvent& e : doc.events) {
+    for (std::size_t i = 0; i < doc.events.size(); ++i) {
+        const ChordEvent& e = doc.events[i];
         json event = {{"id", e.id},
                       {"root", e.chord.root},
                       {"type", e.chord.type->id},
                       {"symbol", chordSymbol(e.chord, doc.projectKey)},
                       {"roman", romanNumeral(e.chord, doc.projectKey)},
                       {"family", familyName(e.chord.type->family)},
+                      {"function", functionShortName(functionOf(e.chord, doc.projectKey))},
+                      {"tension", tension(e.chord, doc.projectKey)},
                       {"startBeat", beat},
                       {"lengthBeats", e.lengthBeats},
                       {"velocity", e.velocity},
-                      {"voicing", closeVoicing(e.chord)},
-                      {"outOfKey", outOfKeyJson(e.chord, doc.projectKey)}};
+                      {"inversion", e.inversion},
+                      {"octave", e.octave},
+                      {"manualVoicing", e.manualVoicing},
+                      {"voicing", compiledVoicings[i]},
+                      {"outOfKey", outOfKeyJson(e.chord, doc.projectKey)},
+                      {"why", i == 0 ? json() : whyJson(doc.events[i - 1].chord, e.chord, doc.projectKey)}};
         events.push_back(std::move(event));
         beat += e.lengthBeats;
     }
@@ -743,10 +1071,20 @@ std::string snapshotJson(const Document& doc, const Palette& palette) {
                      {"symbol", c.symbol},
                      {"roman", c.roman},
                      {"family", familyName(c.chord.type->family)},
+                     {"function", functionShortName(functionOf(c.chord, doc.projectKey))},
+                     {"tension", tension(c.chord, doc.projectKey)},
                      {"filled", c.filled},
                      {"voicing", closeVoicing(c.chord)},
                      {"outOfKey", outOfKeyJson(c.chord, doc.projectKey)}};
         cells.push_back(std::move(cell));
+    }
+
+    // Suggestions follow the selected chord, else the last one, else open the progression.
+    const Chord* previous = nullptr;
+    if (selectedIndex >= 0) {
+        previous = &doc.events[static_cast<std::size_t>(selectedIndex)].chord;
+    } else if (!doc.events.empty()) {
+        previous = &doc.events.back().chord;
     }
 
     const json snapshot = {{"schema", kJsonSchema},
@@ -756,10 +1094,14 @@ std::string snapshotJson(const Document& doc, const Palette& palette) {
                            {"browsedKeyName", keyName(doc.browsedKey)},
                            {"progressionLoop", doc.progressionLoop},
                            {"followHost", doc.followHost},
+                           {"autoVoiceLead", doc.autoVoiceLead},
                            {"endBeat", beat},
+                           {"selectedEventId", selectedIndex >= 0 ? json(selectedEventId) : json()},
                            {"modes", modesJson()},
                            {"tonics", tonicsJson()},
                            {"events", std::move(events)},
+                           {"sections", sectionsJson(doc)},
+                           {"suggestions", suggestionsJson(previous, doc)},
                            {"palette", {{"tiers", palette.tiers}, {"cells", std::move(cells)}}}};
     return snapshot.dump();
 }
@@ -772,7 +1114,10 @@ std::string stateJson(const DocumentStore& store, int editorWidth, int editorHei
                       {"root", e.chord.root},
                       {"type", e.chord.type->id},
                       {"lengthBeats", e.lengthBeats},
-                      {"velocity", e.velocity}};
+                      {"velocity", e.velocity},
+                      {"inversion", e.inversion},
+                      {"octave", e.octave},
+                      {"manualVoicing", e.manualVoicing}};
         events.push_back(std::move(event));
     }
     const json state = {{"schema", kJsonSchema},
@@ -780,8 +1125,11 @@ std::string stateJson(const DocumentStore& store, int editorWidth, int editorHei
                         {"browsedKey", keyToJson(doc.browsedKey)},
                         {"progressionLoop", doc.progressionLoop},
                         {"followHost", doc.followHost},
+                        {"autoVoiceLead", doc.autoVoiceLead},
                         {"events", std::move(events)},
+                        {"sections", sectionsJson(doc)},
                         {"nextId", store.nextId()},
+                        {"nextSectionId", store.nextSectionId()},
                         {"editor", {{"width", editorWidth}, {"height", editorHeight}}}};
     return state.dump();
 }
@@ -790,10 +1138,11 @@ bool applyCommandJson(DocumentStore& store, std::string_view text, std::string& 
     try {
         error.clear();
         Command command;
-        if (!parseCommand(text, command, error)) {  // Phase A: the JSON tree is destroyed on return
+        std::string name;  // a section name; its destructor frees, never allocates
+        if (!parseCommand(text, command, name, error)) {  // Phase A: the JSON tree is destroyed on return
             return false;
         }
-        switch (applyCommand(store, command)) {  // Phase B: only the store and plain data in scope
+        switch (applyCommand(store, command, name)) {  // Phase B: only the store, plain data and the name in scope
             case Refusal::None:
                 return true;
             case Refusal::DocumentFull:
@@ -802,6 +1151,9 @@ bool applyCommandJson(DocumentStore& store, std::string_view text, std::string& 
                 return false;
             case Refusal::IdsExhausted:
                 error = "\"appendChord\" refused: no event ids left";
+                return false;
+            case Refusal::SectionIdsExhausted:
+                error = "\"addSection\" refused: no section ids left";
                 return false;
         }
         return true;
@@ -817,12 +1169,13 @@ bool loadStateJson(DocumentStore& store, std::string_view text, std::string& err
         error.clear();
         Document doc;
         int nextId = 0;
+        int nextSectionId = 0;
         int width = kDefaultEditorWidth;
         int height = kDefaultEditorHeight;
-        if (!parseState(text, doc, nextId, width, height, error)) {  // Phase A: the JSON tree is destroyed on return
+        if (!parseState(text, doc, nextId, nextSectionId, width, height, error)) {  // Phase A: the tree is destroyed on return
             return false;
         }
-        store.replace(std::move(doc), nextId);  // Phase B: cannot throw, nor can the writes below
+        store.replace(std::move(doc), nextId, nextSectionId);  // Phase B: cannot throw, nor can the writes below
         if (editorWidth != nullptr) {
             *editorWidth = width;
         }
