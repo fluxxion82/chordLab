@@ -9,8 +9,9 @@ namespace chordlab {
 
 namespace {
 
-constexpr int kDefaultLowest = 48;
-constexpr int kDefaultHighest = 84;
+/// The middle-C octave for the root (see the header); must match the header's default arguments.
+constexpr int kDefaultLowest = 60;
+constexpr int kDefaultHighest = 96;
 constexpr int kOctave = 12;
 constexpr int kMinRange = 2 * kOctave;
 constexpr int kMidiMax = 127;
