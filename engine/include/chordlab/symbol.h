@@ -27,8 +27,12 @@ std::string chordSymbol(const Chord& chord, const Key& spellingKey, SymbolStyle 
 /// degree it holds in a parallel mode (b2, b3, #4, b6, b7; the tritone is always #4 rather than b5) and
 /// is prefixed with a single `b` or `#`: in C Aeolian `Eb` is `bIII` and `Bb` is `bVII`, in A Aeolian
 /// `G` is `bVII` and `G#` diminished is `vii°`, in C Lydian `F#` is `#IV`. The degree comes from
-/// `majorDegreeOfInterval` (pitch.h), the table `spell` also uses for chromatic roots, so the numeral's
-/// accidental always matches the symbol's (`Bb` / `bVII`, `F#°` / `#iv°`).
+/// `majorDegreeOfInterval` (pitch.h), the same selection `spell` uses for a chromatic root, but the two
+/// accidentals measure different things and are not always equal: the numeral's is key-relative (how
+/// far the root sits from the key's own degree), the symbol's is letter-relative and subject to
+/// white-key folding. They coincide only when the key's degree is natural: in C major `Db` is `bII` and
+/// `F#°` is `#iv°`, but in E major `G` is `bIII` (a semitone under G#) and in Ab major `B` is `bIII`
+/// (Cb folded to B).
 /// Case: lowercase when the type has a minor third and no major third; uppercase otherwise,
 /// including power chords and suspended chords (`I5`, `Isus4`).
 /// Suffix: as `chordSymbol`, except that a minor quality is carried by the lowercase numeral

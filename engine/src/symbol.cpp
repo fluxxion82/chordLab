@@ -113,8 +113,9 @@ std::string chordSymbol(const Chord& chord, const Key& spellingKey, SymbolStyle 
 
 std::string romanNumeral(const Chord& chord, const Key& projectKey, SymbolStyle style) {
     assertValidChord(chord);
-    // Numerals are read against the parallel major of the project tonic, whatever the project mode, by
-    // the same degree table `spell` uses for chromatic roots (pitch.h), so symbol and numeral agree.
+    // Numerals are read against the parallel major of the project tonic, whatever the project mode, with
+    // the same degree selection as `spell` (pitch.h). The alteration below is key-relative, unlike the
+    // symbol's letter-relative accidental, so the two need not be equal (see symbol.h).
     const PitchClass tonic = projectKey.tonicPc();
     const int degree = majorDegreeOfInterval(chord.root - tonic);
     const PitchClass degreePc = scalePitchClasses(tonic, Mode::Ionian)[static_cast<std::size_t>(degree)];

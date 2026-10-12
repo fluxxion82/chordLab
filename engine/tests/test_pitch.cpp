@@ -315,7 +315,7 @@ TEST_CASE("spell: scale members use their degree spelling") {
 }
 
 TEST_CASE("spell: chromatic tones take the letter of the parallel-major degree they alter") {
-    // In C major: b2, b3, #4, b6, b7, the same accidentals as the roman numerals.
+    // In C major: b2, b3, #4, b6, b7, the degrees the roman numerals are read from.
     const Key cMajor = key('C', 0, Mode::Ionian);
     CHECK(spell(1, cMajor).text() == "Db");
     CHECK(spell(3, cMajor).text() == "Eb");
