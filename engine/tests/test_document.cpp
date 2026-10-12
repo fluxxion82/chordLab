@@ -270,6 +270,24 @@ TEST_CASE("appendChord: returns -1 and changes nothing once the id counter reach
 
 // --- findIndex -------------------------------------------------------------------------
 
+TEST_CASE("appendChord: the id counter advances only for an append that happened") {
+    DocumentStore store;
+    CHECK(store.nextId() == 1);
+    CHECK(store.appendChord(kC, kNaN) == kNoEventId);
+    CHECK(store.appendChord(kC, kInf) == kNoEventId);
+    CHECK(store.nextId() == 1);
+    CHECK(store.appendChord(kC) == 1);
+    CHECK(store.nextId() == 2);
+    REQUIRE(store.undo());
+    CHECK(store.nextId() == 2);  // not undoable state
+
+    DocumentStore exhausted(INT_MAX);
+    CHECK(exhausted.nextId() == INT_MAX);
+    CHECK(exhausted.appendChord(kC) == kNoEventId);
+    CHECK(exhausted.nextId() == INT_MAX);
+    CHECK(exhausted.doc().events.empty());
+}
+
 TEST_CASE("findIndex: position in playback order, -1 when absent") {
     DocumentStore store = threeChords();
     CHECK(store.findIndex(1) == 0);
@@ -719,6 +737,26 @@ TEST_CASE("undo: history is capped at kMaxUndoDepth, dropping the oldest snapsho
     }
     CHECK(redos == 200);
     CHECK(store.doc().events.size() == 250);
+}
+
+// --- replace ---------------------------------------------------------------------------
+
+TEST_CASE("replace: swaps in a document, resets the id counter and clears the whole history") {
+    DocumentStore store = threeChords();
+    REQUIRE(store.undo());  // one undo entry left, one redo entry
+
+    Document doc;
+    doc.projectKey = key('D', 0, Mode::Dorian);
+    doc.browsedKey = key('G', 0, Mode::Ionian);
+    doc.progressionLoop = false;
+    doc.events.push_back(ChordEvent{7, kC, 2.0, 90});
+    store.replace(doc, 8);
+
+    CHECK(store.doc() == doc);  // live state included: replace is a load, not an edit
+    CHECK_FALSE(store.undo());
+    CHECK_FALSE(store.redo());
+    CHECK(store.appendChord(kF) == 8);
+    CHECK(store.findIndex(7) == 0);
 }
 
 // --- Property test ---------------------------------------------------------------------

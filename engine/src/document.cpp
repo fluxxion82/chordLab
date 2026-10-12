@@ -5,6 +5,7 @@
 #include <climits>
 #include <cmath>
 #include <cstddef>
+#include <set>
 #include <utility>
 
 namespace chordlab {
@@ -51,6 +52,17 @@ void assertValidKey([[maybe_unused]] const Key& key) {
     assert(static_cast<int>(key.mode) >= 0 && static_cast<int>(key.mode) < kNumModes);
 }
 
+/// True when no two events of `doc` share an id. Debug-only, for `replace`'s precondition check.
+[[maybe_unused]] bool idsAreDistinct(const Document& doc) {
+    std::set<int> seen;
+    for (const ChordEvent& e : doc.events) {
+        if (!seen.insert(e.id).second) {
+            return false;
+        }
+    }
+    return true;
+}
+
 /// Copies the live (non-undoable) fields of `current` into `target`, so that restoring a snapshot keeps
 /// the browsed key and the transport toggles as they are now.
 void keepLiveState(Document& target, const Document& current) {
@@ -69,6 +81,28 @@ const Document& DocumentStore::doc() const {
     return doc_;
 }
 
+void DocumentStore::replace(Document doc, int nextId) {
+    assertValidKey(doc.projectKey);
+    assertValidKey(doc.browsedKey);
+    assert(nextId >= 1);
+    for ([[maybe_unused]] const ChordEvent& e : doc.events) {
+        assertValidChord(e.chord);
+        assert(std::isfinite(e.lengthBeats) && e.lengthBeats >= kMinLengthBeats && e.lengthBeats <= kMaxLengthBeats);
+        assert(e.velocity >= kMinVelocity && e.velocity <= kMaxVelocity);
+        assert(e.id >= 1 && e.id < nextId);
+    }
+    assert(idsAreDistinct(doc));
+    // Nothing below can throw: `doc` arrived fully built, and the moves and clears are noexcept.
+    doc_ = std::move(doc);
+    undoStack_.clear();
+    redoStack_.clear();
+    nextId_ = nextId;
+}
+
+int DocumentStore::nextId() const {
+    return nextId_;
+}
+
 int DocumentStore::findIndex(int id) const {
     for (std::size_t i = 0; i < doc_.events.size(); ++i) {
         if (doc_.events[i].id == id) {
@@ -82,11 +116,13 @@ bool DocumentStore::commit(Document next) {
     if (next == doc_) {
         return false;
     }
-    undoStack_.push_back(std::move(doc_));
+    // Strong guarantee: the one allocating step comes first, while nothing has changed yet, so if it
+    // throws the store is untouched. Everything after it is noexcept (vector moves, deque pop and clear).
+    undoStack_.push_back(doc_);
+    doc_ = std::move(next);
     if (undoStack_.size() > kMaxUndoDepth) {
         undoStack_.pop_front();
     }
-    doc_ = std::move(next);
     redoStack_.clear();
     return true;
 }
@@ -96,11 +132,12 @@ int DocumentStore::appendChord(Chord chord, double lengthBeats, int velocity) {
     if (!std::isfinite(lengthBeats) || nextId_ == INT_MAX) {
         return kNoEventId;
     }
-    const int id = nextId_++;
+    const int id = nextId_;
     Document next = doc_;
     next.events.push_back(ChordEvent{id, chord, clampLength(lengthBeats), clampVelocity(velocity)});
     [[maybe_unused]] const bool changed = commit(std::move(next));
     assert(changed);  // a fresh id always makes the sequence differ
+    ++nextId_;        // only now: a throw above leaves the counter, like the rest of the store, untouched
     return id;
 }
 
@@ -179,11 +216,11 @@ bool DocumentStore::undo() {
     if (undoStack_.empty()) {
         return false;
     }
-    Document restored = std::move(undoStack_.back());
-    undoStack_.pop_back();
+    redoStack_.push_back(doc_);  // the allocating step first: if it throws, nothing has changed
+    Document& restored = undoStack_.back();
     keepLiveState(restored, doc_);
-    redoStack_.push_back(std::move(doc_));
     doc_ = std::move(restored);
+    undoStack_.pop_back();
     return true;
 }
 
@@ -191,11 +228,11 @@ bool DocumentStore::redo() {
     if (redoStack_.empty()) {
         return false;
     }
-    Document restored = std::move(redoStack_.back());
-    redoStack_.pop_back();
+    undoStack_.push_back(doc_);  // the allocating step first: if it throws, nothing has changed
+    Document& restored = redoStack_.back();
     keepLiveState(restored, doc_);
-    undoStack_.push_back(std::move(doc_));
     doc_ = std::move(restored);
+    redoStack_.pop_back();
     return true;
 }
 
