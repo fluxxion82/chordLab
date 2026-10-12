@@ -4,9 +4,12 @@
 
 #include <algorithm>
 #include <cassert>
+#include <climits>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
 #include <tuple>
+#include <utility>
 
 namespace chordlab {
 
@@ -21,6 +24,30 @@ void assertValidEvent([[maybe_unused]] const ChordEvent& event) {
     assert(std::isfinite(event.lengthBeats) && event.lengthBeats >= kMinLengthBeats &&
            event.lengthBeats <= kMaxLengthBeats);
     assert(event.velocity >= kMinVelocity && event.velocity <= kMaxVelocity);
+    assert(event.inversion >= 0 && event.inversion < inversionCount(event.chord));
+    assert(event.octave >= kMinVoicingOctave && event.octave <= kMaxVoicingOctave);
+}
+
+/// The voicing of `chord` closest to `previous` over every inversion at octaves -1..1 (at most 15
+/// candidates): the one with the smallest key (cost, |octave|, inversion, octave), so that equally cheap
+/// candidates go to the smaller |octave|, then the smaller inversion, then the lower octave.
+std::vector<int> closestVoicing(const Chord& chord, const std::vector<int>& previous) {
+    using Key = std::tuple<int, int, int, int>;
+    std::vector<int> best;
+    Key bestKey{INT_MAX, INT_MAX, INT_MAX, INT_MAX};
+    const int count = inversionCount(chord);
+    for (int octave = kMinVoicingOctave; octave <= kMaxVoicingOctave; ++octave) {
+        for (int inversion = 0; inversion < count; ++inversion) {
+            std::vector<int> candidate = voicing(chord, inversion, octave);
+            const Key key{voiceLeadingCost(previous, candidate), std::abs(octave), inversion, octave};
+            if (key < bestKey) {
+                bestKey = key;
+                best = std::move(candidate);
+            }
+        }
+    }
+    assert(!best.empty());
+    return best;
 }
 
 /// The sort key: beat, then offs before ons, then ascending pitch. Over one compiled document the key
@@ -32,23 +59,40 @@ bool keyLess(const NoteEvent& a, const NoteEvent& b) {
 
 }  // namespace
 
+std::vector<std::vector<int>> voicings(const Document& doc) {
+    std::vector<std::vector<int>> result;
+    result.reserve(doc.events.size());
+    for (const ChordEvent& event : doc.events) {
+        assertValidEvent(event);
+        if (doc.autoVoiceLead && !event.manualVoicing && !result.empty()) {
+            result.push_back(closestVoicing(event.chord, result.back()));
+        } else {
+            result.push_back(voicing(event.chord, event.inversion, event.octave));
+        }
+    }
+    return result;
+}
+
 Compiled compileRange(const Document& doc, int firstEvent, int count) {
     assert(firstEvent >= 0 && count >= 0);
     assert(static_cast<std::size_t>(firstEvent) + static_cast<std::size_t>(count) <= doc.events.size());
+    // The voicings are those of the whole progression, sliced: under auto voice-leading a chord follows
+    // the chord before it, section boundary or not, so a range sounds as it does in the whole (header).
+    const std::vector<std::vector<int>> chosen = voicings(doc);
     Compiled compiled;
     // Start beats are accumulated in a single pass, in the same order and with the same additions as
     // `Document::endBeat` does for a document holding just these chords. The running value is reused as
     // the off beat of one chord and the on beat of the next, so adjacent events compare equal exactly
     // rather than merely closely.
     double beat = 0.0;
-    const auto begin = doc.events.begin() + firstEvent;
-    for (auto it = begin; it != begin + count; ++it) {
-        const ChordEvent& event = *it;
-        assertValidEvent(event);
+    const std::size_t first = static_cast<std::size_t>(firstEvent);
+    const std::size_t last = first + static_cast<std::size_t>(count);
+    for (std::size_t i = first; i < last; ++i) {
+        const ChordEvent& event = doc.events[i];
         const double start = beat;
         beat += event.lengthBeats;
         const double end = beat;
-        for (const int pitch : closeVoicing(event.chord)) {
+        for (const int pitch : chosen[i]) {
             compiled.events.push_back(NoteEvent{start, true, pitch, event.velocity});
             compiled.events.push_back(NoteEvent{end, false, pitch, 0});
         }

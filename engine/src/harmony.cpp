@@ -16,7 +16,6 @@ namespace chordlab {
 namespace {
 
 constexpr int kOctave = 12;
-constexpr int kMidiMax = 127;
 
 /// The parallel modes in the order `borrowedFrom` tries them for a major-family project key: the
 /// parallel minor first, then the other major modes, the minor modes, Locrian, and (never reached for
@@ -44,20 +43,6 @@ const std::array<Mode, kNumModes>& borrowOrder(Mode projectMode) {
 
 bool withinVoiceLimit(std::size_t count) {
     return count > 0 && count <= static_cast<std::size_t>(kMaxVoiceLeadingNotes);
-}
-
-bool isMidiVoicing(const std::vector<int>& notes) {
-    return withinVoiceLimit(notes.size()) &&
-           std::all_of(notes.begin(), notes.end(), [](int n) { return n >= 0 && n <= kMidiMax; });
-}
-
-/// Appends the octave above the lowest note of `notes` until it holds `size` notes.
-void padWithLowestOctave(std::vector<int>& notes, std::size_t size) {
-    if (notes.size() >= size) {
-        return;
-    }
-    const int doubling = *std::min_element(notes.begin(), notes.end()) + kOctave;
-    notes.resize(size, doubling);
 }
 
 /// Appends copies of `pcs`'s own entries, cycling from the first, until it holds `size` entries.
@@ -126,16 +111,6 @@ RootMotion rootMotion(PitchClass from, PitchClass to) {
         case 10: return RootMotion::StepDown;
         default: return RootMotion::SemitoneDown;  // 11
     }
-}
-
-int voiceLeadingCost(const std::vector<int>& a, const std::vector<int>& b) {
-    assert(isMidiVoicing(a) && isMidiVoicing(b));
-    std::vector<int> from = a;
-    std::vector<int> to = b;
-    padWithLowestOctave(from, to.size());
-    padWithLowestOctave(to, from.size());
-    return minimalBijectionCost(from.size(),
-                                [&](std::size_t i, std::size_t j) { return std::abs(from[i] - to[j]); });
 }
 
 int pcVoiceLeadingCost(const std::vector<PitchClass>& a, const std::vector<PitchClass>& b) {

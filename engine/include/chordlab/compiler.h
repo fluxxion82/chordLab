@@ -14,11 +14,20 @@ struct Compiled {
     double endBeat = 0.0;
 };
 
+/// The voicing `compile` gives each chord of `doc`, in playback order: `voicing(chord, inversion, octave)`
+/// at the default range. With `doc.autoVoiceLead` on, every chord after the first whose `manualVoicing`
+/// is clear instead takes, over all of its inversions at octaves -1, 0 and 1, the pair with the smallest
+/// `voiceLeadingCost` from the previous chord's voicing as chosen here; a tie goes to the smaller
+/// |octave|, then the smaller inversion, then the lower octave. A chord whose `manualVoicing` is set is
+/// voiced as stored, auto or not (so a manual root position stays put), and so is the first chord.
+/// Same preconditions as `compile`.
+std::vector<std::vector<int>> voicings(const Document& doc);
+
 /// Compiles `doc` for playback and export. This is the one duration policy shared by live playback and
-/// the MIDI file (D10): each chord is voiced with `closeVoicing` at the default range, its ons sit at the
-/// chord's start beat and its offs sit exactly at start + length, with no gap. A chord that repeats the
-/// previous chord's pitch therefore has that pitch's off and on at the same beat, and the sort puts the
-/// off first so the note retriggers.
+/// the MIDI file (D10): each chord is voiced as `voicings` says, its ons sit at the chord's start beat
+/// and its offs sit exactly at start + length, with no gap. A chord that repeats the previous chord's
+/// pitch therefore has that pitch's off and on at the same beat, and the sort puts the off first so the
+/// note retriggers.
 ///
 /// Start beats are accumulated once, left to right, exactly as `Document::startBeatOf` and
 /// `Document::endBeat` do, so a chord's offs and the next chord's ons share the identical boundary value
@@ -26,16 +35,20 @@ struct Compiled {
 /// is a total order over the generated set, so the output is deterministic.
 ///
 /// `doc` must satisfy the `DocumentStore` invariants: every chord valid, every length finite and within
-/// `kMinLengthBeats`..`kMaxLengthBeats`, every velocity in `kMinVelocity`..`kMaxVelocity`. These are
-/// preconditions (asserted, not checked): a document that came from outside the process is validated by
-/// the store before it gets here.
+/// `kMinLengthBeats`..`kMaxLengthBeats`, every velocity in `kMinVelocity`..`kMaxVelocity`, every
+/// inversion and octave within the ranges `voicing` accepts. These are preconditions (asserted, not
+/// checked): a document that came from outside the process is validated by the store before it gets here.
 Compiled compile(const Document& doc);
 
-/// Compiles the `count` chords from `firstEvent` on, exactly as `compile` would a document holding only
-/// those chords: the same voicings, the beats accumulated from 0 (not the whole document's beats shifted,
-/// which could differ in the last bit), so the range starts at 0 and `endBeat` is its length. `compile(doc)`
-/// is `compileRange(doc, 0, events.size())`. `firstEvent` must be in 0..events.size() and `count` in
-/// 0..events.size()-firstEvent (preconditions, asserted); the same document invariants as `compile`.
+/// Compiles the `count` chords from `firstEvent` on, as they sound in the whole document, re-based to 0:
+/// each chord takes the voicing `voicings(doc)` gives it in the whole progression (the context of auto
+/// voice-leading is the whole progression, so a chord at the start of a range still follows the chord
+/// before the range; the voicings are sliced, never recomputed on the range alone), and the beats are
+/// accumulated from 0 (not the whole document's beats shifted, which could differ in the last bit), so
+/// the range starts at 0 and `endBeat` is its length. `compile(doc)` is `compileRange(doc, 0,
+/// events.size())`, and with auto voice-leading off a range compiles exactly as a document holding only
+/// its chords would. `firstEvent` must be in 0..events.size() and `count` in 0..events.size()-firstEvent
+/// (preconditions, asserted); the same document invariants as `compile`.
 Compiled compileRange(const Document& doc, int firstEvent, int count);
 
 /// Compiles the section at `sectionIndex` of `doc.sections` as `compileRange` would: from its first chord

@@ -3,6 +3,7 @@
 #include "chordlab/chord.h"
 #include "chordlab/pitch.h"
 #include "chordlab/scale.h"
+#include "chordlab/voicing.h"
 
 #include <optional>
 #include <vector>
@@ -38,23 +39,6 @@ const char* rootMotionName(RootMotion motion);
 /// the result depends only on the interval between them.
 RootMotion rootMotion(PitchClass from, PitchClass to);
 
-/// Upper bound on the number of notes `voiceLeadingCost` and `pcVoiceLeadingCost` accept per side. The
-/// dictionary's largest chord has five; the search is over every bijection (n!), which stays trivial
-/// up to six.
-constexpr int kMaxVoiceLeadingNotes = 6;
-
-/// Cost of moving one concrete voicing onto another: the total displacement, in semitones, of the
-/// cheapest one-to-one pairing of the MIDI notes of `a` with those of `b` (the minimum over every
-/// bijection of the sum of |a[i] - b[j]|). This is the register-aware cost for actual voicings, as the
-/// auto voice-leading of P2-D5 compares them; the smoothness of one chord into another regardless of
-/// register is `pcVoiceLeadingCost`. The order of the notes in either voicing is irrelevant. When the
-/// voicings differ in size, the shorter is first padded up to the longer's size with its lowest note an
-/// octave up (the same doubled note as often as needed), so a triad against a seventh chord moves three
-/// real voices plus one doubled root; the result is therefore symmetric for any two voicings. Both
-/// voicings are MIDI note numbers (0..127), non-empty, and hold at most `kMaxVoiceLeadingNotes` notes;
-/// anything else is a precondition violation.
-int voiceLeadingCost(const std::vector<int>& a, const std::vector<int>& b);
-
 /// Octave-free cost of moving the pitch classes of `a` onto those of `b`: the minimum over every
 /// bijection of the sum of circular distances min(d, 12 - d), so C -> F is 3 (E->F, G->A), C -> Am is 2
 /// (G->A) and C -> Db is 3, whatever register either chord would be voiced in. When the sets differ in
@@ -62,7 +46,8 @@ int voiceLeadingCost(const std::vector<int>& a, const std::vector<int>& b);
 /// given order (C E G against a seventh chord becomes C E G C, against a ninth chord C E G C E), so with
 /// pitch classes root first, as `pitchClasses` returns them, the root is the first note doubled. The
 /// padding depends only on the shorter side, so the result is symmetric for any two sets. Entries are
-/// reduced modulo 12. Both sets must be non-empty and hold at most `kMaxVoiceLeadingNotes` entries.
+/// reduced modulo 12. Both sets must be non-empty and hold at most `kMaxVoiceLeadingNotes` (voicing.h)
+/// entries. The register-aware counterpart for two actual voicings is `voiceLeadingCost` in voicing.h.
 int pcVoiceLeadingCost(const std::vector<PitchClass>& a, const std::vector<PitchClass>& b);
 
 /// The parallel mode `chord` is borrowed from: nullopt when `chord` is fully in `projectKey`; otherwise
@@ -89,7 +74,7 @@ struct Relation {
     RootMotion motion;
     /// `pcVoiceLeadingCost` of the two chords' pitch classes (root first): how smoothly one chord moves
     /// into the next, octave-free and independent of how either is voiced. The register-aware cost of
-    /// two actual voicings is `voiceLeadingCost`'s business, not this field's.
+    /// two actual voicings is `voiceLeadingCost`'s (voicing.h) business, not this field's.
     int voiceLeadingCost;
     /// `borrowedFrom` of the second chord against the project key.
     std::optional<Key> borrowedFrom;

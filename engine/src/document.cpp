@@ -1,5 +1,7 @@
 #include "chordlab/document.h"
 
+#include "chordlab/voicing.h"
+
 #include <algorithm>
 #include <cassert>
 #include <climits>
@@ -64,6 +66,15 @@ double clampLength(double lengthBeats) {
 
 int clampVelocity(int velocity) {
     return std::clamp(velocity, kMinVelocity, kMaxVelocity);
+}
+
+/// `chord` must be valid: `inversionCount` reads its type.
+int clampInversion(const Chord& chord, int inversion) {
+    return std::clamp(inversion, 0, inversionCount(chord) - 1);
+}
+
+int clampOctave(int octave) {
+    return std::clamp(octave, kMinVoicingOctave, kMaxVoicingOctave);
 }
 
 int clampColour(int colourIndex) {
@@ -159,7 +170,8 @@ Section makeSection(int id, std::string name, int firstEventIndex) {
 }
 
 /// Copies the live (non-undoable) fields of `current` into `target`, so that restoring a snapshot keeps
-/// the browsed key and the transport toggles as they are now.
+/// the browsed key and the transport toggles as they are now. `autoVoiceLead` is deliberately absent: it
+/// changes the notes `compile` produces, so it is restored with the progression (see `Document`).
 void keepLiveState(Document& target, const Document& current) {
     target.browsedKey = current.browsedKey;
     target.progressionLoop = current.progressionLoop;
@@ -185,6 +197,8 @@ void DocumentStore::replace(Document doc, int nextId, int nextSectionId) {
         assertValidChord(e.chord);
         assert(std::isfinite(e.lengthBeats) && e.lengthBeats >= kMinLengthBeats && e.lengthBeats <= kMaxLengthBeats);
         assert(e.velocity >= kMinVelocity && e.velocity <= kMaxVelocity);
+        assert(e.inversion >= 0 && e.inversion < inversionCount(e.chord));
+        assert(e.octave >= kMinVoicingOctave && e.octave <= kMaxVoicingOctave);
         assert(e.id >= 1 && e.id < nextId);
     }
     assert(idsAreDistinct(doc));
@@ -312,6 +326,43 @@ void DocumentStore::setVelocity(int id, int velocity) {
     commit(std::move(next));
 }
 
+void DocumentStore::setInversion(int id, int inversion) {
+    const int index = findIndex(id);
+    if (index < 0) {
+        return;
+    }
+    Document next = doc_;
+    ChordEvent& event = next.events[static_cast<std::size_t>(index)];
+    event.inversion = clampInversion(event.chord, inversion);
+    event.manualVoicing = true;
+    commit(std::move(next));
+}
+
+void DocumentStore::setOctave(int id, int octave) {
+    const int index = findIndex(id);
+    if (index < 0) {
+        return;
+    }
+    Document next = doc_;
+    ChordEvent& event = next.events[static_cast<std::size_t>(index)];
+    event.octave = clampOctave(octave);
+    event.manualVoicing = true;
+    commit(std::move(next));
+}
+
+void DocumentStore::resetVoicing(int id) {
+    const int index = findIndex(id);
+    if (index < 0) {
+        return;
+    }
+    Document next = doc_;
+    ChordEvent& event = next.events[static_cast<std::size_t>(index)];
+    event.inversion = 0;
+    event.octave = 0;
+    event.manualVoicing = false;
+    commit(std::move(next));
+}
+
 void DocumentStore::removeChord(int id) {
     const int index = findIndex(id);
     if (index < 0) {
@@ -328,6 +379,12 @@ void DocumentStore::setProjectKey(Key key) {
     Document next = doc_;
     next.projectKey = key;
     commit(std::move(next));
+}
+
+void DocumentStore::setAutoVoiceLead(bool on) {
+    Document next = doc_;
+    next.autoVoiceLead = on;
+    commit(std::move(next));  // undoable: it changes the compiled progression
 }
 
 void DocumentStore::setBrowsedKey(Key key) {

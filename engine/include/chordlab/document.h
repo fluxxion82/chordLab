@@ -4,6 +4,7 @@
 #include "chordlab/limits.h"
 #include "chordlab/pitch.h"
 #include "chordlab/scale.h"
+#include "chordlab/voicing.h"
 
 #include <cstddef>
 #include <deque>
@@ -32,9 +33,9 @@ constexpr int kNoSectionId = -1;
 
 /// The most chords a document may hold: `appendChord` refuses the next one (`kNoEventId`), `loadStateJson`
 /// rejects a state with more, and `replace` asserts. The bound exists so that a compiled document always
-/// fits one scheduler snapshot: kMaxChords chords x at most 8 voices (the Phase 2 voicings; `closeVoicing`
-/// today has at most 5, the ninths) x 2 events (on and off) = 4096 = `kMaxSnapshotEvents`. With today's
-/// voicings a full document compiles to 2560 events.
+/// fits one scheduler snapshot: kMaxChords chords x at most 8 voices (headroom; `voicing` has one note per
+/// chord tone, at most 5 today, the ninths) x 2 events (on and off) = 4096 = `kMaxSnapshotEvents`. With
+/// today's voicings a full document compiles to 2560 events.
 constexpr int kMaxChords = 256;
 static_assert(static_cast<std::size_t>(kMaxChords) * 8 * 2 <= kMaxSnapshotEvents,
               "a full document of eight-note chords must fit one scheduler snapshot");
@@ -46,15 +47,27 @@ static_assert(static_cast<std::size_t>(kMaxChords) * 8 * 2 <= kMaxSnapshotEvents
 /// `chord` holds only a pitch class and a dictionary type. Note spelling is derived at display time from
 /// the browsed key, so whatever enharmonic spelling the chord was entered with (Gb vs F#) is not preserved
 /// by the document: this is policy, not an omission.
+/// `inversion` (0..`inversionCount(chord) - 1`, 0 = root position) and `octave` (`kMinVoicingOctave`..
+/// `kMaxVoicingOctave`, 0 = the default register) are the chord's voicing as `voicing` in voicing.h reads
+/// them, and `manualVoicing` says the user chose them. `DocumentStore::setInversion` and `setOctave` set
+/// the flag along with the value (root position in the default register is a choice like any other), and
+/// `resetVoicing` clears all three, so an event the store was never asked to voice is at 0, 0, not manual.
+/// With `Document::autoVoiceLead` on, `compile` chooses the voicing of every chord whose flag is clear and
+/// keeps the stored values of every chord whose flag is set; with it off every chord keeps its stored
+/// values, flag or not (see compiler.h).
 struct ChordEvent {
     int id;
     Chord chord;
     double lengthBeats;
     int velocity;
+    int inversion = 0;
+    int octave = 0;
+    bool manualVoicing = false;
 };
 
 constexpr bool operator==(const ChordEvent& a, const ChordEvent& b) noexcept {
-    return a.id == b.id && a.chord == b.chord && a.lengthBeats == b.lengthBeats && a.velocity == b.velocity;
+    return a.id == b.id && a.chord == b.chord && a.lengthBeats == b.lengthBeats && a.velocity == b.velocity &&
+           a.inversion == b.inversion && a.octave == b.octave && a.manualVoicing == b.manualVoicing;
 }
 
 constexpr bool operator!=(const ChordEvent& a, const ChordEvent& b) noexcept {
@@ -85,18 +98,20 @@ inline bool operator!=(const Section& a, const Section& b) noexcept {
     return !(a == b);
 }
 
-/// The whole editable state of a project: the two keys, the progression, its sections and the transport
-/// toggles. Plain data so that `DocumentStore` can snapshot it for undo; mutate it through the store, not
-/// directly.
+/// The whole editable state of a project: the two keys, the progression, its sections, the voicing flag
+/// and the transport toggles. Plain data so that `DocumentStore` can snapshot it for undo; mutate it
+/// through the store, not directly.
 ///
-/// Undo scope: `events`, `sections` and `projectKey` are undoable (they are what the user composes).
-/// `browsedKey`, `progressionLoop` and `followHost` are live session state: changing them never creates
-/// history, and undo/redo leave their current values alone while restoring the rest.
+/// Undo scope: `events`, `sections`, `projectKey` and `autoVoiceLead` are undoable (they are what the user
+/// composes: the flag changes which notes `compile` produces, so toggling it is an edit of the progression,
+/// not a view of it). `browsedKey`, `progressionLoop` and `followHost` are live session state: changing
+/// them never creates history, and undo/redo leave their current values alone while restoring the rest.
 struct Document {
     Key projectKey{{'C', 0}, Mode::Ionian};
     Key browsedKey{{'C', 0}, Mode::Ionian};
     std::vector<ChordEvent> events;  // playback order; chords abut, no gaps
     std::vector<Section> sections;   // sorted by firstEventIndex, strictly increasing from 0, each < events.size()
+    bool autoVoiceLead = false;      // compile picks each non-manual chord's inversion and octave (compiler.h)
     bool progressionLoop = true;
     bool followHost = true;
 
@@ -116,7 +131,8 @@ struct Document {
 /// Compares every field, live state included.
 inline bool operator==(const Document& a, const Document& b) noexcept {
     return a.projectKey == b.projectKey && a.browsedKey == b.browsedKey && a.events == b.events &&
-           a.sections == b.sections && a.progressionLoop == b.progressionLoop && a.followHost == b.followHost;
+           a.sections == b.sections && a.autoVoiceLead == b.autoVoiceLead &&
+           a.progressionLoop == b.progressionLoop && a.followHost == b.followHost;
 }
 
 inline bool operator!=(const Document& a, const Document& b) noexcept {
@@ -131,10 +147,11 @@ bool sectionsWellFormed(const Document& doc);
 
 /// Owns a `Document` and its undo/redo history.
 ///
-/// Undoable state is `Document::events`, `Document::sections` and `Document::projectKey`. Every mutation
-/// that changes any of them pushes the previous document onto the undo stack and clears the redo stack. A
-/// call that changes nothing (an unknown id, a value equal to the current one after clamping, a move to
-/// the chord's current position, a rejected argument) pushes nothing and leaves the redo stack intact.
+/// Undoable state is `Document::events`, `Document::sections`, `Document::projectKey` and
+/// `Document::autoVoiceLead`. Every mutation that changes any of them pushes the previous document onto the
+/// undo stack and clears the redo stack. A call that changes nothing (an unknown id, a value equal to the
+/// current one after clamping, a move to the chord's current position, a rejected argument) pushes nothing
+/// and leaves the redo stack intact.
 /// `browsedKey`, `progressionLoop` and `followHost` are live state: their setters never touch the history,
 /// and `undo()`/`redo()` keep their current values while restoring the undoable state.
 /// The history holds at most `kMaxUndoDepth` snapshots; beyond that the oldest is dropped.
@@ -189,6 +206,19 @@ public:
     /// Sets the velocity of event `id`, clamped to [kMinVelocity, kMaxVelocity]. Unknown id: no-op.
     void setVelocity(int id, int velocity);
 
+    /// Sets the inversion of event `id`, clamped to 0..`inversionCount(chord) - 1`, and marks its voicing
+    /// manual, in one undoable step. Unknown id: no-op. The current value on an event already manual: no-op.
+    void setInversion(int id, int inversion);
+
+    /// Sets the octave of event `id`, clamped to [kMinVoicingOctave, kMaxVoicingOctave], and marks its
+    /// voicing manual, in one undoable step. Unknown id: no-op. The current value on an event already
+    /// manual: no-op.
+    void setOctave(int id, int octave);
+
+    /// Returns event `id` to root position in the default register and clears its manual flag, so that
+    /// auto voice-leading decides for it again. Unknown id, or an event already so: no-op.
+    void resetVoicing(int id);
+
     /// Removes event `id`; the events after it move up so the sequence stays contiguous, and so do the
     /// sections starting after it. A section starting on the removed chord is removed with it (its other
     /// chords join the section before it), except the first section, which is pinned to the start: it
@@ -199,6 +229,9 @@ public:
     /// Undoable. `key.tonic` must satisfy the `Tonic` preconditions of pitch.h and `key.mode` be a
     /// declared `Mode`.
     void setProjectKey(Key key);
+
+    /// Undoable: the flag changes what `compile` produces (see `Document`).
+    void setAutoVoiceLead(bool on);
 
     /// Live state, never recorded in the history. Same preconditions as `setProjectKey`.
     void setBrowsedKey(Key key);
@@ -246,13 +279,14 @@ public:
     /// Replaces the whole document, live state included, and restarts the id counters: what a load does.
     /// Clears the undo and redo history and changes nothing else.
     /// `doc` must satisfy the store's invariants (valid chords and keys, finite lengths within
-    /// [kMinLengthBeats, kMaxLengthBeats], velocities within [kMinVelocity, kMaxVelocity], distinct ids,
-    /// at most `kMaxChords` events; sections as `sectionsWellFormed` requires, in particular ids in
-    /// 1..INT_MAX-1) and `nextId` must be >= 1 and greater than every event id, so that ids stay unique.
-    /// `nextSectionId` must likewise be >= 1 and greater than every section id, or 0 (the default): one
-    /// past the largest section id in `doc` (which the id bound keeps from overflowing), 1 when it has
-    /// none; a derived INT_MAX means the next `addSection` is refused. Callers that take documents from
-    /// outside the process (`loadStateJson`) validate before calling.
+    /// [kMinLengthBeats, kMaxLengthBeats], velocities within [kMinVelocity, kMaxVelocity], inversions
+    /// within 0..`inversionCount(chord) - 1`, octaves within [kMinVoicingOctave, kMaxVoicingOctave],
+    /// distinct ids, at most `kMaxChords` events; sections as `sectionsWellFormed` requires, in particular
+    /// ids in 1..INT_MAX-1) and `nextId` must be >= 1 and greater than every event id, so that ids stay
+    /// unique. `nextSectionId` must likewise be >= 1 and greater than every section id, or 0 (the
+    /// default): one past the largest section id in `doc` (which the id bound keeps from overflowing), 1
+    /// when it has none; a derived INT_MAX means the next `addSection` is refused. Callers that take
+    /// documents from outside the process (`loadStateJson`) validate before calling.
     void replace(Document doc, int nextId, int nextSectionId = 0);
 
     /// The id the next successful append will get. Persisted by `stateJson` so that a reloaded document
