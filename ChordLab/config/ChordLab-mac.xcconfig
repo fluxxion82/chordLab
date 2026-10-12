@@ -15,7 +15,10 @@ BINARY_NAME = ChordLab
 
 // ------------------------------
 // HEADER AND LIBRARY SEARCH PATHS
-//EXTRA_INC_PATHS = $(IGRAPHICS_INC_PATHS)
+// The engine (engine/src is a synchronized group of every plug-in target). PROJECT_DIR is ChordLab/projects.
+// EXTRA_INC_PATHS is the slot iPlug2's project-level HEADER_SEARCH_PATHS reserves for us; a HEADER_SEARCH_PATHS
+// line here would be overridden by that project-level setting (it carries no $(inherited)).
+EXTRA_INC_PATHS = $(PROJECT_DIR)/../../engine/include $(PROJECT_DIR)/../../engine/third_party
 //EXTRA_LIB_PATHS = $(IGRAPHICS_LIB_PATHS)
 EXTRA_LNK_FLAGS = -framework Metal -framework MetalKit -framework Accelerate
 

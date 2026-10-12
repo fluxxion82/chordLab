@@ -581,6 +581,7 @@
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		4F3A3D602D7F63BF00AE89B6 /* UI */ = {isa = PBXFileSystemSynchronizedRootGroup; explicitFileTypes = {}; explicitFolders = (); name = UI; path = ../UI; sourceTree = SOURCE_ROOT; };
+		8FF97CEC3749F46191E93843 /* engine */ = {isa = PBXFileSystemSynchronizedRootGroup; explicitFileTypes = {}; explicitFolders = (); name = engine; path = ../../engine/src; sourceTree = SOURCE_ROOT; };
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -649,6 +650,7 @@
 			isa = PBXGroup;
 			children = (
 				4F3A3D602D7F63BF00AE89B6 /* UI */,
+				8FF97CEC3749F46191E93843 /* engine */,
 				52FBBED30D0CF143001C8B8A /* config.h */,
 				4FDCA0BE268E2F12007C8124 /* ChordLab-Bridging-Header.h */,
 				4FC145FA26A60B1B00DA8929 /* ChordLab-Shared.h */,
@@ -1347,6 +1349,7 @@
 			);
 			fileSystemSynchronizedGroups = (
 				4F3A3D602D7F63BF00AE89B6 /* UI */,
+				8FF97CEC3749F46191E93843 /* engine */,
 			);
 			name = VST2;
 			productInstallPath = "$(HOME)/Library/Bundles";
@@ -1372,6 +1375,7 @@
 			);
 			fileSystemSynchronizedGroups = (
 				4F3A3D602D7F63BF00AE89B6 /* UI */,
+				8FF97CEC3749F46191E93843 /* engine */,
 			);
 			name = "AUv3 APP";
 			productName = "OSXAPP_32&64_intel";
@@ -1414,6 +1418,7 @@
 			);
 			fileSystemSynchronizedGroups = (
 				4F3A3D602D7F63BF00AE89B6 /* UI */,
+				8FF97CEC3749F46191E93843 /* engine */,
 			);
 			name = AU;
 			productName = IPlugExampleAU;
@@ -1435,6 +1440,7 @@
 			);
 			fileSystemSynchronizedGroups = (
 				4F3A3D602D7F63BF00AE89B6 /* UI */,
+				8FF97CEC3749F46191E93843 /* engine */,
 			);
 			name = AUv3Framework;
 			productName = AUv3Framework;
@@ -1456,6 +1462,7 @@
 			);
 			fileSystemSynchronizedGroups = (
 				4F3A3D602D7F63BF00AE89B6 /* UI */,
+				8FF97CEC3749F46191E93843 /* engine */,
 			);
 			name = VST3;
 			productInstallPath = "$(HOME)/Library/Bundles";
@@ -1479,6 +1486,7 @@
 			);
 			fileSystemSynchronizedGroups = (
 				4F3A3D602D7F63BF00AE89B6 /* UI */,
+				8FF97CEC3749F46191E93843 /* engine */,
 			);
 			name = AAX;
 			productInstallPath = "$(HOME)/Library/Bundles";
@@ -1501,6 +1509,7 @@
 			);
 			fileSystemSynchronizedGroups = (
 				4F3A3D602D7F63BF00AE89B6 /* UI */,
+				8FF97CEC3749F46191E93843 /* engine */,
 			);
 			name = APP;
 			productName = "OSXAPP_32&64_intel";

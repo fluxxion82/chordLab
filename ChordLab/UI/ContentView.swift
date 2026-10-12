@@ -1,58 +1,62 @@
 import SwiftUI
 
-/// M0 host-contract spikes (plan Tasks 0.3–0.6). Replaced by the real UI in M2.
+/// Key bar over the palette grid, with a temporary status line and the Spike 3 drag-out label along the
+/// bottom until M3/M4 replace them.
 struct ContentView: View {
   @EnvironmentObject var state: ChordLabState
-  private let cMajor: [UInt8] = [60, 64, 67]
 
   var body: some View {
     ZStack {
-      Color(red: 0.06, green: 0.08, blue: 0.22)
-      VStack(spacing: 24) {
-        Text("ChordLab — M0 spikes").font(.title2).foregroundStyle(.white)
+      PaletteView.background
+      VStack(spacing: 12) {
+        KeyBarView()
 
-        // Spike 1: preview a chord while the mouse is held.
-        Text("C major (hold)")
-          .font(.title3).foregroundStyle(.white)
-          .padding(.horizontal, 28).padding(.vertical, 16)
-          .background(Circle().fill(Color(red: 0.11, green: 0.44, blue: 0.50)))
-          .pressAction(onPress: { state.sendChord(cMajor, on: true) },
-                       onRelease: { state.sendChord(cMajor, on: false) })
+        PaletteView()
 
-        // Spike 3: drag a prepared .mid out to the DAW.
-        Text("♫ Drag MIDI clip to Live")
-          .foregroundStyle(.white)
-          .padding(12)
-          .background(RoundedRectangle(cornerRadius: 8).fill(Color(red: 0.20, green: 0.25, blue: 0.55)))
-          .onDrag {
-            guard let url = ExportFixture.prepareExportFile() else { return NSItemProvider() }
-            return NSItemProvider(contentsOf: url) ?? NSItemProvider()
+        HStack(spacing: 16) {
+          if let snapshot = state.snapshot {
+            Text("\(snapshot.palette.cells.count) cells · \(snapshot.events.count) events · ends at beat \(snapshot.endBeat, specifier: "%.2f")")
+              .foregroundStyle(.gray).font(.callout.monospacedDigit())
+          } else {
+            Text("Waiting for a snapshot…").foregroundStyle(.gray).font(.callout)
+          }
+          Button("Append C") { state.send(command: ["cmd": "appendChord", "root": 0, "type": "maj"]) }
+          Button("Panic") { state.panic() }
+            .accessibilityLabel("Silence every sounding note")
+          if let snapshot = state.snapshot, !snapshot.hasTonicTable {
+            Text("snapshot missing tonics").foregroundStyle(.orange).font(.callout)
+          }
+          if state.incompleteBlocks > 0 {
+            Text("incomplete blocks: \(state.incompleteBlocks)").foregroundStyle(.orange).font(.callout.monospacedDigit())
+          }
+          if let error = state.lastError {
+            Text("Error: \(error)").foregroundStyle(.red).font(.callout).lineLimit(2)
           }
 
-        // Spike 4: a value that must survive save/reload through the state chunk.
-        HStack {
-          Text("Chunk test value: \(state.testValue)").foregroundStyle(.white)
-          Stepper("", value: Binding(get: { state.testValue },
-                                     set: { state.setTestValue($0) }))
-            .labelsHidden()
-        }
-        // Spike 2: ppq-driven test arpeggio (one 1/8-note per beat, C D E F) while Live plays.
-        Toggle("Spike 2: ppq test arp (route track 2, press play in Live)",
-               isOn: Binding(get: { state.spikeArp }, set: { state.setSpikeArp($0) }))
-          .toggleStyle(.switch).foregroundStyle(.white)
+          Spacer()
 
-        Text(state.stateJson).font(.caption.monospaced()).foregroundStyle(.gray)
-          .textSelection(.enabled)
+          // Spike 3: drag a prepared .mid out to the DAW.
+          Text("♫ Drag MIDI clip to Live")
+            .foregroundStyle(.white)
+            .padding(.horizontal, 12).padding(.vertical, 8)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color(red: 0.20, green: 0.25, blue: 0.55)))
+            .onDrag {
+              guard let url = ExportFixture.prepareExportFile() else { return NSItemProvider() }
+              return NSItemProvider(contentsOf: url) ?? NSItemProvider()
+            }
+        }
       }
-      .padding()
+      .padding(12)
     }
     .edgesIgnoringSafeArea(.all)
+    .onAppear { state.requestSnapshot() }
+    .onDisappear { state.releaseHeld() }      // editor closed mid-press: never leave a note sounding
   }
 }
 
 struct SwiftUIView_Previews: PreviewProvider {
   static var previews: some View {
     ContentView().environmentObject(ChordLabState(numParams: kNumParams))
-      .frame(width: 600, height: 400)
+      .frame(width: 900, height: 620)
   }
 }
