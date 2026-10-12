@@ -15,6 +15,9 @@ class ChordLabState: NSObject, ObservableObject {
   @Published var transport: TransportJSON?
   /// The MIDI file of the last export request (`kMsgTagExportReady`), or nil while none is ready.
   @Published var exportPath: String?
+  /// Whether a text field (a section rename) is being edited: bare-key shortcuts (the suggestion digits)
+  /// stand down meanwhile, so typing a name never appends chords.
+  @Published var editingText = false
   /// Id of the palette cell whose voicing is sounding (pressed), or nil.
   @Published private(set) var heldCellId: String?
   /// Preview id of the held cell: a per-press counter, so that Start and Stop pair up in the scheduler.
@@ -120,6 +123,13 @@ class ChordLabState: NSObject, ObservableObject {
   @MainActor func requestExport() {
     exportPath = nil
     sendCommand(kMsgTagExport, Data())
+  }
+
+  /// The same for one section (`kMsgTagExportSection {id}`): the section's chords alone, re-based to
+  /// beat 0; an unknown id comes back as `kMsgTagError`.
+  @MainActor func requestExportSection(id: Int) {
+    exportPath = nil
+    send(["id": id], tag: kMsgTagExportSection)
   }
 
   // MARK: - Messages from the plugin

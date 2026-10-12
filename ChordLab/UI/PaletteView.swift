@@ -70,20 +70,18 @@ struct PaletteView: View {
 }
 
 /// One cell: a circle coloured by family, filled when every note is in the project key and a ring
-/// otherwise (a borrowed chord), with the symbol and/or roman numeral inside. While pressed it gets a
-/// white ring and a brighter fill (Klimper's selected look). Resting the mouse on it for a moment opens
-/// a popover with the chord's details; the popover goes away on hover exit and while the cell is pressed.
+/// otherwise (a borrowed chord), with the symbol and/or roman numeral inside and a 6-pt function dot
+/// (`FunctionStyle`) at the bottom left, inside the circle. Label mode "both" writes the function's short
+/// name after the numeral ("I · T"). While pressed it gets a white ring and a brighter fill (Klimper's
+/// selected look). Resting the mouse on it for a moment opens a popover with the chord's details
+/// (`HoverPopover`); the popover goes away on hover exit and while the cell is pressed.
 struct PaletteCellView: View {
   let cell: CellJSON
   let size: CGFloat
   let labelMode: LabelMode
   var isPressed = false
 
-  static let hoverDelay: TimeInterval = 0.25
-
-  @State private var hovering = false
-  @State private var showDetails = false
-  @State private var pendingDetails: DispatchWorkItem?
+  static let dotSize: CGFloat = 6
 
   static func color(family: String) -> Color {
     switch family {
@@ -91,6 +89,12 @@ struct PaletteCellView: View {
     case "Minor": return Color(red: 0.357, green: 0.180, blue: 0.494)   // #5B2E7E
     default: return Color(red: 0.290, green: 0.310, blue: 0.416)        // #4A4F6A
     }
+  }
+
+  /// The numeral line: the roman numeral, plus " · T" (the function's short name) in label mode "both".
+  static func numeralLabel(roman: String, function: String?, labelMode: LabelMode) -> String {
+    guard labelMode == .both, let function = function else { return ChordSymbol.glyphs(roman) }
+    return ChordSymbol.glyphs(roman) + " · " + function
   }
 
   var body: some View {
@@ -111,7 +115,7 @@ struct PaletteCellView: View {
             .font(.system(size: size * 0.24, weight: .medium))
         }
         if labelMode != .names {
-          Text(ChordSymbol.glyphs(cell.roman))
+          Text(Self.numeralLabel(roman: cell.roman, function: cell.function, labelMode: labelMode))
             .font(.system(size: size * 0.16))
             .opacity(labelMode == .both ? 0.85 : 1)
         }
@@ -120,28 +124,14 @@ struct PaletteCellView: View {
       .lineLimit(1)
       .minimumScaleFactor(0.6)
       .padding(.horizontal, size * 0.08)
+      // Bottom left on the circle's diagonal, 0.72 of the radius out: inside the ring at every cell size.
+      FunctionDot(function: cell.function, size: Self.dotSize)
+        .offset(x: -size * 0.255, y: size * 0.255)
     }
     .frame(width: size, height: size)
     .contentShape(Circle())
     .accessibilityLabel(ChordSymbol.spokenName(symbol: cell.symbol, type: cell.type) + (cell.filled ? ", in key" : ", borrowed"))
-    .onHover { over in
-      hovering = over
-      pendingDetails?.cancel()
-      if over && !isPressed {
-        let work = DispatchWorkItem { if hovering && !isPressed { showDetails = true } }
-        pendingDetails = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.hoverDelay, execute: work)
-      } else {
-        showDetails = false
-      }
-    }
-    .onChange(of: isPressed) { _, pressed in
-      if pressed {
-        pendingDetails?.cancel()
-        showDetails = false
-      }
-    }
-    .popover(isPresented: $showDetails, arrowEdge: .top) {
+    .hoverPopover(suppressed: isPressed) {
       ChordDetailView(cell: cell).padding(12)
     }
   }
@@ -166,7 +156,8 @@ struct ChordDragPreview: View {
           Text(ChordSymbol.glyphs(cell.symbol)).font(.system(size: 13, weight: .medium))
         }
         if labelMode != .names {
-          Text(ChordSymbol.glyphs(cell.roman)).font(.system(size: 11)).opacity(labelMode == .both ? 0.85 : 1)
+          Text(PaletteCellView.numeralLabel(roman: cell.roman, function: cell.function, labelMode: labelMode))
+            .font(.system(size: 11)).opacity(labelMode == .both ? 0.85 : 1)
         }
       }
       .foregroundStyle(.white)
@@ -175,9 +166,11 @@ struct ChordDragPreview: View {
   }
 }
 
-/// Popover body: symbol and numeral, family, the voicing as note names, and the engine's verdict on the
-/// project key: "In key" or the borrowed notes (`outOfKey`; the line is omitted when an older plug-in
-/// build sends no such field).
+/// Popover body: symbol and numeral, family and function word, the voicing as note names, the tension
+/// bar, and the engine's verdict on the project key: "In key" or the borrowed notes (`outOfKey`). The
+/// function, tension and out-of-key lines are omitted when an older plug-in build sends no such field.
+/// (A cell carries no "borrowed from" key, only its out-of-key notes; the block popover, whose event has a
+/// `why`, names the key.)
 struct ChordDetailView: View {
   let cell: CellJSON
 
@@ -187,8 +180,17 @@ struct ChordDetailView: View {
         Text(ChordSymbol.glyphs(cell.symbol)).font(.title2.weight(.semibold))
         Text(ChordSymbol.glyphs(cell.roman)).font(.title3).foregroundStyle(.secondary)
       }
-      Text(cell.family).font(.callout).foregroundStyle(.secondary)
-      Text(cell.voicing.map(ChordSymbol.noteName(midi:)).joined(separator: "  ")).font(.body.monospacedDigit())
+      HStack(spacing: 6) {
+        Text(cell.family).font(.callout).foregroundStyle(.secondary)
+        if let word = HarmonyText.functionWord(cell.function) {
+          FunctionDot(function: cell.function)
+          Text(word).font(.callout).foregroundStyle(.secondary)
+        }
+      }
+      Text(HarmonyText.voicingText(cell.voicing)).font(.body.monospacedDigit())
+      if let tension = cell.tension {
+        TensionBar(tension: tension, function: cell.function)
+      }
       if let outside = cell.outOfKey {
         if outside.isEmpty {
           Text("In key").font(.callout).foregroundStyle(.secondary)
