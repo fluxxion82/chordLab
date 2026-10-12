@@ -339,3 +339,110 @@ TEST_CASE("compile: kMaxChords chords of the widest dictionary type fit a schedu
     CHECK(compiled.events.size() == static_cast<std::size_t>(kMaxChords) * widest->intervals.size() * 2);
     CHECK(compiled.events.size() <= kMaxSnapshotEvents);
 }
+
+// --- compileRange / compileSection -----------------------------------------------------
+
+TEST_CASE("compileRange: a middle section compiles exactly like a document holding only its chords") {
+    // Lengths that are not quarter multiples: the range's beats must be accumulated from 0, not taken from
+    // the whole document's accumulation and shifted, or the boundaries would differ in the last bit.
+    DocumentStore store;
+    store.appendChord(kC, 0.3, 100);
+    store.appendChord(kAm, 0.3, 90);
+    store.appendChord(kC, 0.7, 80);
+    store.appendChord(kAm, 1.1, 70);
+    store.appendChord(kC, 0.3, 60);
+    const Compiled range = compileRange(store.doc(), 1, 3);
+
+    DocumentStore only;
+    only.appendChord(kAm, 0.3, 90);
+    only.appendChord(kC, 0.7, 80);
+    only.appendChord(kAm, 1.1, 70);
+    const Compiled whole = compile(only.doc());
+
+    REQUIRE(range.events.size() == whole.events.size());
+    REQUIRE(range.events.size() == 18);
+    for (std::size_t i = 0; i < range.events.size(); ++i) {
+        CAPTURE(i);
+        CHECK(range.events[i] == whole.events[i]);
+        CHECK(bitsOf(range.events[i].beat) == bitsOf(whole.events[i].beat));
+    }
+    CHECK(bitsOf(range.endBeat) == bitsOf(whole.endBeat));
+    CHECK(range.events.front().beat == 0.0);  // re-based: the range starts at 0, not at 0.3
+    CHECK(bitsOf(range.events.back().beat) == bitsOf(range.endBeat));
+}
+
+TEST_CASE("compileRange: the whole document is what compile gives; an empty range is empty") {
+    DocumentStore store;
+    store.appendChord(kC, 4.0, 100);
+    store.appendChord(kAm, 2.0, 100);
+    const Compiled whole = compile(store.doc());
+    const Compiled all = compileRange(store.doc(), 0, 2);
+    CHECK(all.events == whole.events);
+    CHECK(bitsOf(all.endBeat) == bitsOf(whole.endBeat));
+
+    const Compiled none = compileRange(store.doc(), 1, 0);
+    CHECK(none.events.empty());
+    CHECK(none.endBeat == 0.0);
+    CHECK(compileRange(store.doc(), 2, 0).events.empty());  // one past the last chord, zero chords
+    CHECK(compileRange(Document{}, 0, 0).events.empty());
+}
+
+TEST_CASE("compileRange: the last chord alone starts at 0 with its own length as endBeat") {
+    DocumentStore store;
+    store.appendChord(kC, 4.0, 100);
+    store.appendChord(kAm, 2.0, 90);
+    const Compiled last = compileRange(store.doc(), 1, 1);
+    const Events expected{
+        {0.0, true, 69, 90}, {0.0, true, 72, 90}, {0.0, true, 76, 90},
+        {2.0, false, 69, 0}, {2.0, false, 72, 0}, {2.0, false, 76, 0},
+    };
+    CHECK(last.events == expected);
+    CHECK(last.endBeat == 2.0);
+}
+
+TEST_CASE("compileSection: without sections, section 0 is the whole document") {
+    DocumentStore store;
+    store.appendChord(kC, 4.0, 100);
+    store.appendChord(kAm, 2.0, 100);
+    const Compiled whole = compile(store.doc());
+    const Compiled section = compileSection(store.doc(), 0);
+    CHECK(section.events == whole.events);
+    CHECK(bitsOf(section.endBeat) == bitsOf(whole.endBeat));
+    CHECK(compileSection(Document{}, 0).events.empty());
+    CHECK(compileSection(Document{}, 0).endBeat == 0.0);
+}
+
+TEST_CASE("compileSection: each section runs to the next section's start, the last to the end") {
+    DocumentStore store;
+    for (int i = 1; i <= 5; ++i) {
+        store.appendChord(i % 2 == 1 ? kC : kAm, static_cast<double>(i), 100);  // lengths 1..5
+    }
+    store.addSection(0, "A");
+    store.addSection(2, "B");
+    store.addSection(3, "C");
+    const Document& doc = store.doc();
+
+    const Compiled a = compileSection(doc, 0);
+    CHECK(a.events == compileRange(doc, 0, 2).events);
+    CHECK(a.endBeat == 3.0);
+    const Compiled b = compileSection(doc, 1);
+    CHECK(b.events == compileRange(doc, 2, 1).events);
+    CHECK(b.endBeat == 3.0);
+    const Compiled c = compileSection(doc, 2);
+    CHECK(c.events == compileRange(doc, 3, 2).events);
+    CHECK(c.endBeat == 9.0);
+}
+
+TEST_CASE("compileSection: chords before the first section belong to no section") {
+    DocumentStore store;
+    for (int i = 0; i < 5; ++i) {
+        store.appendChord(kC, 1.0, 100);
+    }
+    store.addSection(1, "A");
+    store.addSection(3, "B");
+    const Document& doc = store.doc();
+    CHECK(compileSection(doc, 0).events == compileRange(doc, 1, 2).events);
+    CHECK(compileSection(doc, 0).endBeat == 2.0);
+    CHECK(compileSection(doc, 1).events == compileRange(doc, 3, 2).events);
+    CHECK(compileSection(doc, 1).endBeat == 2.0);
+}
