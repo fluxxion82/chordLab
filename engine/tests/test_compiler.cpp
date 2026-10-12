@@ -109,13 +109,13 @@ TEST_CASE("compile: one C chord of four beats gives three ons at 0 and three off
     REQUIRE(ons.size() == 3);
     CHECK(allOn(ons, true));
     CHECK(allVelocity(ons, 100));
-    CHECK(pitchesOf(ons) == std::vector<int>{48, 52, 55});  // ascending pitch
+    CHECK(pitchesOf(ons) == std::vector<int>{60, 64, 67});  // ascending pitch
 
     const Events offs = eventsAt(compiled, 4.0);
     REQUIRE(offs.size() == 3);
     CHECK(allOn(offs, false));
     CHECK(allVelocity(offs, 0));
-    CHECK(pitchesOf(offs) == std::vector<int>{48, 52, 55});
+    CHECK(pitchesOf(offs) == std::vector<int>{60, 64, 67});
 }
 
 TEST_CASE("compile: two identical chords back to back retrigger with offs before ons at beat 4") {
@@ -128,7 +128,7 @@ TEST_CASE("compile: two identical chords back to back retrigger with offs before
     REQUIRE(atFour.size() == 6);
     CHECK(allOn(Events(atFour.begin(), atFour.begin() + 3), false));
     CHECK(allOn(Events(atFour.begin() + 3, atFour.end()), true));
-    CHECK(pitchesOf(atFour) == std::vector<int>{48, 52, 55, 48, 52, 55});
+    CHECK(pitchesOf(atFour) == std::vector<int>{60, 64, 67, 60, 64, 67});
 
     // The first chord's offs and the second chord's ons carry the very same boundary value.
     for (std::size_t i = 0; i < 3; ++i) {
@@ -146,17 +146,17 @@ TEST_CASE("compile: C then Am of four and two beats") {
     CHECK(compiled.endBeat == 6.0);
     REQUIRE(compiled.events.size() == 12);
 
-    CHECK(pitchesOf(eventsAt(compiled, 0.0)) == std::vector<int>{48, 52, 55});
+    CHECK(pitchesOf(eventsAt(compiled, 0.0)) == std::vector<int>{60, 64, 67});
     CHECK(allOn(eventsAt(compiled, 0.0), true));
 
     const Events atFour = eventsAt(compiled, 4.0);
     REQUIRE(atFour.size() == 6);
-    CHECK(pitchesOf(atFour) == std::vector<int>{48, 52, 55, 57, 60, 64});  // C offs, then Am ons
+    CHECK(pitchesOf(atFour) == std::vector<int>{60, 64, 67, 69, 72, 76});  // C offs, then Am ons
     CHECK(allOn(Events(atFour.begin(), atFour.begin() + 3), false));
     CHECK(allOn(Events(atFour.begin() + 3, atFour.end()), true));
 
     const Events atSix = eventsAt(compiled, 6.0);
-    CHECK(pitchesOf(atSix) == std::vector<int>{57, 60, 64});
+    CHECK(pitchesOf(atSix) == std::vector<int>{69, 72, 76});
     CHECK(allOn(atSix, false));
 }
 
@@ -223,10 +223,10 @@ TEST_CASE("compile: each chord's ons carry that chord's velocity; offs carry 0")
 TEST_CASE("compile: exact event order for C then C") {
     const Compiled compiled = compile(documentOf({kC, kC}, 4.0, 100));
     const Events expected{
-        {0.0, true, 48, 100},  {0.0, true, 52, 100},  {0.0, true, 55, 100},
-        {4.0, false, 48, 0},   {4.0, false, 52, 0},   {4.0, false, 55, 0},
-        {4.0, true, 48, 100},  {4.0, true, 52, 100},  {4.0, true, 55, 100},
-        {8.0, false, 48, 0},   {8.0, false, 52, 0},   {8.0, false, 55, 0},
+        {0.0, true, 60, 100},  {0.0, true, 64, 100},  {0.0, true, 67, 100},
+        {4.0, false, 60, 0},   {4.0, false, 64, 0},   {4.0, false, 67, 0},
+        {4.0, true, 60, 100},  {4.0, true, 64, 100},  {4.0, true, 67, 100},
+        {8.0, false, 60, 0},   {8.0, false, 64, 0},   {8.0, false, 67, 0},
     };
     CHECK(compiled.events == expected);
     CHECK(compiled.endBeat == 8.0);
