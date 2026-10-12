@@ -138,49 +138,61 @@ TEST_CASE("after G7 the top suggestion is C, resolving with a cadence") {
     CHECK(hasText(s[0], "cadence (V7→I)"));
     CHECK(hasText(s[0], "diatonic"));
     CHECK(hasText(s[0], "tonic"));
-    // D->T 1.0 + one common tone (G) 0.15 - pc cost 4 x 0.03 + cadence 0.3 + in key 0.4 + triad 0.25.
-    CHECK(s[0].score == doctest::Approx(1.98));
-    // iii (two common tones) and the tonic's own extensions follow; the extensions share more tones
-    // with G7 but pay for their size.
-    CHECK(top(s, 5) == std::vector<std::string>{"C", "Em", "CΔ7", "CΔ9", "Em7"});
+    // D->T 1.0 + one common tone (G) 0.1 - pc cost 4 x 0.05 + cadence 0.3 + in key 0.2 + triad 0.25
+    // + prior I 1.0.
+    CHECK(s[0].score == doctest::Approx(2.65));
+    // The deceptive cadence is in the top four: vi's prior (0.8) outweighs iii's two common tones.
+    CHECK(contains(top(s, 4), "Am"));
+    CHECK(has(*find(s, kAm), Reason::Resolves));
+    CHECK(top(s, 5) == std::vector<std::string>{"C", "CΔ7", "Am", "Em", "G"});
 }
 
-TEST_CASE("after G7 the tonic seventh chords also carry the cadence and their common tones") {
+TEST_CASE("after G7 the tonic seventh resolves and shares tones, but the cadence is the triad's alone") {
     const auto s = suggestNext(&kG7, kCIonian, kCIonian);
     const Suggestion* cmaj7 = find(s, chord(C, "maj7"));
     REQUIRE(cmaj7 != nullptr);
     CHECK(cmaj7->roman == "IΔ7");
-    CHECK(has(*cmaj7, Reason::Cadence));
-    CHECK(hasText(*cmaj7, "cadence (V7→IΔ7)"));
+    CHECK(has(*cmaj7, Reason::Resolves));
+    CHECK_FALSE(has(*cmaj7, Reason::Cadence));
     CHECK(has(*cmaj7, Reason::CommonTones));
     CHECK(hasText(*cmaj7, "2 common tones (G, B)"));
     CHECK_FALSE(has(*cmaj7, Reason::Smooth));  // cost 3
 }
 
-TEST_CASE("after C the top three are F, FΔ9 and G; Dm, Em and Am follow") {
-    // T->PD 0.8 puts the predominants ahead of the dominant's 0.6 + one shared tone; FΔ9 holds the
-    // whole C triad (three common tones, 0.45) and stays second despite the ninth's -0.2. The
-    // tonic-group chords (T->T 0.3) trail even with two common tones, and Em (cost 1) edges Am
-    // (cost 2), so vi cannot reach the top three under a function-level table.
+TEST_CASE("after C the top three are F, G and Am; Em stays below Am and vii° out of the top five") {
+    // T->PD 0.8 and the IV/V priors (0.9) put F and G first; vi's prior (0.8) and two common tones
+    // lift Am over Dm (prior 0.6, no common tone) and over iii (prior 0.35), which the table alone
+    // could not do.
     const auto s = suggestNext(&kC, kCIonian, kCIonian);
     checkWellFormed(s, &kC, 8);
     REQUIRE(s.size() == 8);
-    CHECK(top(s, 3) == std::vector<std::string>{"F", "FΔ9", "G"});
-    CHECK(contains(labels(s), "Am"));
-    CHECK(contains(labels(s), "Em"));
-    CHECK(top(s, 8) == std::vector<std::string>{"F", "FΔ9", "G", "Dm", "F5", "FΔ7", "Em", "Am"});
-    // T->PD 0.8 + one common tone 0.15 - pc cost 3 x 0.03 + in key 0.4 + triad 0.25.
-    CHECK(s[0].score == doctest::Approx(1.51));
+    const std::vector<std::string> first3 = top(s, 3);
+    CHECK(contains(first3, "F"));
+    CHECK(contains(first3, "G"));
+    CHECK(contains(first3, "Am"));
+    CHECK(top(s, 5) == std::vector<std::string>{"F", "G", "Am", "Dm", "FΔ7"});
+    const auto all = suggestNext(&kC, kCIonian, kCIonian, Style::Pop, 64);  // keeps the pointers below alive
+    const Suggestion* am = find(s, kAm);
+    const Suggestion* em = find(all, chord(E, "min"));
+    REQUIRE((am != nullptr && em != nullptr));
+    CHECK(em->score < am->score);
+    CHECK_FALSE(contains(top(s, 5), "Bmb5"));
+    // T->PD 0.8 + one common tone 0.1 - pc cost 3 x 0.05 + in key 0.2 + triad 0.25 + prior IV 0.9.
+    CHECK(s[0].score == doctest::Approx(2.1));
     CHECK(s[0].roman == "IV");
     CHECK(s[0].reasons == std::vector<Reason>{Reason::Diatonic, Reason::Predominant});
     CHECK(s[0].reasonTexts == std::vector<std::string>{"diatonic", "predominant"});
-    CHECK(hasText(s[1], "3 common tones (C, E, G)"));
-    CHECK(has(s[2], Reason::Dominant));
-    CHECK_FALSE(has(s[2], Reason::Prepares));  // T->D is not a preparation
+    CHECK(has(s[1], Reason::Dominant));
+    CHECK_FALSE(has(s[1], Reason::Prepares));  // T->D is not a preparation
+    // The score counts at most two common tones; the sentence still reports the real number.
+    const Suggestion* fmaj9 = find(all, chord(F, "maj9"));
+    REQUIRE(fmaj9 != nullptr);
+    CHECK(hasText(*fmaj9, "3 common tones (C, E, G)"));
+    CHECK(fmaj9->score < find(s, kF)->score);
 }
 
 TEST_CASE("after C the tonic-group chords are smooth and share two tones") {
-    const auto s = suggestNext(&kC, kCIonian, kCIonian);
+    const auto s = suggestNext(&kC, kCIonian, kCIonian, Style::Pop, 64);
     const Suggestion* am = find(s, kAm);
     REQUIRE(am != nullptr);
     CHECK(am->reasons == std::vector<Reason>{Reason::CommonTones, Reason::Smooth, Reason::Diatonic, Reason::Tonic});
@@ -190,14 +202,14 @@ TEST_CASE("after C the tonic-group chords are smooth and share two tones") {
     REQUIRE(em != nullptr);
     CHECK(hasText(*em, "2 common tones (E, G)"));
     CHECK(hasText(*em, "smooth voice leading (cost 1)"));
-    CHECK(em->score > am->score);
 }
 
-TEST_CASE("after Dm the dominant is prepared") {
+TEST_CASE("after Dm the dominant is prepared and leads; vii° stays out of the top three") {
     const auto s = suggestNext(&kDm, kCIonian, kCIonian);
     checkWellFormed(s, &kDm, 8);
-    const std::vector<std::string> first3 = top(s, 3);
-    CHECK((contains(first3, "G") || contains(first3, "G7")));
+    CHECK((s[0].label == "G" || s[0].label == "G7"));
+    CHECK_FALSE(contains(top(s, 3), "Bmb5"));
+    CHECK(top(s, 5) == std::vector<std::string>{"G", "F", "G7", "Am", "C"});
     const Suggestion* g = find(s, kG);
     REQUIRE(g != nullptr);
     CHECK(has(*g, Reason::Prepares));
@@ -208,16 +220,14 @@ TEST_CASE("after Dm the dominant is prepared") {
     REQUIRE(g7 != nullptr);
     CHECK(has(*g7, Reason::Prepares));
     CHECK(hasText(*g7, "2 common tones (D, F)"));
-    // The leading-tone chord shares two tones with ii and moves by one step, so it leads: a known
-    // weakness of a function-level table (ii -> vii° is rare in pop).
-    CHECK(top(s, 5) == std::vector<std::string>{"Bmb5", "G", "Bm7b5", "G9", "G7"});
 }
 
-TEST_CASE("after Am the top three include F") {
+TEST_CASE("after Am a predominant leads and the dominant is in the top four") {
     const auto s = suggestNext(&kAm, kCIonian, kCIonian);
     checkWellFormed(s, &kAm, 8);
-    CHECK(contains(top(s, 3), "F"));
-    CHECK(top(s, 3) == std::vector<std::string>{"F", "Dm", "FΔ7"});
+    CHECK((s[0].label == "F" || s[0].label == "Dm"));
+    CHECK(contains(top(s, 4), "G"));
+    CHECK(top(s, 5) == std::vector<std::string>{"F", "C", "Dm", "G", "FΔ7"});
     const Suggestion* f = find(s, kF);
     REQUIRE(f != nullptr);
     CHECK(has(*f, Reason::Predominant));
@@ -247,10 +257,12 @@ TEST_CASE("a borrowed chord on the tonic root is not a cadence") {
     CHECK_FALSE(has(*cm, Reason::Cadence));
     CHECK(has(*cm, Reason::Borrowed));
     CHECK_FALSE(has(*cm, Reason::Diatonic));
-    // Its tonic sibling C5 is in key and does cadence.
+    // The in-key power chord on the tonic resolves but is not the cadence chord either: that is the
+    // triad's alone.
     const Suggestion* c5 = find(s, chord(C, "5"));
     REQUIRE(c5 != nullptr);
-    CHECK(has(*c5, Reason::Cadence));
+    CHECK(has(*c5, Reason::Resolves));
+    CHECK_FALSE(has(*c5, Reason::Cadence));
 }
 
 // --- No previous chord ----------------------------------------------------------------------
@@ -261,11 +273,13 @@ TEST_CASE("with no previous chord the tonic triad leads and nothing relates") {
     REQUIRE(s.size() == 8);
     CHECK(s[0].chord == kC);
     CHECK(s[0].label == "C");
-    // Tonic 1.0 + home 0.1 + in key 0.4 + triad 0.25.
-    CHECK(s[0].score == doctest::Approx(1.75));
+    // Tonic 1.0 + home 0.1 + in key 0.2 + triad 0.25 + prior I 1.0.
+    CHECK(s[0].score == doctest::Approx(2.55));
     CHECK(s[0].reasons == std::vector<Reason>{Reason::Diatonic, Reason::Tonic});
-    // The other tonic-group triads follow, then the tonic group's extensions by label.
-    CHECK(top(s, 3) == std::vector<std::string>{"C", "Am", "Em"});
+    // One of the pop staples follows within the next three.
+    const std::vector<std::string> next3{s[1].label, s[2].label, s[3].label};
+    CHECK((contains(next3, "F") || contains(next3, "G") || contains(next3, "Am")));
+    CHECK(top(s, 5) == std::vector<std::string>{"C", "Am", "C6", "CΔ7", "F"});
     for (const Suggestion& x : s) {
         CAPTURE(x.label);
         CHECK_FALSE(hasRelationReason(x));
@@ -273,28 +287,51 @@ TEST_CASE("with no previous chord the tonic triad leads and nothing relates") {
     }
 }
 
-TEST_CASE("with no previous chord the functions rank T, PD, D, then applied and borrowed") {
+TEST_CASE("with no previous chord the opening ranks by function, diatonicity and the Pop degree prior") {
     const auto s = suggestNext(nullptr, kCIonian, kCIonian, Style::Pop, 64);
-    const Suggestion* f = find(s, kF);
-    const Suggestion* g = find(s, kG);
-    const Suggestion* d7 = find(s, chord(D, "7"));
-    const Suggestion* eb = find(s, chord(3, "maj"));
-    REQUIRE((f != nullptr && g != nullptr && d7 != nullptr && eb != nullptr));
-    CHECK(f->score == doctest::Approx(1.25));  // PD 0.6 + in key 0.4 + triad 0.25
-    CHECK(g->score == doctest::Approx(1.15));  // D 0.5 + in key 0.4 + triad 0.25
-    CHECK(d7->score == doctest::Approx(0.35)); // D 0.5 - applied 0.05 - seventh 0.1
-    CHECK(eb->score == doctest::Approx(1.25)); // T 1.0 + triad 0.25 (bIII is tonic-group, not in key)
-    CHECK(has(*d7, Reason::AppliedDominant));
-    CHECK(has(*eb, Reason::Borrowed));
+    struct Expected {
+        Chord chord;
+        double score;
+    };
+    // function base + in key 0.2 + simplicity + prior (I 1.0, ii .6, iii .35, IV .9, V .9, vi .8,
+    // vii° .1, bII .2, bIII .4, bVI .5, bVII .5); the tonic chord adds the 0.1 home bonus.
+    const std::vector<Expected> expected{
+        {kC, 2.55},               // T 1.0 + .1 + .2 + .25 + 1.0
+        {kDm, 1.65},              // PD .6 + .2 + .25 + .6
+        {chord(E, "min"), 1.8},   // T 1.0 + .2 + .25 + .35
+        {kF, 1.95},               // PD .6 + .2 + .25 + .9
+        {kG, 1.85},               // D .5 + .2 + .25 + .9
+        {kAm, 2.25},              // T 1.0 + .2 + .25 + .8
+        {kBdim, 1.05},            // D .5 + .2 + .25 + .1
+        {chord(1, "maj"), 1.05},  // bII: PD .6 + .25 + .2
+        {chord(3, "maj"), 1.65},  // bIII: T 1.0 + .25 + .4
+        {chord(Ab, "maj"), 1.35}, // bVI: PD .6 + .25 + .5
+        {chord(Bb, "maj"), 1.75}, // bVII: T 1.0 + .25 + .5
+        {chord(C, "5"), 1.8},     // T 1.0 + .1 + .2 - power .5 + 1.0
+        {chord(C, "maj7"), 2.05}, // T 1.0 + .1 + .2 - seventh .25 + 1.0
+        {chord(C, "maj9"), 1.8},  // T 1.0 + .1 + .2 - ninth .5 + 1.0
+        {chord(D, "7"), 0.9},     // applied: D .5 - seventh .25 + applied .2 + half of V's prior .45
+    };
+    for (const Expected& e : expected) {
+        const Suggestion* x = find(s, e.chord);
+        REQUIRE(x != nullptr);
+        CAPTURE(x->label);
+        CHECK(x->score == doctest::Approx(e.score));
+    }
+    CHECK(has(*find(s, chord(D, "7")), Reason::AppliedDominant));
+    CHECK(has(*find(s, chord(3, "maj")), Reason::Borrowed));
 }
 
 // --- Applied and borrowed candidates --------------------------------------------------------
 
-TEST_CASE("applied dominants are listed after a predominant, below the diatonic dominants") {
-    const auto s = suggestNext(&kF, kCIonian, kCIonian, Style::Pop, 64);
-    checkWellFormed(s, &kF, 64);
+TEST_CASE("after F the dominant leads, the tonic is in the top three and V7/V is in the strip") {
+    const auto s = suggestNext(&kF, kCIonian, kCIonian);
+    checkWellFormed(s, &kF, 8);
+    CHECK(contains(top(s, 2), "G"));
+    CHECK(contains(top(s, 3), "C"));
+    CHECK(top(s, 5) == std::vector<std::string>{"G", "Am", "C", "G7", "D7"});  // Am and C tie at 1.8
     const Suggestion* d7 = find(s, chord(D, "7"));
-    REQUIRE(d7 != nullptr);
+    REQUIRE(d7 != nullptr);  // within the default eight
     CHECK(d7->label == "D7");
     CHECK(d7->roman == "V7/V");
     CHECK(has(*d7, Reason::AppliedDominant));
@@ -304,13 +341,9 @@ TEST_CASE("applied dominants are listed after a predominant, below the diatonic 
     CHECK(hasText(*d7, "2 common tones (C, A)"));
     CHECK_FALSE(has(*d7, Reason::Diatonic));
     CHECK_FALSE(has(*d7, Reason::Borrowed));
-    // PD->D 0.9 + two common tones 0.3 - pc cost 4 x 0.03 - applied 0.05 - seventh 0.1: below every
-    // diatonic dominant (in key +0.4) and the plain triads, so outside the default eight.
-    CHECK(d7->score == doctest::Approx(0.93));
-    CHECK(top(s, 8) == std::vector<std::string>{"Bmb5", "Bm7b5", "G", "Am", "G9", "Dm", "G7", "G5"});
-    for (std::size_t i = 0; i < 8; ++i) {
-        CHECK_FALSE(has(s[i], Reason::AppliedDominant));
-    }
+    // PD->D 0.9 + two common tones 0.2 - pc cost 4 x 0.05 - seventh 0.25 + applied 0.2 + the ii-V
+    // setup 0.15 (after a T or PD chord, targeting V or ii) + half of V's prior 0.45.
+    CHECK(d7->score == doctest::Approx(1.45));
 }
 
 TEST_CASE("applied leading-tone chords are labelled with their target") {
@@ -321,6 +354,9 @@ TEST_CASE("applied leading-tone chords are labelled with their target") {
     CHECK(fs->roman == "vii°7/V");
     CHECK(has(*fs, Reason::AppliedDominant));
     CHECK(hasText(*fs, "leading-tone chord of V (vii°7/V)"));
+    // The ii-V setup bonus is the secondary dominant's, not the leading-tone chord's:
+    // PD->D 0.9 + two common tones 0.2 - pc cost 3 x 0.05 - seventh 0.25 + applied 0.2 + 0.45.
+    CHECK(fs->score == doctest::Approx(1.35));
     const Suggestion* cs = find(s, chord(1, "dim7"));
     REQUIRE(cs != nullptr);
     CHECK(cs->label == "C#dim7");
@@ -328,24 +364,34 @@ TEST_CASE("applied leading-tone chords are labelled with their target") {
 }
 
 TEST_CASE("borrowed chords appear when browsing a parallel key") {
-    const auto s = suggestNext(nullptr, kCIonian, kCAeolian, Style::Pop, 24);
-    checkWellFormed(s, nullptr, 24);
-    const Suggestion* ab = find(s, chord(Ab, "maj"));
-    const Suggestion* bb = find(s, chord(Bb, "maj"));
+    // bVI is a predominant and bVII a tonic-group chord, so no one previous chord favours both:
+    // after the tonic, Ab (T->PD) is in the strip; opening, Bb (T) is.
+    const auto afterC = suggestNext(&kC, kCIonian, kCAeolian);
+    checkWellFormed(afterC, &kC, 8);
+    const Suggestion* ab = find(afterC, chord(Ab, "maj"));
     REQUIRE(ab != nullptr);
-    REQUIRE(bb != nullptr);
     CHECK(ab->label == "Ab");
     CHECK(ab->roman == "bVI");
     CHECK(has(*ab, Reason::Borrowed));
     CHECK(hasText(*ab, "borrowed from C Aeolian"));
     CHECK(has(*ab, Reason::Predominant));
+    CHECK(has(*ab, Reason::Smooth));  // C -> Ab: E -> Eb, G -> Ab
     CHECK_FALSE(has(*ab, Reason::Diatonic));
+
+    const auto opening = suggestNext(nullptr, kCIonian, kCAeolian);
+    checkWellFormed(opening, nullptr, 8);
+    const Suggestion* bb = find(opening, chord(Bb, "maj"));
+    REQUIRE(bb != nullptr);
+    CHECK(bb->label == "Bb");
     CHECK(bb->roman == "bVII");
     CHECK(has(*bb, Reason::Borrowed));
     CHECK(hasText(*bb, "borrowed from C Aeolian"));
     CHECK(has(*bb, Reason::Tonic));
-    // With no previous chord the one in-key tonic chord (C5) leads, then the borrowed tonic-group triads.
-    CHECK(top(s, 4) == std::vector<std::string>{"C5", "Cm", "Bb", "Eb"});
+    // Every hollow cell of the browsed palette is borrowed from C Aeolian; the in-key cells are not.
+    for (const Suggestion& x : opening) {
+        CAPTURE(x.label);
+        CHECK(has(x, Reason::Borrowed) != fullyInKey(x.chord, kCIonian));
+    }
 }
 
 TEST_CASE("the four common borrowed triads are candidates even when browsing the project key") {
@@ -366,6 +412,17 @@ TEST_CASE("the four common borrowed triads are candidates even when browsing the
     CHECK(hasText(*bb, "borrowed from C Aeolian"));
     CHECK(has(*ab, Reason::Smooth));  // C -> Ab: E -> Eb, G -> Ab
     CHECK(hasText(*ab, "smooth voice leading (cost 2)"));
+}
+
+TEST_CASE("borrowed triads are spelled in the project key, whatever key is browsed") {
+    // bII of C is Db; spelled in the browsed G major it would come out as C#.
+    const auto s = suggestNext(&kC, kCIonian, key('G', 0, Mode::Ionian), Style::Pop, 64);
+    const Suggestion* db = find(s, chord(1, "maj"));
+    REQUIRE(db != nullptr);
+    CHECK(db->label == "Db");
+    CHECK(db->roman == "bII");
+    CHECK(find(s, chord(Ab, "maj"))->label == "Ab");
+    CHECK(find(s, chord(Bb, "maj"))->label == "Bb");
 }
 
 TEST_CASE("the full candidate list is the palette, the applied chords and the borrowed triads, once each") {

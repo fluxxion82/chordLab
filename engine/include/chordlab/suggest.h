@@ -18,7 +18,8 @@ enum class Style { Pop };
 enum class Reason {
     /// The previous chord is a dominant and this one is in the tonic group (D -> T).
     Resolves,
-    /// `Resolves`, and this is the project's own tonic chord: V -> I, vii° -> I, V7 -> IΔ7.
+    /// `Resolves`, and this is the project's own tonic triad: V -> I, vii° -> I (IΔ7 after V7 resolves
+    /// but is not the cadence chord).
     Cadence,
     /// The previous chord is a predominant and this one a dominant (PD -> D).
     Prepares,
@@ -43,8 +44,9 @@ enum class Reason {
 /// One ranked candidate for the next chord.
 struct Suggestion {
     Chord chord;
-    /// The Klimper-style `chordSymbol`, spelled in the browsed key for a palette cell or a borrowed
-    /// triad and in its own `AppliedChord::spellingKey` for an applied chord (`F#°7`, not `Gb°7`).
+    /// The Klimper-style `chordSymbol`: a palette cell is spelled in the browsed key, a borrowed triad in
+    /// the project key (it is a degree of that tonic: bII of C is `Db` even when browsing G major) and an
+    /// applied chord in its own `AppliedChord::spellingKey` (`F#dim7`, not `Gbdim7`).
     std::string label;
     /// Relative to the project key: the Standard-style `romanNumeral` for a palette cell or a borrowed
     /// triad (`IV`, `bVI`), the `AppliedChord::label` for an applied chord (`V7/V`, `vii°7/ii`).
@@ -72,26 +74,42 @@ struct Suggestion {
 ///
 /// Score, in hundredths so that equal scores are exactly equal, with f() = `functionOf` in the project
 /// key and an applied chord counted as a Dominant whatever `functionOf` says:
-/// - after a chord: `transition[f(previous)][f(candidate)]` for the style, plus 0.15 per common tone,
-///   minus 0.03 per unit of `pcVoiceLeadingCost`, plus a cadence bonus of 0.3 when f(previous) is
-///   Dominant and the candidate is in key on the project tonic;
+/// - after a chord: `transition[f(previous)][f(candidate)]` for the style, plus 0.1 per common tone
+///   counting at most two (a third shared tone means the candidate contains the previous chord, which
+///   is the same sonority dressed up, not a progression), minus 0.05 per unit of
+///   `pcVoiceLeadingCost`, plus a cadence bonus of 0.3 when f(previous) is Dominant and the candidate
+///   is the in-key triad on the project tonic (its extensions still "resolve" but are not the
+///   cadence chord);
 /// - opening (no previous chord): Tonic 1.0, Predominant 0.6, Dominant 0.5, Other 0.2, plus 0.1 for a
 ///   chord on the project tonic so that the tonic chord leads its group rather than tying with iii
 ///   and vi;
-/// - either way: plus 0.4 when fully in the project key; plus 0.25 for a plain triad (maj, min, dim,
-///   aug), nothing for a power chord or a suspended chord, minus 0.1 per chord tone beyond the third
-///   (a seventh chord -0.1, a ninth -0.2); minus 0.05 for an applied chord (so a diatonic dominant
-///   wins a tie).
+/// - either way: plus 0.2 when fully in the project key; a simplicity term of +0.25 for a plain triad
+///   (maj, min, dim, aug), 0 for a suspended chord, -0.5 for a power chord and -0.25 per chord tone
+///   beyond the third (a seventh chord -0.25, a ninth -0.5);
+/// - a degree prior for the style, `+1.0 x prior[degree]` with the degree from `numeralDegree` in the
+///   project key (chromatic degrees have their own entries). The Pop prior is a hand-authored,
+///   Hooktheory-style frequency table, numerals read against the parallel major as `numeralDegree`
+///   does (so a minor key's own VI, III and VII take the bVI, bIII and bVII entries):
+///
+///       I 1.0   V 0.9   IV 0.9   vi 0.8   ii 0.6   iii 0.35   vii° 0.1
+///       bVII 0.5   bVI 0.5   bIII 0.4   bII 0.2   #IV 0.1
+///
+/// - an applied chord has no prior of its own and takes half of its target's instead, plus a flat 0.2,
+///   plus 0.15 for a secondary dominant of V or of ii after a tonic or predominant chord (the common
+///   I -> V7/V -> V and IV -> V7/ii -> ii setups; the leading-tone chords vii°7/x do not get it).
 /// The Pop table (rows the previous function, columns the next): T -> T .3, T -> PD .8, T -> D .6;
 /// PD -> T .4, PD -> PD .3, PD -> D .9; D -> T 1.0, D -> PD .3, D -> D .4; .2 wherever Other is
-/// involved. The in-key and simplicity terms are deliberately larger than the plan's first guess
-/// (0.1 in key, 0.05 for a triad): at 0.15 per common tone a seventh or ninth chord shares more with
-/// any neighbour than its triad does (CΔ9 holds G, B and D of G7; FΔ9 holds all of C), so a graded
-/// preference for the plain triad is what makes V7 -> I beat V7 -> IΔ9 and I -> V beat I -> IVΔ9, and
-/// the in-key term must then exceed the triad bonus so that the opening list stays diatonic (bIII
-/// and bVII are tonic-group triads). The price is that an applied chord, which earns none of the
-/// three bonuses, ranks below every diatonic chord of its function in a full key: V7/V after IV scores
-/// 0.93 in C major, below the top eight.
+/// involved.
+///
+/// The weights are tuned to a fixed set of Pop expectations in C major (test_suggest.cpp pins them:
+/// F, G and Am are the top three after C with Em below Am; C leads after G7 with Am in the top four;
+/// G leads after Dm and after F with vii° out of the top three; C is in the top three and V7/V in the
+/// top eight after F; F leads after Am with G in the top four; the opening list of every key is its
+/// tonic triad followed by diatonic chords only). The function table alone cannot order vi against
+/// iii or ii (all it sees is T versus PD), so the prior outweighs it; the in-key bonus is small so
+/// that an applied chord can reach the strip; and the simplicity term is steep so that a seventh
+/// that contains the previous triad does not outrank a plain triad. Several of those orderings hold
+/// by a single hundredth: change one weight and re-run the suite.
 ///
 /// Sorted by score descending, then label ascending (byte order), so the order is total and the same
 /// input always gives the same vector; the first `maxCount` are returned (fewer when there are fewer

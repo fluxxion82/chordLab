@@ -37,13 +37,23 @@ constexpr TransitionTable kPopTransition{{
 /// Opening scores by function when there is no previous chord.
 constexpr std::array<int, kFunctionCount> kOpening{{100, 60, 50, 20}};
 
-constexpr int kCommonToneWeight = 15;
-constexpr int kVoiceLeadingWeight = 3;
+/// Pop degree prior (see suggest.h), in hundredths, indexed by semitones above the tonic, which is the
+/// numeral `numeralDegree` names: I bII ii bIII iii IV #IV V bVI vi bVII vii°.
+using PriorTable = std::array<int, 12>;
+constexpr PriorTable kPopPrior{{100, 20, 60, 40, 35, 90, 10, 90, 50, 80, 50, 10}};
+
+constexpr int kCommonToneWeight = 10;
+constexpr int kCommonTonesCounted = 2;  // further shared tones are the previous chord dressed up
+constexpr int kVoiceLeadingWeight = 5;
 constexpr int kCadenceBonus = 30;
-constexpr int kInKeyBonus = 40;
+constexpr int kInKeyBonus = 20;
 constexpr int kTriadBonus = 25;
-constexpr int kExtensionPenalty = 10;  // per chord tone beyond the third
-constexpr int kAppliedPenalty = 5;
+constexpr int kPowerChordPenalty = 50;
+constexpr int kExtensionPenalty = 25;  // per chord tone beyond the third
+constexpr int kPriorWeight = 100;      // percent of the prior table
+constexpr int kAppliedBonus = 20;
+constexpr int kAppliedSetupBonus = 15;  // V7/V or V7/ii after a tonic or predominant chord
+constexpr int kAppliedPriorShare = 50;  // percent of the target's prior
 constexpr int kHomeBonus = 10;
 
 /// Thresholds for the CommonTones and Smooth reasons.
@@ -57,6 +67,23 @@ const TransitionTable& transitionTable(Style style) {
     }
     assert(false && "Style outside the enum");
     return kPopTransition;
+}
+
+const PriorTable& priorTable(Style style) {
+    switch (style) {
+        case Style::Pop:
+            return kPopPrior;
+    }
+    assert(false && "Style outside the enum");
+    return kPopPrior;
+}
+
+/// The prior of `chord`'s degree in `projectKey`: its numeral's semitone distance above the tonic.
+int priorOf(const Chord& chord, const Key& projectKey, const PriorTable& table) {
+    constexpr std::array<int, 7> kMajorScale{{0, 2, 4, 5, 7, 9, 11}};
+    const NumeralDegree numeral = numeralDegree(chord, projectKey);
+    const int semitones = pitchClassOf(kMajorScale[static_cast<std::size_t>(numeral.degree)] + numeral.alter);
+    return table[static_cast<std::size_t>(semitones)] * kPriorWeight / 100;
 }
 
 constexpr std::size_t index(Function function) {
@@ -98,7 +125,8 @@ std::vector<Candidate> collectCandidates(const Key& projectKey, const Key& brows
     for (const int semitones : kBorrowedDegrees) {
         const Chord chord{pitchClassOf(projectKey.tonicPc() + semitones), &major};
         if (!listed(out, chord)) {
-            out.push_back(Candidate{chord, chordSymbol(chord, browsedKey, SymbolStyle::Klimper),
+            // Spelled in the project key: they are degrees of its tonic (bII of C is Db whatever is browsed).
+            out.push_back(Candidate{chord, chordSymbol(chord, projectKey, SymbolStyle::Klimper),
                                     romanNumeral(chord, projectKey, SymbolStyle::Standard), nullptr});
         }
     }
@@ -138,14 +166,31 @@ bool isTriad(const ChordType& type) {
     return id == "maj" || id == "min" || id == "dim" || id == "aug";
 }
 
-/// "Prefer simpler": a plain triad earns the bonus, a power chord or a suspended chord nothing, and
-/// every chord tone beyond the third costs a step, so a seventh is 0.1 and a ninth 0.2 below neutral.
+/// "Prefer simpler": a plain triad earns the bonus, a power chord pays for being incomplete, a
+/// suspended chord is neutral, and every chord tone beyond the third costs a step, so a seventh is
+/// 0.25 and a ninth 0.5 below neutral.
 int simplicity(const ChordType& type) {
     if (isTriad(type)) {
         return kTriadBonus;
     }
+    if (std::string_view(type.id) == "5") {
+        return -kPowerChordPenalty;
+    }
     const int extra = static_cast<int>(type.intervals.size()) - 3;
     return extra > 0 ? -kExtensionPenalty * extra : 0;
+}
+
+/// Whether `applied` is a secondary dominant (`V7/x`) rather than a leading-tone chord (`vii°7/x`).
+bool isSecondaryDominant(const AppliedChord& applied) {
+    return std::string_view(applied.label).substr(0, 3) == "V7/";
+}
+
+/// Whether `previous` -> `applied` is one of the common setups the extra bonus rewards: a secondary
+/// dominant of V or of ii after a tonic or predominant chord (I -> V7/V -> V, IV -> V7/ii -> ii).
+bool isSetup(Function previous, const AppliedChord& applied) {
+    constexpr int kSupertonic = 1, kDominant = 4;  // target degrees, 0-based
+    return (previous == Function::Tonic || previous == Function::Predominant) && isSecondaryDominant(applied) &&
+           (applied.targetDegree == kDominant || applied.targetDegree == kSupertonic);
 }
 
 // --- Scoring ----------------------------------------------------------------------------------
@@ -163,7 +208,7 @@ void addReason(Suggestion& s, Reason reason, std::string text) {
 }
 
 Suggestion score(const Candidate& candidate, const Previous& previous, const Key& projectKey,
-                 const TransitionTable& table) {
+                 const TransitionTable& table, const PriorTable& prior) {
     Suggestion s{candidate.chord, candidate.label, candidate.roman, 0.0, {}, {}};
     const bool applied = candidate.applied != nullptr;
     const Function function = applied ? Function::Dominant : functionOf(candidate.chord, projectKey);
@@ -174,10 +219,10 @@ Suggestion score(const Candidate& candidate, const Previous& previous, const Key
     if (previous.chord != nullptr) {
         const Relation relation = relate(*previous.chord, candidate.chord, projectKey);
         hundredths += table[index(previous.function)][index(function)];
-        hundredths += kCommonToneWeight * relation.commonTones;
+        hundredths += kCommonToneWeight * std::min(relation.commonTones, kCommonTonesCounted);
         hundredths -= kVoiceLeadingWeight * relation.voiceLeadingCost;
         const bool resolves = previous.function == Function::Dominant && function == Function::Tonic;
-        const bool cadence = resolves && inKey && onTonic;
+        const bool cadence = resolves && inKey && onTonic && isTriad(*candidate.chord.type);
         if (resolves) {
             addReason(s, Reason::Resolves, "resolves (D→T)");
         }
@@ -211,8 +256,15 @@ Suggestion score(const Candidate& candidate, const Previous& previous, const Key
     }
     hundredths += simplicity(*candidate.chord.type);
     if (applied) {
-        hundredths -= kAppliedPenalty;
+        // No prior of its own: a tonicisation borrows half of its target's.
+        const Chord target = diatonicTriad(projectKey, candidate.applied->targetDegree);
+        hundredths += kAppliedBonus + (priorOf(target, projectKey, prior) * kAppliedPriorShare + 50) / 100;
+        if (previous.chord != nullptr && isSetup(previous.function, *candidate.applied)) {
+            hundredths += kAppliedSetupBonus;
+        }
         addReason(s, Reason::AppliedDominant, appliedText(*candidate.applied));
+    } else {
+        hundredths += priorOf(candidate.chord, projectKey, prior);
     }
     switch (function) {
         case Function::Tonic:
@@ -253,6 +305,7 @@ std::vector<Suggestion> suggestNext(const Chord* previous, const Key& projectKey
                                     std::size_t maxCount) {
     assert(previous == nullptr || (previous->type != nullptr && previous->root >= 0 && previous->root < 12));
     const TransitionTable& table = transitionTable(style);
+    const PriorTable& prior = priorTable(style);
     const std::vector<AppliedChord> applied = appliedChords(projectKey);
     const std::vector<Candidate> candidates = collectCandidates(projectKey, browsedKey, applied);
 
@@ -268,7 +321,7 @@ std::vector<Suggestion> suggestNext(const Chord* previous, const Key& projectKey
         if (previous != nullptr && candidate.chord == *previous) {
             continue;
         }
-        out.push_back(score(candidate, prev, projectKey, table));
+        out.push_back(score(candidate, prev, projectKey, table, prior));
     }
     std::sort(out.begin(), out.end(), before);
     if (out.size() > maxCount) {
