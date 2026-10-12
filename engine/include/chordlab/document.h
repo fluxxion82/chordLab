@@ -85,6 +85,11 @@ inline bool operator!=(const Document& a, const Document& b) noexcept {
 /// The history holds at most `kMaxUndoDepth` snapshots; beyond that the oldest is dropped.
 /// Event ids are handed out from a counter that starts at `firstId` (1 by default), only ever increases
 /// and is not part of the undoable state, so an id is never reused even after undo or redo.
+///
+/// Exception safety: every mutation gives the strong guarantee. Each one does all of its allocating (the
+/// new document, the history entry) before it changes any member, and finishes with steps that cannot
+/// throw, so an allocation failure part-way through leaves the document, both history stacks and the id
+/// counter exactly as they were. This holds by construction (see `commit`), not by test.
 class DocumentStore {
 public:
     /// Most recent changes that can be undone. Older snapshots are discarded.
@@ -99,7 +104,8 @@ public:
     /// non-null and `chord.root` in 0..11. `lengthBeats` is clamped to [kMinLengthBeats, kMaxLengthBeats]
     /// and `velocity` to [kMinVelocity, kMaxVelocity].
     /// Returns `kNoEventId` and changes nothing (no event, no history, no id consumed) when `lengthBeats`
-    /// is NaN or infinite, or when the id counter has reached INT_MAX.
+    /// is NaN or infinite, or when the id counter has reached INT_MAX. The counter advances only once the
+    /// append is committed.
     int appendChord(Chord chord, double lengthBeats = 4.0, int velocity = 100);
 
     /// Moves the event `id` so that it sits at `newIndex` in playback order; `newIndex` is clamped to
@@ -134,6 +140,18 @@ public:
     /// Reapplies the most recently undone change, keeping the live state. Returns false, changing
     /// nothing, when there is nothing to redo.
     bool redo();
+
+    /// Replaces the whole document, live state included, and restarts the id counter at `nextId`: what a
+    /// load does. Clears the undo and redo history and changes nothing else.
+    /// `doc` must satisfy the store's invariants (valid chords and keys, finite lengths within
+    /// [kMinLengthBeats, kMaxLengthBeats], velocities within [kMinVelocity, kMaxVelocity], distinct ids)
+    /// and `nextId` must be >= 1 and greater than every event id, so that ids stay unique. Callers that
+    /// take documents from outside the process (`loadStateJson`) validate before calling.
+    void replace(Document doc, int nextId);
+
+    /// The id the next successful append will get. Persisted by `stateJson` so that a reloaded document
+    /// keeps handing out fresh ids.
+    int nextId() const;
 
     /// Position of event `id` in playback order, or -1 if no event has that id.
     int findIndex(int id) const;
