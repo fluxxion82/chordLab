@@ -852,9 +852,49 @@ Refusal applyCommand(DocumentStore& store, const Command& command, std::string& 
     return Refusal::None;
 }
 
-/// Phase A of `loadStateJson`: parses and validates `text` into a document, an id counter and an editor
-/// size. `Document` holds a vector, whose destruction frees but never allocates.
-bool parseState(std::string_view text, Document& doc, int& nextId, int& width, int& height, std::string& error) {
+/// Reads the optional `sections` array of a state into `doc.sections` and checks the section invariants
+/// (`sectionsWellFormed`) on the whole: each entry needs `id`, `name`, `colourIndex` (clamped) and
+/// `firstEventIndex`. `maxSectionId` is the largest id read (0 without sections). `doc.events` must be
+/// complete, since the invariants bound the indices by it.
+bool parseSections(Fields& fields, Document& doc, int& maxSectionId, std::string& error) {
+    maxSectionId = 0;
+    if (!fields.has("sections")) {
+        return true;
+    }
+    const json* sections = fields.getArray("sections");
+    if (sections == nullptr) {
+        return false;
+    }
+    for (std::size_t i = 0; i < sections->size(); ++i) {
+        const std::string where = "sections[" + std::to_string(i) + "]";
+        const json& sectionObject = (*sections)[i];
+        if (!sectionObject.is_object()) {
+            error = where + " must be an object";
+            return false;
+        }
+        Fields sectionFields(sectionObject, where, error);
+        Section section{};
+        if (!sectionFields.getIntIn("id", 1, INT_MAX - 1, section.id) || !sectionFields.getString("name", section.name) ||
+            !sectionFields.getInt("colourIndex", section.colourIndex) ||
+            !sectionFields.getInt("firstEventIndex", section.firstEventIndex)) {
+            return false;
+        }
+        section.colourIndex = std::clamp(section.colourIndex, 0, kNumSectionColours - 1);
+        maxSectionId = std::max(maxSectionId, section.id);
+        doc.sections.push_back(std::move(section));
+    }
+    if (!sectionsWellFormed(doc)) {
+        return fields.fail("sections", "must start at 0, be sorted by firstEventIndex with distinct starts inside "
+                                       "the progression, and have distinct ids");
+    }
+    return true;
+}
+
+/// Phase A of `loadStateJson`: parses and validates `text` into a document, the two id counters and an
+/// editor size. `Document` holds vectors and strings, whose destruction frees but never allocates.
+/// `nextSectionId` is 0 when the state carries none: `replace` then derives it.
+bool parseState(std::string_view text, Document& doc, int& nextId, int& nextSectionId, int& width, int& height,
+                std::string& error) {
     json message;
     if (!parseMessage(text, message, error)) {
         return false;
@@ -864,6 +904,9 @@ bool parseState(std::string_view text, Document& doc, int& nextId, int& width, i
     if (!parseKeyField(fields, "projectKey", doc.projectKey, error) ||
         !parseKeyField(fields, "browsedKey", doc.browsedKey, error) ||
         !fields.getBool("progressionLoop", doc.progressionLoop) || !fields.getBool("followHost", doc.followHost)) {
+        return false;
+    }
+    if (fields.has("autoVoiceLead") && !fields.getBool("autoVoiceLead", doc.autoVoiceLead)) {
         return false;
     }
 
@@ -903,6 +946,14 @@ bool parseState(std::string_view text, Document& doc, int& nextId, int& width, i
         event.chord = Chord{root, type};
         event.lengthBeats = std::clamp(lengthBeats, kMinLengthBeats, kMaxLengthBeats);
         event.velocity = std::clamp(event.velocity, kMinVelocity, kMaxVelocity);
+        // The voicing fields are optional (states saved before Phase 2 have none) and clamped like the store's setters.
+        if ((eventFields.has("inversion") && !eventFields.getInt("inversion", event.inversion)) ||
+            (eventFields.has("octave") && !eventFields.getInt("octave", event.octave)) ||
+            (eventFields.has("manualVoicing") && !eventFields.getBool("manualVoicing", event.manualVoicing))) {
+            return false;
+        }
+        event.inversion = std::clamp(event.inversion, 0, inversionCount(event.chord) - 1);
+        event.octave = std::clamp(event.octave, kMinVoicingOctave, kMaxVoicingOctave);
         maxId = std::max(maxId, event.id);
         doc.events.push_back(event);
     }
@@ -912,6 +963,20 @@ bool parseState(std::string_view text, Document& doc, int& nextId, int& width, i
     }
     if (nextId <= maxId) {
         return fields.fail("nextId", "must exceed every event id (" + std::to_string(maxId) + ")");
+    }
+
+    int maxSectionId = 0;
+    if (!parseSections(fields, doc, maxSectionId, error)) {
+        return false;
+    }
+    nextSectionId = 0;
+    if (fields.has("nextSectionId")) {
+        if (!fields.getIntIn("nextSectionId", 1, INT_MAX, nextSectionId)) {
+            return false;
+        }
+        if (nextSectionId <= maxSectionId) {
+            return fields.fail("nextSectionId", "must exceed every section id (" + std::to_string(maxSectionId) + ")");
+        }
     }
 
     width = kDefaultEditorWidth;
@@ -1038,7 +1103,10 @@ std::string stateJson(const DocumentStore& store, int editorWidth, int editorHei
                       {"root", e.chord.root},
                       {"type", e.chord.type->id},
                       {"lengthBeats", e.lengthBeats},
-                      {"velocity", e.velocity}};
+                      {"velocity", e.velocity},
+                      {"inversion", e.inversion},
+                      {"octave", e.octave},
+                      {"manualVoicing", e.manualVoicing}};
         events.push_back(std::move(event));
     }
     const json state = {{"schema", kJsonSchema},
@@ -1046,8 +1114,11 @@ std::string stateJson(const DocumentStore& store, int editorWidth, int editorHei
                         {"browsedKey", keyToJson(doc.browsedKey)},
                         {"progressionLoop", doc.progressionLoop},
                         {"followHost", doc.followHost},
+                        {"autoVoiceLead", doc.autoVoiceLead},
                         {"events", std::move(events)},
+                        {"sections", sectionsJson(doc)},
                         {"nextId", store.nextId()},
+                        {"nextSectionId", store.nextSectionId()},
                         {"editor", {{"width", editorWidth}, {"height", editorHeight}}}};
     return state.dump();
 }
@@ -1087,12 +1158,13 @@ bool loadStateJson(DocumentStore& store, std::string_view text, std::string& err
         error.clear();
         Document doc;
         int nextId = 0;
+        int nextSectionId = 0;
         int width = kDefaultEditorWidth;
         int height = kDefaultEditorHeight;
-        if (!parseState(text, doc, nextId, width, height, error)) {  // Phase A: the JSON tree is destroyed on return
+        if (!parseState(text, doc, nextId, nextSectionId, width, height, error)) {  // Phase A: the tree is destroyed on return
             return false;
         }
-        store.replace(std::move(doc), nextId);  // Phase B: cannot throw, nor can the writes below
+        store.replace(std::move(doc), nextId, nextSectionId);  // Phase B: cannot throw, nor can the writes below
         if (editorWidth != nullptr) {
             *editorWidth = width;
         }

@@ -127,8 +127,9 @@ DocumentStore threeChords() {
     return store;
 }
 
-/// A document exercising every field: non-default keys and toggles, a gap in the ids, mixed lengths.
-/// Ids are 1 and 3 (2 was removed), so the next id is 4.
+/// A document exercising every field: non-default keys and toggles, a gap in the ids, mixed lengths, a
+/// manual voicing, auto voice-leading on, and two sections. Ids are 1 and 3 (2 was removed), so the next
+/// id is 4; the sections are 1 ("A", at 0) and 2 ("B", colour 3, at 1), so the next section id is 3.
 DocumentStore richStore() {
     DocumentStore store;
     store.setProjectKey(key('D', 0, Mode::Dorian));
@@ -139,6 +140,12 @@ DocumentStore richStore() {
     store.appendChord(chord(5, "maj7"), 2.5, 80);
     store.appendChord(kG7, 1.0, 127);
     store.removeChord(2);
+    store.setInversion(3, 2);
+    store.setOctave(3, -1);
+    store.setAutoVoiceLead(true);
+    store.addSection(0, "A");
+    store.addSection(1, "B");
+    store.setSectionColour(2, 3);
     return store;
 }
 
@@ -1143,13 +1150,39 @@ TEST_CASE("state: shape") {
     CHECK_FALSE(state.contains("palette"));
     CHECK_FALSE(state.contains("tonics"));  // the key tables are for display, not persistence
     CHECK_FALSE(state.contains("modes"));
+    CHECK_FALSE(state.contains("suggestions"));
+    CHECK_FALSE(state.contains("selectedEventId"));  // the selection is live state
 
     REQUIRE(state.at("events").size() == 2);
-    CHECK(state.at("events")[0] == json({{"id", 1}, {"root", 0}, {"type", "maj"}, {"lengthBeats", 4.0}, {"velocity", 100}}));
-    CHECK(state.at("events")[1] == json({{"id", 3}, {"root", 7}, {"type", "7"}, {"lengthBeats", 1.0}, {"velocity", 127}}));
+    CHECK(state.at("events")[0] == json({{"id", 1},
+                                         {"root", 0},
+                                         {"type", "maj"},
+                                         {"lengthBeats", 4.0},
+                                         {"velocity", 100},
+                                         {"inversion", 0},
+                                         {"octave", 0},
+                                         {"manualVoicing", false}}));
+    CHECK(state.at("events")[1] == json({{"id", 3},
+                                         {"root", 7},
+                                         {"type", "7"},
+                                         {"lengthBeats", 1.0},
+                                         {"velocity", 127},
+                                         {"inversion", 2},
+                                         {"octave", -1},
+                                         {"manualVoicing", true}}));
+    CHECK(state.at("autoVoiceLead") == true);
+    REQUIRE(state.at("sections").size() == 2);
+    CHECK(state.at("sections")[0] == json({{"id", 1}, {"name", "A"}, {"colourIndex", 0}, {"firstEventIndex", 0}}));
+    CHECK(state.at("sections")[1] == json({{"id", 2}, {"name", "B"}, {"colourIndex", 3}, {"firstEventIndex", 1}}));
+    CHECK(state.at("nextSectionId") == 3);
 
     const json defaults = json::parse(stateJson(store));
     CHECK(defaults.at("editor") == json({{"width", 900}, {"height", 620}}));
+
+    const json empty = json::parse(stateJson(DocumentStore{}));
+    CHECK(empty.at("autoVoiceLead") == false);
+    CHECK(empty.at("sections") == json::array());
+    CHECK(empty.at("nextSectionId") == 1);
 }
 
 TEST_CASE("state: loadStateJson(stateJson(doc)) round-trips the document, the ids, the id counter and the editor size") {
@@ -1157,18 +1190,27 @@ TEST_CASE("state: loadStateJson(stateJson(doc)) round-trips the document, the id
     const std::string text = stateJson(original, 1024, 768);
 
     DocumentStore loaded;
-    loaded.appendChord(kC);  // pre-existing content and history must be discarded
+    loaded.appendChord(kC);  // pre-existing content, history and selection must be discarded
+    loaded.setSelectedEvent(1);
     std::string error;
     int width = 0;
     int height = 0;
     REQUIRE_MESSAGE(loadStateJson(loaded, text, error, &width, &height), error);
     CHECK(error.empty());
-    CHECK(loaded.doc() == original.doc());
+    CHECK(loaded.doc() == original.doc());  // voicing fields, autoVoiceLead and sections included
+    CHECK(loaded.doc().events[1].inversion == 2);
+    CHECK(loaded.doc().events[1].octave == -1);
+    CHECK(loaded.doc().events[1].manualVoicing == true);
+    CHECK(loaded.doc().autoVoiceLead == true);
+    CHECK(loaded.doc().sections == original.doc().sections);
     CHECK(width == 1024);
     CHECK(height == 768);
     CHECK_FALSE(loaded.undo());  // history cleared
     CHECK_FALSE(loaded.redo());
-    CHECK(loaded.appendChord(kF) == 4);  // the counter continues where the saved document stopped
+    CHECK(loaded.selectedEventId() == kNoEventId);
+    CHECK(loaded.appendChord(kF) == 4);  // the counters continue where the saved document stopped
+    CHECK(loaded.nextSectionId() == 3);
+    CHECK(loaded.addSection(2) == 3);
 
     // The out-params are optional, and `editor` is optional in the text (defaults to 900 x 620).
     DocumentStore again;
@@ -1190,6 +1232,122 @@ TEST_CASE("state: an empty document round-trips") {
     REQUIRE(loadStateJson(loaded, stateJson(empty), error));
     CHECK(loaded.doc() == Document{});
     CHECK(loaded.appendChord(kC) == 1);
+}
+
+TEST_CASE("state: a legacy state without the Phase 2 fields loads with the defaults") {
+    json legacy = json::parse(stateJson(richStore()));
+    for (json& e : legacy["events"]) {
+        e.erase("inversion");
+        e.erase("octave");
+        e.erase("manualVoicing");
+    }
+    legacy.erase("autoVoiceLead");
+    legacy.erase("sections");
+    legacy.erase("nextSectionId");
+
+    DocumentStore loaded;
+    std::string error;
+    REQUIRE_MESSAGE(loadStateJson(loaded, legacy.dump(), error), error);
+    REQUIRE(loaded.doc().events.size() == 2);
+    for (const ChordEvent& e : loaded.doc().events) {
+        CHECK(e.inversion == 0);
+        CHECK(e.octave == 0);
+        CHECK(e.manualVoicing == false);
+    }
+    CHECK(loaded.doc().autoVoiceLead == false);
+    CHECK(loaded.doc().sections.empty());
+    CHECK(loaded.nextSectionId() == 1);
+    CHECK(loaded.addSection(0) == 1);
+
+    // Each field is optional on its own: a partial event, and sections without a counter (derived).
+    json partial = json::parse(stateJson(richStore()));
+    partial["events"][1].erase("octave");
+    partial.erase("nextSectionId");
+    REQUIRE_MESSAGE(loadStateJson(loaded, partial.dump(), error), error);
+    CHECK(loaded.doc().events[1].inversion == 2);
+    CHECK(loaded.doc().events[1].octave == 0);
+    CHECK(loaded.doc().events[1].manualVoicing == true);
+    CHECK(loaded.nextSectionId() == 3);  // one past the largest section id
+
+    // A counter above the derived one is kept, like nextId.
+    json ahead = json::parse(stateJson(richStore()));
+    ahead["nextSectionId"] = 10;
+    REQUIRE_MESSAGE(loadStateJson(loaded, ahead.dump(), error), error);
+    CHECK(loaded.nextSectionId() == 10);
+    CHECK(loaded.doc().sections.size() == 2);
+}
+
+TEST_CASE("state: inversions, octaves and section colours are clamped on load, like the store does") {
+    json state = json::parse(stateJson(richStore()));
+    state["events"][0]["inversion"] = 9;
+    state["events"][0]["octave"] = 5;
+    state["events"][1]["inversion"] = -1;
+    state["events"][1]["octave"] = -9;
+    state["sections"][0]["colourIndex"] = 99;
+    state["sections"][1]["colourIndex"] = -1;
+
+    DocumentStore loaded;
+    std::string error;
+    REQUIRE_MESSAGE(loadStateJson(loaded, state.dump(), error), error);
+    CHECK(loaded.doc().events[0].inversion == inversionCount(kC) - 1);
+    CHECK(loaded.doc().events[0].octave == kMaxVoicingOctave);
+    CHECK(loaded.doc().events[1].inversion == 0);
+    CHECK(loaded.doc().events[1].octave == kMinVoicingOctave);
+    CHECK(loaded.doc().sections[0].colourIndex == kNumSectionColours - 1);
+    CHECK(loaded.doc().sections[1].colourIndex == 0);
+}
+
+TEST_CASE("state: bad Phase 2 fields reject the whole state, sections checked before anything is replaced") {
+    DocumentStore store;
+    store.appendChord(kC);
+    store.setSelectedEvent(1);
+    const Document before = store.doc();
+    const json good = json::parse(stateJson(richStore()));
+
+    const auto rejects = [&](const char* what, const std::function<void(json&)>& patch) {
+        CAPTURE(what);
+        json bad = good;
+        patch(bad);
+        std::string error;
+        CHECK_FALSE(loadStateJson(store, bad.dump(), error));
+        CHECK_FALSE(error.empty());
+        CHECK(store.doc() == before);
+        CHECK(store.nextSectionId() == 1);
+        CHECK(store.selectedEventId() == 1);
+    };
+
+    rejects("inversion not an integer", [](json& s) { s["events"][1]["inversion"] = "2"; });
+    rejects("inversion fractional", [](json& s) { s["events"][1]["inversion"] = 1.5; });
+    rejects("octave not an integer", [](json& s) { s["events"][1]["octave"] = "down"; });
+    rejects("manualVoicing not a bool", [](json& s) { s["events"][1]["manualVoicing"] = 1; });
+    rejects("autoVoiceLead not a bool", [](json& s) { s["autoVoiceLead"] = "yes"; });
+    rejects("sections not an array", [](json& s) { s["sections"] = 1; });
+    rejects("section not an object", [](json& s) { s["sections"][0] = 1; });
+    rejects("section id missing", [](json& s) { s["sections"][0].erase("id"); });
+    rejects("section name missing", [](json& s) { s["sections"][0].erase("name"); });
+    rejects("section colour missing", [](json& s) { s["sections"][0].erase("colourIndex"); });
+    rejects("section index missing", [](json& s) { s["sections"][0].erase("firstEventIndex"); });
+    rejects("section id zero", [](json& s) { s["sections"][0]["id"] = 0; });
+    rejects("section id INT_MAX", [](json& s) { s["sections"][1]["id"] = INT_MAX; s["nextSectionId"] = INT_MAX; });
+    rejects("section name not a string", [](json& s) { s["sections"][0]["name"] = 5; });
+    rejects("section colour not an integer", [](json& s) { s["sections"][0]["colourIndex"] = "red"; });
+    rejects("section index not an integer", [](json& s) { s["sections"][0]["firstEventIndex"] = "0"; });
+    rejects("first section not at 0", [](json& s) { s["sections"].erase(0); });
+    rejects("section index past the progression", [](json& s) { s["sections"][1]["firstEventIndex"] = 2; });
+    rejects("section index negative", [](json& s) { s["sections"][0]["firstEventIndex"] = -1; });
+    rejects("two sections at one index", [](json& s) { s["sections"][1]["firstEventIndex"] = 0; });
+    rejects("sections unsorted", [](json& s) { std::swap(s["sections"][0], s["sections"][1]); });
+    rejects("duplicate section ids", [](json& s) { s["sections"][1]["id"] = 1; });
+    rejects("sections on an empty progression", [](json& s) {
+        s["events"] = json::array();
+        s["sections"] = json::array({{{"id", 1}, {"name", "A"}, {"colourIndex", 0}, {"firstEventIndex", 0}}});
+    });
+    rejects("nextSectionId equal to a section id", [](json& s) { s["nextSectionId"] = 2; });
+    rejects("nextSectionId zero", [](json& s) { s["nextSectionId"] = 0; });
+    rejects("nextSectionId not an integer", [](json& s) { s["nextSectionId"] = "3"; });
+
+    REQUIRE(store.undo());  // history intact
+    CHECK(store.doc().events.empty());
 }
 
 TEST_CASE("state: lengths and velocities are clamped on load, like the store does") {

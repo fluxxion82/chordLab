@@ -195,24 +195,38 @@ bool applyCommandJson(DocumentStore& store, std::string_view json, std::string& 
 /// The persistent form of the store's document, without the palette:
 /// ```
 /// {"schema":1, "projectKey":<key>, "browsedKey":<key>, "progressionLoop":true, "followHost":true,
-///  "events":[{"id":1,"root":0,"type":"maj","lengthBeats":4.0,"velocity":100}, ...],
-///  "nextId":2, "editor":{"width":900,"height":620}}
+///  "autoVoiceLead":false,
+///  "events":[{"id":1,"root":0,"type":"maj","lengthBeats":4.0,"velocity":100,
+///             "inversion":0,"octave":0,"manualVoicing":false}, ...],
+///  "sections":[{"id":1,"name":"Verse","colourIndex":0,"firstEventIndex":0}, ...],
+///  "nextId":2, "nextSectionId":2, "editor":{"width":900,"height":620}}
 /// ```
 /// `nextId` is the store's id counter (`DocumentStore::nextId`), so that a reloaded document keeps
-/// handing out ids no saved event ever had. `editorWidth` / `editorHeight` are the editor window size to
-/// remember; they are stored verbatim.
+/// handing out ids no saved event ever had, and `nextSectionId` the section counter likewise.
+/// `editorWidth` / `editorHeight` are the editor window size to remember; they are stored verbatim. The
+/// selection (`DocumentStore::selectedEventId`) is live state and is not written.
+/// `autoVoiceLead`, the events' `inversion`, `octave` and `manualVoicing`, `sections` and
+/// `nextSectionId` were added under schema 1 (Phase 2): a reader that predates them ignores them, and
+/// `loadStateJson` defaults them when they are missing, so states cross both ways.
 std::string stateJson(const DocumentStore& store, int editorWidth = kDefaultEditorWidth,
                       int editorHeight = kDefaultEditorHeight);
 
 /// Restores a document saved by `stateJson`. Atomic: the whole text is parsed and validated first; on any
 /// problem (malformed JSON, wrong schema, a missing or mistyped field, an unknown chord type or mode, a
 /// root outside 0..11, an id below 1 or repeated, more than `kMaxChords` events, a `nextId` below 1 or
-/// not above every event id, a non-positive editor size) it returns false with a description in `error` and the store, its history
-/// and the out-params are untouched. Otherwise it replaces the store's document and id counter
-/// (`DocumentStore::replace`, which clears the undo/redo history), writes the editor size into the
-/// out-params that are non-null, and returns true with `error` cleared.
-/// Lengths and velocities are clamped to the store's ranges rather than rejected. `editor` is optional
-/// and defaults to `kDefaultEditorWidth` x `kDefaultEditorHeight`; every other field is required.
+/// not above every event id, a non-positive editor size, or sections that are not `sectionsWellFormed`
+/// (document.h): not starting at 0, unsorted or sharing a start, an index outside the progression, a
+/// section id outside 1..INT_MAX-1 or repeated; or a `nextSectionId` below 1 or not above every section
+/// id) it returns false with a description in `error` and the store, its history, its selection and the
+/// out-params are untouched. Otherwise it replaces the store's document and both id counters
+/// (`DocumentStore::replace`, which clears the undo/redo history and the selection), writes the editor
+/// size into the out-params that are non-null, and returns true with `error` cleared.
+/// Lengths, velocities, inversions, octaves and section colours are clamped to the store's ranges
+/// rather than rejected (a mistyped value is still rejected). Optional, with their defaults: `editor`
+/// (`kDefaultEditorWidth` x `kDefaultEditorHeight`), the events' `inversion` (0), `octave` (0) and
+/// `manualVoicing` (false), `autoVoiceLead` (false), `sections` (none) and `nextSectionId` (derived, one
+/// past the largest section id, 1 without sections; when given it must be at least that and is kept, like
+/// `nextId`). Every other field is required.
 bool loadStateJson(DocumentStore& store, std::string_view json, std::string& error, int* editorWidth = nullptr,
                    int* editorHeight = nullptr) noexcept;
 
