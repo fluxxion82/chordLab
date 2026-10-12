@@ -30,9 +30,9 @@ struct MidiOut {
 
 /// The compiled progression as the scheduler plays it. `events` must be sorted by
 /// `(beat, off before on, pitch)` with every beat in `[0, endBeat]` and at most
-/// `Scheduler::kMaxSnapshotEvents` of them, as `compile` produces. The array is read only inside
-/// `process`: it must stay valid and unchanged from `adopt` until a later `adopt` has replaced it, after
-/// which it is never read again. `generation` changes whenever the content changes.
+/// `Scheduler::kMaxSnapshotEvents` of them, as `compile` produces. The array must stay valid and
+/// unchanged during `adopt` and during every `process` call until the next `adopt`; after that `adopt`
+/// returns it is never read again. `generation` changes whenever the content changes.
 struct Snapshot {
     const NoteEvent* events;
     std::size_t count;
@@ -75,19 +75,25 @@ constexpr std::uint8_t kOwnerPreview = 2;
 /// the block is a seek: the progression's notes are released and the notes sounding at the new position
 /// are chased (attacked at offset 0). Start, stop, `reset` and a changed `adopt` are discontinuities too.
 ///
-/// Output order: `(sampleOffset, off before on, pitch)` within each phase of a block; at equal offsets the
-/// phases run note-offs owed from earlier blocks, preview commands in arrival order, the discontinuity's
-/// releases and chase, then the timeline. Releases are never lost: one that does not fit the output is
-/// owed and paid at the start of the next block before anything else, and a capacity of at least
-/// `kCapacityForImmediateRelease` always pays every owed release in the block that owes it. Attacks that
-/// do not fit are dropped and left unowned, and `process` then returns false.
+/// Output order: events are written in time order. At one sample the phases run note-offs owed from
+/// earlier blocks, preview commands in arrival order, the discontinuity's releases (by pitch) and chase
+/// (by pitch), then the timeline in the snapshot's own order, which `compile` makes `(beat, off before on,
+/// pitch)`; the final offs of one wrap precede the first attacks of the next. Timeline events that did
+/// not fit an earlier block are written first, at offset 0, still in their order. Releases are never
+/// lost: one that does not fit the output is owed and paid at the start of the next block before anything
+/// else, and a capacity of at least `kCapacityForImmediateRelease` always pays every owed release in the
+/// block that owes it. Attacks that do not fit are dropped and left unowned, and `process` then returns
+/// false.
 ///
 /// Bounded work: a block of unusable timing (`nFrames < 0`, `sampleRate` or `bpm` not positive and finite,
 /// a non-finite `ppqStart`, samples per beat outside `(0, kMaxSamplesPerBeat]`, or a preview timer that
 /// does not fit) is treated as a stopped block (previews served, progression released, nothing played);
-/// a block spanning more than `kMaxWrapsPerBlock` wraps of the progression is skipped the same way; a
-/// timeline too dense for the scratch is carried over to the next block, late but complete. An empty
-/// block (`nFrames == 0`) does nothing at all and changes nothing.
+/// a block spanning more than `kMaxWrapsPerBlock` wraps of the progression is skipped the same way. A
+/// timeline too dense for the scratch is carried over to the following blocks, late but complete and in
+/// order, each block making progress; a backlog that falls more than `kMaxLagBeats` behind the transport
+/// is dropped instead, with every progression note released and the current position chased. Every
+/// block that carries over, drops or skips anything returns false. An empty block (`nFrames == 0`) does
+/// nothing at all and changes nothing.
 ///
 /// Real time: after construction nothing allocates, throws, locks or logs. `process`, `reset`, `adopt`,
 /// `panic`, `ownersOf` and `sounding` belong to one thread (the audio thread); `pushPreview` may be
@@ -112,6 +118,8 @@ public:
     static constexpr std::size_t kCapacityForImmediateRelease = 128;
     /// The largest sane sample-rate-to-tempo ratio; beyond it the block's timing is unusable.
     static constexpr double kMaxSamplesPerBeat = 1e9;
+    /// How far a carried-over timeline may fall behind the transport before it is dropped.
+    static constexpr double kMaxLagBeats = 1.0;
 
     Scheduler() noexcept;
 
@@ -156,8 +164,10 @@ private:
     enum Phase : std::uint8_t { PhaseFlush, PhaseChase, PhaseTimeline };
 
     /// One owner-level event of the block, before ownership turns it into physical MIDI (or into nothing).
+    /// `sample` is on the clock (`mBlockSample` is this block's first sample); a timeline event carried
+    /// over from an earlier block sits before it and is written at offset 0.
     struct Logical {
-        int offset;
+        std::int64_t sample;
         Kind kind;
         Phase phase;
         std::uint8_t pitch;
@@ -191,8 +201,11 @@ private:
     bool pushLogical(const Logical& event, bool mandatory) noexcept;
     void pushExpiries(int nFrames, std::int64_t previewSamples) noexcept;
     void chase(double samplesPerBeat) noexcept;
-    void enumerate(std::int64_t windowLo, std::int64_t windowHi, int nFrames, double samplesPerBeat) noexcept;
+    void seekCursor(std::int64_t targetSample, double samplesPerBeat) noexcept;
+    bool cursorNext(std::int64_t& wrap, std::size_t& index) const noexcept;
+    void enumerate(std::int64_t windowHi, double samplesPerBeat) noexcept;
     bool snapshotUsable() const noexcept;
+    double canonicalBeat(std::int64_t wrap, std::size_t index) const noexcept;
     std::int64_t sampleOf(double beat, double samplesPerBeat) const noexcept;
 
     static bool attack(State& state, std::uint8_t owner, int offset, std::uint8_t pitch, std::uint8_t velocity,
@@ -204,7 +217,7 @@ private:
     static void payOwed(State& state, Writer& writer) noexcept;
     static void applyBatch(State& state, const PreviewCmd* batch, std::size_t count, std::int64_t clock,
                            std::int64_t previewSamples, Writer& writer) noexcept;
-    static void apply(State& state, const Logical& event, std::int64_t clock, Writer& writer) noexcept;
+    static void apply(State& state, const Logical& event, int offset, std::int64_t clock, Writer& writer) noexcept;
 
     State mState;
     Snapshot mSnapshot;
@@ -216,21 +229,21 @@ private:
 
     // The sample clock the progression is played on while the transport runs.
     bool mHasAnchor;
-    double mAnchorPpq;        // host beat at clock sample 0
-    double mSamplesPerBeat;   // the tempo the clock was anchored with
-    std::int64_t mBlockSample;     // clock sample at which the next block starts
-    std::int64_t mFrontierSample;  // first clock sample whose events have not been emitted (<= mBlockSample)
-    bool mHasLag;                  // the frontier lags behind the block start (a carried-over timeline)
-    double mLagBeat;               // the beat of the first carried-over event, to re-anchor with
-    std::int64_t mPreviewClock;    // runs whether or not the transport does
+    double mAnchorPpq;           // host beat at clock sample 0
+    double mSamplesPerBeat;      // the tempo the clock was anchored with
+    std::int64_t mBlockSample;   // clock sample at which the next block starts
+    std::int64_t mPreviewClock;  // runs whether or not the transport does
+
+    // How far the timeline has been consumed: the next snapshot occurrence to emit, as (wrap, index) in
+    // playback order. Independent of tempo, so re-anchoring the clock can neither lose nor repeat an event.
+    bool mHasCursor;
+    std::int64_t mCursorWrap;
+    std::size_t mCursorIndex;
 
     // Per-block scratch.
     std::array<Logical, kMaxEventsPerBlock> mScratch;
     std::size_t mScratchCount;
     bool mDropped;
-    std::int64_t mNextFrontier;
-    bool mNextHasLag;
-    double mNextLagBeat;
     std::array<PreviewCmd, kPreviewQueueCapacity> mBatch;
     std::size_t mBatchCount;
 

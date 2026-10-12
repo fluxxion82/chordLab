@@ -17,8 +17,11 @@ constexpr int kPitchCount = 128;
 constexpr double kSampleLimit = 4e18;
 /// Wrap indices are computed in doubles and must fit an integer with room to spare.
 constexpr double kWrapLimit = 1e15;
+constexpr std::int64_t kWrapLimitInt = static_cast<std::int64_t>(kWrapLimit);
 /// The most samples a preview timer may count (four seconds of any sane sample rate).
 constexpr double kMaxPreviewSamples = 1e12;
+/// A hard stop for the enumeration loop, far beyond what the scratch and the lag bound allow.
+constexpr std::size_t kMaxEnumerationSteps = 8 * Scheduler::kMaxSnapshotEvents + Scheduler::kMaxEventsPerBlock;
 
 std::uint8_t clampVelocity(int velocity) noexcept {
     return static_cast<std::uint8_t>(std::clamp(velocity, 1, 127));
@@ -117,16 +120,13 @@ Scheduler::Scheduler() noexcept
       mAnchorPpq(0.0),
       mSamplesPerBeat(0.0),
       mBlockSample(0),
-      mFrontierSample(0),
-      mHasLag(false),
-      mLagBeat(0.0),
       mPreviewClock(0),
+      mHasCursor(false),
+      mCursorWrap(0),
+      mCursorIndex(0),
       mScratch{},
       mScratchCount(0),
       mDropped(false),
-      mNextFrontier(0),
-      mNextHasLag(false),
-      mNextLagBeat(0.0),
       mBatch{},
       mBatchCount(0),
       mQueue{},
@@ -165,7 +165,7 @@ void Scheduler::adopt(const Snapshot& snapshot) noexcept {
         mSnapshot.events = nullptr;
         mSnapshot.count = 0;
     }
-    // The final offs sit at endBeat (a sorted suffix); `enumerate` places them on the next wrap's start.
+    // The final offs sit at endBeat (a sorted suffix); they are placed on the next wrap's start.
     mEndIndex = mSnapshot.count;
     for (std::size_t i = 0; i < mSnapshot.count; ++i) {
         if (mSnapshot.events[i].beat >= mSnapshot.endBeat) {
@@ -173,6 +173,7 @@ void Scheduler::adopt(const Snapshot& snapshot) noexcept {
             break;
         }
     }
+    mHasCursor = false;  // the pending flush re-seeks it
 }
 
 bool Scheduler::pushPreview(const PreviewCmd& cmd) noexcept {
@@ -214,6 +215,17 @@ bool Scheduler::sounding(int pitch) const noexcept {
 bool Scheduler::snapshotUsable() const noexcept {
     return mSnapshot.events != nullptr && mSnapshot.count > 0 && mSnapshot.endBeat > 0.0 &&
            std::isfinite(mSnapshot.endBeat);
+}
+
+/// The beat of occurrence (`wrap`, `index`): the wrap's start plus the event's beat, except that the final
+/// offs (at endBeat) sit exactly on the next wrap's start, so that `k * endBeat + endBeat` and
+/// `(k + 1) * endBeat` cannot disagree by a rounding error.
+double Scheduler::canonicalBeat(std::int64_t wrap, std::size_t index) const noexcept {
+    const double w = static_cast<double>(wrap);
+    if (index >= mEndIndex) {
+        return (w + 1.0) * mSnapshot.endBeat;
+    }
+    return w * mSnapshot.endBeat + mSnapshot.events[index].beat;
 }
 
 /// The clock sample of `beat`, rounded half up, saturated far outside any block so that comparisons
@@ -264,12 +276,11 @@ void Scheduler::pushExpiries(int nFrames, std::int64_t previewSamples) noexcept 
         if (preview.active) {
             running = std::max<std::int64_t>(preview.expireAt - mPreviewClock, 0);
             if (running < nFrames) {
-                pushLogical(Logical{static_cast<int>(running), PreviewExpiry, PhaseTimeline, 0, 0, slot, 0}, true);
+                pushLogical(Logical{mBlockSample + running, PreviewExpiry, PhaseTimeline, 0, 0, slot, 0}, true);
             }
         }
         if (previewSamples < nFrames && previewSamples != running) {
-            pushLogical(Logical{static_cast<int>(previewSamples), PreviewExpiry, PhaseTimeline, 0, 0, slot, 0},
-                        true);
+            pushLogical(Logical{mBlockSample + previewSamples, PreviewExpiry, PhaseTimeline, 0, 0, slot, 0}, true);
         }
     }
 }
@@ -291,12 +302,12 @@ void Scheduler::chase(double samplesPerBeat) noexcept {
     if (!(wrap < kWrapLimit)) {
         return;
     }
-    const double base = wrap * endBeat;
+    const std::int64_t k = static_cast<std::int64_t>(wrap);
     bool sounding[kPitchCount] = {};
     std::uint8_t velocity[kPitchCount] = {};
     for (std::size_t i = 0; i < mEndIndex; ++i) {
         const NoteEvent& e = mSnapshot.events[i];
-        const std::int64_t sample = sampleOf(base + e.beat, samplesPerBeat);
+        const std::int64_t sample = sampleOf(canonicalBeat(k, i), samplesPerBeat);
         if (sample > mBlockSample) {
             break;
         }
@@ -312,7 +323,7 @@ void Scheduler::chase(double samplesPerBeat) noexcept {
             sounding[e.pitch] = false;
         }
     }
-    if (mEndIndex < mSnapshot.count && sampleOf((wrap + 1.0) * endBeat, samplesPerBeat) <= mBlockSample) {
+    if (mEndIndex < mSnapshot.count && sampleOf(canonicalBeat(k, mEndIndex), samplesPerBeat) <= mBlockSample) {
         for (std::size_t i = mEndIndex; i < mSnapshot.count; ++i) {
             const NoteEvent& e = mSnapshot.events[i];
             if (!e.on && validPitch(e.pitch)) {
@@ -322,102 +333,95 @@ void Scheduler::chase(double samplesPerBeat) noexcept {
     }
     for (int pitch = 0; pitch < kPitchCount; ++pitch) {
         if (sounding[pitch] &&
-            !pushLogical(Logical{0, ProgressionAttack, PhaseChase, static_cast<std::uint8_t>(pitch), velocity[pitch],
-                                 0, 0},
+            !pushLogical(Logical{mBlockSample, ProgressionAttack, PhaseChase, static_cast<std::uint8_t>(pitch),
+                                 velocity[pitch], 0, 0},
                          false)) {
             mDropped = true;
         }
     }
 }
 
-void Scheduler::enumerate(std::int64_t windowLo, std::int64_t windowHi, int nFrames,
-                          double samplesPerBeat) noexcept {
-    // Events whose clock sample falls in [windowLo, windowHi), in time order. The first event at or past
-    // windowHi ends the block (everything after it is later still); running out of scratch ends it too,
-    // after rolling back the partial group of events that share that sample, which the next block then
-    // starts from (`mNextFrontier`, `mNextLagBeat`).
+/// Points the cursor at the first occurrence on or after clock sample `targetSample`.
+void Scheduler::seekCursor(std::int64_t targetSample, double samplesPerBeat) noexcept {
+    mHasCursor = true;
+    mCursorWrap = 0;
+    mCursorIndex = 0;
     if (!snapshotUsable()) {
         return;
     }
-    const double endBeat = mSnapshot.endBeat;
-    const double beatLo = std::max(mAnchorPpq + static_cast<double>(windowLo - 1) / samplesPerBeat, 0.0);
-    const double beatHi = mAnchorPpq + static_cast<double>(windowHi + 1) / samplesPerBeat;
-    if (!(beatLo < beatHi)) {
-        return;  // the progression has not begun
-    }
-    double firstWrap = 0.0;
-    double lastWrap = 0.0;
+    const double targetBeat = mAnchorPpq + static_cast<double>(targetSample) / samplesPerBeat;
+    double first = 0.0;
     if (mSnapshot.loop) {
-        // One wrap earlier than the window as well: its final offs sit on the next wrap's start.
-        firstWrap = std::max(std::floor(beatLo / endBeat) - 1.0, 0.0);
-        lastWrap = std::floor(beatHi / endBeat);
-        if (!(lastWrap < kWrapLimit) || lastWrap - firstWrap > static_cast<double>(kMaxWrapsPerBlock) + 2.0) {
-            return;  // `process` has already ruled this block out; keep the casts defined regardless
+        first = std::max(std::floor(targetBeat / mSnapshot.endBeat) - 1.0, 0.0);
+        if (!(first < kWrapLimit)) {
+            mHasCursor = false;  // an unreachable position: nothing is ever due there
+            return;
         }
     }
-    const int lastOffset = nFrames - 1;
-    std::size_t groupStart = mScratchCount;
-    std::int64_t groupSample = windowLo - 1;
-    double groupBeat = 0.0;
-    auto emit = [&](const NoteEvent& e, std::int64_t sample, double beat) noexcept -> bool {
-        if (sample != groupSample) {
-            groupStart = mScratchCount;
-            groupSample = sample;
-            groupBeat = beat;
+    // The wrap after the one containing the target starts past it, so three wraps always suffice.
+    const std::int64_t startWrap = static_cast<std::int64_t>(first);
+    const std::int64_t lastWrap = mSnapshot.loop ? startWrap + 2 : 0;
+    for (std::int64_t k = startWrap; k <= lastWrap; ++k) {
+        for (std::size_t i = 0; i < mSnapshot.count; ++i) {
+            if (sampleOf(canonicalBeat(k, i), samplesPerBeat) >= targetSample) {
+                mCursorWrap = k;
+                mCursorIndex = i;
+                return;
+            }
         }
-        const std::int64_t offset = std::clamp<std::int64_t>(sample - mBlockSample, 0, lastOffset);
-        const Logical event{static_cast<int>(offset),
-                            e.on ? ProgressionAttack : ProgressionRelease,
-                            PhaseTimeline,
-                            static_cast<std::uint8_t>(e.pitch),
-                            e.on ? clampVelocity(e.velocity) : std::uint8_t{0},
-                            0,
-                            0};
-        if (pushLogical(event, false)) {
-            return true;
-        }
-        mScratchCount = groupStart;
-        mNextFrontier = groupSample;
-        mNextHasLag = true;
-        mNextLagBeat = groupBeat;
-        mDropped = true;  // carried over, not lost; still an incomplete block
+    }
+    mCursorWrap = lastWrap + 1;  // past the end of a one-shot progression, or unexpectedly far
+    mCursorIndex = 0;
+}
+
+/// The occurrence the cursor points at, normalised; false when there is none (past a one-shot's end).
+bool Scheduler::cursorNext(std::int64_t& wrap, std::size_t& index) const noexcept {
+    if (!mHasCursor || !snapshotUsable()) {
         return false;
-    };
-    for (double wrap = firstWrap; wrap <= lastWrap; wrap += 1.0) {
-        const double base = wrap * endBeat;
-        for (std::size_t i = 0; i < mEndIndex; ++i) {
-            const NoteEvent& e = mSnapshot.events[i];
-            const double beat = base + e.beat;
-            const std::int64_t sample = sampleOf(beat, samplesPerBeat);
-            if (sample < windowLo) {
-                continue;
-            }
-            if (sample >= windowHi) {
-                return;
-            }
-            if (validPitch(e.pitch) && !emit(e, sample, beat)) {
-                return;
-            }
-        }
-        if (mEndIndex < mSnapshot.count) {
-            const double beat = (wrap + 1.0) * endBeat;
-            const std::int64_t sample = sampleOf(beat, samplesPerBeat);
-            if (sample >= windowHi) {
-                return;
-            }
-            if (sample >= windowLo) {
-                for (std::size_t i = mEndIndex; i < mSnapshot.count; ++i) {
-                    const NoteEvent& e = mSnapshot.events[i];
-                    if (e.on && !mSnapshot.loop) {
-                        continue;  // nothing attacks at or after endBeat when playing once
-                    }
-                    if (validPitch(e.pitch) && !emit(e, sample, beat)) {
-                        return;
-                    }
-                }
-            }
-        }
     }
+    wrap = mCursorWrap;
+    index = mCursorIndex;
+    if (index >= mSnapshot.count) {
+        wrap = wrap < kWrapLimitInt ? wrap + 1 : wrap;
+        index = 0;
+    }
+    return mSnapshot.loop || wrap == 0;
+}
+
+/// Emits occurrences from the cursor on, in playback order, up to the first one at or past `windowHi`
+/// (deferred to a later block) or until the scratch is full (the rest is carried over, in order; the
+/// block is then incomplete). Occurrences behind the block start are emitted late, at offset 0.
+void Scheduler::enumerate(std::int64_t windowHi, double samplesPerBeat) noexcept {
+    std::int64_t wrap = 0;
+    std::size_t index = 0;
+    if (!cursorNext(wrap, index)) {
+        return;
+    }
+    for (std::size_t steps = 0; steps < kMaxEnumerationSteps; ++steps) {
+        if (index >= mSnapshot.count) {
+            if (wrap >= kWrapLimitInt || !mSnapshot.loop) {
+                break;
+            }
+            ++wrap;
+            index = 0;
+        }
+        const NoteEvent& e = mSnapshot.events[index];
+        const std::int64_t sample = sampleOf(canonicalBeat(wrap, index), samplesPerBeat);
+        if (sample >= windowHi) {
+            break;
+        }
+        const bool silent = !validPitch(e.pitch) || (!mSnapshot.loop && e.on && index >= mEndIndex);
+        if (!silent && !pushLogical(Logical{sample, e.on ? ProgressionAttack : ProgressionRelease, PhaseTimeline,
+                                            static_cast<std::uint8_t>(e.pitch),
+                                            e.on ? clampVelocity(e.velocity) : std::uint8_t{0}, 0, 0},
+                                    false)) {
+            mDropped = true;  // carried over, not lost; still an incomplete block
+            break;
+        }
+        ++index;
+    }
+    mCursorWrap = wrap;
+    mCursorIndex = index;
 }
 
 // --- Ownership ---------------------------------------------------------------------------------
@@ -560,23 +564,23 @@ void Scheduler::applyBatch(State& state, const PreviewCmd* batch, std::size_t co
     }
 }
 
-void Scheduler::apply(State& state, const Logical& event, std::int64_t clock, Writer& writer) noexcept {
+void Scheduler::apply(State& state, const Logical& event, int offset, std::int64_t clock, Writer& writer) noexcept {
     switch (event.kind) {
         case ProgressionAttack:
-            attack(state, kOwnerProgression, event.offset, event.pitch, event.velocity, writer);
+            attack(state, kOwnerProgression, offset, event.pitch, event.velocity, writer);
             break;
         case ProgressionRelease:
-            releaseProgression(state, event.offset, event.pitch, writer);
+            releaseProgression(state, offset, event.pitch, writer);
             break;
         case ProgressionReleaseAll:
             for (int pitch = 0; pitch < kPitchCount; ++pitch) {
-                releaseProgression(state, event.offset, static_cast<std::uint8_t>(pitch), writer);
+                releaseProgression(state, offset, static_cast<std::uint8_t>(pitch), writer);
             }
             break;
         case PreviewExpiry: {
             const Preview& preview = state.previews[event.slot];
-            if (preview.active && preview.expireAt <= clock + event.offset) {
-                releasePreview(state, event.slot, event.offset, writer);
+            if (preview.active && preview.expireAt <= clock + offset) {
+                releasePreview(state, event.slot, offset, writer);
             }
             break;
         }
@@ -613,7 +617,12 @@ bool Scheduler::process(const BlockInfo& info, MidiOut* out, std::size_t capacit
     mDropped = false;
     drainQueue();
 
-    // Discontinuities, and the clock.
+    // Discontinuities, and the clock. Whether a carried-over timeline is pending is judged on the clock
+    // as it was, before any re-anchoring.
+    std::int64_t nextWrap = 0;
+    std::size_t nextIndex = 0;
+    const bool backlog = mWasPlaying && mHasAnchor && cursorNext(nextWrap, nextIndex) &&
+                         sampleOf(canonicalBeat(nextWrap, nextIndex), mSamplesPerBeat) < mBlockSample;
     const bool stopped = !playing && mWasPlaying;
     const bool started = playing && !mWasPlaying;
     const double expected = mHasAnchor ? mAnchorPpq + static_cast<double>(mBlockSample) / mSamplesPerBeat : 0.0;
@@ -626,83 +635,81 @@ bool Scheduler::process(const BlockInfo& info, MidiOut* out, std::size_t capacit
         mAnchorPpq = info.ppqStart;
         mSamplesPerBeat = samplesPerBeat;
         mBlockSample = 0;
-        mFrontierSample = 0;
-        mHasLag = false;
-    } else if (continuous) {
-        if (samplesPerBeat != mSamplesPerBeat) {
-            // Tempo or sample rate changed: re-anchor the clock where this block was expected to start.
-            mAnchorPpq = expected;
-            mSamplesPerBeat = samplesPerBeat;
-            mBlockSample = 0;
-            mFrontierSample = mHasLag ? sampleOf(mLagBeat, samplesPerBeat) : 0;
-        }
-        if (mPendingFlush) {
-            mFrontierSample = mBlockSample;  // the chase re-acquires whatever was still to come
-            mHasLag = false;
-        }
+    } else if (continuous && samplesPerBeat != mSamplesPerBeat) {
+        // Tempo or sample rate changed: re-anchor the clock where this block was expected to start. The
+        // cursor is in beats, so what has been emitted stays emitted and what has not stays due.
+        mAnchorPpq = expected;
+        mSamplesPerBeat = samplesPerBeat;
+        mBlockSample = 0;
     }
-    const std::int64_t windowLo = mFrontierSample;
     const std::int64_t windowHi = mBlockSample + nFrames;
-    mNextFrontier = windowHi;
-    mNextHasLag = false;
-    mNextLagBeat = 0.0;
 
     // The block's events: mandatory releases first, so that nothing can displace them.
     if (flush) {
-        pushLogical(Logical{0, ProgressionReleaseAll, PhaseFlush, 0, 0, 0, 0}, true);
+        pushLogical(Logical{mBlockSample, ProgressionReleaseAll, PhaseFlush, 0, 0, 0, 0}, true);
+        if (backlog) {
+            mDropped = true;  // the carried-over timeline is abandoned with the position
+        }
     }
     pushExpiries(nFrames, previewSamples);
     if (playing) {
-        const bool spansTooMuch =
-            snapshotUsable() && mSnapshot.loop &&
-            static_cast<double>(windowHi - windowLo) / samplesPerBeat / mSnapshot.endBeat >
-                static_cast<double>(kMaxWrapsPerBlock);
-        if (spansTooMuch) {
+        const bool spansTooMuch = snapshotUsable() && mSnapshot.loop &&
+                                  static_cast<double>(nFrames) / samplesPerBeat / mSnapshot.endBeat >
+                                      static_cast<double>(kMaxWrapsPerBlock);
+        bool overloaded = false;
+        if (!flush && !spansTooMuch && backlog) {
+            const double position = mAnchorPpq + static_cast<double>(mBlockSample) / samplesPerBeat;
+            overloaded = position - canonicalBeat(nextWrap, nextIndex) > kMaxLagBeats;
+        }
+        if (spansTooMuch || overloaded) {
             if (!flush) {
-                pushLogical(Logical{0, ProgressionReleaseAll, PhaseFlush, 0, 0, 0, 0}, true);
+                pushLogical(Logical{mBlockSample, ProgressionReleaseAll, PhaseFlush, 0, 0, 0, 0}, true);
             }
+            mDropped = true;  // this block's timeline, or a stale backlog, is dropped
+        }
+        if (spansTooMuch) {
+            seekCursor(windowHi, samplesPerBeat);  // skip the block
         } else {
-            if (flush) {
+            if (flush || overloaded) {
+                seekCursor(mBlockSample, samplesPerBeat);
                 chase(samplesPerBeat);
             }
-            enumerate(windowLo, windowHi, nFrames, samplesPerBeat);
+            enumerate(windowHi, samplesPerBeat);
         }
     }
 
     // Order, then apply ownership twice: a dry run to count the note-offs, the real run with the rest of
     // the capacity for attacks. Owed note-offs and the preview commands come before the sorted events.
+    // Within one sample, earlier phases first, then arrival order: the snapshot's own `(off before on,
+    // pitch)` at one beat, one wrap's final offs before the next wrap's attacks, releases and chase by pitch.
     std::sort(mScratch.begin(), mScratch.begin() + static_cast<std::ptrdiff_t>(mScratchCount),
               [](const Logical& a, const Logical& b) noexcept {
-                  if (a.offset != b.offset) {
-                      return a.offset < b.offset;
+                  if (a.sample != b.sample) {
+                      return a.sample < b.sample;
                   }
                   if (a.phase != b.phase) {
                       return a.phase < b.phase;
                   }
-                  const bool aAttack = a.kind == ProgressionAttack;
-                  const bool bAttack = b.kind == ProgressionAttack;
-                  if (aAttack != bAttack) {
-                      return !aAttack;
-                  }
-                  if (a.pitch != b.pitch) {
-                      return a.pitch < b.pitch;
-                  }
                   return a.seq < b.seq;
               });
+    const int lastOffset = nFrames > 0 ? nFrames - 1 : 0;
+    auto offsetOf = [&](const Logical& event) noexcept -> int {
+        return static_cast<int>(std::clamp<std::int64_t>(event.sample - mBlockSample, 0, lastOffset));
+    };
     Writer dry(nullptr, 0, 0, true);
     {
         State shadow = mState;
         payOwed(shadow, dry);
         applyBatch(shadow, mBatch.data(), mBatchCount, mPreviewClock, previewSamples, dry);
         for (std::size_t i = 0; i < mScratchCount; ++i) {
-            apply(shadow, mScratch[i], mPreviewClock, dry);
+            apply(shadow, mScratch[i], offsetOf(mScratch[i]), mPreviewClock, dry);
         }
     }
     Writer writer(out, capacity, capacity > dry.releases ? capacity - dry.releases : 0, false);
     payOwed(mState, writer);
     applyBatch(mState, mBatch.data(), mBatchCount, mPreviewClock, previewSamples, writer);
     for (std::size_t i = 0; i < mScratchCount; ++i) {
-        apply(mState, mScratch[i], mPreviewClock, writer);
+        apply(mState, mScratch[i], offsetOf(mScratch[i]), mPreviewClock, writer);
     }
     written = writer.written;
 
@@ -710,11 +717,9 @@ bool Scheduler::process(const BlockInfo& info, MidiOut* out, std::size_t capacit
     mPreviewClock += nFrames;
     if (playing) {
         mBlockSample += nFrames;
-        mFrontierSample = mNextFrontier;
-        mHasLag = mNextHasLag;
-        mLagBeat = mNextLagBeat;
     } else {
         mHasAnchor = false;
+        mHasCursor = false;
     }
     mWasPlaying = playing;
     mPendingFlush = false;

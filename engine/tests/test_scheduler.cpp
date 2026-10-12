@@ -16,6 +16,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 using namespace chordlab;
@@ -818,11 +819,12 @@ TEST_CASE("scheduler: absurd snapshots and host timing return promptly with rele
         const std::vector<Ev> adopted = host.run(512.0 / kSamplesPerBeat, 512, true);
         CAPTURE(describe(adopted));
         CHECK(adopted == std::vector<Ev>{off(0, 48), off(0, 52), off(0, 55)});
-        CHECK(host.lastOk);
+        CHECK_FALSE(host.lastOk);  // the block's timeline was skipped: incomplete, never silent
         CHECK(host.run(1024.0 / kSamplesPerBeat, 2048, true) == kNone);
+        CHECK_FALSE(host.lastOk);
         CHECK(host.run(1e12, 2048, true) == kNone);  // a huge seek on top
         CHECK(host.run(1e12, 0, true) == kNone);
-        CHECK(host.lastOk);
+        CHECK(host.lastOk);  // an empty block does nothing and says so
         CHECK(host.owners(60) == 0);
     }
     SUBCASE("bpm 1e-9: samples per beat beyond 1e9, so the block counts as stopped") {
@@ -916,7 +918,7 @@ TEST_CASE("scheduler: absurd snapshots and host timing return promptly with rele
         const std::vector<Ev> skipped = host.run(256.0, 65 * 4 * kSamplesPerBeat + 4800, true);
         CAPTURE(describe(skipped));
         CHECK(skipped == std::vector<Ev>{off(0, 48), off(0, 52), off(0, 55)});
-        CHECK(host.lastOk);
+        CHECK_FALSE(host.lastOk);  // skipped: reported, not silent
     }
 }
 
@@ -1171,4 +1173,282 @@ TEST_CASE("scheduler: panic releases the progression and the previews, with no c
     CHECK(host.scheduler.pushPreview(previewStop(1)));
     CHECK(host.run((1536.0 + 4 * kSamplesPerBeat) / kSamplesPerBeat, 512, true) == kNone);
     CHECK(host.lastOk);
+}
+
+// --- Follow-up review regressions ------------------------------------------------------------------
+
+namespace {
+
+/// Tracks what physically sounds and fails on a double on, an orphan off, a disordered offset or a
+/// mismatch with the scheduler's own `sounding`.
+struct Model {
+    bool sounding[128] = {};
+    long ons = 0;
+    long offs = 0;
+    std::vector<Ev> sequence;  // every emitted event, in order
+
+    void take(const Host& host, const std::vector<Ev>& events, int nFrames) {
+        int previous = 0;
+        for (const Ev& e : events) {
+            CAPTURE(e.pitch);
+            CAPTURE(e.offset);
+            REQUIRE(e.offset >= previous);
+            REQUIRE(e.offset < nFrames);
+            previous = e.offset;
+            REQUIRE(sounding[e.pitch] != e.on);
+            sounding[e.pitch] = e.on;
+            (e.on ? ons : offs) += 1;
+            sequence.push_back(e);
+        }
+        for (int p = 0; p < 128; ++p) {
+            REQUIRE(host.scheduler.sounding(p) == sounding[p]);
+        }
+    }
+
+    bool silent() const {
+        return std::none_of(std::begin(sounding), std::end(sounding), [](bool s) { return s; });
+    }
+};
+
+/// The (on, pitch) sequence of every occurrence of `snapshot` with canonical beat below `untilBeat`, in
+/// playback order: wrap by wrap, the snapshot's own order within a wrap, its final offs on the next
+/// wrap's start.
+std::vector<std::pair<bool, int>> occurrenceSequence(const Snapshot& snapshot, double untilBeat) {
+    std::vector<std::pair<bool, int>> sequence;
+    for (int k = 0;; ++k) {
+        bool any = false;
+        for (std::size_t i = 0; i < snapshot.count; ++i) {
+            const NoteEvent& e = snapshot.events[i];
+            const double beat = e.beat >= snapshot.endBeat ? (k + 1) * snapshot.endBeat : k * snapshot.endBeat + e.beat;
+            if (beat < untilBeat) {
+                sequence.emplace_back(e.on, e.pitch);
+                any = true;
+            }
+        }
+        if (!any || !snapshot.loop) {
+            break;
+        }
+    }
+    return sequence;
+}
+
+}  // namespace
+
+TEST_CASE("regression: carried-over events keep their chronological order") {
+    SUBCASE("300 notes on one pitch inside one beat") {
+        std::vector<NoteEvent> notes;
+        for (int i = 0; i < 300; ++i) {
+            notes.push_back({i * 0.002, true, 60, 100});
+            notes.push_back({i * 0.002 + 0.001, false, 60, 0});
+        }
+        Host host;
+        host.adopt(snapshotOf(notes, 1.0, /*loop=*/false));
+        Model model;
+        const std::vector<Ev> first = host.run(0.0, 24000, true);  // 600 events for one block
+        model.take(host, first, 24000);
+        // Everything the scratch holds beyond the reserve and the start's own release-all.
+        CHECK(first.size() == Scheduler::kMaxEventsPerBlock - Scheduler::kReservedReleaseEvents - 1);
+        CHECK_FALSE(host.lastOk);
+        const std::vector<Ev> rest = host.run(1.0, 512, true);  // the second of ceil(600 / 480) blocks
+        model.take(host, rest, 512);
+        CHECK(rest.size() == 600 - first.size());
+        CHECK(std::all_of(rest.begin(), rest.end(), [](const Ev& e) { return e.offset == 0; }));
+        CHECK(host.lastOk);
+        REQUIRE(!rest.empty());
+        CHECK_FALSE(rest.back().on);
+        CHECK(model.silent());
+        CHECK(host.run(1.0 + 512.0 / kSamplesPerBeat, 512, true) == kNone);
+        CHECK(host.lastOk);
+    }
+    SUBCASE("100 alternating quarter-beat chords in one 25-beat block: the stale backlog is dropped loudly") {
+        DocumentStore store;
+        for (int i = 0; i < 100; ++i) {
+            store.appendChord(i % 2 ? chord(9, "min") : chord(0, "maj"), 0.25, 100);
+        }
+        const Compiled compiled = compile(store.doc());
+        REQUIRE(compiled.endBeat == 25.0);
+        Host host;
+        host.adopt(snapshotOf(compiled, /*loop=*/false));
+        Model model;
+        const std::vector<Ev> first = host.run(0.0, 600001, true);
+        model.take(host, first, 600001);
+        CHECK_FALSE(host.lastOk);
+        // The next block starts 25 beats later: the backlog is more than kMaxLagBeats old. It is dropped
+        // (reported), every progression note released, and the position chased (past the end: nothing).
+        const std::vector<Ev> recovery = host.run(600001.0 / kSamplesPerBeat, 512, true);
+        model.take(host, recovery, 512);
+        CHECK_FALSE(host.lastOk);
+        CHECK(model.silent());
+        CHECK(std::all_of(recovery.begin(), recovery.end(), [](const Ev& e) { return !e.on; }));
+        CHECK(host.run((600001.0 + 512.0) / kSamplesPerBeat, 512, true) == kNone);
+        CHECK(host.lastOk);
+    }
+}
+
+TEST_CASE("regression: a coincident group larger than the scratch drains across blocks") {
+    std::vector<NoteEvent> notes;  // 600 distinct beats that all quantise to sample 24000
+    for (int i = 0; i < 300; ++i) {
+        notes.push_back({1.0 + i * 1e-9, true, 60, 100});
+        notes.push_back({1.0 + i * 1e-9 + 5e-10, false, 60, 0});
+    }
+    Host host;
+    host.adopt(snapshotOf(notes, 2.0, /*loop=*/false));
+    Model model;
+    const std::vector<Ev> first = host.run(0.0, 48000, true);
+    model.take(host, first, 48000);
+    CHECK(first.size() == Scheduler::kMaxEventsPerBlock - Scheduler::kReservedReleaseEvents - 1);
+    CHECK(std::all_of(first.begin(), first.end(), [](const Ev& e) { return e.offset == 24000; }));
+    CHECK_FALSE(host.lastOk);
+    const std::vector<Ev> rest = host.run(2.0, 512, true);  // the second of ceil(600 / 480) blocks
+    model.take(host, rest, 512);
+    CHECK(rest.size() == 600 - first.size());
+    CHECK(std::all_of(rest.begin(), rest.end(), [](const Ev& e) { return e.offset == 0; }));
+    CHECK(host.lastOk);
+    CHECK(model.silent());
+    for (int block = 0; block < 10; ++block) {
+        CAPTURE(block);
+        REQUIRE(host.run(2.0 + (block + 1) * 512.0 / kSamplesPerBeat, 512, true) == kNone);
+        REQUIRE(host.lastOk);
+    }
+}
+
+TEST_CASE("regression: a backlog older than kMaxLagBeats is dropped loudly, with release-all and chase") {
+    std::vector<NoteEvent> dense;  // 127 pitches for a quarter beat: 254 events per wrap
+    for (int p = 1; p < 128; ++p) {
+        dense.push_back({0.0, true, p, 100});
+    }
+    for (int p = 1; p < 128; ++p) {
+        dense.push_back({0.25, false, p, 0});
+    }
+    Host host;
+    host.adopt(snapshotOf(dense, 0.25));
+    Model model;
+    // Two beats in one block: 2032 events, of which one scratch-full is emitted; the rest is ~1.5 beats
+    // behind by the time the next block starts.
+    model.take(host, host.run(0.0, 48000, true), 48000);
+    CHECK_FALSE(host.lastOk);
+    const std::vector<Ev> dropped = host.run(2.0, 512, true);
+    model.take(host, dropped, 512);
+    CHECK_FALSE(host.lastOk);  // the stale backlog is dropped: reported
+    // Every progression note was released, then the position chased: at beat 2.0 the wrap's attacks are
+    // the timeline's own (an attack exactly on the block start is not chased), so the block holds offs
+    // for whatever sounded, then 127 ons.
+    REQUIRE(!dropped.empty());
+    CHECK(std::all_of(dropped.begin(), dropped.end(), [](const Ev& e) { return e.offset == 0; }));
+    const auto firstOn = std::find_if(dropped.begin(), dropped.end(), [](const Ev& e) { return e.on; });
+    CHECK(std::all_of(firstOn, dropped.end(), [](const Ev& e) { return e.on; }));
+    CHECK(std::count_if(dropped.begin(), dropped.end(), [](const Ev& e) { return e.on; }) == 127);
+    // In sync again: the next block is complete and carries exactly its own events.
+    const std::vector<Ev> next = host.run(2.0 + 512.0 / kSamplesPerBeat, 5488, true);  // up to beat 2.25
+    model.take(host, next, 5488);
+    CHECK(next == kNone);
+    CHECK(host.lastOk);
+    const std::vector<Ev> boundary = host.run(2.25, 6000, true);
+    model.take(host, boundary, 6000);
+    CHECK(boundary.size() == 254);
+    CHECK(std::all_of(boundary.begin(), boundary.end(), [](const Ev& e) { return e.offset == 0; }));
+    CHECK(host.lastOk);
+    model.take(host, host.run(2.5, 512, false), 512);
+    CHECK(model.silent());
+}
+
+TEST_CASE("regression: sustained overload stays bounded and never leaves stuck notes") {
+    std::vector<NoteEvent> dense;  // 127 pitches for a quarter beat: 254 events per wrap
+    for (int p = 1; p < 128; ++p) {
+        dense.push_back({0.0, true, p, 100});
+    }
+    for (int p = 1; p < 128; ++p) {
+        dense.push_back({0.25, false, p, 0});
+    }
+    Host host;
+    host.adopt(snapshotOf(dense, 0.25));
+    Model model;
+    long position = 0;
+    int incomplete = 0;
+    int allLateRun = 0;
+    for (int block = 0; block < 40; ++block) {
+        CAPTURE(block);
+        const double ppq = static_cast<double>(position) * kBpm / (60.0 * kSr);
+        const std::vector<Ev> events = host.run(ppq, 18000, true);  // 762 events per block
+        model.take(host, events, 18000);
+        incomplete += host.lastOk ? 0 : 1;
+        position += 18000;
+        // With the backlog bounded, the scheduler keeps catching up: a block whose events are all overdue
+        // (every offset 0) is followed within a few blocks by one that plays in real time again.
+        const bool allLate = std::all_of(events.begin(), events.end(), [](const Ev& e) { return e.offset == 0; });
+        allLateRun = allLate ? allLateRun + 1 : 0;
+        CHECK(allLateRun < 4);
+    }
+    CHECK(incomplete == 40);
+    // Small blocks drain whatever is left, then a wrap boundary arrives in sync: exactly its 254 events.
+    for (int block = 0; block < 20 && !host.lastOk; ++block) {
+        const double ppq = static_cast<double>(position) * kBpm / (60.0 * kSr);
+        model.take(host, host.run(ppq, 600, true), 600);
+        position += 600;
+    }
+    REQUIRE(host.lastOk);
+    const long toBoundary = 6000 - position % 6000;
+    model.take(host, host.run(static_cast<double>(position) * kBpm / (60.0 * kSr), static_cast<int>(toBoundary), true),
+               static_cast<int>(toBoundary));
+    position += toBoundary;
+    const std::vector<Ev> boundary = host.run(static_cast<double>(position) * kBpm / (60.0 * kSr), 6000, true);
+    model.take(host, boundary, 6000);
+    CHECK(boundary.size() == 254);
+    CHECK(host.lastOk);
+    model.take(host, host.run(static_cast<double>(position + 6000) * kBpm / (60.0 * kSr), 512, false), 512);
+    CHECK(model.silent());
+}
+
+TEST_CASE("regression: a tempo change neither loses nor duplicates a boundary attack") {
+    SUBCASE("an attack rounded just past the block edge is deferred, then emitted once (120 -> 119.94)") {
+        const std::vector<NoteEvent> one{{(512.0 - 0.4999) / 24000.0, true, 60, 100}, {2.0, false, 60, 0}};
+        Host host;
+        host.adopt(snapshotOf(one, 2.0, /*loop=*/false));
+        CHECK(host.run(0.0, 512, true, 120.0) == kNone);
+        const std::vector<Ev> second = host.run(512.0 / 24000.0, 512, true, 119.94);
+        CAPTURE(describe(second));
+        CHECK(second == std::vector<Ev>{on(0, 60)});
+        CHECK(host.scheduler.sounding(60));
+        CHECK(host.run(512.0 / 24000.0 + 512.0 * 119.94 / (60.0 * kSr), 512, true, 119.94) == kNone);
+    }
+    SUBCASE("an attack rounded just before the block edge is emitted once (120 -> 120.06)") {
+        const std::vector<NoteEvent> one{{(512.0 - 0.5001) / 24000.0, true, 60, 100}, {2.0, false, 60, 0}};
+        Host host;
+        host.adopt(snapshotOf(one, 2.0, /*loop=*/false));
+        const std::vector<Ev> first = host.run(0.0, 512, true, 120.0);
+        CAPTURE(describe(first));
+        CHECK(first == std::vector<Ev>{on(511, 60)});
+        CHECK(host.run(512.0 / 24000.0, 512, true, 120.06) == kNone);
+        CHECK(host.scheduler.sounding(60));
+    }
+}
+
+TEST_CASE("regression: tempo jitter on every block emits each occurrence exactly once, in order") {
+    const Snapshot snapshot = snapshotOf(cThenAm());
+    Host host;
+    host.adopt(snapshot);
+    Model model;
+    std::mt19937 rng(7u);
+    auto randInt = [&rng](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rng); };
+    auto randReal = [&rng](double lo, double hi) { return std::uniform_real_distribution<double>(lo, hi)(rng); };
+    long double ppq = 0.0L;  // the host's own running position
+    for (int block = 0; block < 3000; ++block) {
+        CAPTURE(block);
+        const int nFrames = randInt(1, 2048);
+        const double bpm = 120.0 + randReal(-1.0, 1.0);
+        model.take(host, host.run(static_cast<double>(ppq), nFrames, true, bpm), nFrames);
+        REQUIRE(host.lastOk);
+        ppq += static_cast<long double>(nFrames) * bpm / (60.0L * kSr);
+    }
+    // Everything emitted is the occurrence sequence, as a prefix, and that prefix reaches the end.
+    const double finalBeat = static_cast<double>(ppq);
+    const auto atLeast = occurrenceSequence(snapshot, finalBeat - 0.001);
+    const auto atMost = occurrenceSequence(snapshot, finalBeat + 0.001);
+    REQUIRE(model.sequence.size() >= atLeast.size());
+    REQUIRE(model.sequence.size() <= atMost.size());
+    for (std::size_t i = 0; i < model.sequence.size(); ++i) {
+        CAPTURE(i);
+        REQUIRE(model.sequence[i].on == atMost[i].first);
+        REQUIRE(model.sequence[i].pitch == atMost[i].second);
+    }
 }
