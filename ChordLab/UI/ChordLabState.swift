@@ -1,13 +1,14 @@
 import SwiftUI
 
 /// UI-side state. Logic lives in C++; this object only mirrors what the plugin
-/// pushes (JSON) and forwards user intent (commands, MIDI) back.
+/// pushes (snapshot / error JSON) and forwards user intent (commands, MIDI) back.
 class ChordLabState: NSObject, ObservableObject {
   var params: [Param] = []
   @Published var bundleID = String("")
-  @Published var testValue: Int = 0        // M0 spike 4: round-trips through the state chunk
-  @Published var stateJson: String = ""
-  @Published var spikeArp: Bool = false  // M0 spike 2
+  /// The last snapshot the plugin pushed; nil until the first one arrives.
+  @Published var snapshot: Snapshot?
+  /// The last command the plugin rejected, or a decode failure; cleared by the next good snapshot.
+  @Published var lastError: String?
 
   let beginEdit: @MainActor (Int) -> Void
   let doEdit: @MainActor (Int, Double) -> Void
@@ -44,30 +45,52 @@ class ChordLabState: NSObject, ObservableObject {
     }
   }
 
+  // MARK: - Preview (Task 2.4 routes palette presses through here)
+
   @MainActor func sendChord(_ pitches: [UInt8], on: Bool, velocity: UInt8 = 100) {
     for p in pitches {
       sendMidi(on ? 0x90 : 0x80, p, on ? velocity : 0)
     }
   }
 
-  @MainActor func setTestValue(_ v: Int) {
-    testValue = v
-    var value = Int32(v)
-    sendCommand(kMsgTagSetTestValue, Data(bytes: &value, count: MemoryLayout<Int32>.size))
+  // MARK: - Commands (engine wire format, json_api.h)
+
+  /// Sends one command, e.g. `["cmd": "appendChord", "root": 0, "type": "maj"]`; `"schema": 1` is added
+  /// here. The plugin answers with a snapshot (`kMsgTagSnapshot`) or an error (`kMsgTagError`).
+  @MainActor func send(command: [String: Any]) {
+    var message = command
+    message["schema"] = 1
+    guard JSONSerialization.isValidJSONObject(message),
+          let data = try? JSONSerialization.data(withJSONObject: message) else {
+      lastError = "command is not valid JSON: \(command)"
+      return
+    }
+    sendCommand(kMsgTagCommand, data)
   }
 
-  /// Called with the JSON the plugin pushes on open and after every change.
-  @MainActor func setSpikeArp(_ on: Bool) {
-    spikeArp = on
-    var value: Int32 = on ? 1 : 0
-    sendCommand(kMsgTagSpikeArp, Data(bytes: &value, count: MemoryLayout<Int32>.size))
+  /// Asks the plugin to push its current snapshot.
+  @MainActor func requestSnapshot() {
+    sendCommand(kMsgTagRequestSnapshot, Data())
   }
 
-  func applyState(json: Data) {
-    stateJson = String(decoding: json, as: UTF8.self)
-    if let obj = try? JSONSerialization.jsonObject(with: json) as? [String: Any] {
-      if let v = obj["test"] as? Int { testValue = v }
-      if let a = obj["arp"] as? Int { spikeArp = a != 0 }
+  // MARK: - Messages from the plugin
+
+  /// `kMsgTagSnapshot` payload.
+  func applySnapshot(json: Data) {
+    do {
+      snapshot = try JSONDecoder().decode(Snapshot.self, from: json)
+      lastError = nil
+    } catch {
+      lastError = "snapshot decode failed: \(error)"
+    }
+  }
+
+  /// `kMsgTagError` payload.
+  func applyError(json: Data) {
+    if let message = try? JSONDecoder().decode(ErrorJSON.self, from: json) {
+      lastError = message.error
+    } else {
+      lastError = String(decoding: json, as: UTF8.self)
     }
   }
 }

@@ -1,17 +1,41 @@
 import SwiftUI
 
-/// M0 host-contract spikes (plan Tasks 0.3–0.6). Replaced by the real UI in M2.
+/// Temporary M2.1 screen: proves the JSON bridge round-trips (commands in, snapshots and errors out).
+/// Replaced by the key bar and palette grid in Tasks 2.2–2.3.
 struct ContentView: View {
   @EnvironmentObject var state: ChordLabState
   private let cMajor: [UInt8] = [60, 64, 67]
 
   var body: some View {
     ZStack {
-      Color(red: 0.06, green: 0.08, blue: 0.22)
-      VStack(spacing: 24) {
-        Text("ChordLab — M0 spikes").font(.title2).foregroundStyle(.white)
+      Color(red: 0.04, green: 0.07, blue: 0.25)
+      VStack(spacing: 18) {
+        Text("ChordLab — M2.1 bridge").font(.title2).foregroundStyle(.white)
 
-        // Spike 1: preview a chord while the mouse is held.
+        if let snapshot = state.snapshot {
+          Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 6) {
+            GridRow { Text("Project key"); Text(snapshot.projectKeyName) }
+            GridRow { Text("Browsed key"); Text(snapshot.browsedKeyName) }
+            GridRow { Text("Palette"); Text("\(snapshot.palette.cells.count) cells, \(snapshot.palette.tiers) tiers") }
+            GridRow { Text("Events"); Text("\(snapshot.events.count), ending at beat \(snapshot.endBeat, specifier: "%.2f")") }
+          }
+          .foregroundStyle(.white)
+          .font(.body.monospacedDigit())
+        } else {
+          Text("Waiting for a snapshot…").foregroundStyle(.gray)
+        }
+
+        HStack(spacing: 12) {
+          Button("Append C") { state.send(command: ["cmd": "appendChord", "root": 0, "type": "maj"]) }
+          Button("Browse +1") { state.send(command: ["cmd": "browseKey", "steps": 1]) }
+          Button("Home") { state.send(command: ["cmd": "browseKey", "home": true]) }
+        }
+
+        if let error = state.lastError {
+          Text("Error: \(error)").foregroundStyle(.red).font(.callout)
+        }
+
+        // Spike 1: preview a chord while the mouse is held (Live verification still pending).
         Text("C major (hold)")
           .font(.title3).foregroundStyle(.white)
           .padding(.horizontal, 28).padding(.vertical, 16)
@@ -28,25 +52,11 @@ struct ContentView: View {
             guard let url = ExportFixture.prepareExportFile() else { return NSItemProvider() }
             return NSItemProvider(contentsOf: url) ?? NSItemProvider()
           }
-
-        // Spike 4: a value that must survive save/reload through the state chunk.
-        HStack {
-          Text("Chunk test value: \(state.testValue)").foregroundStyle(.white)
-          Stepper("", value: Binding(get: { state.testValue },
-                                     set: { state.setTestValue($0) }))
-            .labelsHidden()
-        }
-        // Spike 2: ppq-driven test arpeggio (one 1/8-note per beat, C D E F) while Live plays.
-        Toggle("Spike 2: ppq test arp (route track 2, press play in Live)",
-               isOn: Binding(get: { state.spikeArp }, set: { state.setSpikeArp($0) }))
-          .toggleStyle(.switch).foregroundStyle(.white)
-
-        Text(state.stateJson).font(.caption.monospaced()).foregroundStyle(.gray)
-          .textSelection(.enabled)
       }
       .padding()
     }
     .edgesIgnoringSafeArea(.all)
+    .onAppear { state.requestSnapshot() }
   }
 }
 

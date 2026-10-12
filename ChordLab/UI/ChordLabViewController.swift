@@ -58,13 +58,19 @@ public typealias MIDIVelocity = UInt8
     hostingController.view.pinToSuperviewEdges()
   }
 
-  /// Messages from C++ (sendArbitraryMsgFromDelegate).
+  /// Messages from C++ (SendArbitraryMsgFromDelegate): snapshots and command errors.
   override func onMessage(_ msgTag: Int, _ ctrlTag: Int, _ msg: Data!) -> Bool {
-    if msgTag == kMsgTagStateToUI, let msg = msg {
-      state.applyState(json: msg)
+    guard let msg = msg else { return false }
+    switch msgTag {
+    case kMsgTagSnapshot:
+      state.applySnapshot(json: msg)
       return true
+    case kMsgTagError:
+      state.applyError(json: msg)
+      return true
+    default:
+      return false
     }
-    return false
   }
 
   override func sendControlMsgFromDelegate(ctrlTag: Int, msgTag: Int, msg: Data!) {

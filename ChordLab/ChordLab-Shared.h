@@ -10,10 +10,13 @@ const NSInteger kNumParams = 1;
 
 const NSInteger kNoCtrlTag = -1;
 
+// Message tags of the UI <-> plugin bridge. Every payload is UTF-8 JSON in the engine's wire format
+// (engine/include/chordlab/json_api.h): commands and snapshots carry "schema":1.
 // UI -> plugin
-const NSInteger kMsgTagSetTestValue = 3;   // payload: int32 (M0 spike 4)
-const NSInteger kMsgTagSpikeArp = 5;       // payload: int32 0/1 (M0 spike 2: ppq-driven test arpeggio)
+const NSInteger kMsgTagCommand = 10;          // payload: one command, {"schema":1,"cmd":"...",...}
+const NSInteger kMsgTagRequestSnapshot = 11;  // no payload: asks for a fresh snapshot
 // plugin -> UI
-const NSInteger kMsgTagStateToUI = 4;      // payload: UTF-8 JSON of the plugin state
+const NSInteger kMsgTagSnapshot = 20;         // payload: snapshotJson (document + palette)
+const NSInteger kMsgTagError = 21;            // payload: {"schema":1,"error":"..."} for a rejected command
 
 #endif /* ChordLab_Shared_h */
