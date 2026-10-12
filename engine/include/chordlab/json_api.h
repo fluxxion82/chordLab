@@ -34,10 +34,10 @@ constexpr int kDefaultEditorHeight = 620;
 ///  "projectKey":<key>, "browsedKey":<key>, "projectKeyName":"C Ionian", "browsedKeyName":"G Ionian",
 ///  "progressionLoop":true, "followHost":true, "endBeat":4.0,
 ///  "events":[{"id":1,"root":0,"type":"maj","symbol":"C","roman":"I","startBeat":0.0,
-///             "lengthBeats":4.0,"velocity":100,"voicing":[48,52,55]}, ...],
+///             "lengthBeats":4.0,"velocity":100,"voicing":[60,64,67]}, ...],
 ///  "palette":{"tiers":5,
 ///             "cells":[{"degree":0,"tier":1,"root":0,"type":"maj","symbol":"C","roman":"I",
-///                       "family":"Major","filled":true,"voicing":[48,52,55]}, ...]}}
+///                       "family":"Major","filled":true,"voicing":[60,64,67]}, ...]}}
 /// ```
 /// Events are in playback order with `startBeat` accumulated as `Document::startBeatOf` does; `symbol` is
 /// the Klimper-style symbol spelled in the project key, `roman` the Standard-style numeral relative to the

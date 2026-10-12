@@ -161,7 +161,7 @@ TEST_CASE("snapshot: appendChord yields one event spelled and numbered in the pr
     CHECK(e.at("startBeat").get<double>() == 0.0);
     CHECK(e.at("lengthBeats").get<double>() == 4.0);
     CHECK(e.at("velocity") == 100);
-    CHECK(e.at("voicing") == json({48, 52, 55}));
+    CHECK(e.at("voicing") == json({60, 64, 67}));
 }
 
 TEST_CASE("snapshot: start beats accumulate and symbols follow the project key, not the browsed key") {
@@ -206,7 +206,7 @@ TEST_CASE("snapshot: palette carries the C major grid with Klimper symbols, nume
     CHECK(c.at("roman") == "I");
     CHECK(c.at("family") == "Major");
     CHECK(c.at("filled") == true);
-    CHECK(c.at("voicing") == json({48, 52, 55}));
+    CHECK(c.at("voicing") == json({60, 64, 67}));
 
     CHECK(cellAt(snap, 1, 1).at("family") == "Minor");
     CHECK(cellAt(snap, 6, 1).at("family") == "Other");
