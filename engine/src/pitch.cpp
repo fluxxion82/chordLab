@@ -17,6 +17,9 @@ constexpr std::array<PitchClass, kNumLetters> kNaturalPc{9, 11, 0, 2, 4, 5, 7};
 // Circle-of-fifths index of each natural Ionian key, indexed 'A'..'G' (A=3, B=5, C=0, D=2, E=4, F=-1, G=1).
 constexpr std::array<int, kNumLetters> kFifthsIndex{3, 5, 0, 2, 4, -1, 1};
 
+// Major degree (0..6) altered by each interval above the tonic; see `majorDegreeOfInterval`.
+constexpr std::array<int, 12> kMajorDegreeOfInterval{0, 1, 1, 2, 2, 3, 3, 4, 5, 5, 6, 6};
+
 // Signature offset of each mode relative to Ionian on the same tonic, indexed by Mode.
 constexpr std::array<int, kNumModes> kModeSignatureOffset{
     0,   // Ionian
@@ -67,7 +70,8 @@ int letterWithNaturalPc(PitchClass pc) {
 /// Accidental count that moves `letter` to `pc`, as the representative of the difference mod 12 in
 /// -2..9. The formula alone does not bound the result to -2..2: that holds only because every caller
 /// passes a letter within two semitones of `pc`, which is true for the degrees of any valid key
-/// (single-accidental tonic, declared mode) and is what keeps `Spelling::alter` in -2..2.
+/// (single-accidental tonic, declared mode) and for a chromatic tone read from the major degree it
+/// alters (`spell`), and is what keeps `Spelling::alter` in -2..2.
 int alterToReach(char letter, PitchClass pc) {
     const int diff = pc - naturalPitchClass(letter);
     return ((diff % 12) + 12 + 2) % 12 - 2;
@@ -147,21 +151,35 @@ Spelling spellDegree(const Key& key, int degree) {
     return Spelling{letter, alterToReach(letter, pc)};
 }
 
+int majorDegreeOfInterval(int semitones) {
+    return kMajorDegreeOfInterval[static_cast<std::size_t>(pitchClassOf(semitones))];
+}
+
 Spelling spell(PitchClass pc, const Key& key) {
     const PitchClass target = pitchClassOf(pc);
     const int degree = degreeOf(target, key.tonicPc(), key.mode);
     if (degree >= 0) {
         return spellDegree(key, degree);
     }
+    // A chromatic tone: the letter of the parallel-major degree it alters (b2, b3, #4, b6, b7), from the
+    // same table as the roman numerals, with the accidental that reaches it from that letter.
+    const Key major{key.tonic, Mode::Ionian};
+    const Spelling base = spellDegree(major, majorDegreeOfInterval(target - major.tonicPc()));
+    const int alter = alterToReach(base.letter, target);
+    assert(alter >= -2 && alter <= 2);  // the major degree is always within a semitone of the tone
     const int natural = letterWithNaturalPc(target);
-    if (natural >= 0) {
+    if (alter != 0 && natural >= 0) {
+        // Cb, Fb, E#, B# and any double accidental on a white key fold to the natural name.
         return Spelling{letterAt(natural), 0};
     }
-    // A black key: raise the white key below in sharp-side keys, lower the one above in flat-side keys.
-    const int alter = signatureOf(key) >= 0 ? 1 : -1;
-    const int letter = letterWithNaturalPc(pitchClassOf(target - alter));
-    assert(letter >= 0);  // every black key is a semitone from a white key on both sides
-    return Spelling{letterAt(letter), alter};
+    if (alter == 2 || alter == -2) {
+        // A double accidental on a black key (Ex in B# major): the single accidental of the same sign.
+        const int sign = alter > 0 ? 1 : -1;
+        const int letter = letterWithNaturalPc(pitchClassOf(target - sign));
+        assert(letter >= 0);  // every black key is a semitone from a white key on both sides
+        return Spelling{letterAt(letter), sign};
+    }
+    return Spelling{base.letter, alter};
 }
 
 }  // namespace chordlab

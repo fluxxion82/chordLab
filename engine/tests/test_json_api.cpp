@@ -179,7 +179,7 @@ TEST_CASE("snapshot: start beats accumulate and symbols follow the project key, 
     CHECK(snap.at("events")[0].at("roman") == "V");
     const json& e = snap.at("events")[1];
     CHECK(e.at("id") == 2);
-    CHECK(e.at("symbol") == "Eb");  // chromatic in F major, spelled on the flat side; D# in the browsed key
+    CHECK(e.at("symbol") == "Eb");  // chromatic in F major: bVII by the parallel-major degree table; D# in the browsed key
     CHECK(e.at("roman") == "bVII");
     CHECK(e.at("startBeat").get<double>() == 4.0);
     CHECK(e.at("lengthBeats").get<double>() == 2.5);

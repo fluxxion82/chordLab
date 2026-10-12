@@ -28,6 +28,16 @@ PitchClass naturalPc(char letter) {
     return table[static_cast<std::size_t>(letter - 'A')];
 }
 
+/// True if some letter has `pc` as its natural pitch class.
+bool isWhiteKey(PitchClass pc) {
+    for (char letter = 'A'; letter <= 'G'; ++letter) {
+        if (naturalPc(letter) == pc) {
+            return true;
+        }
+    }
+    return false;
+}
+
 }  // namespace
 
 // --- Tonic / Key -------------------------------------------------------------
@@ -270,10 +280,27 @@ TEST_CASE("spellDegree: every canonical key uses each letter once and hits the s
     }
 }
 
+// --- majorDegreeOfInterval ---------------------------------------------------------
+
+TEST_CASE("majorDegreeOfInterval: every interval maps to the major degree it alters") {
+    // Major-scale members are their own degree; the rest are b2, b3, #4, b6, b7.
+    constexpr std::array<int, 12> expected{0, 1, 1, 2, 2, 3, 3, 4, 5, 5, 6, 6};
+    for (int interval = 0; interval < 12; ++interval) {
+        CAPTURE(interval);
+        CHECK(majorDegreeOfInterval(interval) == expected[static_cast<std::size_t>(interval)]);
+    }
+}
+
+TEST_CASE("majorDegreeOfInterval: reduces the interval modulo 12") {
+    CHECK(majorDegreeOfInterval(12) == 0);
+    CHECK(majorDegreeOfInterval(18) == 3);
+    CHECK(majorDegreeOfInterval(-2) == 6);
+}
+
 // --- spell -------------------------------------------------------------------------
 
 TEST_CASE("spell: plan cases") {
-    CHECK(spell(10, key('D', 0, Mode::Ionian)).text() == "A#");
+    CHECK(spell(10, key('D', 0, Mode::Ionian)).text() == "Bb");  // bVI of D major, not A#
     CHECK(spell(6, key('E', -1, Mode::Ionian)).text() == "Gb");
 }
 
@@ -284,29 +311,84 @@ TEST_CASE("spell: scale members use their degree spelling") {
     CHECK(spell(3, key('D', +1, Mode::Locrian)).text() == "D#");
     CHECK(spell(9, key('D', +1, Mode::Locrian)).text() == "A");
     CHECK(spell(2, key('D', +1, Mode::HarmonicMinor)).text() == "Cx");
+    CHECK(spell(3, key('B', 0, Mode::Ionian)).text() == "D#");  // the third of B major, not a bIII
 }
 
-TEST_CASE("spell: chromatic black keys take a sharp in sharp-side keys and a flat in flat-side keys") {
-    CHECK(spell(1, key('C', 0, Mode::Ionian)).text() == "C#");   // signature 0 counts as sharp-side
-    CHECK(spell(1, key('F', 0, Mode::Ionian)).text() == "Db");
-    CHECK(spell(8, key('G', 0, Mode::Ionian)).text() == "G#");
-    CHECK(spell(8, key('B', -1, Mode::Ionian)).text() == "Ab");
+TEST_CASE("spell: chromatic tones take the letter of the parallel-major degree they alter") {
+    // In C major: b2, b3, #4, b6, b7, the same accidentals as the roman numerals.
+    const Key cMajor = key('C', 0, Mode::Ionian);
+    CHECK(spell(1, cMajor).text() == "Db");
+    CHECK(spell(3, cMajor).text() == "Eb");
+    CHECK(spell(6, cMajor).text() == "F#");
+    CHECK(spell(8, cMajor).text() == "Ab");
+    CHECK(spell(10, cMajor).text() == "Bb");
+    // The same degrees read from other tonics.
+    CHECK(spell(1, key('F', 0, Mode::Ionian)).text() == "Db");   // b6 of F
+    CHECK(spell(8, key('G', 0, Mode::Ionian)).text() == "Ab");   // b2 of G, not G#
+    CHECK(spell(8, key('B', -1, Mode::Ionian)).text() == "Ab");  // b7 of Bb
+    CHECK(spell(6, key('E', -1, Mode::Ionian)).text() == "Gb");  // b3 of Eb
+    CHECK(spell(2, key('B', 0, Mode::Ionian)).text() == "D");    // b3 of B
+}
+
+TEST_CASE("spell: a mode's chromatic tones are read against its parallel major, not its own scale") {
+    // C Aeolian: the raised degrees that are in C major carry no accidental, as in the numerals.
+    const Key cAeolian = key('C', 0, Mode::Aeolian);
+    CHECK(spell(4, cAeolian).text() == "E");
+    CHECK(spell(9, cAeolian).text() == "A");
+    CHECK(spell(11, cAeolian).text() == "B");
+    // The tritone is #4 whatever the mode.
+    CHECK(spell(6, key('C', 0, Mode::HarmonicMinor)).text() == "F#");  // not Gb
     CHECK(spell(6, key('A', 0, Mode::HarmonicMinor)).text() == "F#");
-    CHECK(spell(6, key('C', 0, Mode::HarmonicMinor)).text() == "Gb");
     CHECK(spell(10, key('C', 0, Mode::HarmonicMinor)).text() == "Bb");
 }
 
 TEST_CASE("spell: chromatic white keys keep their natural name") {
-    CHECK(spell(5, key('G', 0, Mode::Ionian)).text() == "F");   // not E#
-    CHECK(spell(0, key('D', 0, Mode::Ionian)).text() == "C");   // not B#
-    CHECK(spell(4, key('E', -1, Mode::Ionian)).text() == "E");  // not Fb
-    CHECK(spell(11, key('F', 0, Mode::Ionian)).text() == "B");  // not Cb
-    CHECK(spell(7, key('A', 0, Mode::Ionian)).text() == "G");
+    CHECK(spell(5, key('G', 0, Mode::Ionian)).text() == "F");    // b7 of G, not E#
+    CHECK(spell(0, key('D', 0, Mode::Ionian)).text() == "C");    // b7 of D, not B#
+    CHECK(spell(4, key('E', -1, Mode::Ionian)).text() == "E");   // b2 of Eb would be Fb
+    CHECK(spell(11, key('F', 0, Mode::Ionian)).text() == "B");   // #4 of F
+    CHECK(spell(7, key('A', 0, Mode::Ionian)).text() == "G");    // b7 of A
+    CHECK(spell(11, key('A', -1, Mode::Ionian)).text() == "B");  // b3 of Ab would be Cb
+    CHECK(spell(9, key('F', +1, Mode::Ionian)).text() == "A");   // b3 of F#
     CHECK(spell(9, key('C', 0, Mode::HarmonicMinor)).text() == "A");
+}
+
+TEST_CASE("spell: double accidentals fold to the natural, or to a single accidental on a black key") {
+    CHECK(spell(7, key('C', +1, Mode::Ionian)).text() == "G");   // #4 of C# would be Fx
+    CHECK(spell(0, key('C', -1, Mode::Ionian)).text() == "C");   // b2 of Cb would be Dbb
+    CHECK(spell(6, key('B', +1, Mode::Ionian)).text() == "F#");  // #4 of B# would be Ex: no natural
+    CHECK(spell(1, key('B', +1, Mode::Ionian)).text() == "C#");  // b2 of B#: Cx lowered
 }
 
 TEST_CASE("spell: reduces the pitch class modulo 12") {
     const Key cMajor = key('C', 0, Mode::Ionian);
-    CHECK(spell(13, cMajor).text() == "C#");
+    CHECK(spell(13, cMajor).text() == "Db");
     CHECK(spell(-1, cMajor).text() == "B");
+}
+
+TEST_CASE("spell: every pc in every key round-trips, and chromatic tones carry at most one accidental") {
+    for (char letter = 'A'; letter <= 'G'; ++letter) {
+        for (int alter = -1; alter <= 1; ++alter) {
+            for (const Mode mode : kAllModes) {
+                const Key k = key(letter, alter, mode);
+                for (PitchClass pc = 0; pc < 12; ++pc) {
+                    CAPTURE(letter);
+                    CAPTURE(alter);
+                    CAPTURE(static_cast<int>(mode));
+                    CAPTURE(pc);
+                    const Spelling s = spell(pc, k);
+                    CHECK(s.letter >= 'A');
+                    CHECK(s.letter <= 'G');
+                    CHECK(pitchClassOf(naturalPc(s.letter) + s.alter) == pc);
+                    if (!inScale(pc, k.tonicPc(), mode)) {
+                        CHECK(s.alter >= -1);
+                        CHECK(s.alter <= 1);
+                        if (isWhiteKey(pc)) {
+                            CHECK(s.alter == 0);
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

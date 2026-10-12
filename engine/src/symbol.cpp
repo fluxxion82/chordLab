@@ -12,11 +12,6 @@ namespace chordlab {
 
 namespace {
 
-/// Numeral degree (0..6) of each interval above the tonic, relative to the major scale: the degree the
-/// interval holds in a parallel mode (1 is b2, 3 is b3, 6 is #4, 8 is b6, 10 is b7). The tritone is the
-/// only interval two modes spell differently (Lydian #4, Locrian b5); it is taken as #4.
-constexpr std::array<int, 12> kDegreeOfInterval{0, 1, 1, 2, 2, 3, 3, 4, 5, 5, 6, 6};
-
 constexpr std::array<std::string_view, 7> kUpperNumerals{"I", "II", "III", "IV", "V", "VI", "VII"};
 constexpr std::array<std::string_view, 7> kLowerNumerals{"i", "ii", "iii", "iv", "v", "vi", "vii"};
 
@@ -118,10 +113,10 @@ std::string chordSymbol(const Chord& chord, const Key& spellingKey, SymbolStyle 
 
 std::string romanNumeral(const Chord& chord, const Key& projectKey, SymbolStyle style) {
     assertValidChord(chord);
-    // Numerals are read against the parallel major of the project tonic, whatever the project mode.
+    // Numerals are read against the parallel major of the project tonic, whatever the project mode, by
+    // the same degree table `spell` uses for chromatic roots (pitch.h), so symbol and numeral agree.
     const PitchClass tonic = projectKey.tonicPc();
-    const int interval = pitchClassOf(chord.root - tonic);
-    const int degree = kDegreeOfInterval[static_cast<std::size_t>(interval)];
+    const int degree = majorDegreeOfInterval(chord.root - tonic);
     const PitchClass degreePc = scalePitchClasses(tonic, Mode::Ionian)[static_cast<std::size_t>(degree)];
     // Zero for a major-scale member; otherwise +1 (#4) or -1 (b2, b3, b6, b7).
     const int alteration = signedSemitones(degreePc, chord.root);
