@@ -270,6 +270,24 @@ TEST_CASE("appendChord: returns -1 and changes nothing once the id counter reach
 
 // --- findIndex -------------------------------------------------------------------------
 
+TEST_CASE("appendChord: the id counter advances only for an append that happened") {
+    DocumentStore store;
+    CHECK(store.nextId() == 1);
+    CHECK(store.appendChord(kC, kNaN) == kNoEventId);
+    CHECK(store.appendChord(kC, kInf) == kNoEventId);
+    CHECK(store.nextId() == 1);
+    CHECK(store.appendChord(kC) == 1);
+    CHECK(store.nextId() == 2);
+    REQUIRE(store.undo());
+    CHECK(store.nextId() == 2);  // not undoable state
+
+    DocumentStore exhausted(INT_MAX);
+    CHECK(exhausted.nextId() == INT_MAX);
+    CHECK(exhausted.appendChord(kC) == kNoEventId);
+    CHECK(exhausted.nextId() == INT_MAX);
+    CHECK(exhausted.doc().events.empty());
+}
+
 TEST_CASE("findIndex: position in playback order, -1 when absent") {
     DocumentStore store = threeChords();
     CHECK(store.findIndex(1) == 0);

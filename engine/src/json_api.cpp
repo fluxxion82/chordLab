@@ -235,8 +235,53 @@ private:
     std::string& error_;
 };
 
+/// Guards that run on the raw text before the parser sees it:
+/// - longer than `kMaxJsonBytes`: refused outright;
+/// - a raw NUL byte anywhere: nlohmann's lexer reads it as end of input, so "valid command" + NUL +
+///   anything would apply the command and silently drop the rest;
+/// - nested deeper than `kMaxJsonDepth`, counting `{` and `[` outside string literals (a backslash
+///   escapes the next character, so an escaped quote does not end a literal).
+/// Unbalanced brackets and unterminated strings are left to the parser, which rejects them.
+bool prescan(std::string_view text, std::string& error) {
+    if (text.size() > kMaxJsonBytes) {
+        error = "message longer than " + std::to_string(kMaxJsonBytes) + " bytes";
+        return false;
+    }
+    int depth = 0;
+    bool inString = false;
+    bool escaped = false;
+    for (const char c : text) {
+        if (c == '\0') {
+            error = "message contains a NUL byte";
+            return false;
+        }
+        if (inString) {
+            if (escaped) {
+                escaped = false;
+            } else if (c == '\\') {
+                escaped = true;
+            } else if (c == '"') {
+                inString = false;
+            }
+        } else if (c == '"') {
+            inString = true;
+        } else if (c == '{' || c == '[') {
+            if (++depth > kMaxJsonDepth) {
+                error = "message nested deeper than " + std::to_string(kMaxJsonDepth) + " levels";
+                return false;
+            }
+        } else if ((c == '}' || c == ']') && depth > 0) {
+            --depth;
+        }
+    }
+    return true;
+}
+
 /// Parses `text` into `out` and checks that it is an object carrying the supported schema.
 bool parseMessage(std::string_view text, json& out, std::string& error) {
+    if (!prescan(text, error)) {
+        return false;
+    }
     out = json::parse(text, nullptr, /*allow_exceptions=*/false);
     if (out.is_discarded()) {
         error = "malformed JSON";
@@ -420,55 +465,11 @@ bool applyToggle(DocumentStore& store, Fields& fields, Setter setter) {
     return true;
 }
 
-}  // namespace
+// --- Readers ---------------------------------------------------------------------------
 
-// --- Public API ------------------------------------------------------------------------
-
-std::string snapshotJson(const Document& doc, const Palette& palette) {
-    json events = json::array();
-    double beat = 0.0;  // accumulated left to right, exactly as Document::startBeatOf does
-    for (const ChordEvent& e : doc.events) {
-        json event = {{"id", e.id},
-                      {"root", e.chord.root},
-                      {"type", e.chord.type->id},
-                      {"symbol", chordSymbol(e.chord, doc.projectKey)},
-                      {"roman", romanNumeral(e.chord, doc.projectKey)},
-                      {"startBeat", beat},
-                      {"lengthBeats", e.lengthBeats},
-                      {"velocity", e.velocity},
-                      {"voicing", closeVoicing(e.chord)}};
-        events.push_back(std::move(event));
-        beat += e.lengthBeats;
-    }
-
-    json cells = json::array();
-    for (const PaletteCell& c : palette.cells) {
-        json cell = {{"degree", c.degree},
-                     {"tier", c.tier},
-                     {"root", c.chord.root},
-                     {"type", c.chord.type->id},
-                     {"symbol", c.symbol},
-                     {"roman", c.roman},
-                     {"family", familyName(c.chord.type->family)},
-                     {"filled", c.filled},
-                     {"voicing", closeVoicing(c.chord)}};
-        cells.push_back(std::move(cell));
-    }
-
-    const json snapshot = {{"schema", kJsonSchema},
-                           {"projectKey", keyToJson(doc.projectKey)},
-                           {"browsedKey", keyToJson(doc.browsedKey)},
-                           {"projectKeyName", keyName(doc.projectKey)},
-                           {"browsedKeyName", keyName(doc.browsedKey)},
-                           {"progressionLoop", doc.progressionLoop},
-                           {"followHost", doc.followHost},
-                           {"endBeat", beat},
-                           {"events", std::move(events)},
-                           {"palette", {{"tiers", palette.tiers}, {"cells", std::move(cells)}}}};
-    return snapshot.dump();
-}
-
-bool applyCommandJson(DocumentStore& store, std::string_view text, std::string& error) {
+/// `applyCommandJson` without the exception guard. The store is touched last, by one call that gives
+/// the strong guarantee, so a throw from anywhere in here leaves it untouched.
+bool applyCommand(DocumentStore& store, std::string_view text, std::string& error) {
     error.clear();
     json message;
     if (!parseMessage(text, message, error)) {
@@ -518,30 +519,9 @@ bool applyCommandJson(DocumentStore& store, std::string_view text, std::string& 
     return false;
 }
 
-std::string stateJson(const DocumentStore& store, int editorWidth, int editorHeight) {
-    const Document& doc = store.doc();
-    json events = json::array();
-    for (const ChordEvent& e : doc.events) {
-        json event = {{"id", e.id},
-                      {"root", e.chord.root},
-                      {"type", e.chord.type->id},
-                      {"lengthBeats", e.lengthBeats},
-                      {"velocity", e.velocity}};
-        events.push_back(std::move(event));
-    }
-    const json state = {{"schema", kJsonSchema},
-                        {"projectKey", keyToJson(doc.projectKey)},
-                        {"browsedKey", keyToJson(doc.browsedKey)},
-                        {"progressionLoop", doc.progressionLoop},
-                        {"followHost", doc.followHost},
-                        {"events", std::move(events)},
-                        {"nextId", store.nextId()},
-                        {"editor", {{"width", editorWidth}, {"height", editorHeight}}}};
-    return state.dump();
-}
-
-bool loadStateJson(DocumentStore& store, std::string_view text, std::string& error, int* editorWidth,
-                   int* editorHeight) {
+/// `loadStateJson` without the exception guard. Everything is parsed into locals first; the store and
+/// the out-params are written last, by steps that cannot throw.
+bool loadState(DocumentStore& store, std::string_view text, std::string& error, int* editorWidth, int* editorHeight) {
     error.clear();
     json message;
     if (!parseMessage(text, message, error)) {
@@ -622,6 +602,105 @@ bool loadStateJson(DocumentStore& store, std::string_view text, std::string& err
         *editorHeight = height;
     }
     return true;
+}
+
+/// Records the failure of a reader that threw: an allocation failure, or a nlohmann exception that the
+/// type checks did not anticipate. Runs inside the catch handler of a noexcept function, so it must not
+/// throw itself: a failure to assign just leaves `error` as it was.
+void setInternalError(std::string& error) noexcept {
+    try {
+        error = "internal error";
+    } catch (...) {  // NOLINT(bugprone-empty-catch)
+    }
+}
+
+}  // namespace
+
+// --- Public API ------------------------------------------------------------------------
+
+std::string snapshotJson(const Document& doc, const Palette& palette) {
+    json events = json::array();
+    double beat = 0.0;  // accumulated left to right, exactly as Document::startBeatOf does
+    for (const ChordEvent& e : doc.events) {
+        json event = {{"id", e.id},
+                      {"root", e.chord.root},
+                      {"type", e.chord.type->id},
+                      {"symbol", chordSymbol(e.chord, doc.projectKey)},
+                      {"roman", romanNumeral(e.chord, doc.projectKey)},
+                      {"startBeat", beat},
+                      {"lengthBeats", e.lengthBeats},
+                      {"velocity", e.velocity},
+                      {"voicing", closeVoicing(e.chord)}};
+        events.push_back(std::move(event));
+        beat += e.lengthBeats;
+    }
+
+    json cells = json::array();
+    for (const PaletteCell& c : palette.cells) {
+        json cell = {{"degree", c.degree},
+                     {"tier", c.tier},
+                     {"root", c.chord.root},
+                     {"type", c.chord.type->id},
+                     {"symbol", c.symbol},
+                     {"roman", c.roman},
+                     {"family", familyName(c.chord.type->family)},
+                     {"filled", c.filled},
+                     {"voicing", closeVoicing(c.chord)}};
+        cells.push_back(std::move(cell));
+    }
+
+    const json snapshot = {{"schema", kJsonSchema},
+                           {"projectKey", keyToJson(doc.projectKey)},
+                           {"browsedKey", keyToJson(doc.browsedKey)},
+                           {"projectKeyName", keyName(doc.projectKey)},
+                           {"browsedKeyName", keyName(doc.browsedKey)},
+                           {"progressionLoop", doc.progressionLoop},
+                           {"followHost", doc.followHost},
+                           {"endBeat", beat},
+                           {"events", std::move(events)},
+                           {"palette", {{"tiers", palette.tiers}, {"cells", std::move(cells)}}}};
+    return snapshot.dump();
+}
+
+std::string stateJson(const DocumentStore& store, int editorWidth, int editorHeight) {
+    const Document& doc = store.doc();
+    json events = json::array();
+    for (const ChordEvent& e : doc.events) {
+        json event = {{"id", e.id},
+                      {"root", e.chord.root},
+                      {"type", e.chord.type->id},
+                      {"lengthBeats", e.lengthBeats},
+                      {"velocity", e.velocity}};
+        events.push_back(std::move(event));
+    }
+    const json state = {{"schema", kJsonSchema},
+                        {"projectKey", keyToJson(doc.projectKey)},
+                        {"browsedKey", keyToJson(doc.browsedKey)},
+                        {"progressionLoop", doc.progressionLoop},
+                        {"followHost", doc.followHost},
+                        {"events", std::move(events)},
+                        {"nextId", store.nextId()},
+                        {"editor", {{"width", editorWidth}, {"height", editorHeight}}}};
+    return state.dump();
+}
+
+bool applyCommandJson(DocumentStore& store, std::string_view text, std::string& error) noexcept {
+    try {
+        return applyCommand(store, text, error);
+    } catch (...) {
+        setInternalError(error);
+        return false;
+    }
+}
+
+bool loadStateJson(DocumentStore& store, std::string_view text, std::string& error, int* editorWidth,
+                   int* editorHeight) noexcept {
+    try {
+        return loadState(store, text, error, editorWidth, editorHeight);
+    } catch (...) {
+        setInternalError(error);
+        return false;
+    }
 }
 
 }  // namespace chordlab

@@ -615,3 +615,152 @@ TEST_CASE("state: a bad state is rejected whole and the store keeps its document
     REQUIRE(store.undo());  // history intact
     CHECK(store.doc().events.empty());
 }
+
+// --- Boundary --------------------------------------------------------------------------
+
+namespace {
+
+const std::string kAppendC = R"({"schema":1,"cmd":"appendChord","root":0,"type":"maj"})";
+
+/// `text` followed by a NUL byte and garbage: what a C-string reader would silently truncate.
+std::string withNulTail(std::string text) {
+    text.push_back('\0');
+    text += R"(,"garbage")";
+    return text;
+}
+
+/// A valid append command padded with an ignored string field to exactly `total` bytes.
+std::string paddedAppend(std::size_t total) {
+    const std::string head = R"({"schema":1,"cmd":"appendChord","root":0,"type":"maj","pad":")";
+    const std::string tail = R"("})";
+    REQUIRE(total > head.size() + tail.size());
+    return head + std::string(total - head.size() - tail.size(), 'x') + tail;
+}
+
+/// A valid state padded with an ignored string field to exactly `total` bytes.
+std::string paddedState(std::size_t total) {
+    std::string text = stateJson(richStore());
+    text.pop_back();  // the closing brace
+    const std::string open = R"(,"pad":")";
+    const std::string close = R"("})";
+    REQUIRE(total > text.size() + open.size() + close.size());
+    return text + open + std::string(total - text.size() - open.size() - close.size(), 'x') + close;
+}
+
+/// An undo command whose ignored field `x` nests `arrays` arrays: `arrays + 1` levels in all.
+std::string nestedUndo(int arrays) {
+    return R"({"schema":1,"cmd":"undo","x":)" + std::string(static_cast<std::size_t>(arrays), '[') +
+           std::string(static_cast<std::size_t>(arrays), ']') + "}";
+}
+
+/// Checks that the state text is rejected and that the store, its history and its counter are untouched.
+void checkStateRejected(DocumentStore& store, const std::string& text) {
+    const Document before = store.doc();
+    const int nextId = store.nextId();
+    std::string error;
+    CHECK_FALSE(loadStateJson(store, text, error));
+    CHECK_FALSE(error.empty());
+    CHECK(store.doc() == before);
+    CHECK(store.nextId() == nextId);
+}
+
+}  // namespace
+
+TEST_CASE("boundary: a raw NUL byte anywhere rejects the message (the lexer would stop there)") {
+    DocumentStore store;
+    checkRejectedRaw(store, withNulTail(kAppendC));
+    checkRejectedRaw(store, std::string(1, '\0') + kAppendC);
+    std::string inside = kAppendC;
+    inside.insert(1, 1, '\0');
+    checkRejectedRaw(store, inside);
+    CHECK(store.doc().events.empty());
+    CHECK(store.nextId() == 1);
+    CHECK_FALSE(store.undo());
+
+    checkStateRejected(store, withNulTail(stateJson(richStore())));
+    CHECK_FALSE(store.undo());
+}
+
+TEST_CASE("boundary: an escaped \\u0000 is an ordinary character: it never matches a name and is ignored elsewhere") {
+    DocumentStore store;
+    checkRejectedRaw(store, R"({"schema":1,"cmd":"undo\u0000"})");
+    checkRejectedRaw(store, R"({"schema":1,"cmd":"appendChord","root":0,"type":"maj\u0000"})");
+    checkRejectedRaw(store, R"({"schema":1,"cmd":"setKey","letter":"C\u0000","alter":0,"mode":"Ionian"})");
+    checkRejectedRaw(store, R"({"schema":1,"cmd":"browseKey","mode":"\u0000Dorian"})");
+    std::string error;
+    CHECK(applyCommandJson(store, R"({"schema":1,"cmd":"undo","note":"\u0000"})", error));
+    CHECK(store.doc() == Document{});
+}
+
+TEST_CASE("boundary: a member given twice takes its last value") {
+    DocumentStore store;
+    std::string error;
+    REQUIRE(applyCommandJson(store, R"({"schema":1,"cmd":"appendChord","root":0,"type":"maj","root":7})", error));
+    CHECK(snapshot(store).at("events")[0].at("symbol") == "G");
+    checkRejectedRaw(store, R"({"schema":1,"schema":2,"cmd":"undo"})");
+    CHECK(store.doc().events.size() == 1);
+    CHECK(applyCommandJson(store, R"({"schema":2,"schema":1,"cmd":"undo"})", error));
+    CHECK(store.doc().events.empty());
+}
+
+TEST_CASE("boundary: messages longer than kMaxJsonBytes are rejected, one of exactly kMaxJsonBytes accepted") {
+    DocumentStore store;
+    checkRejectedRaw(store, paddedAppend(kMaxJsonBytes + 1));
+    checkRejectedRaw(store, paddedAppend(kMaxJsonBytes * 4));
+    CHECK(store.nextId() == 1);
+    CHECK_FALSE(store.undo());
+
+    std::string error;
+    REQUIRE_MESSAGE(applyCommandJson(store, paddedAppend(kMaxJsonBytes), error), error);
+    CHECK(store.doc().events.size() == 1);
+    CHECK(store.nextId() == 2);
+
+    checkStateRejected(store, paddedState(kMaxJsonBytes + 1));
+    REQUIRE_MESSAGE(loadStateJson(store, paddedState(kMaxJsonBytes), error), error);
+    CHECK(store.doc() == richStore().doc());
+}
+
+TEST_CASE("boundary: nesting deeper than kMaxJsonDepth is rejected before parsing") {
+    DocumentStore store;
+    std::string error;
+    CHECK(applyCommandJson(store, nestedUndo(kMaxJsonDepth - 1), error));  // the top-level object is level 1
+    checkRejectedRaw(store, nestedUndo(kMaxJsonDepth));
+    checkRejectedRaw(store, nestedUndo(100000));
+
+    // Objects count too: each "[{"a":" adds two levels.
+    const auto mixed = [](int pairs) {
+        std::string text = R"({"schema":1,"cmd":"undo","x":)";
+        for (int i = 0; i < pairs; ++i) {
+            text += R"([{"a":)";
+        }
+        text += "1";
+        for (int i = 0; i < pairs; ++i) {
+            text += "}]";
+        }
+        return text + "}";
+    };
+    CHECK(applyCommandJson(store, mixed((kMaxJsonDepth - 1) / 2), error));  // 63 levels
+    checkRejectedRaw(store, mixed(kMaxJsonDepth / 2));                      // 65 levels
+
+    // Brackets inside string literals are text, escaped quotes included.
+    CHECK(applyCommandJson(store, R"({"schema":1,"cmd":"undo","x":"\"[[{{)" + std::string(500, '[') + R"(\\"})", error));
+    CHECK(applyCommandJson(store, R"({"schema":1,"cmd":"undo","x":"\\","y":")" + std::string(500, '{') + R"("})", error));
+
+    // Unbalanced brackets outside strings are the parser's business and still fail.
+    checkRejectedRaw(store, R"({"schema":1,"cmd":"undo"}]]]])");
+    checkRejectedRaw(store, R"([[[{"schema":1,"cmd":"undo"})");
+    CHECK(store.doc() == Document{});
+
+    std::string state = stateJson(richStore());
+    state.pop_back();
+    checkStateRejected(store, state + R"(,"pad":)" + std::string(100, '[') + std::string(100, ']') + "}");
+}
+
+TEST_CASE("boundary: a rejected append leaves the id counter alone") {
+    DocumentStore store;
+    checkRejected(store, {{"cmd", "appendChord"}, {"root", 0}, {"type", "maj"}, {"lengthBeats", "nan"}});
+    checkRejected(store, {{"cmd", "appendChord"}, {"root", 0}, {"type", "nope"}});
+    CHECK(store.nextId() == 1);
+    applyOk(store, {{"cmd", "appendChord"}, {"root", 0}, {"type", "maj"}});
+    CHECK(store.nextId() == 2);
+}

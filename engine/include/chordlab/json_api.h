@@ -3,6 +3,7 @@
 #include "chordlab/document.h"
 #include "chordlab/palette.h"
 
+#include <cstddef>
 #include <string>
 #include <string_view>
 
@@ -17,6 +18,12 @@ constexpr int kJsonSchema = 1;
 constexpr int kDefaultEditorWidth = 900;
 constexpr int kDefaultEditorHeight = 620;
 
+/// Largest message either reader accepts, in bytes, and the deepest nesting of objects and arrays it
+/// accepts (the top-level object is level 1). Longer or deeper input is rejected by a pre-scan before
+/// the parser sees it, so a corrupt or hostile message cannot make the parser allocate without bound.
+constexpr std::size_t kMaxJsonBytes = std::size_t{1} << 20;
+constexpr int kMaxJsonDepth = 64;
+
 /// Common encodings
 /// ----------------
 /// A key is `{"tonic":{"letter":"C","alter":0},"mode":"Ionian"}`: `letter` is a one-character string
@@ -26,6 +33,20 @@ constexpr int kDefaultEditorHeight = 620;
 /// tonic plus the mode name: "C Ionian", "Bb HarmonicMinor".
 /// Beats and lengths are JSON numbers, ids and velocities integers. Strings are UTF-8 (symbols contain
 /// the literal `Δ` and `°`).
+///
+/// Robustness of the two readers (`applyCommandJson`, `loadStateJson`)
+/// --------------------------------------------------------------------
+/// Both are noexcept and transactional: the whole message is parsed and validated first, and the store
+/// is touched last through calls that give the strong exception guarantee (document.h), so a false
+/// result always means the store, its history and its id counter are exactly as they were. An exception
+/// the validation did not anticipate (an allocation failure, say) is reported as `error == "internal
+/// error"`; by construction, not by test, it too leaves the store unchanged.
+/// Before parsing, the raw text is checked cheaply: longer than `kMaxJsonBytes`, nested deeper than
+/// `kMaxJsonDepth`, or containing a raw NUL byte (nlohmann's lexer would read it as end of input and
+/// silently drop whatever follows) is rejected. An escaped `\u0000` inside a string is just a
+/// character: it never matches a command, type, mode or letter name, and is ignored in a field nothing
+/// reads. A member that appears twice takes its last value (nlohmann's parse policy); the UI never
+/// sends such messages, but the behaviour is pinned by a test.
 
 /// The document as the UI shows it, with the given palette (normally
 /// `buildPalette(doc.browsedKey, doc.projectKey)`), so that the UI never computes theory:
@@ -67,7 +88,7 @@ std::string snapshotJson(const Document& doc, const Palette& palette);
 /// Returns true for every accepted command, including ones that change nothing: an edit naming an id no
 /// event has, a move to the chord's current position, and `undo`/`redo` with nothing to undo or redo are
 /// valid no-ops, not errors. `error` is cleared on success.
-bool applyCommandJson(DocumentStore& store, std::string_view json, std::string& error);
+bool applyCommandJson(DocumentStore& store, std::string_view json, std::string& error) noexcept;
 
 /// The persistent form of the store's document, without the palette:
 /// ```
@@ -91,6 +112,6 @@ std::string stateJson(const DocumentStore& store, int editorWidth = kDefaultEdit
 /// Lengths and velocities are clamped to the store's ranges rather than rejected. `editor` is optional
 /// and defaults to `kDefaultEditorWidth` x `kDefaultEditorHeight`; every other field is required.
 bool loadStateJson(DocumentStore& store, std::string_view json, std::string& error, int* editorWidth = nullptr,
-                   int* editorHeight = nullptr);
+                   int* editorHeight = nullptr) noexcept;
 
 }  // namespace chordlab
