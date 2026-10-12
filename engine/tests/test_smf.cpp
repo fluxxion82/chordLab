@@ -16,7 +16,14 @@
 #include <limits>
 #include <sstream>
 #include <string>
+#include <system_error>
 #include <vector>
+
+#ifdef _WIN32
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
 
 using namespace chordlab;
 
@@ -252,6 +259,46 @@ Bytes readAll(const std::filesystem::path& path) {
     REQUIRE(in);
     return Bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
 }
+
+long processId() {
+#ifdef _WIN32
+    return static_cast<long>(_getpid());
+#else
+    return static_cast<long>(::getpid());
+#endif
+}
+
+/// A path under the system temp directory that no other test or process writes: the name carries the
+/// process id and a per-process counter, so parallel runs and a crashed earlier run cannot collide. The
+/// file is removed when the guard goes out of scope, which a failed assertion (an exception) also reaches.
+struct TempFile {
+    std::filesystem::path path;
+
+    explicit TempFile(const char* tag) {
+        static int counter = 0;
+        std::ostringstream name;
+        name << "chordlab-test_smf-" << tag << "-" << processId() << "-" << ++counter << ".mid";
+        path = std::filesystem::temp_directory_path() / name.str();
+        remove();
+    }
+
+    ~TempFile() {
+        remove();
+    }
+
+    TempFile(const TempFile&) = delete;
+    TempFile& operator=(const TempFile&) = delete;
+
+    std::string string() const {
+        return path.string();
+    }
+
+private:
+    void remove() const noexcept {
+        std::error_code ignored;
+        std::filesystem::remove(path, ignored);
+    }
+};
 
 /// The events of `compile(cMajorBars(1))`, which are also what the golden bytes encode: one C major chord
 /// of four beats at velocity 100, voiced C4 E4 G4 (60, 64, 67). For hand-built `Compiled` values.
@@ -607,22 +654,28 @@ TEST_CASE("writeSmf0: events that cannot be encoded give an empty vector") {
 // --- writeFile ---------------------------------------------------------------------------------
 
 TEST_CASE("writeFile: round trip through a temporary path, overwriting what was there") {
-    const std::filesystem::path path =
-        std::filesystem::temp_directory_path() / "chordlab-test_smf-roundtrip.mid";
-    std::filesystem::remove(path);
+    std::filesystem::path written;
+    {
+        const TempFile file("roundtrip");
+        written = file.path;
 
-    const Bytes twoBars = writeSmf0(compile(cMajorBars(2)), 120.0);
-    REQUIRE(writeFile(path.string(), twoBars));
-    CHECK(readAll(path) == twoBars);
+        const Bytes twoBars = writeSmf0(compile(cMajorBars(2)), 120.0);
+        REQUIRE(writeFile(file.string(), twoBars));
+        CHECK(readAll(file.path) == twoBars);
 
-    // A shorter write replaces the longer file rather than overwriting its prefix.
-    const Bytes oneBar = writeSmf0(compile(cMajorBars(1)), 120.0);
-    REQUIRE(oneBar.size() < twoBars.size());
-    REQUIRE(writeFile(path.string(), oneBar));
-    CHECK(readAll(path) == oneBar);
-    CHECK(readAll(path) == kGolden);
+        // A shorter write replaces the longer file rather than overwriting its prefix.
+        const Bytes oneBar = writeSmf0(compile(cMajorBars(1)), 120.0);
+        REQUIRE(oneBar.size() < twoBars.size());
+        REQUIRE(writeFile(file.string(), oneBar));
+        CHECK(readAll(file.path) == oneBar);
+        CHECK(readAll(file.path) == kGolden);
+    }
+    CHECK_FALSE(std::filesystem::exists(written));  // the guard cleaned up
 
-    std::filesystem::remove(path);
+    // Two guards never share a path, even with the same tag.
+    const TempFile a("same");
+    const TempFile b("same");
+    CHECK(a.path != b.path);
 }
 
 TEST_CASE("writeFile: returns false when the file cannot be created") {
@@ -631,9 +684,7 @@ TEST_CASE("writeFile: returns false when the file cannot be created") {
 }
 
 TEST_CASE("writeFile: refuses to write nothing") {
-    const std::filesystem::path path =
-        std::filesystem::temp_directory_path() / "chordlab-test_smf-empty.mid";
-    std::filesystem::remove(path);
-    CHECK_FALSE(writeFile(path.string(), Bytes{}));
-    CHECK_FALSE(std::filesystem::exists(path));
+    const TempFile file("empty");
+    CHECK_FALSE(writeFile(file.string(), Bytes{}));
+    CHECK_FALSE(std::filesystem::exists(file.path));
 }
