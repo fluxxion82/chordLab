@@ -6,9 +6,9 @@ exercised by a doctest suite.
 ## Layout
 
 ```
-include/chordlab/   public headers, one per module (pitch, scale, chord, symbol, function, applied, relations, voicing,
-                    palette, document, compiler, note_event, limits, scheduler, triple_buffer,
-                    publication, smf, json_api)
+include/chordlab/   public headers, one per module (pitch, scale, chord, symbol, function, applied,
+                    harmony, tension, relations, voicing, palette, document, compiler, note_event,
+                    limits, scheduler, triple_buffer, publication, smf, json_api)
 src/                the matching implementations
 tests/              doctest suite (tests/doctest.h is the vendored framework), one file per module;
                     tests/rt_alloc/ is a second executable that counts allocations (see below)
@@ -34,7 +34,8 @@ Three mechanisms, chosen by who can get it wrong:
 - **Status returns for expected failures.** Input from outside the process, or a resource that may be
   missing, is reported, never thrown: `applyCommandJson` / `loadStateJson` return false with a message and
   leave the store untouched; `appendChord` returns `kNoEventId` when the document is full or the ids
-  are exhausted; `writeSmf0` returns an empty vector and `writeFile` false; `pushPreview` returns false
+  are exhausted, and `addSection` returns `kNoSectionId` for an index that is not a chord position or
+  already starts a section; `writeSmf0` returns an empty vector and `writeFile` false; `pushPreview` returns false
   on a full queue and `process` returns false for a block it could not complete.
 - **Assertions for programmer preconditions.** A `Chord` with a null type, a `Key` with a bad letter, a
   `Mode` outside the enum, an unsorted `Snapshot`: these are contract violations, checked with `assert`
