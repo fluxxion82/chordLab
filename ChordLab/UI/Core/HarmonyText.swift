@@ -2,8 +2,8 @@ import Foundation
 
 /// Display formatting for the Phase 2 harmony fields (function, tension, "why", voicings), pure and in one
 /// place so that the palette's popover, the block's popover and the suggestion chips word things the same
-/// way. Nothing here computes theory: every input is a snapshot field. Depends on Foundation only, so it
-/// also compiles under plain `swiftc` for the scratchpad checks (scripts/geometry_check).
+/// way. Nothing here computes theory: every input is a snapshot field. Depends on Foundation only; unit-tested
+/// by the `ChordLabUICore` package (ChordLab/Package.swift, Tests/ChordLabUICoreTests/HarmonyTextTests.swift).
 enum HarmonyText {
   /// The function word for the engine's short name: "T" Tonic, "PD" Predominant, "D" Dominant, "O" (and
   /// anything else) Other; nil for nil (an older plug-in build sends no function).

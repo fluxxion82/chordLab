@@ -25,3 +25,6 @@ Icon?
 .worktrees/
 engine/build/
 .DS_Store
+ChordLab/.build/
+ChordLab/.swiftpm/
+ChordLab/Package.resolved
