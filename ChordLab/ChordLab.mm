@@ -57,19 +57,23 @@
 #include "ChordLab.h"
 #include "IPlug_include_in_plug_src.h"
 
+// Pure C++ helpers for message validation and export naming, unit-tested by ChordLab/tests (bridge_tests).
+#include "bridge/export_naming.h"
+#include "bridge/export_request.h"
+#include "bridge/preview_request.h"
+
 #include "chordlab/json_api.h"
 #include "chordlab/smf.h"
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <cassert>
-#include <cctype>
 #include <chrono>
-#include <climits>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <ctime>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -109,13 +113,17 @@ void RemoveIfStale(NSString* path)
     [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
 }
 
-// Purges every stale export in `dir`, whichever instance or process wrote it.
+// Purges every stale export in `dir`, whichever instance or process wrote it. What counts as an export
+// is the name rule ChordLab-*.mid (chordlab::bridge::isChordLabExportName).
 void PurgeStaleExports(NSString* dir)
 {
   NSArray<NSString*>* names = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:dir error:nil];
   for (NSString* name in names)
-    if ([name hasPrefix:@"ChordLab-"] && [name hasSuffix:@".mid"])
+  {
+    const char* utf8 = [name UTF8String];
+    if (utf8 && chordlab::bridge::isChordLabExportName(utf8))
       RemoveIfStale([dir stringByAppendingPathComponent:name]);
+  }
 }
 }  // namespace
 
@@ -384,69 +392,17 @@ bool ChordLab::OnMessage(int msgTag, int ctrlTag, int dataSize, const void* pDat
 
 void ChordLab::HandlePreview(std::string_view text)
 {
-  // Main thread, never real-time: nlohmann parses here, the scheduler only ever sees plain PreviewCmd.
+  // Main thread, never real-time: nlohmann parses here (parsePreviewRequest, which owns the validation
+  // rules and the error texts), the scheduler only ever sees plain PreviewCmd.
   std::string problem;
-  chordlab::PreviewCmd cmd{};
-  try
-  {
-    const nlohmann::json message = nlohmann::json::parse(text, nullptr, /*allow_exceptions=*/false);
-    const auto intField = [&](const char* name, int lo, int hi, int& out) {
-      const auto it = message.find(name);
-      if (it == message.end() || !it->is_number_integer())
-        return false;
-      const auto v = it->get<std::int64_t>();
-      if (v < lo || v > hi)
-        return false;
-      out = (int) v;
-      return true;
-    };
-    int schema = 0;
-    int id = 0;
-    const auto on = message.is_object() ? message.find("on") : message.end();
-    if (!message.is_object() || !intField("schema", chordlab::kJsonSchema, chordlab::kJsonSchema, schema) ||
-        !intField("id", 0, INT_MAX, id) || on == message.end() || !on->is_boolean())
-      problem = "preview message needs schema 1, an id and on:true|false";
-    else if (on->get<bool>())
-    {
-      int velocity = 100;
-      const auto pitches = message.find("pitches");
-      if ((message.contains("velocity") && !intField("velocity", 1, 127, velocity)) || pitches == message.end() ||
-          !pitches->is_array() || pitches->empty() || pitches->size() > 8)
-        problem = "preview start needs 1..8 pitches and a velocity in 1..127";
-      else
-      {
-        cmd.kind = chordlab::PreviewCmd::Start;
-        cmd.id = id;
-        cmd.velocity = velocity;
-        cmd.count = 0;
-        for (const auto& p : *pitches)
-        {
-          if (!p.is_number_integer() || p.get<std::int64_t>() < 0 || p.get<std::int64_t>() > 127)
-          {
-            problem = "preview pitches must be integers in 0..127";
-            break;
-          }
-          cmd.pitches[cmd.count++] = (std::uint8_t) p.get<std::int64_t>();
-        }
-      }
-    }
-    else
-    {
-      cmd.kind = chordlab::PreviewCmd::Stop;
-      cmd.id = id;
-    }
-  }
-  catch (...)
-  {
-    problem = "preview message could not be parsed";
-  }
-
-  if (!problem.empty())
+  const std::optional<chordlab::PreviewCmd> parsed = chordlab::bridge::parsePreviewRequest(text, &problem);
+  if (!parsed)
   {
     DBGMSG("ChordLab: %s\n", problem.c_str());
     PushError(problem);
     return;
   }
+  const chordlab::PreviewCmd& cmd = *parsed;
   if (!mScheduler.pushPreview(cmd))
   {
     PushError("preview queue full");                             // the watchdog (4 s of processed audio) still ends what sounds
@@ -479,32 +435,16 @@ void ChordLab::HandleExportSection(std::string_view text)
   // once and is as long as the section.
   @autoreleasepool
   {
-  int id = -1;
+  // parseSectionExportRequest reads schema and id like HandlePreview does (boundedIntField: the full
+  // 64-bit value is range-checked BEFORE narrowing), so an oversized schema (4294967297, which narrows to
+  // 1) or id (2^31, -2^40) is refused with tag 21 rather than read as something in range.
+  const std::optional<chordlab::bridge::SectionExportRequest> request = chordlab::bridge::parseSectionExportRequest(text);
+  if (!request)
   {
-    const nlohmann::json message = nlohmann::json::parse(text, nullptr, /*allow_exceptions=*/false);
-    // As HandlePreview's intField: read the full 64-bit value and range-check it BEFORE narrowing, so an
-    // oversized schema (4294967297, which narrows to 1) or id (2^31, -2^40) is refused with tag 21 rather
-    // than read as something in range. nlohmann stores a JSON integer as int64 (or uint64 beyond
-    // INT64_MAX, which get<int64_t> wraps negative: still out of both ranges).
-    const auto intField = [&](const char* name, std::int64_t lo, std::int64_t hi, int& out) {
-      if (!message.is_object())
-        return false;
-      const auto it = message.find(name);
-      if (it == message.end() || !it->is_number_integer())
-        return false;
-      const auto v = it->get<std::int64_t>();
-      if (v < lo || v > hi)
-        return false;
-      out = (int) v;
-      return true;
-    };
-    int schema = 0;
-    if (!intField("schema", chordlab::kJsonSchema, chordlab::kJsonSchema, schema) || !intField("id", 1, INT_MAX, id))
-    {
-      PushError("section export message needs schema 1 and a section id");
-      return;
-    }
+    PushError("section export message needs schema 1 and a section id");
+    return;
   }
+  const int id = request->sectionId;
   chordlab::Compiled compiled;
   std::string label;
   {
@@ -545,9 +485,7 @@ void ChordLab::WriteExport(const chordlab::Compiled& compiled, const std::string
   // anything but an ASCII letter or digit so the name is safe anywhere ("C-Ionian", "Fs-Dorian",
   // "C-Ionian-Verse"); pid, counter and uuid make it unique across instances and processes, and the name
   // is checked to be unused before anything is written (see the cleanup note above).
-  std::string safeLabel;
-  for (const char c : label)
-    safeLabel += std::isalnum((unsigned char) c) ? c : (c == '#' ? 's' : '-');
+  const std::string safeLabel = chordlab::bridge::safeExportLabel(label);
   char stamp[32] = {0};
   const std::time_t now = std::time(nullptr);
   std::tm local{};
@@ -563,8 +501,8 @@ void ChordLab::WriteExport(const chordlab::Compiled& compiled, const std::string
   for (int attempt = 0; attempt < 8 && path.empty(); ++attempt)
   {
     NSString* uuid = [[[NSUUID UUID] UUIDString] substringToIndex:8];
-    std::string candidate = std::string([dir UTF8String]) + "/ChordLab-" + safeLabel + "-" + stamp + "-" +
-                            std::to_string(getpid()) + "-" + std::to_string(++mExportCounter) + "-" + [uuid UTF8String] + ".mid";
+    std::string candidate = std::string([dir UTF8String]) + "/" +
+                            chordlab::bridge::exportFileName(safeLabel, stamp, (long) getpid(), ++mExportCounter, [uuid UTF8String]);
     if (![[NSFileManager defaultManager] fileExistsAtPath:[NSString stringWithUTF8String:candidate.c_str()]])
       path = std::move(candidate);                             // never an existing file: nothing is ever rewritten
   }
