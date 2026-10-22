@@ -2,7 +2,7 @@ import SwiftUI
 import XCTest
 @testable import ChordLabUICore
 
-/// The harmonic-function colours (UI/FunctionStyle.swift).
+/// The harmonic-function colours (UI/Core/FunctionStyle.swift).
 final class FunctionStyleTests: XCTestCase {
   func testEachFunctionCodeHasItsColour() {
     XCTAssertEqual(FunctionStyle.color("T"), FunctionStyle.tonic)

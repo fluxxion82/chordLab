@@ -1,7 +1,7 @@
 import XCTest
 @testable import ChordLabUICore
 
-/// Chord symbol glyphs, spoken names and note names (UI/ChordSymbol.swift).
+/// Chord symbol glyphs, spoken names and note names (UI/Core/ChordSymbol.swift).
 final class ChordSymbolTests: XCTestCase {
   func testGlyphsReplaceAsciiAccidentals() {
     XCTAssertEqual(ChordSymbol.glyphs("Bb7"), "B♭7")

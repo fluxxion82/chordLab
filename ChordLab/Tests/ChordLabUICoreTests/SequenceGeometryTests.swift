@@ -2,7 +2,7 @@ import CoreGraphics
 import XCTest
 @testable import ChordLabUICore
 
-/// The sequence bar's geometry (UI/SequenceGeometry.swift): block layout, reorder targets, resize
+/// The sequence bar's geometry (UI/Core/SequenceGeometry.swift): block layout, reorder targets, resize
 /// snapping, section spans and section-edge snapping. All at the fixed zoom of 24 pt per beat.
 final class SequenceGeometryTests: XCTestCase {
   private let px: CGFloat = 24

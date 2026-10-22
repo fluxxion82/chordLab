@@ -2,7 +2,7 @@ import Foundation
 import XCTest
 @testable import ChordLabUICore
 
-/// Decoding the engine's snapshot JSON (UI/Snapshot.swift): inline Phase 1 / Phase 2 / homeTriads cases,
+/// Decoding the engine's snapshot JSON (UI/Core/Snapshot.swift): inline Phase 1 / Phase 2 / homeTriads cases,
 /// the small message payloads, and every snapshot fixture the engine tests write to
 /// engine/tests/fixtures (skipped when that directory is absent).
 final class SnapshotTests: XCTestCase {

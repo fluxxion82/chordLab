@@ -1,7 +1,7 @@
 import XCTest
 @testable import ChordLabUICore
 
-/// The palette label mode (UI/LabelMode.swift). Its raw values and storage key are persisted in
+/// The palette label mode (UI/Core/LabelMode.swift). Its raw values and storage key are persisted in
 /// UserDefaults, so changing either would silently reset every user's choice: they are pinned here.
 final class LabelModeTests: XCTestCase {
   func testDefaultModeIsBoth() {

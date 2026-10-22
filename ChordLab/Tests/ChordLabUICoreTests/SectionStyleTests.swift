@@ -2,7 +2,7 @@ import SwiftUI
 import XCTest
 @testable import ChordLabUICore
 
-/// The section colour palette (UI/SectionStyle.swift) that the engine's `colourIndex` indexes.
+/// The section colour palette (UI/Core/SectionStyle.swift) that the engine's `colourIndex` indexes.
 final class SectionStyleTests: XCTestCase {
   func testExactlyEightColoursAndNames() {
     XCTAssertEqual(SectionStyle.colors.count, 8, "kNumSectionColours in engine/include/chordlab/document.h")

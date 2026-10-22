@@ -1,7 +1,7 @@
 import XCTest
 @testable import ChordLabUICore
 
-/// Display wording of the Phase 2 harmony fields (UI/HarmonyText.swift).
+/// Display wording of the Phase 2 harmony fields (UI/Core/HarmonyText.swift).
 final class HarmonyTextTests: XCTestCase {
   // MARK: - Function words and tension
 

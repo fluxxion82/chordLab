@@ -2,7 +2,7 @@ import UniformTypeIdentifiers
 import XCTest
 @testable import ChordLabUICore
 
-/// The palette's drag payload (UI/ChordRef.swift).
+/// The palette's drag payload (UI/Core/ChordRef.swift).
 final class ChordRefTests: XCTestCase {
   func testCodableRoundTrip() throws {
     for ref in [ChordRef(root: 0, type: "maj"), ChordRef(root: 11, type: "m7b5"), ChordRef(root: 6, type: "7sus4")] {

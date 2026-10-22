@@ -1,7 +1,7 @@
 import XCTest
 @testable import ChordLabUICore
 
-/// Key display names and tonic pitch classes (UI/KeyNames.swift).
+/// Key display names and tonic pitch classes (UI/Core/KeyNames.swift).
 final class KeyNamesTests: XCTestCase {
   private func key(_ letter: String, _ alter: Int, _ mode: String) -> KeyJSON {
     KeyJSON(tonic: TonicJSON(letter: letter, alter: alter), mode: mode)
