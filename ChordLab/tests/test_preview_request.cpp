@@ -156,13 +156,13 @@ TEST_CASE("parsePreviewRequest: trailing junk after the object is malformed") {
     CHECK(problemOf(R"({"schema":1,"id":1,"on":false} {})") == kHeaderProblem);
 }
 
-TEST_CASE("parsePreviewRequest: raw NUL bytes") {
-    // Pinned parser behaviour: nlohmann's lexer reads a raw NUL as the end of input. After a complete
-    // message the tail is never read (accepted); inside the object the message is unterminated (refused).
-    const PreviewCmd c = accepted(std::string("{\"schema\":1,\"id\":3,\"on\":false}\0junk", 35));
-    CHECK(c.kind == PreviewCmd::Stop);
-    CHECK(c.id == 3);
-    CHECK(problemOf(std::string("{\"schema\":1,\0\"id\":3,\"on\":false}", 31)) == kHeaderProblem);
+TEST_CASE("parsePreviewRequest: a raw NUL byte anywhere is refused before the parse") {
+    // As the engine's prescan. Without it nlohmann would stop at the NUL and accept the trailing case.
+    const std::string kParseProblem = "preview message could not be parsed";
+    CHECK(problemOf(std::string("{\"schema\":1,\"id\":3,\"on\":false}\0junk", 35)) == kParseProblem);
+    CHECK(problemOf(std::string("{\"schema\":1,\"id\":3,\"on\":false}\0", 31)) == kParseProblem);
+    CHECK(problemOf(std::string("{\"schema\":1,\0\"id\":3,\"on\":false}", 31)) == kParseProblem);
+    CHECK(problemOf(std::string("\0", 1)) == kParseProblem);
 }
 
 TEST_CASE("parsePreviewRequest: an escaped \\u0000 is an ordinary string character") {

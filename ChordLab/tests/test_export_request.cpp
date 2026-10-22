@@ -54,15 +54,12 @@ TEST_CASE("parseSectionExportRequest: malformed or non-object payloads are nullo
     CHECK_FALSE(parseSectionExportRequest("null").has_value());
 }
 
-TEST_CASE("parseSectionExportRequest: a NUL ends the payload") {
-    // nlohmann's lexer reads a NUL byte as the end of input: one inside the object leaves it unterminated
-    // (refused), one after a complete object is where the parse stops (accepted, the tail unread).
-    const std::string inside("{\"schema\":1,\0\"id\":7}", 20);
-    CHECK_FALSE(parseSectionExportRequest(inside).has_value());
-    const std::string trailing("{\"schema\":1,\"id\":7}\0junk", 24);
-    const auto r = parseSectionExportRequest(trailing);
-    REQUIRE(r.has_value());
-    CHECK(r->sectionId == 7);
+TEST_CASE("parseSectionExportRequest: a raw NUL byte anywhere is refused") {
+    // As the engine's prescan. Without it nlohmann would stop at the NUL and accept the trailing case.
+    CHECK_FALSE(parseSectionExportRequest(std::string("{\"schema\":1,\0\"id\":7}", 20)).has_value());
+    CHECK_FALSE(parseSectionExportRequest(std::string("{\"schema\":1,\"id\":7}\0junk", 24)).has_value());
+    CHECK_FALSE(parseSectionExportRequest(std::string("{\"schema\":1,\"id\":7}\0", 20)).has_value());
+    CHECK_FALSE(parseSectionExportRequest(std::string("\0", 1)).has_value());
 }
 
 TEST_CASE("parseSectionExportRequest: an escaped \\u0000 is an ordinary string character") {

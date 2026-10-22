@@ -23,6 +23,9 @@ namespace chordlab::bridge {
 /// nlohmann parses here, the scheduler only ever sees plain PreviewCmd.
 ///
 /// Rules, checked in this order (the first failure decides the message written to `*problem`):
+///  0. A raw NUL byte anywhere is "preview message could not be parsed", before any parse, as the
+///     engine's readers refuse one (prescan in engine/src/json_api.cpp). An escaped `\u0000` inside a
+///     JSON string is a different thing: an ordinary character of that string, accepted.
 ///  1. The text parses as a JSON object with `schema` the integer kJsonSchema, `id` an integer in
 ///     0..INT_MAX and `on` a boolean; else "preview message needs schema 1, an id and on:true|false"
 ///     (malformed JSON parses without throwing, as a non-object).
@@ -33,15 +36,19 @@ namespace chordlab::bridge {
 ///  4. Every pitch must be an integer in 0..127, kept in order (duplicates allowed); else "preview pitches
 ///     must be integers in 0..127".
 ///  5. An exception (in practice only std::bad_alloc) is "preview message could not be parsed".
-/// Raw NUL bytes: nlohmann's lexer reads a raw NUL as the end of input, so a complete message followed by
-/// `\0junk` is accepted (the tail is never read), while a NUL inside the object leaves it unterminated and
-/// fails rule 1. An escaped `\u0000` inside a JSON string is a different thing: an ordinary character of
-/// that string. Duplicate members are nlohmann's call too: the last one wins.
+/// Without rule 0, nlohmann's lexer would read a raw NUL as the end of input and accept a complete message
+/// followed by `\0junk`. Duplicate members are nlohmann's call: the last one wins.
 /// On success `*problem` is left untouched. The returned command is value-initialised first, so a Stop
 /// carries velocity 0, count 0 and zero pitches, and a Start's unused pitch slots are 0. PreviewCmd has no
 /// plug-in-only fields; the plug-in itself only remembers a Start's id for CloseWindow.
 inline std::optional<chordlab::PreviewCmd> parsePreviewRequest(std::string_view json, std::string* problem = nullptr)
 {
+    if (json.find('\0') != std::string_view::npos)
+    {
+        if (problem)
+            *problem = "preview message could not be parsed";
+        return std::nullopt;
+    }
     std::string error;
     chordlab::PreviewCmd cmd{};
     try

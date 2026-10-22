@@ -16,11 +16,10 @@ namespace chordlab::bridge {
 ///
 /// The full 64-bit value is read and range-checked BEFORE narrowing to int, so an oversized schema
 /// (4294967297, which narrows to 1) or id (2^31, -2^40) is refused rather than read as something in
-/// range. nlohmann stores a JSON integer as int64 (or uint64 beyond INT64_MAX, which get<int64_t> wraps
-/// negative: still out of every range the plug-in uses).
+/// range. nlohmann stores a JSON integer as int64, or as uint64 beyond INT64_MAX; such a uint64 is refused
+/// before any signed conversion (converting it to int64 is implementation-defined in C++17).
 ///
-/// Precondition: `0 <= lo <= hi <= INT_MAX`. The upper bound keeps the narrowing exact; the lower one is
-/// what makes the uint64 wrap above harmless (every call site in ChordLab.mm satisfies it).
+/// Precondition: `lo <= hi`, both within int, so the narrowing of an accepted value is exact.
 inline std::optional<int> boundedIntField(const nlohmann::json& object, const char* name, std::int64_t lo,
                                           std::int64_t hi)
 {
@@ -28,6 +27,10 @@ inline std::optional<int> boundedIntField(const nlohmann::json& object, const ch
         return std::nullopt;
     const auto it = object.find(name);
     if (it == object.end() || !it->is_number_integer())
+        return std::nullopt;
+    // Beyond INT64_MAX: out of every int range. Checked as uint64, because get<int64_t> on it would be an
+    // implementation-defined conversion (it wraps negative on the compilers we use, which was refused too).
+    if (it->is_number_unsigned() && it->get<std::uint64_t>() > static_cast<std::uint64_t>(INT64_MAX))
         return std::nullopt;
     const auto v = it->get<std::int64_t>();
     if (v < lo || v > hi)

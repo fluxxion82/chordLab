@@ -26,12 +26,14 @@ struct SectionExportRequest {
 /// caller answers it with kMsgTagError "section export message needs schema 1 and a section id".
 /// The parse never throws on malformed input (allow_exceptions=false); whether the id names an existing
 /// section is the caller's question.
-/// Raw NUL bytes: nlohmann's lexer reads a raw NUL as the end of input, so a complete message followed by
-/// `\0junk` is accepted (the tail is never read), while a NUL inside the object leaves it unterminated and
-/// is refused. An escaped `\u0000` inside a JSON string is a different thing: an ordinary character of
-/// that string.
+/// A raw NUL byte anywhere is refused before the parse, as the engine's readers refuse one (prescan in
+/// engine/src/json_api.cpp); without that, nlohmann's lexer would read it as the end of input and accept
+/// a complete message followed by `\0junk`. An escaped `\u0000` inside a JSON string is a different
+/// thing: an ordinary character of that string, accepted.
 inline std::optional<SectionExportRequest> parseSectionExportRequest(std::string_view json)
 {
+    if (json.find('\0') != std::string_view::npos)
+        return std::nullopt;
     const nlohmann::json message = nlohmann::json::parse(json, nullptr, /*allow_exceptions=*/false);
     if (!boundedIntField(message, "schema", chordlab::kJsonSchema, chordlab::kJsonSchema))
         return std::nullopt;
