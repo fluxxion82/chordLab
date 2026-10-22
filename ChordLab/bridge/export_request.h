@@ -26,6 +26,10 @@ struct SectionExportRequest {
 /// caller answers it with kMsgTagError "section export message needs schema 1 and a section id".
 /// The parse never throws on malformed input (allow_exceptions=false); whether the id names an existing
 /// section is the caller's question.
+/// Raw NUL bytes: nlohmann's lexer reads a raw NUL as the end of input, so a complete message followed by
+/// `\0junk` is accepted (the tail is never read), while a NUL inside the object leaves it unterminated and
+/// is refused. An escaped `\u0000` inside a JSON string is a different thing: an ordinary character of
+/// that string.
 inline std::optional<SectionExportRequest> parseSectionExportRequest(std::string_view json)
 {
     const nlohmann::json message = nlohmann::json::parse(json, nullptr, /*allow_exceptions=*/false);

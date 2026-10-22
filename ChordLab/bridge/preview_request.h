@@ -33,6 +33,10 @@ namespace chordlab::bridge {
 ///  4. Every pitch must be an integer in 0..127, kept in order (duplicates allowed); else "preview pitches
 ///     must be integers in 0..127".
 ///  5. An exception (in practice only std::bad_alloc) is "preview message could not be parsed".
+/// Raw NUL bytes: nlohmann's lexer reads a raw NUL as the end of input, so a complete message followed by
+/// `\0junk` is accepted (the tail is never read), while a NUL inside the object leaves it unterminated and
+/// fails rule 1. An escaped `\u0000` inside a JSON string is a different thing: an ordinary character of
+/// that string. Duplicate members are nlohmann's call too: the last one wins.
 /// On success `*problem` is left untouched. The returned command is value-initialised first, so a Stop
 /// carries velocity 0, count 0 and zero pitches, and a Start's unused pitch slots are 0. PreviewCmd has no
 /// plug-in-only fields; the plug-in itself only remembers a Start's id for CloseWindow.

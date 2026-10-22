@@ -58,11 +58,15 @@ TEST_CASE("parseSectionExportRequest: a NUL ends the payload") {
     // nlohmann's lexer reads a NUL byte as the end of input: one inside the object leaves it unterminated
     // (refused), one after a complete object is where the parse stops (accepted, the tail unread).
     const std::string inside("{\"schema\":1,\0\"id\":7}", 20);
-    REQUIRE(inside.size() == 20);
     CHECK_FALSE(parseSectionExportRequest(inside).has_value());
     const std::string trailing("{\"schema\":1,\"id\":7}\0junk", 24);
-    REQUIRE(trailing.size() == 24);
     const auto r = parseSectionExportRequest(trailing);
+    REQUIRE(r.has_value());
+    CHECK(r->sectionId == 7);
+}
+
+TEST_CASE("parseSectionExportRequest: an escaped \\u0000 is an ordinary string character") {
+    const auto r = parseSectionExportRequest(R"({"schema":1,"id":7,"name":"a\u0000b"})");
     REQUIRE(r.has_value());
     CHECK(r->sectionId == 7);
 }

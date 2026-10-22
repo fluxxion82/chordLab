@@ -17,5 +17,9 @@ target_include_directories(bridge_tests PRIVATE
   ${ENGINE_DIR}/include           # "chordlab/..."
   ${ENGINE_DIR}/third_party       # <nlohmann/json.hpp>
   ${ENGINE_DIR}/tests)            # "doctest.h"
-target_compile_options(bridge_tests PRIVATE -Wall -Wextra -Wpedantic)
+if(NOT MSVC)
+  target_compile_options(bridge_tests PRIVATE -Wall -Wextra -Wpedantic)   # as engine/CMakeLists.txt
+else()
+  target_compile_options(bridge_tests PRIVATE /W4)
+endif()
 add_test(NAME bridge_tests COMMAND bridge_tests)

@@ -54,6 +54,8 @@ TEST_CASE("parsePreviewRequest: a Stop needs no pitches and reads nothing else")
     CHECK(c.id == 4);
     CHECK(c.velocity == 0);
     CHECK(c.count == 0);
+    for (int i = 0; i < 8; ++i)
+        CHECK(c.pitches[i] == 0);                                 // value-initialised, every slot
     // A bad velocity and bad pitches are ignored on a Stop.
     const PreviewCmd d = accepted(R"({"schema":1,"id":5,"on":false,"velocity":0,"pitches":[999]})");
     CHECK(d.kind == PreviewCmd::Stop);
@@ -136,6 +138,9 @@ TEST_CASE("parsePreviewRequest: every pitch must be an integer in 0..127, order 
     CHECK(problemOf(R"({"schema":1,"id":1,"on":true,"pitches":[60.0]})") == kPitchProblem);
     CHECK(problemOf(R"({"schema":1,"id":1,"on":true,"pitches":["60"]})") == kPitchProblem);
     CHECK(problemOf(R"({"schema":1,"id":1,"on":true,"pitches":[null]})") == kPitchProblem);
+    CHECK(problemOf(R"({"schema":1,"id":1,"on":true,"pitches":[true]})") == kPitchProblem);
+    // Seven good pitches, then a bad eighth: the whole Start is refused.
+    CHECK(problemOf(R"({"schema":1,"id":1,"on":true,"pitches":[60,62,64,65,67,69,71,128]})") == kPitchProblem);
     CHECK(problemOf(R"({"schema":1,"id":1,"on":true,"pitches":[18446744073709551615]})") == kPitchProblem);
 }
 
@@ -144,6 +149,33 @@ TEST_CASE("parsePreviewRequest: the first failing rule decides the problem") {
     CHECK(problemOf(R"({"schema":1,"id":1,"on":true,"velocity":0,"pitches":[200]})") == kStartProblem);
     // A bad id with a bad Start body: the header rule wins.
     CHECK(problemOf(R"({"schema":1,"id":-1,"on":true,"pitches":[]})") == kHeaderProblem);
+}
+
+TEST_CASE("parsePreviewRequest: trailing junk after the object is malformed") {
+    CHECK(problemOf(R"({"schema":1,"id":1,"on":false}junk)") == kHeaderProblem);
+    CHECK(problemOf(R"({"schema":1,"id":1,"on":false} {})") == kHeaderProblem);
+}
+
+TEST_CASE("parsePreviewRequest: raw NUL bytes") {
+    // Pinned parser behaviour: nlohmann's lexer reads a raw NUL as the end of input. After a complete
+    // message the tail is never read (accepted); inside the object the message is unterminated (refused).
+    const PreviewCmd c = accepted(std::string("{\"schema\":1,\"id\":3,\"on\":false}\0junk", 35));
+    CHECK(c.kind == PreviewCmd::Stop);
+    CHECK(c.id == 3);
+    CHECK(problemOf(std::string("{\"schema\":1,\0\"id\":3,\"on\":false}", 31)) == kHeaderProblem);
+}
+
+TEST_CASE("parsePreviewRequest: an escaped \\u0000 is an ordinary string character") {
+    const PreviewCmd c = accepted(R"({"schema":1,"id":3,"on":false,"label":"a\u0000b"})");
+    CHECK(c.kind == PreviewCmd::Stop);
+    CHECK(c.id == 3);
+}
+
+TEST_CASE("parsePreviewRequest: duplicate members, the last one wins") {
+    // Pinned parser behaviour (nlohmann overwrites a repeated key), not a rule of ours.
+    CHECK(problemOf(R"({"schema":1,"schema":2,"id":1,"on":false})") == kHeaderProblem);
+    CHECK(accepted(R"({"schema":2,"schema":1,"id":1,"on":false})").id == 1);
+    CHECK(accepted(R"({"schema":1,"id":1,"id":9,"on":false})").id == 9);
 }
 
 TEST_CASE("parsePreviewRequest: extra members are ignored") {
