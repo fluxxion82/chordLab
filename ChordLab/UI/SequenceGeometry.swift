@@ -8,8 +8,8 @@ import Foundation
 /// ruler ticks and the playhead too; a piecewise mapping with a minimum width would have made beats
 /// uneven along the ruler. The rendered width of block `i` is `frames[i].width`, nothing else.
 ///
-/// Depends on nothing but CoreGraphics and Foundation, so it also compiles under plain `swiftc` for the
-/// scratchpad checks (ChordLab has no XCTest target).
+/// Depends on nothing but CoreGraphics and Foundation; unit-tested by the `ChordLabUICore` package
+/// (ChordLab/Package.swift, Tests/ChordLabUICoreTests/SequenceGeometryTests.swift).
 enum SequenceGeometry {
   /// One block's horizontal extent, in points from the strip's origin.
   struct BlockFrame: Equatable {
