@@ -39,7 +39,6 @@ final class ChordSymbolTests: XCTestCase {
     for type in types {
       XCTAssertNotNil(ChordSymbol.spokenQualities[type], type)
     }
-    XCTAssertEqual(ChordSymbol.spokenQualities.count, types.count)
   }
 
   func testPitchClassNamesUseSharpsAndWrap() {

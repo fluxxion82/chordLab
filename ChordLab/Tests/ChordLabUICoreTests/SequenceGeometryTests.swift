@@ -97,6 +97,23 @@ final class SequenceGeometryTests: XCTestCase {
                    "quarter block at 59: after block 0's centre, still 1")
   }
 
+  func testTargetIndexOnAnEmptyLayoutIsTheSourceItself() {
+    XCTAssertEqual(SequenceGeometry.targetIndex(from: 0, droppedBy: 10, in: empty), 0)
+    XCTAssertEqual(SequenceGeometry.targetIndex(from: 3, droppedBy: -10, in: empty), 3)
+  }
+
+  func testTargetIndexOfANegativeSourceIsItself() {
+    XCTAssertEqual(SequenceGeometry.targetIndex(from: -1, droppedBy: 50, in: mixed), -1)
+  }
+
+  /// Dropped exactly on another block's centre: that block is not counted as left of it (strict `<`), so
+  /// the dragged block stays before it.
+  func testTargetIndexOnAnExactCentreTieStaysBefore() {
+    XCTAssertEqual(SequenceGeometry.targetIndex(from: 0, droppedBy: 6, in: quarters), 0, "centre 3 + 6 = block 1's centre 9")
+    XCTAssertEqual(SequenceGeometry.targetIndex(from: 2, droppedBy: -27, in: mixed), 1,
+                   "block 2's centre 126 − 27 = block 1's centre 99: after block 0 only")
+  }
+
   // MARK: - Resize
 
   func testResizedLengthSnapsAndClamps() {
@@ -140,6 +157,13 @@ final class SequenceGeometryTests: XCTestCase {
 
   func testSectionOnNoBlocksIsEmpty() {
     XCTAssertEqual(SequenceGeometry.sectionSpans(starts: [0], in: empty), [Span(x: 0, width: 0)])
+  }
+
+  func testDuplicateSectionStartsGetEmptySpans() {
+    XCTAssertEqual(SequenceGeometry.sectionSpans(starts: [0, 0], in: mixed),
+                   [Span(x: 0, width: 150), Span(x: 150, width: 0)], "the repeated start is empty, the first runs to the end")
+    XCTAssertEqual(SequenceGeometry.sectionSpans(starts: [0, 2, 2], in: mixed),
+                   [Span(x: 0, width: 102), Span(x: 102, width: 48), Span(x: 150, width: 0)])
   }
 
   // MARK: - Boundary snapping
@@ -186,5 +210,14 @@ final class SequenceGeometryTests: XCTestCase {
   func testDroppedBoundaryWithMixedLengths() {
     XCTAssertEqual(SequenceGeometry.droppedBoundaryIndex(from: 1, draggedBy: -30, in: mixed), 1, "96−30 stays at 1")
     XCTAssertEqual(SequenceGeometry.droppedBoundaryIndex(from: 1, draggedBy: -49, in: mixed), 0, "96−49 snaps to 0")
+  }
+
+  func testDroppedBoundaryOnAnEmptyLayoutIsTheSourceItself() {
+    XCTAssertEqual(SequenceGeometry.droppedBoundaryIndex(from: 0, draggedBy: 40, in: empty), 0)
+    XCTAssertEqual(SequenceGeometry.droppedBoundaryIndex(from: 2, draggedBy: -40, in: empty), 2)
+  }
+
+  func testDroppedBoundaryOfANegativeSourceIsItself() {
+    XCTAssertEqual(SequenceGeometry.droppedBoundaryIndex(from: -1, draggedBy: 96, in: fourBars), -1)
   }
 }
