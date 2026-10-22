@@ -74,7 +74,9 @@ void mutateOnce(std::string& s, Rng& rng) {
     }
     switch (rng.below(9)) {
         case 0: {  // flip a bit of a byte
-            s[rng.below(s.size())] ^= static_cast<char>(1u << rng.below(8));
+            const std::size_t at = rng.below(s.size());
+            const unsigned bit = static_cast<unsigned>(rng.below(8));
+            s[at] ^= static_cast<char>(1u << bit);
             break;
         }
         case 1: {  // delete a range
@@ -91,11 +93,17 @@ void mutateOnce(std::string& s, Rng& rng) {
             break;
         }
         case 3: {  // insert a structural token
-            s.insert(rng.below(s.size() + 1), insertToken(rng));
+            // One RNG draw per statement: argument evaluation order is unspecified, and the seed must give the
+            // same mutants on every compiler.
+            const std::size_t at = rng.below(s.size() + 1);
+            const std::string token = insertToken(rng);
+            s.insert(at, token);
             break;
         }
         case 4: {  // insert a number literal
-            s.insert(rng.below(s.size() + 1), kNumberLiterals[rng.below(kNumberLiteralCount)]);
+            const std::size_t at = rng.below(s.size() + 1);
+            const char* literal = kNumberLiterals[rng.below(kNumberLiteralCount)];
+            s.insert(at, literal);
             break;
         }
         case 5:
@@ -118,7 +126,8 @@ void mutateOnce(std::string& s, Rng& rng) {
             }
             std::string replacement = kNumberLiterals[rng.below(kNumberLiteralCount)];
             if (rng.below(2) == 0) {
-                replacement = std::to_string(static_cast<int>(rng.below(300)) - 20);
+                const int small = static_cast<int>(rng.below(300)) - 20;
+                replacement = std::to_string(small);
             }
             s.replace(at, end - at, replacement);
             break;
@@ -151,8 +160,8 @@ Chord chordOf(PitchClass root, const char* typeId) {
 }
 
 /// The store every mutant lands on: four chords (ids 1..4), two sections (ids 1, 2), Am voiced by hand,
-/// event 2 selected.
-DocumentStore prefilledStore() {
+/// event 2 selected; `withRedo` leaves one undone step on the redo stack.
+DocumentStore prefilledStore(bool withRedo = false) {
     DocumentStore store;
     store.appendChord(chordOf(0, "maj"), 4.0, 100);
     store.appendChord(chordOf(9, "min"), 4.0, 90);
@@ -161,6 +170,12 @@ DocumentStore prefilledStore() {
     store.setInversion(2, 1);
     store.addSection(0, "Verse");
     store.addSection(2, "Chorus");
+    if (withRedo) {
+        // An undone edit leaves the document as it was and one step on the redo stack, so the redo path of
+        // the "rejected means unchanged" check has something to walk.
+        store.setVelocity(1, 77);
+        store.undo();
+    }
     store.setSelectedEvent(2);
     return store;
 }
@@ -179,6 +194,9 @@ std::string invariantProblem(const DocumentStore& store, bool snapshot = true) {
     const int sel = store.selectedEventId();
     if (sel != kNoEventId && store.findIndex(sel) < 0) {
         return "selected event id " + std::to_string(sel) + " names no event";
+    }
+    if (store.nextId() < 1 || store.nextSectionId() < 1) {
+        return "nextId or nextSectionId below 1";
     }
     std::set<int> ids;
     for (const ChordEvent& e : d.events) {
@@ -241,6 +259,43 @@ struct Observable {
     }
 };
 
+/// Walks the whole undo history of `a` and `b` (on copies) and then redoes back, requiring both to agree at
+/// every step: the same return value and the same observable state. Empty when they do. This is what makes
+/// "a rejected call changed nothing" cover the history, not only the current document.
+std::string historyDifference(const DocumentStore& a, const DocumentStore& b) {
+    DocumentStore x = a;
+    DocumentStore y = b;
+    const std::size_t limit = DocumentStore::kMaxUndoDepth + 2;
+    std::size_t undone = 0;
+    for (; undone < limit; ++undone) {
+        const bool rx = x.undo();
+        const bool ry = y.undo();
+        if (rx != ry) {
+            return "undo history depth differs at step " + std::to_string(undone);
+        }
+        if (!(Observable(x) == Observable(y))) {
+            return "state differs after undo step " + std::to_string(undone);
+        }
+        if (!rx) {
+            break;
+        }
+    }
+    for (std::size_t redone = 0; redone < limit + undone; ++redone) {
+        const bool rx = x.redo();
+        const bool ry = y.redo();
+        if (rx != ry) {
+            return "redo history depth differs at step " + std::to_string(redone);
+        }
+        if (!(Observable(x) == Observable(y))) {
+            return "state differs after redo step " + std::to_string(redone);
+        }
+        if (!rx) {
+            break;
+        }
+    }
+    return {};
+}
+
 std::string readFixture(const char* name) {
     std::ifstream in(std::string(CHORDLAB_FIXTURE_DIR) + "/" + name, std::ios::binary);
     return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
@@ -289,6 +344,7 @@ std::string feed(DocumentStore& cmdStore, DocumentStore& stateStore, const std::
                  bool* commandAccepted = nullptr) {
     {
         const Observable before(cmdStore);
+        const DocumentStore storeBefore = cmdStore;
         std::string error = "stale";
         bool ok = false;
         try {
@@ -305,6 +361,12 @@ std::string feed(DocumentStore& cmdStore, DocumentStore& stateStore, const std::
         if (!ok && !(Observable(cmdStore) == before)) {
             return "applyCommandJson rejected but changed the store";
         }
+        if (!ok) {
+            const std::string h = historyDifference(storeBefore, cmdStore);
+            if (!h.empty()) {
+                return "applyCommandJson rejected but changed the undo/redo history: " + h;
+            }
+        }
         if (commandAccepted != nullptr) {
             *commandAccepted = ok;
         }
@@ -315,6 +377,7 @@ std::string feed(DocumentStore& cmdStore, DocumentStore& stateStore, const std::
     }
     {
         const Observable before(stateStore);
+        const DocumentStore storeBefore = stateStore;
         std::string error = "stale";
         int w = -7;
         int h = -7;
@@ -335,6 +398,12 @@ std::string feed(DocumentStore& cmdStore, DocumentStore& stateStore, const std::
         }
         if (!ok && (w != -7 || h != -7 || !(Observable(stateStore) == before))) {
             return "loadStateJson rejected but touched the store or the out-params";
+        }
+        if (!ok) {
+            const std::string h = historyDifference(storeBefore, stateStore);
+            if (!h.empty()) {
+                return "loadStateJson rejected but changed the undo/redo history: " + h;
+            }
         }
         const std::string problem = invariantProblem(stateStore, !(Observable(stateStore) == before));
         if (!problem.empty()) {
@@ -363,7 +432,16 @@ TEST_CASE("json robustness: seeded mutation fuzz of both readers keeps every inv
         REQUIRE_MESSAGE(!corpus[i].empty(), "state fixture missing");
     }
 
-    // Unmutated corpus first: every command must at least be a clean accept or reject.
+    // The corpus itself first. Every entry must be accepted by the reader it was written for, on a fresh
+    // store (so a silently broken corpus command cannot hide behind the mutants), and then goes through
+    // both readers on a shared store like any mutant.
+    for (std::size_t i = 0; i < corpus.size(); ++i) {
+        DocumentStore store = prefilledStore(i % 2 == 1);
+        std::string error;
+        const bool ok = i < commandCount ? applyCommandJson(store, corpus[i], error)
+                                         : loadStateJson(store, corpus[i], error);
+        CHECK_MESSAGE(ok, "corpus entry " << i << " rejected: " << error << " input=" << escaped(corpus[i]));
+    }
     {
         DocumentStore cmdStore = prefilledStore();
         DocumentStore stateStore = prefilledStore();
@@ -375,16 +453,20 @@ TEST_CASE("json robustness: seeded mutation fuzz of both readers keeps every inv
 
     const auto t0 = std::chrono::steady_clock::now();
     Rng rng{0x9E3779B97F4A7C15ull};
-    DocumentStore cmdStore = prefilledStore();
-    DocumentStore stateStore = prefilledStore();
+    DocumentStore cmdStore = prefilledStore(true);
+    DocumentStore stateStore = prefilledStore(true);
     int accepted = 0;
     for (int i = 0; i < kIterations; ++i) {
         if (i % 25 == 0) {  // a fresh, known store now and then; in between, accepted mutants accumulate
-            cmdStore = prefilledStore();
-            stateStore = prefilledStore();
+            const bool withRedo = (i / 25) % 2 == 0;  // alternate: with and without a redo step
+            cmdStore = prefilledStore(withRedo);
+            stateStore = prefilledStore(withRedo);
         }
         std::string m = corpus[rng.below(corpus.size())];
-        const std::size_t mutations = rng.below(2) == 0 ? 1 : 1 + rng.below(3);
+        std::size_t mutations = 1;
+        if (rng.below(2) != 0) {
+            mutations = 1 + rng.below(3);
+        }
         for (std::size_t k = 0; k < mutations; ++k) {
             mutateOnce(m, rng);
         }

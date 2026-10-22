@@ -94,17 +94,19 @@ skip() {  # name reason
 # ---------------------------------------------------------------------------------------------------------
 
 engine_debug() {
-    step "$DEFAULT_TIMEOUT" cmake -S engine -B engine/build || return 1
-    step "$DEFAULT_TIMEOUT" cmake --build engine/build -j8 || return 1
-    (cd engine/build && step "$DEFAULT_TIMEOUT" ctest --output-on-failure) || return 1
+    # An explicit build type overrides whatever a cached configure left in CMakeCache.txt, so this section is
+    # always unoptimised with asserts on, whatever was configured in engine/build before.
+    step "$DEFAULT_TIMEOUT" cmake -S engine -B engine/build -DCMAKE_BUILD_TYPE=Debug || return 1
+    step "$DEFAULT_TIMEOUT" cmake --build engine/build --config Debug -j8 || return 1
+    (cd engine/build && step "$DEFAULT_TIMEOUT" ctest -C Debug --output-on-failure) || return 1
 }
 
 engine_ubsan() {
-    step "$UBSAN_TIMEOUT" cmake -S engine -B engine/build-ubsan \
+    step "$UBSAN_TIMEOUT" cmake -S engine -B engine/build-ubsan -DCMAKE_BUILD_TYPE=Debug \
         -DCMAKE_CXX_FLAGS="-fsanitize=undefined -fno-sanitize-recover=all" \
         -DCMAKE_EXE_LINKER_FLAGS=-fsanitize=undefined || return 1
-    step "$UBSAN_TIMEOUT" cmake --build engine/build-ubsan -j8 || return 1
-    (cd engine/build-ubsan && step "$UBSAN_TIMEOUT" ctest --output-on-failure) || return 1
+    step "$UBSAN_TIMEOUT" cmake --build engine/build-ubsan --config Debug -j8 || return 1
+    (cd engine/build-ubsan && step "$UBSAN_TIMEOUT" ctest -C Debug --output-on-failure) || return 1
 }
 
 swift_tests() {
@@ -132,8 +134,13 @@ plugin_scheme() {
         echo "check.sh: xcodebuild $scheme timed out after ${PLUGIN_TIMEOUT}s (see $log)" >&2
         return 1
     fi
+    if [ "$rc" -ne 0 ]; then
+        echo "check.sh: xcodebuild $scheme exited with status $rc (see $log); tail:" >&2
+        tail -n 25 "$log" >&2
+        return 1
+    fi
     if ! grep -q "BUILD SUCCEEDED" "$log"; then
-        echo "check.sh: BUILD SUCCEEDED missing for scheme $scheme (exit $rc); tail of $log:" >&2
+        echo "check.sh: BUILD SUCCEEDED missing for scheme $scheme; tail of $log:" >&2
         tail -n 25 "$log" >&2
         return 1
     fi

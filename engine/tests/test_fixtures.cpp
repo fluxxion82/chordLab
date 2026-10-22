@@ -55,6 +55,8 @@ void checkGolden(const std::string& name, const std::string& actual) {
         std::ofstream out(kFixtureDir + "/" + name, std::ios::binary | std::ios::trunc);
         REQUIRE_MESSAGE(out.good(), "cannot write fixture " << name);
         out.write(actual.data(), static_cast<std::streamsize>(actual.size()));
+        out.close();
+        REQUIRE_MESSAGE(!out.fail(), "writing fixture " << name << " failed; the file may be truncated");
         return;
     }
     std::string expected;
@@ -68,18 +70,29 @@ Chord chordOf(PitchClass root, const char* typeId) {
     return Chord{root, &chordType(typeId)};
 }
 
-/// The documented top-level members of a snapshot (json_api.h). A contract change updates this list and the
-/// fixtures together.
-const std::vector<std::string> kSnapshotKeys = {
-    "schema",        "projectKey",   "browsedKey", "events",         "palette", "sections",
-    "suggestions",   "homeTriads",   "selectedEventId", "autoVoiceLead", "tonics", "modes"};
+/// Every top-level member of a snapshot, as documented in json_api.h (17 of them). A contract change updates
+/// this list and the fixtures together: the snapshot's key set must equal it, so an undocumented key and a
+/// missing documented one both fail.
+const std::set<std::string> kSnapshotKeys = {
+    "schema",         "projectKey",     "browsedKey",   "projectKeyName", "browsedKeyName",
+    "progressionLoop", "followHost",    "autoVoiceLead", "endBeat",       "selectedEventId",
+    "modes",          "tonics",         "events",       "sections",       "suggestions",
+    "palette",        "homeTriads"};
 
 void checkSnapshotShape(const std::string& text) {
     const json j = json::parse(text);
     REQUIRE(j.is_object());
-    for (const std::string& key : kSnapshotKeys) {
-        CHECK_MESSAGE(j.contains(key), "snapshot lacks documented key " << key);
+    std::set<std::string> actual;
+    for (auto it = j.begin(); it != j.end(); ++it) {
+        actual.insert(it.key());
     }
+    for (const std::string& key : kSnapshotKeys) {
+        CHECK_MESSAGE(actual.count(key) == 1, "snapshot lacks documented key " << key);
+    }
+    for (const std::string& key : actual) {
+        CHECK_MESSAGE(kSnapshotKeys.count(key) == 1, "snapshot has undocumented key " << key);
+    }
+    CHECK(actual == kSnapshotKeys);
     CHECK(j.at("schema") == kJsonSchema);
 }
 
