@@ -58,11 +58,10 @@ Phase 2, explainable harmony:
 Engine tests (no Xcode or iPlug2 needed):
 
 ```
-cmake -S engine -B engine/build && cmake --build engine/build -j8 && (cd engine/build && ctest --output-on-failure)
+cmake -S engine -B engine/build -DCMAKE_BUILD_TYPE=Debug && cmake --build engine/build -j8 && (cd engine/build && ctest --output-on-failure)
 ```
 
-Two CTest targets run: `engine_tests` (the doctest suite) and `engine_rt_alloc_test` (no allocation on
-the audio-thread surface). See `engine/README.md`.
+See `engine/README.md`, and "Testing" below for the other suites and the one-shot `scripts/check.sh`.
 
 The plug-in, from the repository root:
 
@@ -84,11 +83,45 @@ The signing overrides are needed because the iPlug2 project template has its own
 baked into the APP target; they switch it to ad-hoc signing with no entitlements. The app lands in
 `~/Applications/ChordLab.app`. The same overrides are harmless on the VST3 scheme.
 
-UI logic checks (there is no XCTest target; this compiles the Foundation-only UI files with `swiftc`):
+## Testing
+
+One script runs every suite; with no flags it runs the engine's Debug build and tests only:
 
 ```
-sh ChordLab/scripts/geometry_check/run.sh      # must end with ALL OK
+scripts/check.sh            # engine (Debug) build + ctest
+scripts/check.sh --all      # + UBSan build, Swift tests, bridge tests, both Xcode schemes
 ```
+
+Flags combine (`--ubsan`, `--swift`, `--bridge`, `--plugin`). The script stops at the first failure
+and prints a PASS/FAIL table. It never uses AddressSanitizer or ThreadSanitizer (both hang or crash on
+the current Apple clang toolchain; UBSan works).
+
+The suites, each runnable on its own:
+
+| Suite | What it covers | Command |
+|---|---|---|
+| `engine_tests` (doctest) | theory, document/undo, compiler, scheduler, SMF, JSON API, golden fixtures, mutation fuzz of the JSON readers | `cmake -S engine -B engine/build -DCMAKE_BUILD_TYPE=Debug && cmake --build engine/build -j8 && (cd engine/build && ctest --output-on-failure)` |
+| `engine_rt_alloc_test` | no allocation on the audio-thread surface | same ctest run |
+| `ChordLabUICoreTests` (XCTest) | the UI's pure logic in `ChordLab/UI/Core/`: geometry, harmony text, symbols, key names, snapshot decoding | `cd ChordLab && swift test` |
+| `bridge_tests` (doctest) | the plug-in shell's pure helpers in `ChordLab/bridge/`: message validation, preview and section-export parsing, export file naming | `cmake -S ChordLab/bridge/tests -B ChordLab/build-bridge-tests && cmake --build ChordLab/build-bridge-tests -j8 && (cd ChordLab/build-bridge-tests && ctest --output-on-failure)` |
+
+**JSON fixtures.** `engine/tests/fixtures/` holds the engine's own `snapshotJson`/`stateJson` output for
+a few documents (empty, a four-chord progression with sections and a manual voicing, the same while
+browsing another key) plus hand-written Phase 1-shaped files. The engine compares its output to them
+byte for byte, and the Swift tests decode them, so the two sides cannot drift apart silently. When the
+contract changes on purpose, regenerate the generated files with
+`CHORDLAB_UPDATE_FIXTURES=1 engine/build/engine_tests -tc="*golden*"` and review the diff; the legacy
+files are maintained by hand. The Swift fixture tests fail if the directory is missing;
+`CHORDLAB_UI_SKIP_FIXTURES=1 swift test` skips them and `CHORDLAB_UI_FIXTURES_DIR=<dir>` points them
+elsewhere.
+
+**Fuzz.** `test_json_robustness.cpp` mutates valid commands and states with a fixed-seed generator and
+checks that the readers never throw, that a rejected message changes nothing (document, counters,
+selection, undo/redo history) and that an accepted one leaves the document well-formed. A failure
+prints the iteration and the escaped input, so it reproduces exactly.
+
+A new pure UI file belongs in `ChordLab/UI/Core/` so the package tests see it; a new pure plug-in helper
+belongs in `ChordLab/bridge/` with a case in `ChordLab/bridge/tests/`.
 
 ## Using it in Ableton Live
 
@@ -157,7 +190,8 @@ Top to bottom:
   them; clicking the chips and buttons always works. The digits are also only active while the plug-in
   window is the key window and no section name is being edited.
 - AddressSanitizer and ThreadSanitizer are unusable with the current Apple clang toolchain on the
-  development machine (they hang or crash); the engine has not been run under them. UBSan works.
+  development machine (they hang or crash); the engine has not been run under them. UBSan works and
+  `scripts/check.sh --ubsan` runs it.
 - No piano roll, melody tracks or key detection yet (planned for Phase 3); chords are contiguous, with
   no gaps or rests between them.
 - macOS and VST3 only. The Xcode project still carries iPlug2's other targets (AU, AUv3, AAX, VST2, iOS)
@@ -169,14 +203,19 @@ Top to bottom:
 ```
 engine/                     C++17 core, no host or UI dependency (CMake + doctest); see engine/README.md
   include/chordlab/         public headers; json_api.h is the contract with the UI
-  src/  tests/  fixtures/  tools/  third_party/
+  src/  tests/  tests/fixtures/  fixtures/  tools/  third_party/
 ChordLab/                   the iPlug2 plug-in
   ChordLab.h / ChordLab.mm  plug-in shell: audio thread, scheduler hand-off, messages, state, MIDI export
   config.h                  plug-in identity and I/O (VST3 "Instrument|Tools", MIDI in and out)
   UI/                       SwiftUI editor (a file-system-synchronized Xcode group)
+    Core/                   its pure logic (geometry, text, decoding), also built as the Swift package
+  bridge/                   header-only C++ helpers the shell uses (message validation, export naming)
+    tests/                  bridge_tests (doctest, standalone CMake project)
+  Package.swift             Swift package: library ChordLabUICore (UI/Core) + Tests/ChordLabUICoreTests
   config/                   xcconfig files (IPLUG2_ROOT lives here)
   projects/                 Xcode projects (ChordLab-macOS.xcodeproj)
   resources/                Info.plists, icons, fonts
-  scripts/geometry_check/   swiftc-compiled checks of the UI's pure logic
+scripts/check.sh            runs every suite (see Testing)
 docs/plans/                 the Phase 1 and Phase 2 plans and decision records
+docs/testing/               the first-look test script for Ableton Live
 ```

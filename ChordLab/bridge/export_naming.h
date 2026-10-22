@@ -1,7 +1,7 @@
 #pragma once
 
 // Plain C++17, header-only: no iPlug2, no Objective-C, no Foundation, so the plug-in shell's export file
-// naming can be unit-tested outside Xcode (ChordLab/tests).
+// naming can be unit-tested outside Xcode (ChordLab/bridge/tests).
 
 #include <cctype>
 #include <string>

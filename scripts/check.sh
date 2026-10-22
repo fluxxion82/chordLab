@@ -6,7 +6,7 @@
 #   scripts/check.sh            engine Debug build + ctest (section 1) only
 #   scripts/check.sh --ubsan    ... plus the engine under UndefinedBehaviorSanitizer
 #   scripts/check.sh --swift    ... plus `swift test` in ChordLab/ (when ChordLab/Package.swift exists)
-#   scripts/check.sh --bridge   ... plus the Obj-C++ bridge tests (when ChordLab/tests/CMakeLists.txt exists)
+#   scripts/check.sh --bridge   ... plus the Obj-C++ bridge tests (when ChordLab/bridge/tests/CMakeLists.txt exists)
 #   scripts/check.sh --plugin   ... plus both Xcode schemes (macOS-VST3, macOS-APP), no signing
 #   scripts/check.sh --all      everything
 # Flags combine; section 1 always runs first.
@@ -114,7 +114,7 @@ swift_tests() {
 }
 
 bridge_tests() {
-    step "$DEFAULT_TIMEOUT" cmake -S ChordLab/tests -B ChordLab/build-bridge-tests || return 1
+    step "$DEFAULT_TIMEOUT" cmake -S ChordLab/bridge/tests -B ChordLab/build-bridge-tests || return 1
     step "$DEFAULT_TIMEOUT" cmake --build ChordLab/build-bridge-tests -j8 || return 1
     (cd ChordLab/build-bridge-tests && step "$DEFAULT_TIMEOUT" ctest --output-on-failure) || return 1
 }
@@ -200,10 +200,10 @@ if [ "$FAILED" -eq 0 ] && [ "$want_swift" -eq 1 ]; then
 fi
 
 if [ "$FAILED" -eq 0 ] && [ "$want_bridge" -eq 1 ]; then
-    if [ -f ChordLab/tests/CMakeLists.txt ]; then
+    if [ -f ChordLab/bridge/tests/CMakeLists.txt ]; then
         section "4 bridge tests" bridge_tests
     else
-        skip "4 bridge tests" "no ChordLab/tests/CMakeLists.txt"
+        skip "4 bridge tests" "no ChordLab/bridge/tests/CMakeLists.txt"
     fi
 fi
 

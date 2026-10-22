@@ -1,7 +1,7 @@
 #pragma once
 
 // Plain C++17, header-only: no iPlug2, no Objective-C, no Foundation, so the plug-in shell's message
-// handling can be unit-tested outside Xcode (ChordLab/tests).
+// handling can be unit-tested outside Xcode (ChordLab/bridge/tests).
 
 #include <nlohmann/json.hpp>
 

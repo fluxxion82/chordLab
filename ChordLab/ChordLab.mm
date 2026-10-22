@@ -57,7 +57,7 @@
 #include "ChordLab.h"
 #include "IPlug_include_in_plug_src.h"
 
-// Pure C++ helpers for message validation and export naming, unit-tested by ChordLab/tests (bridge_tests).
+// Pure C++ helpers for message validation and export naming, unit-tested by ChordLab/bridge/tests (bridge_tests).
 #include "bridge/export_naming.h"
 #include "bridge/export_request.h"
 #include "bridge/preview_request.h"
