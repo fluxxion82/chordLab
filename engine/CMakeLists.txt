@@ -13,7 +13,8 @@ find_package(Threads REQUIRED)
 target_link_libraries(engine_tests PRIVATE chordlab_engine Threads::Threads)  # test_triple_buffer.cpp spawns a producer
 target_include_directories(engine_tests PRIVATE tests third_party)  # test_json_api.cpp parses with nlohmann
 add_test(NAME engine_tests COMMAND engine_tests)
-target_compile_definitions(engine_tests PRIVATE CHORDLAB_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
+target_compile_definitions(engine_tests PRIVATE CHORDLAB_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures"
+                                                 CHORDLAB_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures")  # test_fixtures.cpp: golden JSON for the UI contract
 # Its own process: it replaces the global operator new/delete to count allocations on the real-time surface.
 add_executable(engine_rt_alloc_test tests/rt_alloc/test_rt_alloc.cpp)
 target_link_libraries(engine_rt_alloc_test PRIVATE chordlab_engine)

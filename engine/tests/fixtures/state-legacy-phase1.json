@@ -1,0 +1,1 @@
+{"schema":1,"projectKey":{"tonic":{"letter":"C","alter":0},"mode":"Ionian"},"browsedKey":{"tonic":{"letter":"C","alter":0},"mode":"Ionian"},"progressionLoop":true,"followHost":true,"events":[{"id":1,"root":0,"type":"maj","lengthBeats":4.0,"velocity":100},{"id":2,"root":7,"type":"7","lengthBeats":4.0,"velocity":90}],"nextId":3}
