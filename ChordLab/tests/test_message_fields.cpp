@@ -5,6 +5,7 @@
 #include <climits>
 #include <nlohmann/json.hpp>
 
+using chordlab::bridge::boundedInt;
 using chordlab::bridge::boundedIntField;
 using nlohmann::json;
 
@@ -47,6 +48,22 @@ TEST_CASE("boundedIntField: only JSON integers count") {
     CHECK_FALSE(boundedIntField(parsed(R"({"v":null})"), "v", 0, 10).has_value());
     CHECK_FALSE(boundedIntField(parsed(R"({"v":[1]})"), "v", 0, 10).has_value());
     CHECK_FALSE(boundedIntField(parsed(R"({"v":{"x":1}})"), "v", 0, 10).has_value());
+}
+
+TEST_CASE("boundedInt: a bare value, with the same rules") {
+    CHECK(boundedInt(json(0), 0, 127) == 0);
+    CHECK(boundedInt(json(127), 0, 127) == 127);
+    CHECK_FALSE(boundedInt(json(128), 0, 127).has_value());
+    CHECK_FALSE(boundedInt(json(-1), 0, 127).has_value());
+    CHECK_FALSE(boundedInt(json(1.0), 0, 127).has_value());
+    CHECK_FALSE(boundedInt(json(true), 0, 127).has_value());
+    CHECK_FALSE(boundedInt(json("1"), 0, 127).has_value());
+    CHECK_FALSE(boundedInt(json(nullptr), 0, 127).has_value());
+    CHECK_FALSE(boundedInt(parsed("18446744073709551615"), 0, 127).has_value());
+    // With a negative lower bound the uint64 guard is what refuses it (a wrap would read -1).
+    CHECK_FALSE(boundedInt(parsed("18446744073709551615"), -5, 5).has_value());
+    CHECK_FALSE(boundedIntField(parsed(R"({"v":18446744073709551615})"), "v", -5, 5).has_value());
+    CHECK(boundedInt(json(-1), -5, 5) == -1);
 }
 
 TEST_CASE("boundedIntField: a missing member is nullopt") {

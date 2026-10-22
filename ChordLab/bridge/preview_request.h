@@ -75,12 +75,13 @@ inline std::optional<chordlab::PreviewCmd> parsePreviewRequest(std::string_view 
                 cmd.count = 0;
                 for (const auto& p : *pitches)
                 {
-                    if (!p.is_number_integer() || p.get<std::int64_t>() < 0 || p.get<std::int64_t>() > 127)
+                    const std::optional<int> pitch = boundedInt(p, 0, 127);
+                    if (!pitch)
                     {
                         error = "preview pitches must be integers in 0..127";
                         break;
                     }
-                    cmd.pitches[cmd.count++] = static_cast<std::uint8_t>(p.get<std::int64_t>());
+                    cmd.pitches[cmd.count++] = static_cast<std::uint8_t>(*pitch);
                 }
             }
         }

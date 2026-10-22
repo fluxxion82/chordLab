@@ -112,6 +112,9 @@ TEST_CASE("parsePreviewRequest: velocity defaults to 100 and must be an integer 
     CHECK(problemOf(R"({"schema":1,"id":1,"on":true,"velocity":100.0,"pitches":[60]})") == kStartProblem);
     CHECK(problemOf(R"({"schema":1,"id":1,"on":true,"velocity":null,"pitches":[60]})") == kStartProblem);
     CHECK(problemOf(R"({"schema":1,"id":1,"on":true,"velocity":4294967297,"pitches":[60]})") == kStartProblem);
+    // Beyond INT64_MAX (stored as uint64): refused explicitly, never through a signed conversion.
+    CHECK(problemOf(R"({"schema":1,"id":1,"on":true,"velocity":18446744073709551615,"pitches":[60]})") == kStartProblem);
+    CHECK(problemOf(R"({"schema":1,"id":1,"on":true,"velocity":9223372036854775808,"pitches":[60]})") == kStartProblem);
 }
 
 TEST_CASE("parsePreviewRequest: a Start needs an array of 1..8 pitches") {
@@ -142,6 +145,8 @@ TEST_CASE("parsePreviewRequest: every pitch must be an integer in 0..127, order 
     // Seven good pitches, then a bad eighth: the whole Start is refused.
     CHECK(problemOf(R"({"schema":1,"id":1,"on":true,"pitches":[60,62,64,65,67,69,71,128]})") == kPitchProblem);
     CHECK(problemOf(R"({"schema":1,"id":1,"on":true,"pitches":[18446744073709551615]})") == kPitchProblem);
+    CHECK(problemOf(R"({"schema":1,"id":1,"on":true,"pitches":[60,9223372036854775808]})") == kPitchProblem);
+    CHECK(problemOf(R"({"schema":1,"id":1,"on":true,"pitches":[4294967356]})") == kPitchProblem);   // 2^32 + 60
 }
 
 TEST_CASE("parsePreviewRequest: the first failing rule decides the problem") {
