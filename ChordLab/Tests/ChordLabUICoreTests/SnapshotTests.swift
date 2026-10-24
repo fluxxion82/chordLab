@@ -214,6 +214,82 @@ final class SnapshotTests: XCTestCase {
     XCTAssertNil(snapshot.tonics(for: "Locrian"))
   }
 
+  // MARK: - Chord relations (plan R6)
+
+  /// `phase2` with the top-level relation fields: `relationMode` and, unless `reference` is nil, a
+  /// `relationReference` (`"null"` or an object, written as given).
+  private static func withRelations(mode: String?, reference: String?) -> String {
+    var fields = ""
+    if let mode = mode { fields += "\"relationMode\":\"\(mode)\"," }
+    if let reference = reference { fields += "\"relationReference\":\(reference)," }
+    return phase2.replacingOccurrences(of: "\"events\":", with: fields + "\"events\":")
+  }
+
+  /// One palette cell, with `relation` / `relationText` when `relation` is given.
+  private static func relationCell(degree: Int, relation: Int?) -> String {
+    let extra = relation.map { ",\"relation\":\($0),\"relationText\":\"2 common tones (C, E) · up a fourth · cost 3\"" } ?? ""
+    return "{\"degree\":\(degree),\"tier\":1,\"root\":0,\"type\":\"maj\",\"symbol\":\"C\",\"roman\":\"I\",\"family\":\"Major\"," +
+      "\"function\":\"T\",\"tension\":3,\"filled\":true,\"voicing\":[60,64,67],\"outOfKey\":[]\(extra)}"
+  }
+
+  /// `json` with its palette replaced by one tier-1 row of `cells`.
+  private static func withPaletteCells(_ json: String, _ cells: [String]) -> String {
+    let start = json.range(of: "\"palette\":")!.lowerBound
+    return String(json[..<start]) + "\"palette\":{\"tiers\":2,\"cells\":[\(cells.joined(separator: ","))]}}"
+  }
+
+  func testOlderSnapshotHasNoRelationFields() throws {
+    let snapshot = try Self.decode(Snapshot.self, Self.phase2)
+    XCTAssertNil(snapshot.relationMode)
+    XCTAssertNil(snapshot.relationReference)
+    XCTAssertNil(snapshot.palette.cells[0].relation)
+    XCTAssertNil(snapshot.palette.cells[0].relationText)
+  }
+
+  func testRelationModeAndReferenceObjectDecode() throws {
+    let snapshot = try Self.decode(Snapshot.self, Self.withRelations(mode: "commonTones",
+                                                                      reference: "{\"eventId\":2,\"symbol\":\"G7\"}"))
+    XCTAssertEqual(snapshot.relationMode, "commonTones")
+    XCTAssertEqual(snapshot.relationModeValue, .commonTones)
+    XCTAssertEqual(snapshot.relationReference, RelationReferenceJSON(eventId: 2, symbol: "G7"))
+  }
+
+  func testNullRelationReferenceIsNil() throws {
+    let snapshot = try Self.decode(Snapshot.self, Self.withRelations(mode: "blend", reference: "null"))
+    XCTAssertEqual(snapshot.relationModeValue, .blend)
+    XCTAssertNil(snapshot.relationReference)
+  }
+
+  func testAbsentRelationReferenceIsNil() throws {
+    let snapshot = try Self.decode(Snapshot.self, Self.withRelations(mode: "off", reference: nil))
+    XCTAssertEqual(snapshot.relationModeValue, .off)
+    XCTAssertNil(snapshot.relationReference)
+  }
+
+  /// A mode this UI does not know still decodes (the snapshot is never lost over it); it has no case.
+  func testUnknownRelationModeDecodesWithoutACase() throws {
+    let snapshot = try Self.decode(Snapshot.self, Self.withRelations(mode: "tension", reference: "null"))
+    XCTAssertEqual(snapshot.relationMode, "tension")
+    XCTAssertNil(snapshot.relationModeValue)
+  }
+
+  func testCellsWithAndWithoutRelation() throws {
+    let json = Self.withPaletteCells(Self.withRelations(mode: "blend", reference: "{\"eventId\":2,\"symbol\":\"C\"}"),
+                                     [Self.relationCell(degree: 0, relation: 72), Self.relationCell(degree: 1, relation: nil)])
+    let snapshot = try Self.decode(Snapshot.self, json)
+    XCTAssertEqual(snapshot.palette.cells.map(\.relation), [72, nil])
+    XCTAssertEqual(snapshot.palette.cells[0].relationText, "2 common tones (C, E) · up a fourth · cost 3")
+    XCTAssertNil(snapshot.palette.cells[1].relationText)
+  }
+
+  func testHomeCellsCarryRelations() throws {
+    let entry = Self.relationCell(degree: 0, relation: 100)
+      .replacingOccurrences(of: "{\"degree\"", with: "{\"id\":\"home-0\",\"degree\"")
+    let snapshot = try Self.decode(Snapshot.self, Self.withHome(Self.phase2, entry))
+    XCTAssertEqual(snapshot.homeRow.first?.id, "home-0")
+    XCTAssertEqual(snapshot.homeRow.first?.relation, 100)
+  }
+
   // MARK: - Other payloads
 
   func testMessagePayloadsDecode() throws {

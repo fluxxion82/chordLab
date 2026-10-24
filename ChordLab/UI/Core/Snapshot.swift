@@ -4,7 +4,8 @@ import Foundation
 /// written by engine/src/json_api.cpp). The UI never computes theory: everything it shows is in here.
 /// Fields the engine added under schema 1 (`modes`, `tonics`, `outOfKey`, and the Phase 2 fields:
 /// `function`, `tension`, the voicing fields, `why`, `sections`, `suggestions`, `autoVoiceLead`,
-/// `selectedEventId`, and P2-M3's `homeTriads`) are optional so that a UI built against this file still decodes a snapshot from an
+/// `selectedEventId`, P2-M3's `homeTriads`, and the chord relations' `relationMode`, `relationReference`
+/// and per-cell `relation` / `relationText`) are optional so that a UI built against this file still decodes a snapshot from an
 /// older plug-in build.
 
 /// `{"letter":"C","alter":0}`: a spelled tonic, `alter` -1 flat, 0 natural, 1 sharp.
@@ -73,6 +74,9 @@ struct EventJSON: Codable, Equatable, Identifiable {
 /// `filled` is false for a borrowed chord (a note outside the project key); `family` is "Major", "Minor"
 /// or "Other"; `outOfKey` lists the borrowed pitch classes (empty exactly when `filled`); `function` and
 /// `tension` as on events. `outOfKey`, `function` and `tension` are absent from older plug-in builds.
+/// `relation` (0...100) and `relationText` are the cell's relatedness to the snapshot's
+/// `relationReference` under its `relationMode` (plan R6): present only when there is a reference chord
+/// and the mode is not off, and absent from older plug-in builds.
 /// The snapshot's `homeTriads` entries are cells too: the project key's triads (`degree` of the project
 /// scale, `tier` 1), with the engine's own `id` ("home-0" … "home-6"), which palette cells do not carry.
 struct CellJSON: Codable, Equatable, Identifiable {
@@ -90,6 +94,10 @@ struct CellJSON: Codable, Equatable, Identifiable {
   let tension: Int?
   /// The wire `id`: nil on palette cells, "home-<degree>" on `homeTriads` entries.
   let engineId: String?
+  /// How related the chord is to the reference chord, 0...100; drives `RelationStyle`.
+  let relation: Int?
+  /// The engine's short account of that relation ("2 common tones (C, E) · up a fourth · cost 3").
+  let relationText: String?
 
   /// The engine's id when it sent one, else the grid position ("1/0": unique within a palette, one cell
   /// per tier and degree). The two forms cannot collide, so a held home cell never lights a palette cell.
@@ -97,8 +105,16 @@ struct CellJSON: Codable, Equatable, Identifiable {
 
   enum CodingKeys: String, CodingKey {
     case degree, tier, root, type, symbol, roman, family, filled, voicing, outOfKey, function, tension
+    case relation, relationText
     case engineId = "id"
   }
+}
+
+/// The chord the palette's relatedness is measured against (plan R1: the selected block's chord, else the
+/// last chord): the event's id and its symbol in the project key.
+struct RelationReferenceJSON: Codable, Equatable {
+  let eventId: Int
+  let symbol: String
 }
 
 /// `tiers` is one more than the highest tier present; `cells` holds only the cells that exist, ordered by
@@ -166,6 +182,15 @@ struct Snapshot: Codable, Equatable {
   /// The project key's seven diatonic triads while another key is browsed, else empty; absent from older
   /// plug-in builds. Read it through `homeRow`.
   let homeTriads: [CellJSON]?
+  /// The relation mode (a `RelationMode` raw value), always sent by plug-ins that have chord relations;
+  /// absent from older builds, whose UI then hides the Relations picker. Decoded as a string so that a
+  /// mode this UI does not know never loses the snapshot; read the case through `relationModeValue`.
+  let relationMode: String?
+  /// The chord the cells' `relation` is measured against; nil (JSON null, or absent) for none.
+  let relationReference: RelationReferenceJSON?
+
+  /// `relationMode` as a case; nil when absent or unknown.
+  var relationModeValue: RelationMode? { relationMode.flatMap(RelationMode.init(rawValue:)) }
 
   /// The cells of the home compare row: empty when the project key is the one browsed, and when an older
   /// plug-in build sends no `homeTriads`.
