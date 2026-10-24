@@ -9,6 +9,7 @@
 #include "chordlab/limits.h"
 #include "chordlab/palette.h"
 #include "chordlab/pitch.h"
+#include "chordlab/presets.h"
 #include "chordlab/relatedness.h"
 #include "chordlab/scale.h"
 #include "chordlab/suggest.h"
@@ -2041,4 +2042,185 @@ TEST_CASE("keyName: the spelled tonic and the mode name, as the snapshot's key n
     CHECK(keyName(key('C', 0, Mode::Ionian)) == "C Ionian");
     CHECK(keyName(key('B', -1, Mode::HarmonicMinor)) == "Bb HarmonicMinor");
     CHECK(keyName(key('F', 1, Mode::Dorian)) == "F# Dorian");
+}
+
+// --- Presets ---------------------------------------------------------------------------
+
+TEST_CASE("loadPreset append: the preset resolved in the project key, after the last chord, one undo step") {
+    DocumentStore store = threeChords();
+    store.setProjectKey(key('G', 0, Mode::Ionian));
+    store.setSelectedEvent(2);
+    const Document before = store.doc();
+    applyOk(store, {{"cmd", "loadPreset"}, {"id", "axis"}, {"mode", "append"}});
+    const json snap = snapshot(store);
+    CHECK(snapshotIds(snap) == std::vector<int>{1, 2, 3, 4, 5, 6, 7});
+    std::vector<std::string> symbols;
+    for (const json& e : snap.at("events")) {
+        symbols.push_back(e.at("symbol").get<std::string>());
+    }
+    CHECK(symbols == std::vector<std::string>{"C", "F", "G7", "G", "D", "Em", "C"});
+    CHECK(snap.at("events").at(3).at("roman") == "I");
+    CHECK(snap.at("events").at(5).at("velocity") == 100);
+    CHECK(snap.at("endBeat") == 28.0);
+    REQUIRE(snap.at("sections").size() == 2);
+    CHECK(snap.at("sections").at(0) ==
+          json({{"id", 1}, {"name", "Section 1"}, {"colourIndex", 0}, {"firstEventIndex", 0}}));
+    CHECK(snap.at("sections").at(1) == json({{"id", 2}, {"name", "Axis"}, {"colourIndex", 1}, {"firstEventIndex", 3}}));
+    CHECK(store.selectedEventId() == 2);  // its chord is still there
+    applyOk(store, {{"cmd", "undo"}});
+    CHECK(store.doc() == before);
+}
+
+TEST_CASE("loadPreset replace: chords and sections replaced, keys and live state kept, selection cleared") {
+    DocumentStore store = richStore();  // D Dorian, sections 1 and 2
+    store.setSelectedEvent(3);
+    const Document before = store.doc();
+    applyOk(store, {{"cmd", "loadPreset"}, {"id", "andalusian"}, {"mode", "replace"}});
+    const Document& d = store.doc();
+    REQUIRE(d.events.size() == 4);
+    CHECK(d.events[0].chord == chord(2, "min"));   // i in D
+    CHECK(d.events[1].chord == chord(0, "maj"));   // bVII
+    CHECK(d.events[2].chord == chord(10, "maj"));  // bVI
+    CHECK(d.events[3].chord == chord(9, "7"));     // V7
+    CHECK(d.events[0].id == 4);
+    REQUIRE(d.sections.size() == 1);
+    CHECK(d.sections[0] == Section{3, "Andalusian", 2, 0});
+    CHECK(store.selectedEventId() == kNoEventId);
+    CHECK(d.projectKey == before.projectKey);
+    CHECK(d.browsedKey == before.browsedKey);
+    CHECK(d.relationMode == before.relationMode);
+    CHECK(d.autoVoiceLead == before.autoVoiceLead);
+    applyOk(store, {{"cmd", "undo"}});
+    CHECK(store.doc() == before);
+}
+
+TEST_CASE("loadPreset: an unknown, missing or mistyped id is rejected, naming it") {
+    DocumentStore store = threeChords();
+    for (const json& cmd : {json{{"cmd", "loadPreset"}, {"id", "nope"}, {"mode", "append"}},
+                            json{{"cmd", "loadPreset"}, {"id", "Axis"}, {"mode", "append"}},
+                            json{{"cmd", "loadPreset"}, {"id", ""}, {"mode", "replace"}}}) {
+        checkRejected(store, cmd);
+        std::string error;
+        CHECK_FALSE(apply(store, cmd, error));
+        CHECK_MESSAGE(error.find("\"" + cmd.at("id").get<std::string>() + "\" is not a preset") != std::string::npos,
+                      error);
+        CHECK(error.find("\"id\"") != std::string::npos);
+    }
+    checkRejected(store, {{"cmd", "loadPreset"}, {"mode", "append"}});
+    checkRejected(store, {{"cmd", "loadPreset"}, {"id", 3}, {"mode", "append"}});
+    checkRejected(store, {{"cmd", "loadPreset"}, {"id", nullptr}, {"mode", "append"}});
+    CHECK(store.doc().events.size() == 3);
+    CHECK(store.undo());  // the appends' history is all there is
+}
+
+TEST_CASE("loadPreset: a missing, mistyped or unknown mode is rejected, listing append and replace") {
+    DocumentStore store = threeChords();
+    for (const json& cmd : {json{{"cmd", "loadPreset"}, {"id", "axis"}},
+                            json{{"cmd", "loadPreset"}, {"id", "axis"}, {"mode", "Append"}},
+                            json{{"cmd", "loadPreset"}, {"id", "axis"}, {"mode", "insert"}},
+                            json{{"cmd", "loadPreset"}, {"id", "axis"}, {"mode", 1}},
+                            json{{"cmd", "loadPreset"}, {"id", "nope"}, {"mode", "insert"}}}) {
+        CAPTURE(cmd.dump());
+        checkRejected(store, cmd);
+        std::string error;
+        CHECK_FALSE(apply(store, cmd, error));
+        if (cmd.at("id") == "axis") {
+            CHECK_MESSAGE(error.find("\"append\"") != std::string::npos, error);
+            CHECK_MESSAGE(error.find("\"replace\"") != std::string::npos, error);
+            CHECK(error.find("\"mode\"") != std::string::npos);
+        }
+    }
+}
+
+TEST_CASE("loadPreset: refusals by the store are reported with its reason and change nothing") {
+    SUBCASE("capacity") {
+        DocumentStore store;
+        for (int i = 0; i < kMaxChords - 3; ++i) {
+            REQUIRE(store.appendChord(kC) != kNoEventId);
+        }
+        const Document before = store.doc();
+        const int nextId = store.nextId();
+        std::string error;
+        CHECK_FALSE(apply(store, {{"cmd", "loadPreset"}, {"id", "axis"}, {"mode", "append"}}, error));
+        CHECK_MESSAGE(error.find("\"loadPreset\" refused") != std::string::npos, error);
+        CHECK_MESSAGE(error.find(std::to_string(kMaxChords)) != std::string::npos, error);
+        CHECK(store.doc() == before);
+        CHECK(store.nextId() == nextId);
+        applyOk(store, {{"cmd", "loadPreset"}, {"id", "axis"}, {"mode", "replace"}});  // 4 alone fit
+        CHECK(store.doc().events.size() == 4);
+    }
+    SUBCASE("event ids") {
+        DocumentStore store(INT_MAX - 3);
+        std::string error;
+        CHECK_FALSE(apply(store, {{"cmd", "loadPreset"}, {"id", "axis"}, {"mode", "replace"}}, error));
+        CHECK_MESSAGE(error.find("\"loadPreset\" refused") != std::string::npos, error);
+        CHECK_MESSAGE(error.find("event ids") != std::string::npos, error);
+        CHECK(store.doc().events.empty());
+        CHECK_FALSE(store.undo());
+    }
+    SUBCASE("section ids") {
+        DocumentStore store;
+        store.replace(Document{}, 1, INT_MAX);
+        std::string error;
+        CHECK_FALSE(apply(store, {{"cmd", "loadPreset"}, {"id", "axis"}, {"mode", "append"}}, error));
+        CHECK_MESSAGE(error.find("\"loadPreset\" refused") != std::string::npos, error);
+        CHECK_MESSAGE(error.find("section ids") != std::string::npos, error);
+        CHECK(store.doc().events.empty());
+        CHECK(store.nextId() == 1);
+        CHECK_FALSE(store.undo());
+    }
+}
+
+TEST_CASE("snapshot presets: every record in table order, constant but for fits") {
+    DocumentStore store;
+    const json snap = snapshot(store);
+    const json& presets = snap.at("presets");
+    REQUIRE(presets.is_array());
+    REQUIRE(presets.size() == allPresets().size());
+    CHECK(presets.at(0) == json({{"id", "axis"},
+                                 {"name", "Axis"},
+                                 {"genre", "Pop"},
+                                 {"tonality", "Major"},
+                                 {"numerals", "I \xE2\x80\x93 V \xE2\x80\x93 vi \xE2\x80\x93 IV"},
+                                 {"fits", true}}));
+    for (std::size_t i = 0; i < presets.size(); ++i) {
+        const Preset& p = allPresets()[i];
+        const json& entry = presets.at(i);
+        CAPTURE(std::string(p.id));
+        CHECK(entry.size() == 6);
+        CHECK(entry.at("id") == p.id);
+        CHECK(entry.at("name") == p.name);
+        CHECK(entry.at("genre") == p.genre);
+        CHECK(entry.at("tonality") == tonalityName(p.tonality));
+        CHECK(entry.at("numerals") == presetNumerals(p));
+        CHECK(entry.at("fits") == presetFits(p, store.doc().projectKey));
+    }
+}
+
+TEST_CASE("snapshot presets: fits follows the project key, not the browsed key") {
+    DocumentStore store;
+    const auto fits = [&store](const char* id) {
+        const json snap = snapshot(store);  // kept alive: the loop reads into it
+        for (const json& entry : snap.at("presets")) {
+            if (entry.at("id").get<std::string>() == id) {
+                return entry.at("fits").get<bool>();
+            }
+        }
+        FAIL("no preset " << id);
+        return false;
+    };
+    CHECK(fits("axis"));
+    CHECK_FALSE(fits("edm-minor"));
+    CHECK(fits("blues-12"));
+    applyOk(store, {{"cmd", "browseKey"}, {"mode", "Aeolian"}});  // browsing changes nothing
+    CHECK(fits("axis"));
+    applyOk(store, {{"cmd", "setKey"}, {"letter", "A"}, {"alter", 0}, {"mode", "Aeolian"}});
+    CHECK_FALSE(fits("axis"));
+    CHECK(fits("edm-minor"));
+    CHECK(fits("blues-12"));
+    applyOk(store, {{"cmd", "setKey"}, {"letter", "G"}, {"alter", 0}, {"mode", "Mixolydian"}});
+    CHECK(fits("axis"));
+    CHECK_FALSE(fits("lament"));
+    applyOk(store, {{"cmd", "setKey"}, {"letter", "E"}, {"alter", 0}, {"mode", "HarmonicMinor"}});
+    CHECK(fits("lament"));
 }

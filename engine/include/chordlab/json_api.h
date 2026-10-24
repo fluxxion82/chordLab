@@ -16,8 +16,9 @@ struct Palette;
 /// a message with a different or missing schema is rejected.
 /// Adding a field is not a schema change: the readers here ignore members they do not know, and the UI
 /// reads only the members it needs, so a new field (the snapshot's `modes`, `tonics`, `outOfKey`,
-/// `homeTriads`, `relationMode`, `relationReference` and the cells' `relation` / `relationText` were added
-/// under schema 1) costs nothing to a reader that has not heard of it. The number bumps only
+/// `homeTriads`, `relationMode`, `relationReference`, the cells' `relation` / `relationText` and
+/// `presets` were added under schema 1, like the `loadPreset` command) costs nothing to a reader that
+/// has not heard of it. The number bumps only
 /// when an existing field changes meaning or shape, or a required one is removed.
 constexpr int kJsonSchema = 1;
 
@@ -83,7 +84,9 @@ constexpr int kMaxJsonDepth = 64;
 ///                       "voicing":[60,64,67],"outOfKey":[],
 ///                       "relation":92,"relationText":"1 common tone (C) · up a fifth · cost 3"}, ...]},
 ///  "homeTriads":[],
-///  "relationMode":"blend", "relationReference":{"eventId":3,"symbol":"F"}|null}
+///  "relationMode":"blend", "relationReference":{"eventId":3,"symbol":"F"}|null,
+///  "presets":[{"id":"axis","name":"Axis","genre":"Pop","tonality":"Major","numerals":"I – V – vi – IV",
+///              "fits":true}, ...]}
 /// ```
 /// Events are in playback order with `startBeat` accumulated as `Document::startBeatOf` does; `symbol` is
 /// the Klimper-style symbol spelled in the project key, `roman` the Standard-style numeral relative to the
@@ -170,6 +173,15 @@ constexpr int kMaxJsonDepth = 64;
 ///   " · borrowed from C Aeolian" for a borrowed chord). All of them come from one `relatedness` call over
 ///   the palette cells followed by the home triads, so `blend`'s min–max normalisation spans both rows
 ///   together: the best of either row is 100, the worst 0, and a cell equal to the reference is 100.
+/// - `presets` (additive, schema still 1; always present, 29 entries): the built-in progression library
+///   (presets.h), every record of `allPresets()` in table order (so grouped by genre), each
+///   `{id, name, genre, tonality, numerals, fits}`: `id` the handle `loadPreset` takes, `name` and
+///   `genre` display text (UTF-8: "ii–V–I", "R&B / Neo-soul"), `tonality` `tonalityName` ("Major",
+///   "Minor", "Any"), `numerals` `presetNumerals` ("iiø7 – V7 – i7 – i7": the steps read in C major, or
+///   A minor for a Minor preset, in the events' `roman` spelling, joined with an en dash between spaces,
+///   repeats kept) and `fits` `presetFits` against `projectKey` (a Major preset fits Ionian, Lydian and
+///   Mixolydian, a Minor one the other six modes, Any all nine). Everything but `fits` is constant for a
+///   build, like `modes` and `tonics`.
 /// - `suggestions`: `suggestNext(previous, projectKey, browsedKey)` (suggest.h, Pop style, at most 8),
 ///   where `previous` is the selected event's chord when `selectedEventId` names an event, else the last
 ///   event's chord, else null (the opening suggestions of an empty document). Each entry carries the
@@ -215,10 +227,21 @@ std::string keyName(const Key& key);
 ///   persisted by `stateJson`); `mode` is one of "off", "commonTones", "voiceLeading", "function",
 ///   "blend" (`relationModeName`, relatedness.h). A missing, non-string or unknown `mode` is rejected with
 ///   an error that lists the five.
+/// - `loadPreset {id, mode}`: `id` a preset id of the snapshot's `presets` (exact, case-sensitive; an
+///   unknown id is rejected with an error naming it), `mode` "append" or "replace" (anything else, or
+///   none, is rejected with an error listing both). The preset is resolved in the project key
+///   (`resolvePreset`) and loaded as ONE undoable step: "append" is `appendProgression` (after the last
+///   chord, in a new section named after the preset; onto an unsectioned non-empty progression the
+///   chords already there first get a default "Section <id>" at 0), "replace" is `replaceProgression`
+///   (every chord and section replaced, one section at 0 named after the preset, the selection cleared
+///   because its chord is gone; keys and live state untouched, history kept). Refused (false, an error
+///   naming the reason, no change, no id consumed) for the store's reasons (`progressionRefusal`,
+///   document.h): the result would hold more than `kMaxChords` chords, or the event or section id
+///   counter cannot hand out the ids the load needs.
 /// - `undo`, `redo`: no fields.
 ///
 /// Every field is validated before anything is touched: an unknown `cmd`, a missing or mistyped field, a
-/// root outside 0..11, an unknown chord type or mode, a bad letter or alter, a non-finite number or a
+/// root outside 0..11, an unknown chord type, mode or preset, a bad letter or alter, a non-finite number or a
 /// section name over the bound makes the call return false with a description in `error`, leaving the
 /// document, its history and the selection exactly as they were. Fields the command does not use are ignored. Numbers are not
 /// range-checked beyond that: lengths, velocities, inversions, octaves, colours and move targets are

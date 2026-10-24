@@ -301,8 +301,8 @@ std::string readFixture(const char* name) {
     return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
 }
 
-/// One valid message for every command name of json_api.h (three for browseKey), against ids 1..4 and
-/// section ids 1..2 of `prefilledStore`.
+/// One valid message for every command name of json_api.h (three for browseKey, two each for selectEvent and
+/// loadPreset), against ids 1..4 and section ids 1..2 of `prefilledStore`.
 std::vector<std::string> commandCorpus() {
     const std::vector<json> bodies = {
         {{"cmd", "setKey"}, {"letter", "D"}, {"alter", -1}, {"mode", "Dorian"}},
@@ -328,6 +328,8 @@ std::vector<std::string> commandCorpus() {
         {{"cmd", "selectEvent"}, {"id", 3}},
         {{"cmd", "selectEvent"}, {"id", nullptr}},
         {{"cmd", "setRelationMode"}, {"mode", "voiceLeading"}},
+        {{"cmd", "loadPreset"}, {"id", "andalusian"}, {"mode", "append"}},
+        {{"cmd", "loadPreset"}, {"id", "blues-12"}, {"mode", "replace"}},
         {{"cmd", "undo"}},
         {{"cmd", "redo"}},
     };

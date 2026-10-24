@@ -45,8 +45,10 @@ the voicing `compile` gives them and the "why" of each against the chord before 
 the sections, the live selection, the next-chord suggestions, `homeTriads`, the project key's seven
 diatonic triads in the palette cells' shape while another key is browsed, empty otherwise, and the chord
 relations: `relationMode`, `relationReference` and each sized cell's `relation` score and
-`relationText` against it, from `relatedness.h`), the commands (`applyCommandJson`: keys and browsing,
-chord edits, voicing and auto voice-leading, sections, selection, the relation mode, undo/redo) and the
+`relationText` against it, from `relatedness.h`, and `presets`, the progression library of `presets.h`
+with each record's numerals and whether it fits the project key), the commands (`applyCommandJson`: keys
+and browsing, chord edits, voicing and auto voice-leading, sections, selection, the relation mode, loading
+a preset, undo/redo) and the
 persisted state (`stateJson` / `loadStateJson`). The rules behind the "why" sentence, the validation of
 each command and the defaults a loader applies are in that header's doc blocks and are not repeated
 here; `tests/test_json_api.cpp` pins every field. The schema number is 1 and stays 1 while fields are
