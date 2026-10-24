@@ -257,6 +257,18 @@ final class SequenceGeometryTests: XCTestCase {
 
   func testATensionCountThatDisagreesWithTheLayoutIsNil() {
     XCTAssertNil(SequenceGeometry.tensionPoints(tensions: [3, 27], in: mixed, height: 18), "a stale pairing: no curve")
+    XCTAssertNil(SequenceGeometry.tensionPoints(tensions: [3, 27, 50, 9], in: mixed, height: 18),
+                 "more tensions than blocks is the same stale pairing, not a silent truncation")
+  }
+
+  func testANegativeInsetIsTreatedAsZero() {
+    let points = SequenceGeometry.tensionPoints(tensions: [0, 100], in: fourBars.prefix(2), height: 18, inset: -4)
+    XCTAssertEqual(points?.map(\.y), [18, 0])
+  }
+
+  func testInsetBandInterpolatesLinearlyBetweenTheExtremes() {
+    let points = SequenceGeometry.tensionPoints(tensions: [25, 75], in: fourBars.prefix(2), height: 20, inset: 4)
+    XCTAssertEqual(points?.map(\.y), [13, 7], "band 4…16: 25 is a quarter up (13), 75 three quarters up (7)")
   }
 
   func testAnInsetLargerThanHalfTheHeightCollapsesToTheMiddle() {

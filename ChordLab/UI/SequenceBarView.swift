@@ -28,8 +28,8 @@ import SwiftUI
 /// per chord at its block's centre (`SequenceGeometry.tensionPoints`), tension 0 at the bottom and 100 at
 /// the top, straight neutral segments between the points and a function-coloured dot on each (larger on
 /// the selected chord). It follows a block being resized or dragged, takes no clicks and is hidden from
-/// accessibility (the blocks carry the tension); with any chord lacking a tension (an older plug-in
-/// build) nothing is drawn there.
+/// accessibility (the block's hover popover shows the tension); with any chord lacking a tension (an older
+/// plug-in build) nothing is drawn there.
 /// Undo/redo are the key bar's buttons (⌘Z / ⇧⌘Z), so they work whatever has focus.
 ///
 /// The playhead (`state.transport`, ~15 Hz from the plug-in) is a 2-pt line at the position's beat, folded
@@ -41,7 +41,7 @@ struct SequenceBarView: View {
   @AppStorage(LabelMode.storageKey) private var labelMode = LabelMode.defaultMode
 
   static let pxPerBeat: CGFloat = 24
-  static let height: CGFloat = 138
+  static let height: CGFloat = 132   // header 20 + curve 18 + blocks 56 + ruler 20 + 3 gaps + 12 padding
   static let blockHeight: CGFloat = 56
   static let rulerHeight: CGFloat = 20
   static let handleWidth: CGFloat = 6
