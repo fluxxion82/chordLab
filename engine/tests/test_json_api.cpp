@@ -9,6 +9,7 @@
 #include "chordlab/limits.h"
 #include "chordlab/palette.h"
 #include "chordlab/pitch.h"
+#include "chordlab/relatedness.h"
 #include "chordlab/scale.h"
 #include "chordlab/suggest.h"
 #include "chordlab/tension.h"
@@ -127,7 +128,7 @@ DocumentStore threeChords() {
     return store;
 }
 
-/// A document exercising every field: non-default keys and toggles, a gap in the ids, mixed lengths, a
+/// A document exercising every field: non-default keys, toggles and relation mode, a gap in the ids, mixed lengths, a
 /// manual voicing, auto voice-leading on, and two sections. Ids are 1 and 3 (2 was removed), so the next
 /// id is 4; the sections are 1 ("A", at 0) and 2 ("B", colour 3, at 1), so the next section id is 3.
 DocumentStore richStore() {
@@ -146,6 +147,7 @@ DocumentStore richStore() {
     store.addSection(0, "A");
     store.addSection(1, "B");
     store.setSectionColour(2, 3);
+    store.setRelationMode(RelationMode::VoiceLeading);
     return store;
 }
 
@@ -868,6 +870,52 @@ TEST_CASE("toggles: setProgressionLoop and setFollowHost are live state") {
     CHECK(snapshot(store).at("followHost") == true);
 }
 
+TEST_CASE("setRelationMode: each of the five modes is live state, untouched by undo and redo") {
+    DocumentStore store;
+    const std::vector<std::pair<const char*, RelationMode>> modes{{"off", RelationMode::Off},
+                                                                  {"commonTones", RelationMode::CommonTones},
+                                                                  {"voiceLeading", RelationMode::VoiceLeading},
+                                                                  {"function", RelationMode::Function},
+                                                                  {"blend", RelationMode::Blend}};
+    for (const auto& [name, mode] : modes) {
+        applyOk(store, {{"cmd", "setRelationMode"}, {"mode", name}});
+        CHECK(store.doc().relationMode == mode);
+    }
+    CHECK_FALSE(store.undo());  // never history
+
+    applyOk(store, {{"cmd", "appendChord"}, {"root", 0}, {"type", "maj"}});
+    applyOk(store, {{"cmd", "setRelationMode"}, {"mode", "function"}});
+    applyOk(store, {{"cmd", "undo"}});
+    CHECK(store.doc().events.empty());
+    CHECK(store.doc().relationMode == RelationMode::Function);
+    applyOk(store, {{"cmd", "setRelationMode"}, {"mode", "off"}});
+    applyOk(store, {{"cmd", "redo"}});  // the redo stack survived the mode change
+    CHECK(store.doc().events.size() == 1);
+    CHECK(store.doc().relationMode == RelationMode::Off);
+}
+
+TEST_CASE("setRelationMode: a missing, mistyped or unknown mode is rejected with the five names") {
+    DocumentStore store;
+    store.setRelationMode(RelationMode::CommonTones);
+    for (const json& cmd : {json{{"cmd", "setRelationMode"}},
+                            json{{"cmd", "setRelationMode"}, {"mode", "Blend"}},
+                            json{{"cmd", "setRelationMode"}, {"mode", "none"}},
+                            json{{"cmd", "setRelationMode"}, {"mode", ""}},
+                            json{{"cmd", "setRelationMode"}, {"mode", 4}},
+                            json{{"cmd", "setRelationMode"}, {"mode", nullptr}},
+                            json{{"cmd", "setRelationMode"}, {"on", true}}}) {
+        CAPTURE(cmd.dump());
+        checkRejected(store, cmd);
+        std::string error;
+        CHECK_FALSE(apply(store, cmd, error));
+        for (const char* name : {"\"off\"", "\"commonTones\"", "\"voiceLeading\"", "\"function\"", "\"blend\""}) {
+            CHECK_MESSAGE(error.find(name) != std::string::npos, error);
+        }
+        CHECK(error.find("\"mode\"") != std::string::npos);
+    }
+    CHECK(store.doc().relationMode == RelationMode::CommonTones);
+}
+
 TEST_CASE("undo / redo commands") {
     DocumentStore store;
     std::string error;
@@ -1304,6 +1352,7 @@ TEST_CASE("state: shape") {
     CHECK(state.at("sections")[0] == json({{"id", 1}, {"name", "A"}, {"colourIndex", 0}, {"firstEventIndex", 0}}));
     CHECK(state.at("sections")[1] == json({{"id", 2}, {"name", "B"}, {"colourIndex", 3}, {"firstEventIndex", 1}}));
     CHECK(state.at("nextSectionId") == 3);
+    CHECK(state.at("relationMode") == "voiceLeading");
 
     const json defaults = json::parse(stateJson(store));
     CHECK(defaults.at("editor") == json({{"width", 900}, {"height", 620}}));
@@ -1312,6 +1361,7 @@ TEST_CASE("state: shape") {
     CHECK(empty.at("autoVoiceLead") == false);
     CHECK(empty.at("sections") == json::array());
     CHECK(empty.at("nextSectionId") == 1);
+    CHECK(empty.at("relationMode") == "blend");
 }
 
 TEST_CASE("state: loadStateJson(stateJson(doc)) round-trips the document, the ids, the id counter and the editor size") {
@@ -1332,6 +1382,7 @@ TEST_CASE("state: loadStateJson(stateJson(doc)) round-trips the document, the id
     CHECK(loaded.doc().events[1].manualVoicing == true);
     CHECK(loaded.doc().autoVoiceLead == true);
     CHECK(loaded.doc().sections == original.doc().sections);
+    CHECK(loaded.doc().relationMode == RelationMode::VoiceLeading);
     CHECK(width == 1024);
     CHECK(height == 768);
     CHECK_FALSE(loaded.undo());  // history cleared
@@ -1373,10 +1424,13 @@ TEST_CASE("state: a legacy state without the Phase 2 fields loads with the defau
     legacy.erase("autoVoiceLead");
     legacy.erase("sections");
     legacy.erase("nextSectionId");
+    legacy.erase("relationMode");
 
     DocumentStore loaded;
+    loaded.setRelationMode(RelationMode::Off);  // replaced by the default, not kept
     std::string error;
     REQUIRE_MESSAGE(loadStateJson(loaded, legacy.dump(), error), error);
+    CHECK(loaded.doc().relationMode == RelationMode::Blend);
     REQUIRE(loaded.doc().events.size() == 2);
     for (const ChordEvent& e : loaded.doc().events) {
         CHECK(e.inversion == 0);
@@ -1540,6 +1594,9 @@ TEST_CASE("state: a bad state is rejected whole and the store keeps its document
     rejects("key not an object", [](json& s) { s["projectKey"] = "C"; });
     rejects("toggle not a bool", [](json& s) { s["followHost"] = 1; });
     rejects("toggle missing", [](json& s) { s.erase("progressionLoop"); });
+    rejects("relation mode unknown", [](json& s) { s["relationMode"] = "Blend"; });
+    rejects("relation mode not a string", [](json& s) { s["relationMode"] = 4; });
+    rejects("relation mode null", [](json& s) { s["relationMode"] = nullptr; });
     rejects("editor not an object", [](json& s) { s["editor"] = 900; });
     rejects("editor width not an integer", [](json& s) { s["editor"]["width"] = "wide"; });
     rejects("editor height missing", [](json& s) { s["editor"].erase("height"); });
@@ -1786,9 +1843,11 @@ TEST_CASE("capacity: a state with more than kMaxChords chords is rejected whole;
 namespace {
 
 /// The largest state the engine can produce: kMaxChords chords, a section on every one of them, each
-/// name at the byte bound and made of the characters JSON escapes to two bytes.
+/// name at the byte bound and made of the characters JSON escapes to two bytes, and the relation mode with
+/// the longest name.
 DocumentStore worstCaseStore() {
     DocumentStore store = fullStore();
+    store.setRelationMode(RelationMode::VoiceLeading);
     std::string name;
     for (int i = 0; i < kMaxSectionNameBytes; ++i) {
         name.push_back(i % 2 == 0 ? '"' : '\\');
@@ -1802,7 +1861,7 @@ DocumentStore worstCaseStore() {
 /// `stateJson` of `worstCaseStore()` at the default editor size, measured; pinned so that a change to the
 /// state's shape shows up here against `kMaxJsonBytes` (1 MiB) before it shows up as a state that will
 /// not load.
-constexpr std::size_t kWorstCaseStateBytes = 76770;
+constexpr std::size_t kWorstCaseStateBytes = 76800;
 
 }  // namespace
 

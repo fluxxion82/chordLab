@@ -15,6 +15,7 @@
 #include "chordlab/json_api.h"
 #include "chordlab/palette.h"
 #include "chordlab/pitch.h"
+#include "chordlab/relatedness.h"
 #include "chordlab/scale.h"
 
 #include <nlohmann/json.hpp>
@@ -205,7 +206,7 @@ TEST_CASE("golden fixtures: the legacy Phase 1 state loads with Phase 2 defaults
     std::string text;
     REQUIRE_MESSAGE(readFile("state-legacy-phase1.json", text), "state-legacy-phase1.json missing");
     const json raw = json::parse(text);
-    for (const char* absent : {"autoVoiceLead", "sections", "nextSectionId"}) {
+    for (const char* absent : {"autoVoiceLead", "sections", "nextSectionId", "relationMode"}) {
         CHECK_FALSE(raw.contains(absent));
     }
     for (const json& e : raw.at("events")) {
@@ -229,6 +230,7 @@ TEST_CASE("golden fixtures: the legacy Phase 1 state loads with Phase 2 defaults
     CHECK(store.nextId() == raw.at("nextId").get<int>());
     CHECK_FALSE(d.autoVoiceLead);
     CHECK(d.sections.empty());
+    CHECK(d.relationMode == RelationMode::Blend);
     CHECK(store.nextSectionId() == 1);
     for (const ChordEvent& e : d.events) {
         CHECK(e.inversion == 0);

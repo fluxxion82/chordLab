@@ -195,6 +195,10 @@ std::string keyName(const Key& key);
 ///   `kNoEventId`, clears the selection; an id no event has is a no-op). Pass the store's
 ///   `selectedEventId()` to `snapshotJson` so that the snapshot's `selectedEventId` and `suggestions`
 ///   follow it.
+/// - `setRelationMode {mode}`: `setRelationMode`, live state (never history, kept across undo and redo,
+///   persisted by `stateJson`); `mode` is one of "off", "commonTones", "voiceLeading", "function",
+///   "blend" (`relationModeName`, relatedness.h). A missing, non-string or unknown `mode` is rejected with
+///   an error that lists the five.
 /// - `undo`, `redo`: no fields.
 ///
 /// Every field is validated before anything is touched: an unknown `cmd`, a missing or mistyped field, a
@@ -212,7 +216,7 @@ bool applyCommandJson(DocumentStore& store, std::string_view json, std::string& 
 /// The persistent form of the store's document, without the palette:
 /// ```
 /// {"schema":1, "projectKey":<key>, "browsedKey":<key>, "progressionLoop":true, "followHost":true,
-///  "autoVoiceLead":false,
+///  "autoVoiceLead":false, "relationMode":"blend",
 ///  "events":[{"id":1,"root":0,"type":"maj","lengthBeats":4.0,"velocity":100,
 ///             "inversion":0,"octave":0,"manualVoicing":false}, ...],
 ///  "sections":[{"id":1,"name":"Verse","colourIndex":0,"firstEventIndex":0}, ...],
@@ -223,8 +227,10 @@ bool applyCommandJson(DocumentStore& store, std::string_view json, std::string& 
 /// `editorWidth` / `editorHeight` are the editor window size to remember; they are stored verbatim. The
 /// selection (`DocumentStore::selectedEventId`) is live state and is not written.
 /// `autoVoiceLead`, the events' `inversion`, `octave` and `manualVoicing`, `sections` and
-/// `nextSectionId` were added under schema 1 (Phase 2): a reader that predates them ignores them, and
-/// `loadStateJson` defaults them when they are missing, so states cross both ways.
+/// `nextSectionId` were added under schema 1 (Phase 2), and `relationMode` (`relationModeName` of
+/// `Document::relationMode`, live state that is nonetheless saved with the set, R5) after them: a reader
+/// that predates them ignores them, and `loadStateJson` defaults them when they are missing, so states
+/// cross both ways.
 /// Size: the largest state the store can hold (`kMaxChords` chords, a section on each, every name at
 /// `kMaxSectionNameBytes` bytes of characters that escape to two) is pinned by test_json_api.cpp at
 /// well under a tenth of `kMaxJsonBytes`, so a saved state always loads.
@@ -244,9 +250,10 @@ std::string stateJson(const DocumentStore& store, int editorWidth = kDefaultEdit
 /// Lengths, velocities, inversions, octaves and section colours are clamped to the store's ranges
 /// rather than rejected (a mistyped value is still rejected). Optional, with their defaults: `editor`
 /// (`kDefaultEditorWidth` x `kDefaultEditorHeight`), the events' `inversion` (0), `octave` (0) and
-/// `manualVoicing` (false), `autoVoiceLead` (false), `sections` (none) and `nextSectionId` (derived, one
-/// past the largest section id, 1 without sections; when given it must be at least that and is kept, like
-/// `nextId`). Every other field is required.
+/// `manualVoicing` (false), `autoVoiceLead` (false), `relationMode` ("blend"; when given, one of the five
+/// `relationModeName` strings, anything else rejecting the state), `sections` (none) and `nextSectionId`
+/// (derived, one past the largest section id, 1 without sections; when given it must be at least that and
+/// is kept, like `nextId`). Every other field is required.
 bool loadStateJson(DocumentStore& store, std::string_view json, std::string& error, int* editorWidth = nullptr,
                    int* editorHeight = nullptr) noexcept;
 

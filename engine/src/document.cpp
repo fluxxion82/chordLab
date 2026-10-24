@@ -186,12 +186,13 @@ Section makeSection(int id, std::string name, int firstEventIndex) {
 }
 
 /// Copies the live (non-undoable) fields of `current` into `target`, so that restoring a snapshot keeps
-/// the browsed key and the transport toggles as they are now. `autoVoiceLead` is deliberately absent: it
+/// the browsed key, the transport toggles and the relation mode as they are now. `autoVoiceLead` is deliberately absent: it
 /// changes the notes `compile` produces, so it is restored with the progression (see `Document`).
 void keepLiveState(Document& target, const Document& current) {
     target.browsedKey = current.browsedKey;
     target.progressionLoop = current.progressionLoop;
     target.followHost = current.followHost;
+    target.relationMode = current.relationMode;
 }
 
 }  // namespace
@@ -207,6 +208,7 @@ const Document& DocumentStore::doc() const {
 void DocumentStore::replace(Document doc, int nextId, int nextSectionId) {
     assertValidKey(doc.projectKey);
     assertValidKey(doc.browsedKey);
+    assert(static_cast<int>(doc.relationMode) >= 0 && static_cast<int>(doc.relationMode) < kNumRelationModes);
     assert(nextId >= 1);
     assert(nextSectionId >= 0);
     for ([[maybe_unused]] const ChordEvent& e : doc.events) {
@@ -432,6 +434,11 @@ void DocumentStore::setProgressionLoop(bool loop) {
 
 void DocumentStore::setFollowHost(bool follow) {
     doc_.followHost = follow;  // live state: no history
+}
+
+void DocumentStore::setRelationMode(RelationMode mode) {
+    assert(static_cast<int>(mode) >= 0 && static_cast<int>(mode) < kNumRelationModes);
+    doc_.relationMode = mode;  // live state: no history
 }
 
 int DocumentStore::addSection(int firstEventIndex, std::string name) {

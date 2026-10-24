@@ -7,6 +7,7 @@
 #include "chordlab/harmony.h"
 #include "chordlab/palette.h"
 #include "chordlab/pitch.h"
+#include "chordlab/relatedness.h"
 #include "chordlab/relations.h"
 #include "chordlab/scale.h"
 #include "chordlab/suggest.h"
@@ -21,6 +22,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <set>
 #include <string>
 #include <string_view>
@@ -490,6 +492,32 @@ bool parseModeField(Fields& fields, Mode& out) {
     return true;
 }
 
+/// Reads the relation mode at `fields[name]`: one of the five `relationModeName` strings. Missing,
+/// mistyped and unknown values alike get a message that lists the five.
+bool parseRelationModeField(Fields& fields, const char* name, RelationMode& out) {
+    static const std::string kExpected = [] {
+        std::string list = "must be one of ";
+        for (int i = 0; i < kNumRelationModes; ++i) {
+            list += std::string(i == 0 ? "" : ", ") + "\"" + relationModeName(static_cast<RelationMode>(i)) + "\"";
+        }
+        return list;
+    }();
+    const json* v = fields.find(name);
+    if (v == nullptr) {
+        return fields.fail(name, "is missing; it " + kExpected);
+    }
+    if (!v->is_string()) {
+        return fields.fail(name, kExpected);
+    }
+    const std::string text = v->get<std::string>();
+    const std::optional<RelationMode> mode = parseRelationMode(text);
+    if (!mode) {
+        return fields.fail(name, kExpected + " (got \"" + text + "\")");
+    }
+    out = *mode;
+    return true;
+}
+
 /// Reads the key object at `fields[name]`: `{"tonic":{"letter","alter"},"mode"}`.
 bool parseKeyField(Fields& fields, const char* name, Key& out, std::string& error) {
     const json* keyObject = fields.getObject(name);
@@ -535,6 +563,7 @@ struct Command {
         RemoveSection,
         MoveSectionStart,
         SelectEvent,
+        SetRelationMode,
         Undo,
         Redo
     };
@@ -551,6 +580,7 @@ struct Command {
     int inversion = 0;         // SetInversion
     int octave = 0;            // SetOctave
     int colourIndex = 0;       // SetSectionColour
+    RelationMode relationMode = RelationMode::Blend;  // SetRelationMode
 };
 static_assert(std::is_trivially_destructible_v<Command>, "Command must be plain data: destroying one must not allocate");
 
@@ -774,6 +804,10 @@ bool parseCommand(std::string_view text, Command& out, std::string& name, std::s
     if (cmd == "selectEvent") {
         return parseSelectEvent(fields, out);
     }
+    if (cmd == "setRelationMode") {
+        out.kind = Command::Kind::SetRelationMode;
+        return parseRelationModeField(fields, "mode", out.relationMode);
+    }
     if (cmd == "undo") {
         out.kind = Command::Kind::Undo;
         return true;
@@ -881,6 +915,9 @@ Refusal applyCommand(DocumentStore& store, const Command& command, std::string& 
         case Command::Kind::SelectEvent:
             store.setSelectedEvent(command.id);
             return Refusal::None;
+        case Command::Kind::SetRelationMode:
+            store.setRelationMode(command.relationMode);
+            return Refusal::None;
         case Command::Kind::Undo:
             store.undo();  // nothing to undo is a no-op, not an error
             return Refusal::None;
@@ -946,6 +983,10 @@ bool parseState(std::string_view text, Document& doc, int& nextId, int& nextSect
         return false;
     }
     if (fields.has("autoVoiceLead") && !fields.getBool("autoVoiceLead", doc.autoVoiceLead)) {
+        return false;
+    }
+    // Optional (states saved before the relation modes have none): the default, blend.
+    if (fields.has("relationMode") && !parseRelationModeField(fields, "relationMode", doc.relationMode)) {
         return false;
     }
 
@@ -1143,6 +1184,7 @@ std::string stateJson(const DocumentStore& store, int editorWidth, int editorHei
                         {"progressionLoop", doc.progressionLoop},
                         {"followHost", doc.followHost},
                         {"autoVoiceLead", doc.autoVoiceLead},
+                        {"relationMode", relationModeName(doc.relationMode)},
                         {"events", std::move(events)},
                         {"sections", sectionsJson(doc)},
                         {"nextId", store.nextId()},

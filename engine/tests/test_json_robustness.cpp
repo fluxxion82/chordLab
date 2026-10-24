@@ -327,6 +327,7 @@ std::vector<std::string> commandCorpus() {
         {{"cmd", "moveSectionStart"}, {"id", 2}, {"index", 3}},
         {{"cmd", "selectEvent"}, {"id", 3}},
         {{"cmd", "selectEvent"}, {"id", nullptr}},
+        {{"cmd", "setRelationMode"}, {"mode", "voiceLeading"}},
         {{"cmd", "undo"}},
         {{"cmd", "redo"}},
     };

@@ -3,6 +3,7 @@
 #include "chordlab/chord.h"
 #include "chordlab/limits.h"
 #include "chordlab/pitch.h"
+#include "chordlab/relatedness.h"
 #include "chordlab/scale.h"
 #include "chordlab/voicing.h"
 
@@ -105,14 +106,15 @@ inline bool operator!=(const Section& a, const Section& b) noexcept {
     return !(a == b);
 }
 
-/// The whole editable state of a project: the two keys, the progression, its sections, the voicing flag
-/// and the transport toggles. Plain data so that `DocumentStore` can snapshot it for undo; mutate it
+/// The whole editable state of a project: the two keys, the progression, its sections, the voicing flag,
+/// the transport toggles and the palette's relation mode. Plain data so that `DocumentStore` can snapshot it for undo; mutate it
 /// through the store, not directly.
 ///
 /// Undo scope: `events`, `sections`, `projectKey` and `autoVoiceLead` are undoable (they are what the user
 /// composes: the flag changes which notes `compile` produces, so toggling it is an edit of the progression,
-/// not a view of it). `browsedKey`, `progressionLoop` and `followHost` are live session state: changing
-/// them never creates history, and undo/redo leave their current values alone while restoring the rest.
+/// not a view of it). `browsedKey`, `progressionLoop`, `followHost` and `relationMode` are live session
+/// state: changing them never creates history, and undo/redo leave their current values alone while
+/// restoring the rest.
 struct Document {
     Key projectKey{{'C', 0}, Mode::Ionian};
     Key browsedKey{{'C', 0}, Mode::Ionian};
@@ -121,6 +123,7 @@ struct Document {
     bool autoVoiceLead = false;      // compile picks each non-manual chord's inversion and octave (compiler.h)
     bool progressionLoop = true;
     bool followHost = true;
+    RelationMode relationMode = RelationMode::Blend;  // what sizes the palette cells (relatedness.h, R5)
 
     /// Beat at which the event at `index` starts: the sum of the lengths before it. `index` must be in
     /// 0..events.size(); `startBeatOf(events.size())` is `endBeat()`.
@@ -139,7 +142,8 @@ struct Document {
 inline bool operator==(const Document& a, const Document& b) noexcept {
     return a.projectKey == b.projectKey && a.browsedKey == b.browsedKey && a.events == b.events &&
            a.sections == b.sections && a.autoVoiceLead == b.autoVoiceLead &&
-           a.progressionLoop == b.progressionLoop && a.followHost == b.followHost;
+           a.progressionLoop == b.progressionLoop && a.followHost == b.followHost &&
+           a.relationMode == b.relationMode;
 }
 
 inline bool operator!=(const Document& a, const Document& b) noexcept {
@@ -160,11 +164,11 @@ bool sectionsWellFormed(const Document& doc);
 /// undo stack and clears the redo stack. A call that changes nothing (an unknown id, a value equal to the
 /// current one after clamping, a move to the chord's current position, a rejected argument) pushes nothing
 /// and leaves the redo stack intact.
-/// `browsedKey`, `progressionLoop` and `followHost` are live state: their setters never touch the history,
-/// and `undo()`/`redo()` keep their current values while restoring the undoable state. So is the
-/// selection (`selectedEventId`), which lives in the store rather than the document: it is kept across
-/// edits, undo and redo for as long as the selected event exists and is cleared the moment no event has
-/// its id (a remove, an undo of the append, a `replace`); it is never restored by undo and never
+/// `browsedKey`, `progressionLoop`, `followHost` and `relationMode` are live state: their setters never
+/// touch the history, and `undo()`/`redo()` keep their current values while restoring the undoable
+/// state. So is the selection (`selectedEventId`), which lives in the store rather than the document: it
+/// is kept across edits, undo and redo for as long as the selected event exists and is cleared the moment
+/// no event has its id (a remove, an undo of the append, a `replace`); it is never restored by undo and never
 /// persisted (`stateJson` leaves it out).
 /// The history holds at most `kMaxUndoDepth` snapshots; beyond that the oldest is dropped.
 /// Event ids are handed out from a counter that starts at `firstId` (1 by default), only ever increases
@@ -251,6 +255,10 @@ public:
     /// Live state, never recorded in the history.
     void setProgressionLoop(bool loop);
     void setFollowHost(bool follow);
+
+    /// Live state, never recorded in the history: which relation sizes the palette cells (relatedness.h).
+    /// Persisted by `stateJson`. `mode` must be a declared `RelationMode`.
+    void setRelationMode(RelationMode mode);
 
     /// The id of the event the UI has selected, or `kNoEventId`. Live state (see the class comment): kept
     /// while that event exists, whatever edits, undos and redos happen around it, and cleared as soon as
