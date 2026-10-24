@@ -9,6 +9,7 @@
 #include "chordlab/suggest.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <set>
 #include <string>
@@ -677,4 +678,80 @@ TEST_CASE("every canonical key: after each diatonic triad the list is well forme
             }
         }
     }
+}
+
+// --- Scoring outside the ranking ------------------------------------------------------------------
+
+TEST_CASE("transitionHundredths: the Pop table in hundredths") {
+    const Function T = Function::Tonic, PD = Function::Predominant, D = Function::Dominant, O = Function::Other;
+    CHECK(transitionHundredths(T, T) == 30);
+    CHECK(transitionHundredths(T, PD) == 80);
+    CHECK(transitionHundredths(T, D) == 60);
+    CHECK(transitionHundredths(PD, T) == 40);
+    CHECK(transitionHundredths(PD, PD) == 30);
+    CHECK(transitionHundredths(PD, D) == 90);
+    CHECK(transitionHundredths(D, T, Style::Pop) == 100);
+    CHECK(transitionHundredths(D, PD) == 30);
+    CHECK(transitionHundredths(D, D) == 40);
+    for (const Function f : {T, PD, D, O}) {
+        CHECK(transitionHundredths(f, O) == 20);
+        CHECK(transitionHundredths(O, f) == 20);
+    }
+}
+
+namespace {
+
+/// Every chord `suggestNext` ranks for these arguments, with the score it gave each.
+void checkHundredthsMatchSuggestNext(const Chord* previous, const Key& project, const Key& browsed) {
+    const auto all = suggestNext(previous, project, browsed, Style::Pop, 1000);
+    std::vector<Chord> chords;
+    for (const Suggestion& s : all) {
+        chords.push_back(s.chord);
+    }
+    const std::vector<int> hundredths = suggestionHundredths(previous, chords, project, browsed);
+    REQUIRE(hundredths.size() == all.size());
+    for (std::size_t i = 0; i < all.size(); ++i) {
+        CAPTURE(all[i].label);
+        CHECK(hundredths[i] / 100.0 == all[i].score);  // the same division suggestNext does
+        if (i > 0) {
+            CHECK(hundredths[i - 1] >= hundredths[i]);
+        }
+    }
+}
+
+}  // namespace
+
+TEST_CASE("suggestionHundredths: exactly suggestNext's score for every chord it ranks") {
+    const Key gIonian = key('G', 0, Mode::Ionian);
+    const Key aAeolian = key('A', 0, Mode::Aeolian);
+    const Chord e = chord(E, "maj");
+    for (const Chord* previous : {static_cast<const Chord*>(nullptr), &kC, &kG7, &kDm, &kF, &kAm, &kBdim}) {
+        CAPTURE(previous == nullptr ? "open" : previous->type->id);
+        checkHundredthsMatchSuggestNext(previous, kCIonian, kCIonian);
+        checkHundredthsMatchSuggestNext(previous, kCIonian, kCAeolian);
+        checkHundredthsMatchSuggestNext(previous, kCIonian, gIonian);  // D7 is a palette cell here, not V7/V
+    }
+    checkHundredthsMatchSuggestNext(&kAm, aAeolian, aAeolian);
+    checkHundredthsMatchSuggestNext(&e, aAeolian, key('A', 0, Mode::HarmonicMinor));
+}
+
+TEST_CASE("suggestionHundredths: applied unless the browsed palette lists the chord; the previous chord is scored") {
+    const Chord d7 = chord(D, "7");
+    // Browsing C major, D7 is V7/V: applied scoring. Browsing G major, it is that palette's V7 cell.
+    const auto inC = suggestNext(&kC, kCIonian, kCIonian, Style::Pop, 1000);
+    const auto inG = suggestNext(&kC, kCIonian, key('G', 0, Mode::Ionian), Style::Pop, 1000);
+    const Suggestion* asApplied = find(inC, d7);
+    const Suggestion* asCell = find(inG, d7);
+    REQUIRE((asApplied != nullptr && asCell != nullptr));
+    CHECK(asApplied->score != asCell->score);
+    CHECK(has(*asApplied, Reason::AppliedDominant));
+    CHECK(suggestionHundredths(&kC, {d7}, kCIonian, kCIonian) == std::vector<int>{static_cast<int>(std::lround(asApplied->score * 100))});
+    CHECK(suggestionHundredths(&kC, {d7}, kCIonian, key('G', 0, Mode::Ionian)) ==
+          std::vector<int>{static_cast<int>(std::lround(asCell->score * 100))});
+    // A chord equal to the previous one is scored (suggestNext leaves it out), and so is a repeat.
+    const std::vector<int> repeated = suggestionHundredths(&kC, {kC, kF, kC}, kCIonian, kCIonian);
+    REQUIRE(repeated.size() == 3);
+    CHECK(repeated[0] == repeated[2]);
+    CHECK(repeated[1] == 210);  // the 2.1 pinned for F after C above
+    CHECK(suggestionHundredths(&kC, {}, kCIonian, kCIonian).empty());
 }

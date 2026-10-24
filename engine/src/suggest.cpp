@@ -135,24 +135,6 @@ std::vector<Candidate> collectCandidates(const Key& projectKey, const Key& brows
 
 // --- Text -------------------------------------------------------------------------------------
 
-constexpr std::array<const char*, kNumModes> kModeText{{"Ionian", "Dorian", "Phrygian", "Lydian", "Mixolydian",
-                                                        "Aeolian", "Locrian", "harmonic minor", "melodic minor"}};
-
-std::string keyText(const Key& key) {
-    return Spelling{key.tonic.letter, key.tonic.alter}.text() + " " + kModeText[static_cast<std::size_t>(key.mode)];
-}
-
-std::string commonTonesText(const std::vector<PitchClass>& pcs, const Key& projectKey) {
-    std::string text = std::to_string(pcs.size()) + " common tones (";
-    for (std::size_t i = 0; i < pcs.size(); ++i) {
-        if (i > 0) {
-            text += ", ";
-        }
-        text += spell(pcs[i], projectKey).text();
-    }
-    return text + ")";
-}
-
 std::string appliedText(const AppliedChord& applied) {
     const std::string_view label = applied.label;
     const std::size_t slash = label.find('/');
@@ -240,7 +222,7 @@ Scored score(const Candidate& candidate, const Previous& previous, const Key& pr
             addReason(s, Reason::Prepares, "prepares (PD→D)");
         }
         if (relation.commonTones >= kNotableCommonTones) {
-            addReason(s, Reason::CommonTones, commonTonesText(relation.commonPcs, projectKey));
+            addReason(s, Reason::CommonTones, commonTonesText(relation, projectKey));
         }
         if (relation.voiceLeadingCost <= kSmoothCost) {
             addReason(s, Reason::Smooth, "smooth voice leading (cost " + std::to_string(relation.voiceLeadingCost) + ")");
@@ -257,7 +239,7 @@ Scored score(const Candidate& candidate, const Previous& previous, const Key& pr
         addReason(s, Reason::Diatonic, "diatonic");
     } else if (!applied) {  // an applied chord's foreign notes are explained by its target, not by a mode
         if (const std::optional<Key> source = borrowedFrom(candidate.chord, projectKey)) {
-            addReason(s, Reason::Borrowed, "borrowed from " + keyText(*source));
+            addReason(s, Reason::Borrowed, "borrowed from " + keyProse(*source));
         } else {
             addReason(s, Reason::Chromatic, "outside the key — colour chord");
         }
@@ -290,6 +272,16 @@ Scored score(const Candidate& candidate, const Previous& previous, const Key& pr
 
     s.score = hundredths / 100.0;
     return Scored{std::move(s), hundredths};
+}
+
+/// What the scoring needs to know about `previous` (null to open), computed once per call.
+Previous previousOf(const Chord* previous, const Key& projectKey) {
+    Previous prev{previous, Function::Other, {}};
+    if (previous != nullptr) {
+        prev.function = functionOf(*previous, projectKey);
+        prev.roman = romanNumeral(*previous, projectKey, SymbolStyle::Standard);
+    }
+    return prev;
 }
 
 /// Score descending, then label ascending; the chord itself last, for a total order even if two
@@ -350,11 +342,7 @@ std::vector<Suggestion> suggestNext(const Chord* previous, const Key& projectKey
     const std::vector<AppliedChord> applied = appliedChords(projectKey);
     const std::vector<Candidate> candidates = collectCandidates(projectKey, browsedKey, applied);
 
-    Previous prev{previous, Function::Other, {}};
-    if (previous != nullptr) {
-        prev.function = functionOf(*previous, projectKey);
-        prev.roman = romanNumeral(*previous, projectKey, SymbolStyle::Standard);
-    }
+    const Previous prev = previousOf(previous, projectKey);
 
     std::vector<Scored> scored;
     scored.reserve(candidates.size());
@@ -372,6 +360,40 @@ std::vector<Suggestion> suggestNext(const Chord* previous, const Key& projectKey
     out.reserve(scored.size());
     for (Scored& entry : scored) {
         out.push_back(std::move(entry.suggestion));
+    }
+    return out;
+}
+
+int transitionHundredths(Function from, Function to, Style style) {
+    return transitionTable(style)[index(from)][index(to)];
+}
+
+std::vector<int> suggestionHundredths(const Chord* previous, const std::vector<Chord>& chords, const Key& projectKey,
+                                      const Key& browsedKey, Style style) {
+    assert(previous == nullptr || (previous->type != nullptr && previous->root >= 0 && previous->root < 12));
+    const TransitionTable& table = transitionTable(style);
+    const PriorTable& prior = priorTable(style);
+    const std::vector<AppliedChord> applied = appliedChords(projectKey);
+    const std::vector<PaletteCell> cells = buildPalette(browsedKey, projectKey).cells;
+    const Previous prev = previousOf(previous, projectKey);
+
+    std::vector<int> out;
+    out.reserve(chords.size());
+    for (const Chord& chord : chords) {
+        assert(chord.type != nullptr && chord.root >= 0 && chord.root < 12);
+        // As `collectCandidates` lists it: a palette cell keeps its entry ahead of the applied chords.
+        const AppliedChord* source = nullptr;
+        const bool inPalette =
+            std::any_of(cells.begin(), cells.end(), [&](const PaletteCell& cell) { return cell.chord == chord; });
+        if (!inPalette) {
+            const auto it = std::find_if(applied.begin(), applied.end(),
+                                         [&](const AppliedChord& a) { return a.chord == chord; });
+            if (it != applied.end()) {
+                source = &*it;
+            }
+        }
+        // Label and numeral only word the reasons, which are dropped here; the score does not read them.
+        out.push_back(score(Candidate{chord, {}, {}, source}, prev, projectKey, table, prior).hundredths);
     }
     return out;
 }

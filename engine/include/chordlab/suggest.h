@@ -1,6 +1,7 @@
 #pragma once
 
 #include "chordlab/chord.h"
+#include "chordlab/function.h"
 #include "chordlab/pitch.h"
 
 #include <cstddef>
@@ -132,5 +133,27 @@ struct Suggestion {
 /// documented in pitch.h; `style` a declared enumerator.
 std::vector<Suggestion> suggestNext(const Chord* previous, const Key& projectKey, const Key& browsedKey,
                                     Style style = Style::Pop, std::size_t maxCount = 8);
+
+/// The transition-table entry of `style` from function `from` to function `to`, in hundredths of a score
+/// point: the `transition[f(previous)][f(candidate)]` term of `suggestNext`'s score. For Pop, T -> PD is
+/// 80, T -> D 60, D -> T 100, and 20 wherever Other is involved (the table spelled out above).
+/// Preconditions: every argument a declared enumerator.
+int transitionHundredths(Function from, Function to, Style style = Style::Pop);
+
+/// `suggestNext`'s score of each chord of `chords` after `previous` (null to open), in hundredths: the
+/// integer the ranking sorts by, so `Suggestion::score` is exactly a hundredth of it, and ordering
+/// candidates by it (descending) is `suggestNext`'s order up to the label tie-break.
+///
+/// Each chord is classified as candidate generation would list it: an applied chord when it is one of
+/// `appliedChords(projectKey)` and not a cell of `buildPalette(browsedKey, projectKey)` (palette cells
+/// come first and keep their entry), otherwise as a palette cell or a borrowed triad, which are scored
+/// alike. So a chord `suggestNext` offers scores here exactly as it does there, and any other chord as
+/// it would if it were offered. Unlike `suggestNext`, a chord equal to `previous` is scored too, and a
+/// chord listed twice is scored twice. The result is parallel to `chords`. Allocates; not for the audio
+/// thread.
+///
+/// Preconditions: as `suggestNext`, and every chord with a non-null type and a root in 0..11.
+std::vector<int> suggestionHundredths(const Chord* previous, const std::vector<Chord>& chords, const Key& projectKey,
+                                      const Key& browsedKey, Style style = Style::Pop);
 
 }  // namespace chordlab

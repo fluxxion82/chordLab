@@ -171,27 +171,15 @@ json homeTriadsJson(const Document& doc) {
     return out;
 }
 
-/// Mode names as prose, for the sentences the UI shows: the `Mode` spelling except for the two altered
-/// minor scales. The same table as the suggestions' reason texts (suggest.cpp), so that "borrowed from"
-/// reads identically in the why popover and the suggestion popover.
-constexpr const char* kModeProse[kNumModes] = {"Ionian",  "Dorian",  "Phrygian",       "Lydian",       "Mixolydian",
-                                               "Aeolian", "Locrian", "harmonic minor", "melodic minor"};
-
-std::string keyProse(const Key& key) {
-    return tonicText(key.tonic) + " " + kModeProse[static_cast<int>(key.mode)];
-}
-
 /// The `why` object of event `to` against the event `from` before it: `relate` as data plus the sentence
-/// whose rules json_api.h spells out.
+/// whose rules json_api.h spells out, from the same pieces (harmony.h) as the suggestions' reasons and the
+/// cells' `relationText`.
 json whyJson(const Chord& from, const Chord& to, const Key& projectKey) {
     const Relation relation = relate(from, to, projectKey);
 
     json commonNames = json::array();
-    std::string names;
     for (const PitchClass pc : relation.commonPcs) {
-        const std::string name = spell(pc, projectKey).text();
-        commonNames.push_back(name);
-        names += (names.empty() ? "" : ", ") + name;
+        commonNames.push_back(spell(pc, projectKey).text());
     }
 
     std::string text = chordSymbol(from, projectKey) + " → " + chordSymbol(to, projectKey) + ": " +
@@ -200,8 +188,7 @@ json whyJson(const Chord& from, const Chord& to, const Key& projectKey) {
         text += ", resolves (D→T)";
     }
     if (relation.commonTones >= 1) {
-        text += ", " + std::to_string(relation.commonTones) + (relation.commonTones == 1 ? " common tone (" : " common tones (") +
-                names + ")";
+        text += ", " + commonTonesText(relation, projectKey);
     }
     // The cost sums over one voice per pitch class of the larger chord (the smaller is padded up to it).
     const int voices = static_cast<int>(std::max(pitchClasses(from).size(), pitchClasses(to).size()));

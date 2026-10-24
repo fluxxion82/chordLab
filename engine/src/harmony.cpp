@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <iterator>
 #include <numeric>
+#include <string>
 
 namespace chordlab {
 
@@ -75,6 +76,10 @@ int minimalBijectionCost(std::size_t n, Cost cost) {
     } while (std::next_permutation(order.begin(), order.end()));
     return best;
 }
+
+/// Mode names as prose: the `Mode` spelling except for the two altered minor scales.
+constexpr std::array<const char*, kNumModes> kModeProse{{"Ionian", "Dorian", "Phrygian", "Lydian", "Mixolydian",
+                                                         "Aeolian", "Locrian", "harmonic minor", "melodic minor"}};
 
 }  // namespace
 
@@ -160,6 +165,36 @@ Relation relate(const Chord& from, const Chord& to, const Key& projectKey) {
     relation.voiceLeadingCost = pcVoiceLeadingCost(fromPcs, toPcs);  // root first: the root is doubled first
     relation.borrowedFrom = borrowedFrom(to, projectKey);
     return relation;
+}
+
+std::string keyProse(const Key& key) {
+    return Spelling{key.tonic.letter, key.tonic.alter}.text() + " " + kModeProse[static_cast<std::size_t>(key.mode)];
+}
+
+std::string commonTonesText(const Relation& relation, const Key& projectKey) {
+    if (relation.commonPcs.empty()) {
+        return "no common tones";
+    }
+    std::string text = std::to_string(relation.commonPcs.size()) +
+                       (relation.commonPcs.size() == 1 ? " common tone (" : " common tones (");
+    for (std::size_t i = 0; i < relation.commonPcs.size(); ++i) {
+        if (i > 0) {
+            text += ", ";
+        }
+        text += spell(relation.commonPcs[i], projectKey).text();
+    }
+    return text + ")";
+}
+
+std::string relationText(const Relation& relation, const Key& projectKey) {
+    constexpr const char* kSeparator = " · ";
+    std::string text = commonTonesText(relation, projectKey) + kSeparator + rootMotionName(relation.motion) +
+                       kSeparator + "cost " + std::to_string(relation.voiceLeadingCost);
+    if (relation.borrowedFrom) {
+        text += kSeparator;
+        text += "borrowed from " + keyProse(*relation.borrowedFrom);
+    }
+    return text;
 }
 
 }  // namespace chordlab
