@@ -5,14 +5,17 @@
 #
 #   scripts/check.sh            engine Debug build + ctest (section 1) only
 #   scripts/check.sh --ubsan    ... plus the engine under UndefinedBehaviorSanitizer
+#   scripts/check.sh --asan     ... plus the engine under AddressSanitizer
+#   scripts/check.sh --tsan     ... plus the engine under ThreadSanitizer
 #   scripts/check.sh --swift    ... plus `swift test` in ChordLab/ (when ChordLab/Package.swift exists)
 #   scripts/check.sh --bridge   ... plus the Obj-C++ bridge tests (when ChordLab/bridge/tests/CMakeLists.txt exists)
 #   scripts/check.sh --plugin   ... plus both Xcode schemes (macOS-VST3, macOS-APP), no signing
 #   scripts/check.sh --all      everything
 # Flags combine; section 1 always runs first.
 #
-# Sanitizers: only UBSan is used. Never add ASan or TSan here: on this toolchain (Apple clang 17, macOS) ASan
-# deadlocks before main() and TSan hangs or crashes, so a "sanitizer" run would only burn its timeout.
+# Sanitizers: UBSan, ASan and TSan each get their own build directory. On Apple clang 17 (Xcode 16) ASan
+# deadlocked before main() and TSan hung, which is why every sanitizer step has a hard timeout; since
+# Apple clang 21 (Xcode 27.1, 2026-10-24) all three run the full suite cleanly. `--all` includes them.
 
 set -u
 
@@ -23,15 +26,17 @@ DEFAULT_TIMEOUT=300
 UBSAN_TIMEOUT=600
 PLUGIN_TIMEOUT=600   # a cold xcodebuild of the plug-in exceeds the default
 
-want_ubsan=0 want_swift=0 want_bridge=0 want_plugin=0
+want_ubsan=0 want_asan=0 want_tsan=0 want_swift=0 want_bridge=0 want_plugin=0
 for arg in "$@"; do
     case "$arg" in
         --ubsan) want_ubsan=1 ;;
+        --asan) want_asan=1 ;;
+        --tsan) want_tsan=1 ;;
         --swift) want_swift=1 ;;
         --bridge) want_bridge=1 ;;
         --plugin) want_plugin=1 ;;
-        --all) want_ubsan=1 want_swift=1 want_bridge=1 want_plugin=1 ;;
-        -h|--help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --all) want_ubsan=1 want_asan=1 want_tsan=1 want_swift=1 want_bridge=1 want_plugin=1 ;;
+        -h|--help) sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "check.sh: unknown option '$arg' (try --help)" >&2; exit 2 ;;
     esac
 done
@@ -108,6 +113,18 @@ engine_ubsan() {
     step "$UBSAN_TIMEOUT" cmake --build engine/build-ubsan --config Debug -j8 || return 1
     (cd engine/build-ubsan && step "$UBSAN_TIMEOUT" ctest -C Debug --output-on-failure) || return 1
 }
+
+# One sanitizer build: $1 = directory suffix, $2 = -fsanitize value, $3 = extra compile flags.
+engine_sanitized() {
+    local dir="engine/build-$1"
+    step "$UBSAN_TIMEOUT" cmake -S engine -B "$dir" -DCMAKE_BUILD_TYPE=Debug \
+        -DCMAKE_CXX_FLAGS="-fsanitize=$2 $3" \
+        -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=$2" || return 1
+    step "$UBSAN_TIMEOUT" cmake --build "$dir" --config Debug -j8 || return 1
+    (cd "$dir" && step "$UBSAN_TIMEOUT" ctest -C Debug --output-on-failure) || return 1
+}
+engine_asan() { engine_sanitized asan address "-fno-omit-frame-pointer"; }
+engine_tsan() { engine_sanitized tsan thread ""; }
 
 swift_tests() {
     (cd ChordLab && step "$DEFAULT_TIMEOUT" swift test) || return 1
@@ -189,6 +206,12 @@ section "1 engine Debug" engine_debug
 
 if [ "$FAILED" -eq 0 ] && [ "$want_ubsan" -eq 1 ]; then
     section "2 engine UBSan" engine_ubsan
+fi
+if [ "$FAILED" -eq 0 ] && [ "$want_asan" -eq 1 ]; then
+    section "2a engine ASan" engine_asan
+fi
+if [ "$FAILED" -eq 0 ] && [ "$want_tsan" -eq 1 ]; then
+    section "2b engine TSan" engine_tsan
 fi
 
 if [ "$FAILED" -eq 0 ] && [ "$want_swift" -eq 1 ]; then

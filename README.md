@@ -92,9 +92,9 @@ scripts/check.sh            # engine (Debug) build + ctest
 scripts/check.sh --all      # + UBSan build, Swift tests, bridge tests, both Xcode schemes
 ```
 
-Flags combine (`--ubsan`, `--swift`, `--bridge`, `--plugin`). The script stops at the first failure
-and prints a PASS/FAIL table. It never uses AddressSanitizer or ThreadSanitizer (both hang or crash on
-the current Apple clang toolchain; UBSan works).
+Flags combine (`--ubsan`, `--asan`, `--tsan`, `--swift`, `--bridge`, `--plugin`). The script stops at
+the first failure and prints a PASS/FAIL table. Every sanitizer step runs under a hard timeout because
+older Apple clang releases hung under ASan and TSan (see "Known limits").
 
 The suites, each runnable on its own:
 
@@ -189,9 +189,9 @@ Top to bottom:
 - Live may swallow the bare digit keys 1–8 (and possibly ⌘Z / ⇧⌘Z) before the plug-in window sees
   them; clicking the chips and buttons always works. The digits are also only active while the plug-in
   window is the key window and no section name is being edited.
-- AddressSanitizer and ThreadSanitizer are unusable with the current Apple clang toolchain on the
-  development machine (they hang or crash); the engine has not been run under them. UBSan works and
-  `scripts/check.sh --ubsan` runs it.
+- Sanitizers: with Apple clang 17 (Xcode 16) ASan deadlocked before `main()` and TSan hung; since
+  Apple clang 21 (Xcode 27.1) UBSan, ASan and TSan all run the engine suite cleanly
+  (`scripts/check.sh --ubsan --asan --tsan`, each step under a hard timeout).
 - No piano roll, melody tracks or key detection yet (planned for Phase 3); chords are contiguous, with
   no gaps or rests between them.
 - macOS and VST3 only. The Xcode project still carries iPlug2's other targets (AU, AUv3, AAX, VST2, iOS)
