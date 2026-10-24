@@ -29,7 +29,6 @@ struct ContentView: View {
           } else {
             Text("Waiting for a snapshot…").foregroundStyle(.gray).font(.callout)
           }
-          Button("Append C") { state.send(command: ["cmd": "appendChord", "root": 0, "type": "maj"]) }
           if let snapshot = state.snapshot, !snapshot.hasTonicTable {
             Text("snapshot missing tonics").foregroundStyle(.orange).font(.callout)
           }
