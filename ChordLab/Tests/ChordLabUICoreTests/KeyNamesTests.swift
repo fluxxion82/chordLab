@@ -31,6 +31,12 @@ final class KeyNamesTests: XCTestCase {
     XCTAssertEqual(KeyNames.text(TonicJSON(letter: "B", alter: -1)), "Bb")
   }
 
+  func testTonicNameUsesGlyphs() {
+    XCTAssertEqual(KeyNames.tonicName(TonicJSON(letter: "C", alter: 0)), "C")
+    XCTAssertEqual(KeyNames.tonicName(TonicJSON(letter: "F", alter: 1)), "F♯")
+    XCTAssertEqual(KeyNames.tonicName(TonicJSON(letter: "B", alter: -1)), "B♭")
+  }
+
   func testPitchClassOfNaturalTonics() {
     let pcs = ["C", "D", "E", "F", "G", "A", "B"].map { KeyNames.pitchClass(of: TonicJSON(letter: $0, alter: 0)) }
     XCTAssertEqual(pcs, [0, 2, 4, 5, 7, 9, 11])
