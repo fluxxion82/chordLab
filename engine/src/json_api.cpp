@@ -7,6 +7,7 @@
 #include "chordlab/harmony.h"
 #include "chordlab/palette.h"
 #include "chordlab/pitch.h"
+#include "chordlab/presets.h"
 #include "chordlab/relatedness.h"
 #include "chordlab/relations.h"
 #include "chordlab/scale.h"
@@ -228,6 +229,21 @@ json sectionsJson(const Document& doc) {
             {{"id", s.id}, {"name", s.name}, {"colourIndex", s.colourIndex}, {"firstEventIndex", s.firstEventIndex}});
     }
     return sections;
+}
+
+/// The snapshot's `presets`: every record of `allPresets()` in table order, with `fits` read against
+/// `projectKey`.
+json presetsJson(const Key& projectKey) {
+    json presets = json::array();
+    for (const Preset& p : allPresets()) {
+        presets.push_back({{"id", p.id},
+                           {"name", p.name},
+                           {"genre", p.genre},
+                           {"tonality", tonalityName(p.tonality)},
+                           {"numerals", presetNumerals(p)},
+                           {"fits", presetFits(p, projectKey)}});
+    }
+    return presets;
 }
 
 /// `suggestNext` after `previous` (null to open), as the snapshot lists it.
@@ -528,6 +544,32 @@ bool parseRelationModeField(Fields& fields, const char* name, RelationMode& out)
     return true;
 }
 
+/// Wire names of `ProgressionLoad`, in enum order: what `loadPreset`'s `mode` accepts.
+constexpr const char* kProgressionLoadNames[] = {"append", "replace"};
+
+/// Reads `loadPreset`'s `mode`: "append" or "replace". Missing, mistyped and unknown values alike get a
+/// message that lists both.
+bool parseProgressionLoadField(Fields& fields, ProgressionLoad& out) {
+    const std::string expected = std::string("must be one of \"") + kProgressionLoadNames[0] + "\", \"" +
+                                 kProgressionLoadNames[1] + "\"";
+    const json* v = fields.find("mode");
+    if (v == nullptr) {
+        return fields.fail("mode", "is missing; it " + expected);
+    }
+    if (!v->is_string()) {
+        return fields.fail("mode", expected);
+    }
+    const std::string text = v->get<std::string>();
+    if (text == kProgressionLoadNames[0]) {
+        out = ProgressionLoad::Append;
+    } else if (text == kProgressionLoadNames[1]) {
+        out = ProgressionLoad::Replace;
+    } else {
+        return fields.fail("mode", expected + " (got \"" + text + "\")");
+    }
+    return true;
+}
+
 /// Reads the key object at `fields[name]`: `{"tonic":{"letter","alter"},"mode"}`.
 bool parseKeyField(Fields& fields, const char* name, Key& out, std::string& error) {
     const json* keyObject = fields.getObject(name);
@@ -574,6 +616,7 @@ struct Command {
         MoveSectionStart,
         SelectEvent,
         SetRelationMode,
+        LoadPreset,
         Undo,
         Redo
     };
@@ -591,6 +634,8 @@ struct Command {
     int octave = 0;            // SetOctave
     int colourIndex = 0;       // SetSectionColour
     RelationMode relationMode = RelationMode::Blend;  // SetRelationMode
+    const Preset* preset = nullptr;                   // LoadPreset: a record of allPresets(), never null once parsed
+    ProgressionLoad load = ProgressionLoad::Append;   // LoadPreset
 };
 static_assert(std::is_trivially_destructible_v<Command>, "Command must be plain data: destroying one must not allocate");
 
@@ -738,6 +783,20 @@ bool parseSelectEvent(Fields& fields, Command& out) {
     return toInt(*id, out.id) || fields.fail("id", "must be an integer or null");
 }
 
+/// `loadPreset {id, mode}`: `id` names a record of `allPresets()`, `mode` is "append" or "replace".
+bool parseLoadPreset(Fields& fields, Command& out) {
+    out.kind = Command::Kind::LoadPreset;
+    std::string id;
+    if (!fields.getString("id", id)) {
+        return false;
+    }
+    out.preset = findPreset(id);
+    if (out.preset == nullptr) {
+        return fields.fail("id", "\"" + id + "\" is not a preset");
+    }
+    return parseProgressionLoadField(fields, out.load);
+}
+
 // --- Readers ---------------------------------------------------------------------------
 //
 // Each reader runs in two phases, and the JSON tree must be gone before the store is touched: nlohmann's
@@ -818,6 +877,9 @@ bool parseCommand(std::string_view text, Command& out, std::string& name, std::s
         out.kind = Command::Kind::SetRelationMode;
         return parseRelationModeField(fields, "mode", out.relationMode);
     }
+    if (cmd == "loadPreset") {
+        return parseLoadPreset(fields, out);
+    }
     if (cmd == "undo") {
         out.kind = Command::Kind::Undo;
         return true;
@@ -831,7 +893,39 @@ bool parseCommand(std::string_view text, Command& out, std::string& name, std::s
 }
 
 /// Why Phase B refused a validated command; `None` is success.
-enum class Refusal { None, DocumentFull, IdsExhausted, SectionIdsExhausted };
+enum class Refusal {
+    None,
+    DocumentFull,
+    IdsExhausted,
+    SectionIdsExhausted,
+    PresetDocumentFull,
+    PresetIdsExhausted,
+    PresetSectionIdsExhausted,
+    PresetInvalid
+};
+
+/// `loadPreset`: resolves the preset in the project key and hands it to the store, which builds the
+/// whole next document and commits it once; a refusal is the store's own reason
+/// (`progressionRefusal`), asked before the call so that nothing has changed.
+Refusal applyLoadPreset(DocumentStore& store, const Preset& preset, ProgressionLoad load) {
+    const std::vector<std::pair<Chord, double>> steps = resolvePreset(preset, store.doc().projectKey);
+    switch (store.progressionRefusal(steps, load)) {
+        case ProgressionRefusal::None:
+            break;
+        case ProgressionRefusal::DocumentFull:
+            return Refusal::PresetDocumentFull;
+        case ProgressionRefusal::EventIdsExhausted:
+            return Refusal::PresetIdsExhausted;
+        case ProgressionRefusal::SectionIdsExhausted:
+            return Refusal::PresetSectionIdsExhausted;
+        case ProgressionRefusal::Empty:
+        case ProgressionRefusal::NonFiniteLength:
+            return Refusal::PresetInvalid;  // not in the table (test_presets.cpp), kept total
+    }
+    const bool loaded = load == ProgressionLoad::Append ? store.appendProgression(steps, preset.name)
+                                                        : store.replaceProgression(steps, preset.name);
+    return loaded ? Refusal::None : Refusal::PresetInvalid;  // the refusal was asked first: always loaded
+}
 
 /// True when `index` is a chord position of `doc` at which no section starts: the one case in which the
 /// store's `addSection` can still refuse, for want of ids.
@@ -928,6 +1022,8 @@ Refusal applyCommand(DocumentStore& store, const Command& command, std::string& 
         case Command::Kind::SetRelationMode:
             store.setRelationMode(command.relationMode);
             return Refusal::None;
+        case Command::Kind::LoadPreset:
+            return applyLoadPreset(store, *command.preset, command.load);
         case Command::Kind::Undo:
             store.undo();  // nothing to undo is a no-op, not an error
             return Refusal::None;
@@ -1189,6 +1285,7 @@ std::string snapshotJson(const Document& doc, const Palette& palette, int select
                            {"homeTriads", homeTriadsJson(home, doc.projectKey, homeRelations)},
                            {"relationMode", relationModeName(doc.relationMode)},
                            {"relationReference", std::move(relationReference)},
+                           {"presets", presetsJson(doc.projectKey)},
                            {"palette", {{"tiers", palette.tiers}, {"cells", std::move(cells)}}}};
     return snapshot.dump();
 }
@@ -1242,6 +1339,19 @@ bool applyCommandJson(DocumentStore& store, std::string_view text, std::string& 
                 return false;
             case Refusal::SectionIdsExhausted:
                 error = "\"addSection\" refused: no section ids left";
+                return false;
+            case Refusal::PresetDocumentFull:
+                error = "\"loadPreset\" refused: the document would hold more than " + std::to_string(kMaxChords) +
+                        " chords";
+                return false;
+            case Refusal::PresetIdsExhausted:
+                error = "\"loadPreset\" refused: not enough event ids left";
+                return false;
+            case Refusal::PresetSectionIdsExhausted:
+                error = "\"loadPreset\" refused: not enough section ids left";
+                return false;
+            case Refusal::PresetInvalid:
+                error = "\"loadPreset\" refused: the preset has no loadable steps";
                 return false;
         }
         return true;

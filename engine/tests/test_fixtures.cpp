@@ -71,14 +71,14 @@ Chord chordOf(PitchClass root, const char* typeId) {
     return Chord{root, &chordType(typeId)};
 }
 
-/// Every top-level member of a snapshot, as documented in json_api.h (19 of them). A contract change updates
+/// Every top-level member of a snapshot, as documented in json_api.h (20 of them). A contract change updates
 /// this list and the fixtures together: the snapshot's key set must equal it, so an undocumented key and a
 /// missing documented one both fail.
 const std::set<std::string> kSnapshotKeys = {
     "schema",         "projectKey",     "browsedKey",   "projectKeyName", "browsedKeyName",
     "progressionLoop", "followHost",    "autoVoiceLead", "endBeat",       "selectedEventId",
     "modes",          "tonics",         "events",       "sections",       "suggestions",
-    "palette",        "homeTriads",     "relationMode", "relationReference"};
+    "palette",        "homeTriads",     "relationMode", "relationReference", "presets"};
 
 void checkSnapshotShape(const std::string& text) {
     const json j = json::parse(text);

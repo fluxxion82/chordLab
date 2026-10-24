@@ -7,7 +7,7 @@ exercised by a doctest suite.
 
 ```
 include/chordlab/   public headers, one per module (pitch, scale, chord, symbol, function, applied,
-                    harmony, tension, relations, suggest, relatedness, voicing, palette, document, compiler,
+                    harmony, tension, relations, suggest, relatedness, presets, voicing, palette, document, compiler,
                     note_event, limits, scheduler, triple_buffer, publication, smf, json_api)
 src/                the matching implementations
 tests/              doctest suite (tests/doctest.h is the vendored framework), one file per module plus
@@ -45,8 +45,10 @@ the voicing `compile` gives them and the "why" of each against the chord before 
 the sections, the live selection, the next-chord suggestions, `homeTriads`, the project key's seven
 diatonic triads in the palette cells' shape while another key is browsed, empty otherwise, and the chord
 relations: `relationMode`, `relationReference` and each sized cell's `relation` score and
-`relationText` against it, from `relatedness.h`), the commands (`applyCommandJson`: keys and browsing,
-chord edits, voicing and auto voice-leading, sections, selection, the relation mode, undo/redo) and the
+`relationText` against it, from `relatedness.h`, and `presets`, the progression library of `presets.h`
+with each record's numerals and whether it fits the project key), the commands (`applyCommandJson`: keys
+and browsing, chord edits, voicing and auto voice-leading, sections, selection, the relation mode, loading
+a preset, undo/redo) and the
 persisted state (`stateJson` / `loadStateJson`). The rules behind the "why" sentence, the validation of
 each command and the defaults a loader applies are in that header's doc blocks and are not repeated
 here; `tests/test_json_api.cpp` pins every field. The schema number is 1 and stays 1 while fields are
@@ -60,7 +62,8 @@ Three mechanisms, chosen by who can get it wrong:
 - **Status returns for expected failures.** Input from outside the process, or a resource that may be
   missing, is reported, never thrown: `applyCommandJson` / `loadStateJson` return false with a message and
   leave the store untouched; `appendChord` returns `kNoEventId` when the document is full or the ids
-  are exhausted, and `addSection` returns `kNoSectionId` for an index that is not a chord position or
+  are exhausted, `appendProgression` / `replaceProgression` return false for the cases
+  `progressionRefusal` names, and `addSection` returns `kNoSectionId` for an index that is not a chord position or
   already starts a section (through JSON that index is a no-op and only exhausted ids are refused);
   `writeSmf0` returns an empty vector and `writeFile` false; `pushPreview` returns false
   on a full queue and `process` returns false for a block it could not complete.
