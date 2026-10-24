@@ -7,7 +7,7 @@ import SwiftUI
 /// not fit the project key's mode, half opacity and a footnote ("Written for a minor key"); a greyed preset
 /// still loads.
 ///
-/// Clicking a row sends `loadPreset {id, mode}` and remembers the snapshot and error it saw
+/// Clicking a row sends `loadPreset {id, mode}` and remembers the snapshot and error serial it saw
 /// (`PresetLoadWatch`): the next snapshot means it loaded, and the popover closes; an error instead means
 /// the engine refused it, and the popover stays open while the status line shows why. Escape closes it.
 struct PresetsPopoverView: View {
@@ -56,19 +56,19 @@ struct PresetsPopoverView: View {
     .padding(12)
     .frame(width: Self.width)
     .onChange(of: state.snapshot) { _, _ in checkAnswer() }
-    .onChange(of: state.lastError) { _, _ in checkAnswer() }
+    .onChange(of: state.errorSerial) { _, _ in checkAnswer() }
     .onExitCommand(perform: dismiss)
   }
 
   private func load(_ preset: PresetJSON) {
-    watch = PresetLoadWatch(snapshot: state.snapshot, error: state.lastError)
+    watch = PresetLoadWatch(snapshot: state.snapshot, errorSerial: state.errorSerial)
     state.send(command: PresetStyle.loadCommand(id: preset.id, mode: mode))
     checkAnswer()   // the plug-in usually answers inside `send`, before any onChange
   }
 
   private func checkAnswer() {
     guard let watch = watch else { return }
-    switch watch.outcome(snapshot: state.snapshot, error: state.lastError) {
+    switch watch.outcome(snapshot: state.snapshot, errorSerial: state.errorSerial) {
     case .pending: break
     case .loaded:
       self.watch = nil

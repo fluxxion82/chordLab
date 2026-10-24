@@ -91,17 +91,18 @@ enum PresetLoadOutcome: Equatable {
   case refused
 }
 
-/// The snapshot and error the popover saw just before it sent `loadPreset`, compared with what the state
-/// holds afterwards (plan P7). A changed snapshot is a load (a good snapshot also clears the error); an
-/// error that changed while the snapshot did not is a refusal. The same error text twice in a row cannot
-/// be told from no answer, and stays pending: the popover then simply stays open.
+/// The snapshot and the error serial (`ChordLabState.errorSerial`, bumped on every reported error) the
+/// popover saw just before it sent `loadPreset`, compared with what the state holds afterwards (plan P7).
+/// A changed snapshot is a load (a good snapshot also clears the error); a bumped serial while the
+/// snapshot did not change is a refusal, even when the error text is the same as before, so a watch never
+/// stays armed past its answer and a later unrelated snapshot cannot close the popover.
 struct PresetLoadWatch<Value: Equatable> {
   let snapshot: Value?
-  let error: String?
+  let errorSerial: Int
 
-  func outcome(snapshot now: Value?, error nowError: String?) -> PresetLoadOutcome {
+  func outcome(snapshot now: Value?, errorSerial nowSerial: Int) -> PresetLoadOutcome {
     if now != snapshot { return .loaded }
-    if nowError != error && nowError != nil { return .refused }
+    if nowSerial != errorSerial { return .refused }
     return .pending
   }
 }

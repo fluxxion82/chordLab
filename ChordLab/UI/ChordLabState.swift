@@ -10,6 +10,9 @@ class ChordLabState: NSObject, ObservableObject {
   @Published var snapshot: Snapshot?
   /// The last command the plugin rejected, or a decode failure; cleared by the next good snapshot.
   @Published var lastError: String?
+  /// Counts every error reported into `lastError`, so a watcher can tell a repeated identical error
+  /// (the same refusal twice) from no answer at all; `lastError` alone cannot.
+  @Published var errorSerial = 0
   /// Audio blocks the scheduler could not complete (debug aid from `kMsgTagStatus`).
   @Published var incompleteBlocks: Int = 0
   /// The playhead (`kMsgTagTransport`); nil until the plug-in pushes one.
@@ -107,7 +110,7 @@ class ChordLabState: NSObject, ObservableObject {
     message["schema"] = 1
     guard JSONSerialization.isValidJSONObject(message),
           let data = try? JSONSerialization.data(withJSONObject: message) else {
-      lastError = "message is not valid JSON: \(fields)"
+      reportError("message is not valid JSON: \(fields)")
       return
     }
     sendCommand(tag, data)
@@ -141,7 +144,7 @@ class ChordLabState: NSObject, ObservableObject {
       snapshot = try JSONDecoder().decode(Snapshot.self, from: json)
       lastError = nil
     } catch {
-      lastError = "snapshot decode failed: \(error)"
+      reportError("snapshot decode failed: \(error)")
     }
   }
 
@@ -169,9 +172,14 @@ class ChordLabState: NSObject, ObservableObject {
   /// `kMsgTagError` payload.
   func applyError(json: Data) {
     if let message = try? JSONDecoder().decode(ErrorJSON.self, from: json) {
-      lastError = message.error
+      reportError(message.error)
     } else {
-      lastError = String(decoding: json, as: UTF8.self)
+      reportError(String(decoding: json, as: UTF8.self))
     }
+  }
+
+  private func reportError(_ message: String) {
+    lastError = message
+    errorSerial += 1
   }
 }

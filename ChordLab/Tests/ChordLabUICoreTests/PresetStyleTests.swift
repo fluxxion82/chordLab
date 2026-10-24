@@ -130,23 +130,32 @@ final class PresetStyleTests: XCTestCase {
   // MARK: - Closing after a click (P7)
 
   func testSnapshotChangeMeansLoaded() {
-    let watch = PresetLoadWatch(snapshot: 1, error: nil)
-    XCTAssertEqual(watch.outcome(snapshot: 2, error: nil), .loaded)
-    XCTAssertEqual(PresetLoadWatch<Int>(snapshot: nil, error: nil).outcome(snapshot: 1, error: nil), .loaded)
+    let watch = PresetLoadWatch(snapshot: 1, errorSerial: 0)
+    XCTAssertEqual(watch.outcome(snapshot: 2, errorSerial: 0), .loaded)
+    XCTAssertEqual(PresetLoadWatch<Int>(snapshot: nil, errorSerial: 0).outcome(snapshot: 1, errorSerial: 0), .loaded)
   }
 
-  /// A good snapshot clears an earlier error; it is still a load.
-  func testSnapshotChangeWinsOverAClearedError() {
-    XCTAssertEqual(PresetLoadWatch(snapshot: 1, error: "old").outcome(snapshot: 2, error: nil), .loaded)
+  /// A good snapshot arriving together with a bumped serial is still a load (the snapshot wins).
+  func testSnapshotChangeWinsOverTheSerial() {
+    XCTAssertEqual(PresetLoadWatch(snapshot: 1, errorSerial: 3).outcome(snapshot: 2, errorSerial: 4), .loaded)
   }
 
-  func testNewErrorWithTheSameSnapshotMeansRefused() {
-    XCTAssertEqual(PresetLoadWatch(snapshot: 1, error: nil).outcome(snapshot: 1, error: "too many chords"), .refused)
-    XCTAssertEqual(PresetLoadWatch(snapshot: 1, error: "old").outcome(snapshot: 1, error: "new"), .refused)
+  func testBumpedSerialWithTheSameSnapshotMeansRefused() {
+    XCTAssertEqual(PresetLoadWatch(snapshot: 1, errorSerial: 0).outcome(snapshot: 1, errorSerial: 1), .refused)
+  }
+
+  /// The same refusal twice in a row: each click is answered, because the serial moves even when the
+  /// text does not. (The popover disarms its watch on `.refused`, so a later unrelated snapshot cannot
+  /// close it.)
+  func testAnIdenticalRepeatedRefusalIsStillAnAnswer() {
+    let first = PresetLoadWatch(snapshot: 1, errorSerial: 5)
+    XCTAssertEqual(first.outcome(snapshot: 1, errorSerial: 6), .refused)
+    let second = PresetLoadWatch(snapshot: 1, errorSerial: 6)
+    XCTAssertEqual(second.outcome(snapshot: 1, errorSerial: 7), .refused)
   }
 
   func testNothingChangedIsPending() {
-    XCTAssertEqual(PresetLoadWatch(snapshot: 1, error: nil).outcome(snapshot: 1, error: nil), .pending)
-    XCTAssertEqual(PresetLoadWatch(snapshot: 1, error: "old").outcome(snapshot: 1, error: "old"), .pending)
+    XCTAssertEqual(PresetLoadWatch(snapshot: 1, errorSerial: 0).outcome(snapshot: 1, errorSerial: 0), .pending)
+    XCTAssertEqual(PresetLoadWatch(snapshot: 1, errorSerial: 9).outcome(snapshot: 1, errorSerial: 9), .pending)
   }
 }
