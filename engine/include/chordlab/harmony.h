@@ -6,6 +6,7 @@
 #include "chordlab/voicing.h"
 
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace chordlab {
@@ -88,5 +89,29 @@ struct Relation {
 /// Relates `to` to the chord `from` that precedes it, in `projectKey`. Both chords must have a non-null
 /// type.
 Relation relate(const Chord& from, const Chord& to, const Key& projectKey);
+
+// --- Sentences ---------------------------------------------------------------------------------
+//
+// The pieces every "why" the UI shows is built from, so that the suggestion popover, the event's `why.text`
+// and a palette cell's `relationText` (json_api.h) word the same facts the same way. All allocate: not for
+// the audio thread.
+
+/// A key in prose: the spelled tonic (ASCII `b`/`#`) and the mode as `Mode` spells it, except the two
+/// altered minor scales: "C Aeolian", "Bb Dorian", "A harmonic minor", "D melodic minor". What every
+/// "borrowed from ..." clause names. (The snapshot's `keyName`, json_api.h, is the machine form
+/// "A HarmonicMinor".)
+std::string keyProse(const Key& key);
+
+/// The common-tone phrase of `relation`: the count, "tone" or "tones", and `commonPcs` spelled in
+/// `projectKey` (`spell`, pitch.h), comma-separated: "1 common tone (G)", "2 common tones (C, E)";
+/// "no common tones" when the chords share none.
+std::string commonTonesText(const Relation& relation, const Key& projectKey);
+
+/// The short sentence for `relation`, as a palette cell's `relationText` shows it: `commonTonesText`, the
+/// `rootMotionName`, "cost <voiceLeadingCost>" and, when `borrowedFrom` is set, "borrowed from <keyProse>",
+/// joined by " · " (a literal UTF-8 middle dot between spaces):
+/// "2 common tones (C, E) · down a third · cost 2",
+/// "1 common tone (C) · down a third · cost 2 · borrowed from C Aeolian".
+std::string relationText(const Relation& relation, const Key& projectKey);
 
 }  // namespace chordlab

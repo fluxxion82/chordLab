@@ -9,6 +9,7 @@
 #include "chordlab/limits.h"
 #include "chordlab/palette.h"
 #include "chordlab/pitch.h"
+#include "chordlab/relatedness.h"
 #include "chordlab/scale.h"
 #include "chordlab/suggest.h"
 #include "chordlab/tension.h"
@@ -127,7 +128,7 @@ DocumentStore threeChords() {
     return store;
 }
 
-/// A document exercising every field: non-default keys and toggles, a gap in the ids, mixed lengths, a
+/// A document exercising every field: non-default keys, toggles and relation mode, a gap in the ids, mixed lengths, a
 /// manual voicing, auto voice-leading on, and two sections. Ids are 1 and 3 (2 was removed), so the next
 /// id is 4; the sections are 1 ("A", at 0) and 2 ("B", colour 3, at 1), so the next section id is 3.
 DocumentStore richStore() {
@@ -146,6 +147,7 @@ DocumentStore richStore() {
     store.addSection(0, "A");
     store.addSection(1, "B");
     store.setSectionColour(2, 3);
+    store.setRelationMode(RelationMode::VoiceLeading);
     return store;
 }
 
@@ -725,6 +727,160 @@ TEST_CASE("snapshot: a home triad is the palette's triad cell of the project key
     }
 }
 
+// --- Relations ---------------------------------------------------------------------------
+
+namespace {
+
+/// The store's snapshot with its live selection, parsed back.
+json selectedSnapshot(const DocumentStore& store) {
+    const Document& d = store.doc();
+    return json::parse(snapshotJson(d, buildPalette(d.browsedKey, d.projectKey), store.selectedEventId()));
+}
+
+/// Every cell the UI sizes: the palette's, then the home row's.
+std::vector<json> sizedCells(const json& snap) {
+    std::vector<json> out(snap.at("palette").at("cells").begin(), snap.at("palette").at("cells").end());
+    out.insert(out.end(), snap.at("homeTriads").begin(), snap.at("homeTriads").end());
+    return out;
+}
+
+/// True when no sized cell carries either relation member.
+bool noCellRelations(const json& snap) {
+    for (const json& c : sizedCells(snap)) {
+        if (c.contains("relation") || c.contains("relationText")) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// The engine's own relatedness of every sized cell to `reference`, in `sizedCells` order.
+std::vector<Relatedness> expectedRelations(const json& snap, const Document& doc, const Chord& reference) {
+    std::vector<Chord> chords;
+    for (const json& c : sizedCells(snap)) {
+        chords.push_back(chord(c.at("root").get<int>(), c.at("type").get<std::string>()));
+    }
+    return relatedness(reference, chords, doc.projectKey, doc.browsedKey, doc.relationMode);
+}
+
+}  // namespace
+
+TEST_CASE("snapshot: relationMode is always there; no chords means no reference and no cell relations") {
+    DocumentStore store;
+    json snap = selectedSnapshot(store);
+    CHECK(snap.at("relationMode") == "blend");
+    REQUIRE(snap.contains("relationReference"));
+    CHECK(snap.at("relationReference").is_null());
+    CHECK(noCellRelations(snap));
+
+    store.setBrowsedKey(key('A', 0, Mode::Aeolian));  // home row present, still nothing to relate to
+    snap = selectedSnapshot(store);
+    CHECK(snap.at("homeTriads").size() == 7);
+    CHECK(snap.at("relationReference").is_null());
+    CHECK(noCellRelations(snap));
+
+    for (const char* mode : {"off", "commonTones", "voiceLeading", "function", "blend"}) {
+        applyOk(store, {{"cmd", "setRelationMode"}, {"mode", mode}});
+        CHECK(selectedSnapshot(store).at("relationMode") == mode);
+    }
+}
+
+TEST_CASE("snapshot: the reference is the selected event, else the last; every sized cell carries its relation") {
+    DocumentStore store = threeChords();  // C (1), F (2), G7 (3)
+    json snap = selectedSnapshot(store);
+    CHECK(snap.at("relationReference") == json({{"eventId", 3}, {"symbol", "G7"}}));
+    for (const json& c : sizedCells(snap)) {
+        CHECK(c.contains("relation"));
+        CHECK(c.at("relation").is_number_integer());
+        CHECK(c.at("relationText").is_string());
+    }
+    std::vector<Relatedness> expected = expectedRelations(snap, store.doc(), kG7);
+    std::vector<json> cells = sizedCells(snap);
+    REQUIRE(cells.size() == expected.size());
+    for (std::size_t i = 0; i < cells.size(); ++i) {
+        CHECK(cells[i].at("relation") == expected[i].score);
+        CHECK(cells[i].at("relationText") == expected[i].text);
+    }
+    // After G7, C is the best cell (D -> T with a cadence): 100.
+    CHECK(cellAt(snap, 0, 1).at("relation") == 100);
+    REQUIRE(cellAt(snap, 4, 3).at("symbol") == "G7");
+    CHECK(cellAt(snap, 4, 3).at("relation") == 100);  // the reference itself
+
+    store.setSelectedEvent(1);  // C
+    applyOk(store, {{"cmd", "setRelationMode"}, {"mode", "commonTones"}});
+    snap = selectedSnapshot(store);
+    CHECK(snap.at("relationReference") == json({{"eventId", 1}, {"symbol", "C"}}));
+    CHECK(cellAt(snap, 5, 1).at("relation") == 67);  // Am
+    CHECK(cellAt(snap, 5, 1).at("relationText") == "2 common tones (C, E) · down a third · cost 2");
+    CHECK(cellAt(snap, 0, 3).at("relation") == 75);  // CΔ7
+    CHECK(cellAt(snap, 1, 1).at("relation") == 0);   // Dm
+    CHECK(cellAt(snap, 0, 1).at("relation") == 100);
+
+    applyOk(store, {{"cmd", "setRelationMode"}, {"mode", "function"}});
+    snap = selectedSnapshot(store);
+    CHECK(cellAt(snap, 4, 1).at("relation") == 60);  // C -> G
+    CHECK(cellAt(snap, 3, 1).at("relation") == 80);  // C -> F
+    CHECK(cellAt(snap, 0, 1).at("relation") == 30);  // C -> C: T -> T
+
+    // A stale selection reads as none: back to the last chord.
+    snap = json::parse(snapshotJson(store.doc(), buildPalette(store.doc().browsedKey, store.doc().projectKey), 99));
+    CHECK(snap.at("relationReference") == json({{"eventId", 3}, {"symbol", "G7"}}));
+}
+
+TEST_CASE("snapshot: mode off drops the reference and every cell relation") {
+    DocumentStore store = threeChords();
+    store.setBrowsedKey(key('E', 0, Mode::Ionian));
+    applyOk(store, {{"cmd", "setRelationMode"}, {"mode", "off"}});
+    const json snap = selectedSnapshot(store);
+    CHECK(snap.at("relationMode") == "off");
+    CHECK(snap.at("relationReference").is_null());
+    CHECK(snap.at("homeTriads").size() == 7);
+    CHECK(noCellRelations(snap));
+}
+
+TEST_CASE("snapshot: blend is normalised over the palette and the home row together") {
+    DocumentStore store = threeChords();
+    store.setSelectedEvent(2);  // F
+    store.setBrowsedKey(key('E', 0, Mode::Ionian));
+    const json snap = selectedSnapshot(store);
+    CHECK(snap.at("relationReference") == json({{"eventId", 2}, {"symbol", "F"}}));
+    const std::vector<json> cells = sizedCells(snap);
+    REQUIRE(snap.at("homeTriads").size() == 7);
+    const std::vector<Relatedness> expected = expectedRelations(snap, store.doc(), kF);
+    REQUIRE(cells.size() == expected.size());
+    int lo = 100;
+    int hi = 0;
+    for (std::size_t i = 0; i < cells.size(); ++i) {
+        CHECK(cells[i].at("relation") == expected[i].score);
+        CHECK(cells[i].at("relationText") == expected[i].text);
+        lo = std::min(lo, cells[i].at("relation").get<int>());
+        hi = std::max(hi, cells[i].at("relation").get<int>());
+    }
+    CHECK(lo == 0);
+    CHECK(hi == 100);
+    // One population: the home row is not normalised on its own (its worst is not forced to 0).
+    const json& home = snap.at("homeTriads");
+    CHECK(home[3].at("relation") == 100);  // F itself
+    CHECK(home[4].at("relation") == 100);  // G: the best chord after F, D after PD, the top of the population
+    // The relation text is spelled in the project key, borrowings and all.
+    CHECK(home[0].at("relationText") == "1 common tone (C) · up a fifth · cost 3");
+}
+
+TEST_CASE("snapshot: the reference symbol is the event's own symbol, spelled in the project key") {
+    DocumentStore store;
+    store.setProjectKey(key('E', -1, Mode::Ionian));
+    store.appendChord(chord(3, "maj"));   // Eb
+    store.appendChord(chord(10, "7"));    // Bb7
+    store.appendChord(chord(1, "maj"));   // Db: borrowed bVII
+    json snap = selectedSnapshot(store);
+    CHECK(snap.at("relationReference") == json({{"eventId", 3}, {"symbol", "Db"}}));
+    CHECK(snap.at("relationReference").at("symbol") == snap.at("events")[2].at("symbol"));
+    store.setSelectedEvent(2);
+    snap = selectedSnapshot(store);
+    CHECK(snap.at("relationReference") == json({{"eventId", 2}, {"symbol", snap.at("events")[1].at("symbol")}}));
+    CHECK(snap.at("relationReference").at("symbol") == "Bb7");
+}
+
 // --- browseKey -------------------------------------------------------------------------
 
 TEST_CASE("browseKey steps: moves the browsed key along the fifths and hollows the borrowed cells") {
@@ -866,6 +1022,52 @@ TEST_CASE("toggles: setProgressionLoop and setFollowHost are live state") {
 
     applyOk(store, {{"cmd", "setFollowHost"}, {"on", true}});
     CHECK(snapshot(store).at("followHost") == true);
+}
+
+TEST_CASE("setRelationMode: each of the five modes is live state, untouched by undo and redo") {
+    DocumentStore store;
+    const std::vector<std::pair<const char*, RelationMode>> modes{{"off", RelationMode::Off},
+                                                                  {"commonTones", RelationMode::CommonTones},
+                                                                  {"voiceLeading", RelationMode::VoiceLeading},
+                                                                  {"function", RelationMode::Function},
+                                                                  {"blend", RelationMode::Blend}};
+    for (const auto& [name, mode] : modes) {
+        applyOk(store, {{"cmd", "setRelationMode"}, {"mode", name}});
+        CHECK(store.doc().relationMode == mode);
+    }
+    CHECK_FALSE(store.undo());  // never history
+
+    applyOk(store, {{"cmd", "appendChord"}, {"root", 0}, {"type", "maj"}});
+    applyOk(store, {{"cmd", "setRelationMode"}, {"mode", "function"}});
+    applyOk(store, {{"cmd", "undo"}});
+    CHECK(store.doc().events.empty());
+    CHECK(store.doc().relationMode == RelationMode::Function);
+    applyOk(store, {{"cmd", "setRelationMode"}, {"mode", "off"}});
+    applyOk(store, {{"cmd", "redo"}});  // the redo stack survived the mode change
+    CHECK(store.doc().events.size() == 1);
+    CHECK(store.doc().relationMode == RelationMode::Off);
+}
+
+TEST_CASE("setRelationMode: a missing, mistyped or unknown mode is rejected with the five names") {
+    DocumentStore store;
+    store.setRelationMode(RelationMode::CommonTones);
+    for (const json& cmd : {json{{"cmd", "setRelationMode"}},
+                            json{{"cmd", "setRelationMode"}, {"mode", "Blend"}},
+                            json{{"cmd", "setRelationMode"}, {"mode", "none"}},
+                            json{{"cmd", "setRelationMode"}, {"mode", ""}},
+                            json{{"cmd", "setRelationMode"}, {"mode", 4}},
+                            json{{"cmd", "setRelationMode"}, {"mode", nullptr}},
+                            json{{"cmd", "setRelationMode"}, {"on", true}}}) {
+        CAPTURE(cmd.dump());
+        checkRejected(store, cmd);
+        std::string error;
+        CHECK_FALSE(apply(store, cmd, error));
+        for (const char* name : {"\"off\"", "\"commonTones\"", "\"voiceLeading\"", "\"function\"", "\"blend\""}) {
+            CHECK_MESSAGE(error.find(name) != std::string::npos, error);
+        }
+        CHECK(error.find("\"mode\"") != std::string::npos);
+    }
+    CHECK(store.doc().relationMode == RelationMode::CommonTones);
 }
 
 TEST_CASE("undo / redo commands") {
@@ -1304,6 +1506,7 @@ TEST_CASE("state: shape") {
     CHECK(state.at("sections")[0] == json({{"id", 1}, {"name", "A"}, {"colourIndex", 0}, {"firstEventIndex", 0}}));
     CHECK(state.at("sections")[1] == json({{"id", 2}, {"name", "B"}, {"colourIndex", 3}, {"firstEventIndex", 1}}));
     CHECK(state.at("nextSectionId") == 3);
+    CHECK(state.at("relationMode") == "voiceLeading");
 
     const json defaults = json::parse(stateJson(store));
     CHECK(defaults.at("editor") == json({{"width", 900}, {"height", 620}}));
@@ -1312,6 +1515,7 @@ TEST_CASE("state: shape") {
     CHECK(empty.at("autoVoiceLead") == false);
     CHECK(empty.at("sections") == json::array());
     CHECK(empty.at("nextSectionId") == 1);
+    CHECK(empty.at("relationMode") == "blend");
 }
 
 TEST_CASE("state: loadStateJson(stateJson(doc)) round-trips the document, the ids, the id counter and the editor size") {
@@ -1332,6 +1536,7 @@ TEST_CASE("state: loadStateJson(stateJson(doc)) round-trips the document, the id
     CHECK(loaded.doc().events[1].manualVoicing == true);
     CHECK(loaded.doc().autoVoiceLead == true);
     CHECK(loaded.doc().sections == original.doc().sections);
+    CHECK(loaded.doc().relationMode == RelationMode::VoiceLeading);
     CHECK(width == 1024);
     CHECK(height == 768);
     CHECK_FALSE(loaded.undo());  // history cleared
@@ -1373,10 +1578,13 @@ TEST_CASE("state: a legacy state without the Phase 2 fields loads with the defau
     legacy.erase("autoVoiceLead");
     legacy.erase("sections");
     legacy.erase("nextSectionId");
+    legacy.erase("relationMode");
 
     DocumentStore loaded;
+    loaded.setRelationMode(RelationMode::Off);  // replaced by the default, not kept
     std::string error;
     REQUIRE_MESSAGE(loadStateJson(loaded, legacy.dump(), error), error);
+    CHECK(loaded.doc().relationMode == RelationMode::Blend);
     REQUIRE(loaded.doc().events.size() == 2);
     for (const ChordEvent& e : loaded.doc().events) {
         CHECK(e.inversion == 0);
@@ -1540,6 +1748,9 @@ TEST_CASE("state: a bad state is rejected whole and the store keeps its document
     rejects("key not an object", [](json& s) { s["projectKey"] = "C"; });
     rejects("toggle not a bool", [](json& s) { s["followHost"] = 1; });
     rejects("toggle missing", [](json& s) { s.erase("progressionLoop"); });
+    rejects("relation mode unknown", [](json& s) { s["relationMode"] = "Blend"; });
+    rejects("relation mode not a string", [](json& s) { s["relationMode"] = 4; });
+    rejects("relation mode null", [](json& s) { s["relationMode"] = nullptr; });
     rejects("editor not an object", [](json& s) { s["editor"] = 900; });
     rejects("editor width not an integer", [](json& s) { s["editor"]["width"] = "wide"; });
     rejects("editor height missing", [](json& s) { s["editor"].erase("height"); });
@@ -1786,9 +1997,11 @@ TEST_CASE("capacity: a state with more than kMaxChords chords is rejected whole;
 namespace {
 
 /// The largest state the engine can produce: kMaxChords chords, a section on every one of them, each
-/// name at the byte bound and made of the characters JSON escapes to two bytes.
+/// name at the byte bound and made of the characters JSON escapes to two bytes, and the relation mode with
+/// the longest name.
 DocumentStore worstCaseStore() {
     DocumentStore store = fullStore();
+    store.setRelationMode(RelationMode::VoiceLeading);
     std::string name;
     for (int i = 0; i < kMaxSectionNameBytes; ++i) {
         name.push_back(i % 2 == 0 ? '"' : '\\');
@@ -1802,7 +2015,7 @@ DocumentStore worstCaseStore() {
 /// `stateJson` of `worstCaseStore()` at the default editor size, measured; pinned so that a change to the
 /// state's shape shows up here against `kMaxJsonBytes` (1 MiB) before it shows up as a state that will
 /// not load.
-constexpr std::size_t kWorstCaseStateBytes = 76770;
+constexpr std::size_t kWorstCaseStateBytes = 76800;
 
 }  // namespace
 

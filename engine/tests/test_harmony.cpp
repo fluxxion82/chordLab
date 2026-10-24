@@ -547,3 +547,41 @@ TEST_CASE("relate: common tones and cost are symmetric, and common tones match t
         }
     }
 }
+
+// --- Sentences -----------------------------------------------------------------------------------
+
+TEST_CASE("keyProse: the spelled tonic and the mode, the altered minors in words") {
+    CHECK(keyProse(kCAeolian) == "C Aeolian");
+    CHECK(keyProse(key('B', -1, Mode::Dorian)) == "Bb Dorian");
+    CHECK(keyProse(key('A', 0, Mode::HarmonicMinor)) == "A harmonic minor");
+    CHECK(keyProse(key('F', 1, Mode::MelodicMinor)) == "F# melodic minor");
+    CHECK(keyProse(key('C', 0, Mode::Ionian)) == "C Ionian");
+}
+
+TEST_CASE("commonTonesText: count, singular or plural, names spelled in the project key; none in words") {
+    CHECK(commonTonesText(relate(chord(0, "maj"), chord(7, "7"), kCIonian), kCIonian) == "1 common tone (G)");
+    CHECK(commonTonesText(relate(chord(0, "maj"), chord(9, "min"), kCIonian), kCIonian) == "2 common tones (C, E)");
+    CHECK(commonTonesText(relate(chord(0, "maj"), chord(2, "min"), kCIonian), kCIonian) == "no common tones");
+    CHECK(commonTonesText(relate(chord(0, "maj"), chord(0, "maj"), kCIonian), kCIonian) ==
+          "3 common tones (C, E, G)");
+    // Spelled in the project key: Eb in C Aeolian, D# in E major.
+    CHECK(commonTonesText(relate(chord(3, "maj"), chord(0, "min"), kCAeolian), kCAeolian) ==
+          "2 common tones (Eb, G)");
+    CHECK(commonTonesText(relate(chord(11, "maj"), chord(3, "min"), key('E', 0, Mode::Ionian)),
+                          key('E', 0, Mode::Ionian)) == "2 common tones (D#, F#)");
+}
+
+TEST_CASE("relationText: common tones · motion · cost [· borrowed from]") {
+    CHECK(relationText(relate(chord(0, "maj"), chord(9, "min"), kCIonian), kCIonian) ==
+          "2 common tones (C, E) · down a third · cost 2");
+    CHECK(relationText(relate(chord(0, "maj"), chord(5, "maj"), kCIonian), kCIonian) ==
+          "1 common tone (C) · down a fifth · cost 3");
+    CHECK(relationText(relate(chord(0, "maj"), chord(2, "min"), kCIonian), kCIonian) ==
+          "no common tones · up a step · cost 5");
+    CHECK(relationText(relate(chord(0, "maj"), chord(8, "maj"), kCIonian), kCIonian) ==
+          "1 common tone (C) · down a third · cost 2 · borrowed from C Aeolian");
+    CHECK(relationText(relate(chord(9, "min"), chord(4, "maj"), kAAeolian), kAAeolian) ==
+          "1 common tone (E) · up a fifth · cost 2 · borrowed from A harmonic minor");
+    CHECK(relationText(relate(chord(0, "maj"), chord(0, "maj"), kCIonian), kCIonian) ==
+          "3 common tones (C, E, G) · same root · cost 0");
+}

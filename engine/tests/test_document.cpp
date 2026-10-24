@@ -4,6 +4,7 @@
 #include "chordlab/document.h"
 #include "chordlab/limits.h"
 #include "chordlab/pitch.h"
+#include "chordlab/relatedness.h"
 #include "chordlab/scale.h"
 #include "chordlab/voicing.h"
 
@@ -70,9 +71,10 @@ bool sameUndoableState(const Document& a, const Document& b) {
            a.autoVoiceLead == b.autoVoiceLead;
 }
 
-/// The live (session) part of a document: browsed key and the two transport toggles.
+/// The live (session) part of a document: browsed key, the two transport toggles and the relation mode.
 bool sameLiveState(const Document& a, const Document& b) {
-    return a.browsedKey == b.browsedKey && a.progressionLoop == b.progressionLoop && a.followHost == b.followHost;
+    return a.browsedKey == b.browsedKey && a.progressionLoop == b.progressionLoop && a.followHost == b.followHost &&
+           a.relationMode == b.relationMode;
 }
 
 /// Runs `mutate`, checks it changed the document, then checks that undo restores the document from before
@@ -102,6 +104,7 @@ TEST_CASE("Document: defaults to C Ionian, empty, looping and following the host
     CHECK(doc.followHost == true);
     CHECK(doc.autoVoiceLead == false);
     CHECK(doc.sections.empty());
+    CHECK(doc.relationMode == RelationMode::Blend);
 }
 
 TEST_CASE("Document: empty document has endBeat 0 and startBeatOf(0) 0") {
@@ -159,6 +162,9 @@ TEST_CASE("ChordEvent / Document: equality compares every field") {
     CHECK(x != y);
     y = x;
     y.sections.push_back(Section{1, "A", 0, 0});
+    CHECK(x != y);
+    y = x;
+    y.relationMode = RelationMode::Off;
     CHECK(x != y);
 }
 
@@ -825,6 +831,33 @@ TEST_CASE("setProgressionLoop / setFollowHost: toggle independently and never pu
     CHECK_FALSE(store.redo());
 }
 
+TEST_CASE("setRelationMode: live state: every mode sticks, never pushes history, survives undo and redo") {
+    DocumentStore store;
+    for (const RelationMode mode : {RelationMode::Off, RelationMode::CommonTones, RelationMode::VoiceLeading,
+                                    RelationMode::Function, RelationMode::Blend}) {
+        store.setRelationMode(mode);
+        CHECK(store.doc().relationMode == mode);
+        CHECK_FALSE(store.undo());
+    }
+
+    store.appendChord(kC);
+    store.setRelationMode(RelationMode::Function);
+    store.appendChord(kF);
+    store.setRelationMode(RelationMode::CommonTones);
+    REQUIRE(store.undo());  // the second append
+    CHECK(idsOf(store) == std::vector<int>{1});
+    CHECK(store.doc().relationMode == RelationMode::CommonTones);  // live: kept, not rolled back to Function
+    REQUIRE(store.undo());
+    CHECK(store.doc().events.empty());
+    CHECK(store.doc().relationMode == RelationMode::CommonTones);
+    store.setRelationMode(RelationMode::Off);  // a change while undone...
+    REQUIRE(store.redo());                     // ...leaves the redo stack intact and is kept across it
+    REQUIRE(store.redo());
+    CHECK(idsOf(store) == std::vector<int>{1, 2});
+    CHECK(store.doc().relationMode == RelationMode::Off);
+    CHECK_FALSE(store.redo());
+}
+
 TEST_CASE("setSelectedEvent: live state: selects an event, kNoEventId clears, an unknown id is a no-op, no history") {
     DocumentStore store = threeChords();
     CHECK(store.selectedEventId() == kNoEventId);
@@ -1183,6 +1216,8 @@ TEST_CASE("DocumentStore: 200 random operations undo to the initial document and
                 break;
             case 9:
                 store.setProgressionLoop(flag);
+                // Drawn from a value already drawn, so the seeded sequence of the walk is unchanged.
+                store.setRelationMode(static_cast<RelationMode>((colour + 2) % kNumRelationModes));
                 break;
             case 10:
                 store.setFollowHost(flag);

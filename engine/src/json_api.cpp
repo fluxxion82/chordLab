@@ -7,6 +7,7 @@
 #include "chordlab/harmony.h"
 #include "chordlab/palette.h"
 #include "chordlab/pitch.h"
+#include "chordlab/relatedness.h"
 #include "chordlab/relations.h"
 #include "chordlab/scale.h"
 #include "chordlab/suggest.h"
@@ -21,6 +22,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <set>
 #include <string>
 #include <string_view>
@@ -131,9 +133,10 @@ json outOfKeyJson(const Chord& chord, const Key& key) {
 }
 
 /// One palette cell as the snapshot writes it (`palette.cells` and `homeTriads` alike): the cell's own
-/// position, chord, symbol, numeral and `filled`, plus what is read against `projectKey`.
-json cellJson(const PaletteCell& c, const Key& projectKey) {
-    return {{"degree", c.degree},
+/// position, chord, symbol, numeral and `filled`, plus what is read against `projectKey`, plus `relation`
+/// and `relationText` from `relation` when it is non-null (absent otherwise: no reference, or mode off).
+json cellJson(const PaletteCell& c, const Key& projectKey, const Relatedness* relation) {
+    json cell = {{"degree", c.degree},
             {"tier", c.tier},
             {"root", c.chord.root},
             {"type", c.chord.type->id},
@@ -145,53 +148,50 @@ json cellJson(const PaletteCell& c, const Key& projectKey) {
             {"filled", c.filled},
             {"voicing", closeVoicing(c.chord)},
             {"outOfKey", outOfKeyJson(c.chord, projectKey)}};
+    if (relation != nullptr) {
+        cell["relation"] = relation->score;
+        cell["relationText"] = relation->text;
+    }
+    return cell;
 }
 
-/// The snapshot's `homeTriads`: nothing while the project key is the one browsed (the palette already
-/// shows it); otherwise the project key's seven diatonic triads in degree order, each the cell the
-/// palette's triad row would hold for it when browsing the project key, plus an `id` ("home-<degree>")
-/// that no palette cell has.
-json homeTriadsJson(const Document& doc) {
-    json out = json::array();
+/// The cells of the snapshot's home row: nothing while the project key is the one browsed (the palette
+/// already shows it); otherwise the project key's seven diatonic triads in degree order, each the cell the
+/// palette's triad row would hold for it when browsing the project key.
+std::vector<PaletteCell> homeTriadCells(const Document& doc) {
+    std::vector<PaletteCell> out;
     if (doc.browsedKey == doc.projectKey) {
         return out;
     }
     for (int degree = 0; degree < 7; ++degree) {
         const Chord triad = diatonicTriad(doc.projectKey, degree);
-        const PaletteCell cell{degree,
-                               kPaletteTriadTier,
-                               triad,
-                               fullyInKey(triad, doc.projectKey),
-                               chordSymbol(triad, doc.projectKey),
-                               romanNumeral(triad, doc.projectKey)};
-        json entry = cellJson(cell, doc.projectKey);
-        entry["id"] = "home-" + std::to_string(degree);
+        out.push_back(PaletteCell{degree, kPaletteTriadTier, triad, fullyInKey(triad, doc.projectKey),
+                                  chordSymbol(triad, doc.projectKey), romanNumeral(triad, doc.projectKey)});
+    }
+    return out;
+}
+
+/// The snapshot's `homeTriads`: `homeTriadCells` as `cellJson` writes them, each with an `id`
+/// ("home-<degree>") that no palette cell has. `relations` is null, or holds one entry per home cell.
+json homeTriadsJson(const std::vector<PaletteCell>& home, const Key& projectKey, const Relatedness* relations) {
+    json out = json::array();
+    for (std::size_t i = 0; i < home.size(); ++i) {
+        json entry = cellJson(home[i], projectKey, relations != nullptr ? &relations[i] : nullptr);
+        entry["id"] = "home-" + std::to_string(home[i].degree);
         out.push_back(std::move(entry));
     }
     return out;
 }
 
-/// Mode names as prose, for the sentences the UI shows: the `Mode` spelling except for the two altered
-/// minor scales. The same table as the suggestions' reason texts (suggest.cpp), so that "borrowed from"
-/// reads identically in the why popover and the suggestion popover.
-constexpr const char* kModeProse[kNumModes] = {"Ionian",  "Dorian",  "Phrygian",       "Lydian",       "Mixolydian",
-                                               "Aeolian", "Locrian", "harmonic minor", "melodic minor"};
-
-std::string keyProse(const Key& key) {
-    return tonicText(key.tonic) + " " + kModeProse[static_cast<int>(key.mode)];
-}
-
 /// The `why` object of event `to` against the event `from` before it: `relate` as data plus the sentence
-/// whose rules json_api.h spells out.
+/// whose rules json_api.h spells out, from the same pieces (harmony.h) as the suggestions' reasons and the
+/// cells' `relationText`.
 json whyJson(const Chord& from, const Chord& to, const Key& projectKey) {
     const Relation relation = relate(from, to, projectKey);
 
     json commonNames = json::array();
-    std::string names;
     for (const PitchClass pc : relation.commonPcs) {
-        const std::string name = spell(pc, projectKey).text();
-        commonNames.push_back(name);
-        names += (names.empty() ? "" : ", ") + name;
+        commonNames.push_back(spell(pc, projectKey).text());
     }
 
     std::string text = chordSymbol(from, projectKey) + " → " + chordSymbol(to, projectKey) + ": " +
@@ -200,8 +200,7 @@ json whyJson(const Chord& from, const Chord& to, const Key& projectKey) {
         text += ", resolves (D→T)";
     }
     if (relation.commonTones >= 1) {
-        text += ", " + std::to_string(relation.commonTones) + (relation.commonTones == 1 ? " common tone (" : " common tones (") +
-                names + ")";
+        text += ", " + commonTonesText(relation, projectKey);
     }
     // The cost sums over one voice per pitch class of the larger chord (the smaller is padded up to it).
     const int voices = static_cast<int>(std::max(pitchClasses(from).size(), pitchClasses(to).size()));
@@ -503,6 +502,32 @@ bool parseModeField(Fields& fields, Mode& out) {
     return true;
 }
 
+/// Reads the relation mode at `fields[name]`: one of the five `relationModeName` strings. Missing,
+/// mistyped and unknown values alike get a message that lists the five.
+bool parseRelationModeField(Fields& fields, const char* name, RelationMode& out) {
+    static const std::string kExpected = [] {
+        std::string list = "must be one of ";
+        for (int i = 0; i < kNumRelationModes; ++i) {
+            list += std::string(i == 0 ? "" : ", ") + "\"" + relationModeName(static_cast<RelationMode>(i)) + "\"";
+        }
+        return list;
+    }();
+    const json* v = fields.find(name);
+    if (v == nullptr) {
+        return fields.fail(name, "is missing; it " + kExpected);
+    }
+    if (!v->is_string()) {
+        return fields.fail(name, kExpected);
+    }
+    const std::string text = v->get<std::string>();
+    const std::optional<RelationMode> mode = parseRelationMode(text);
+    if (!mode) {
+        return fields.fail(name, kExpected + " (got \"" + text + "\")");
+    }
+    out = *mode;
+    return true;
+}
+
 /// Reads the key object at `fields[name]`: `{"tonic":{"letter","alter"},"mode"}`.
 bool parseKeyField(Fields& fields, const char* name, Key& out, std::string& error) {
     const json* keyObject = fields.getObject(name);
@@ -548,6 +573,7 @@ struct Command {
         RemoveSection,
         MoveSectionStart,
         SelectEvent,
+        SetRelationMode,
         Undo,
         Redo
     };
@@ -564,6 +590,7 @@ struct Command {
     int inversion = 0;         // SetInversion
     int octave = 0;            // SetOctave
     int colourIndex = 0;       // SetSectionColour
+    RelationMode relationMode = RelationMode::Blend;  // SetRelationMode
 };
 static_assert(std::is_trivially_destructible_v<Command>, "Command must be plain data: destroying one must not allocate");
 
@@ -787,6 +814,10 @@ bool parseCommand(std::string_view text, Command& out, std::string& name, std::s
     if (cmd == "selectEvent") {
         return parseSelectEvent(fields, out);
     }
+    if (cmd == "setRelationMode") {
+        out.kind = Command::Kind::SetRelationMode;
+        return parseRelationModeField(fields, "mode", out.relationMode);
+    }
     if (cmd == "undo") {
         out.kind = Command::Kind::Undo;
         return true;
@@ -894,6 +925,9 @@ Refusal applyCommand(DocumentStore& store, const Command& command, std::string& 
         case Command::Kind::SelectEvent:
             store.setSelectedEvent(command.id);
             return Refusal::None;
+        case Command::Kind::SetRelationMode:
+            store.setRelationMode(command.relationMode);
+            return Refusal::None;
         case Command::Kind::Undo:
             store.undo();  // nothing to undo is a no-op, not an error
             return Refusal::None;
@@ -959,6 +993,10 @@ bool parseState(std::string_view text, Document& doc, int& nextId, int& nextSect
         return false;
     }
     if (fields.has("autoVoiceLead") && !fields.getBool("autoVoiceLead", doc.autoVoiceLead)) {
+        return false;
+    }
+    // Optional (states saved before the relation modes have none): the default, blend.
+    if (fields.has("relationMode") && !parseRelationModeField(fields, "relationMode", doc.relationMode)) {
         return false;
     }
 
@@ -1103,17 +1141,34 @@ std::string snapshotJson(const Document& doc, const Palette& palette, int select
         beat += e.lengthBeats;
     }
 
-    json cells = json::array();
-    for (const PaletteCell& c : palette.cells) {
-        cells.push_back(cellJson(c, doc.projectKey));
-    }
+    // Suggestions and relations follow the selected chord, else the last one; with neither, suggestions
+    // open the progression and there is no relation reference.
+    const int referenceIndex = selectedIndex >= 0 ? selectedIndex : static_cast<int>(doc.events.size()) - 1;
+    const ChordEvent* reference = referenceIndex >= 0 ? &doc.events[static_cast<std::size_t>(referenceIndex)] : nullptr;
+    const Chord* previous = reference != nullptr ? &reference->chord : nullptr;
 
-    // Suggestions follow the selected chord, else the last one, else open the progression.
-    const Chord* previous = nullptr;
-    if (selectedIndex >= 0) {
-        previous = &doc.events[static_cast<std::size_t>(selectedIndex)].chord;
-    } else if (!doc.events.empty()) {
-        previous = &doc.events.back().chord;
+    // Relatedness of every sized cell, palette then home row, in one call so that blend normalises over both.
+    const std::vector<PaletteCell> home = homeTriadCells(doc);
+    std::vector<Relatedness> relations;
+    json relationReference;  // null
+    if (reference != nullptr && doc.relationMode != RelationMode::Off) {
+        std::vector<Chord> sized;
+        sized.reserve(palette.cells.size() + home.size());
+        for (const PaletteCell& c : palette.cells) {
+            sized.push_back(c.chord);
+        }
+        for (const PaletteCell& c : home) {
+            sized.push_back(c.chord);
+        }
+        relations = relatedness(reference->chord, sized, doc.projectKey, doc.browsedKey, doc.relationMode);
+        relationReference = {{"eventId", reference->id}, {"symbol", chordSymbol(reference->chord, doc.projectKey)}};
+    }
+    const Relatedness* cellRelations = relations.empty() ? nullptr : relations.data();
+    const Relatedness* homeRelations = relations.empty() ? nullptr : relations.data() + palette.cells.size();
+
+    json cells = json::array();
+    for (std::size_t i = 0; i < palette.cells.size(); ++i) {
+        cells.push_back(cellJson(palette.cells[i], doc.projectKey, cellRelations != nullptr ? &cellRelations[i] : nullptr));
     }
 
     const json snapshot = {{"schema", kJsonSchema},
@@ -1131,7 +1186,9 @@ std::string snapshotJson(const Document& doc, const Palette& palette, int select
                            {"events", std::move(events)},
                            {"sections", sectionsJson(doc)},
                            {"suggestions", suggestionsJson(previous, doc)},
-                           {"homeTriads", homeTriadsJson(doc)},
+                           {"homeTriads", homeTriadsJson(home, doc.projectKey, homeRelations)},
+                           {"relationMode", relationModeName(doc.relationMode)},
+                           {"relationReference", std::move(relationReference)},
                            {"palette", {{"tiers", palette.tiers}, {"cells", std::move(cells)}}}};
     return snapshot.dump();
 }
@@ -1156,6 +1213,7 @@ std::string stateJson(const DocumentStore& store, int editorWidth, int editorHei
                         {"progressionLoop", doc.progressionLoop},
                         {"followHost", doc.followHost},
                         {"autoVoiceLead", doc.autoVoiceLead},
+                        {"relationMode", relationModeName(doc.relationMode)},
                         {"events", std::move(events)},
                         {"sections", sectionsJson(doc)},
                         {"nextId", store.nextId()},
