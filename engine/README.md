@@ -10,8 +10,10 @@ include/chordlab/   public headers, one per module (pitch, scale, chord, symbol,
                     harmony, tension, relations, suggest, relatedness, voicing, palette, document, compiler,
                     note_event, limits, scheduler, triple_buffer, publication, smf, json_api)
 src/                the matching implementations
-tests/              doctest suite (tests/doctest.h is the vendored framework), one file per module;
+tests/              doctest suite (tests/doctest.h is the vendored framework), one file per module plus
+                    test_fixtures.cpp (golden JSON) and test_json_robustness.cpp (mutation fuzz);
                     tests/rt_alloc/ is a second executable that counts allocations (see below)
+tests/fixtures/     golden snapshot/state JSON the readers and writers are compared against byte for byte
 fixtures/           golden files the tests compare against (cmaj-1bar.mid)
 tools/              developer tools built alongside the library but not run by ctest (see Tools)
 third_party/        vendored headers; see third_party/README.md for provenance and hashes

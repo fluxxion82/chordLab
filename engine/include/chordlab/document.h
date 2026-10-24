@@ -327,7 +327,8 @@ public:
     /// keeps handing out fresh ids.
     int nextId() const;
 
-    /// The id the next successful `addSection` will get. Not persisted yet: `replace` derives it.
+    /// The id the next successful `addSection` will get. Persisted by `stateJson` like `nextId`; `replace`
+    /// derives it when the state carries none.
     int nextSectionId() const;
 
     /// Position of event `id` in playback order, or -1 if no event has that id.

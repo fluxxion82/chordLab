@@ -8,7 +8,7 @@
 
 static const int kNumPresets = 1;
 
-static const NSInteger kParamGain = 0;   // placeholder parameter from the scaffold; removed in M2
+static const NSInteger kParamGain = 0;   // placeholder parameter from the scaffold; unused but still declared and saved
 static const NSInteger kNumParams = 1;
 
 static const NSInteger kNoCtrlTag = -1;
@@ -24,9 +24,9 @@ static const NSInteger kMsgTagExport = 14;           // no payload: write the pr
 static const NSInteger kMsgTagExportSection = 15;    // payload: {"schema":1,"id":<sectionId>}: write that section alone as a .mid file; same answers
 // plugin -> UI
 static const NSInteger kMsgTagSnapshot = 20;         // payload: snapshotJson (document + palette)
-static const NSInteger kMsgTagError = 21;            // payload: {"schema":1,"error":"..."} for a rejected command or preview
+static const NSInteger kMsgTagError = 21;            // payload: {"schema":1,"error":"..."} for a rejected command or preview, or a failed export
 static const NSInteger kMsgTagStatus = 22;           // payload: {"schema":1,"incompleteBlocks":n} (scheduler debug aid)
 static const NSInteger kMsgTagTransport = 23;        // payload: {"schema":1,"ppq":<beats>,"playing":true|false}, ~15 Hz while it changes
-static const NSInteger kMsgTagExportReady = 24;      // payload: {"schema":1,"path":"/.../ChordLab/ChordLab-<key>-<stamp>.mid"}
+static const NSInteger kMsgTagExportReady = 24;      // payload: {"schema":1,"path":"/.../ChordLab/ChordLab-<label>-<stamp>-<pid>-<counter>-<uuid8>.mid"} (see ChordLab.mm, "MIDI export files")
 
 #endif /* ChordLab_Shared_h */

@@ -1,7 +1,8 @@
 import SwiftUI
 
 /// UI-side state. Logic lives in C++; this object only mirrors what the plugin
-/// pushes (snapshot / error / status JSON) and forwards user intent (commands, previews) back.
+/// pushes (snapshot, error, status, transport and export-ready JSON) and forwards user intent
+/// (commands, previews, export requests) back.
 class ChordLabState: NSObject, ObservableObject {
   var params: [Param] = []
   @Published var bundleID = String("")
