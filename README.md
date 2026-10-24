@@ -12,7 +12,7 @@ host-independent C++17 engine that owns all the theory (`engine/`), and a SwiftU
 Phase 1, the basics:
 
 - A project key (12 tonics × 9 modes: the seven church modes, harmonic minor and melodic minor) and a
-  separately browsed key, stepped along the circle of fifths (parallel-mode browsing is currently available only through the engine JSON command).
+  separately browsed key, stepped along the circle of fifths or switched to a parallel mode.
 - A palette of the browsed key: 7 scale degrees × up to 5 tiers (power chord, triad, sixth/seventh,
   seventh/add9, colour chords). Chords with notes outside the project key are drawn as rings.
 - Press a cell to hear it; drag it into the sequence bar to append it.

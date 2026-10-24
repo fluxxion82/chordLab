@@ -27,8 +27,14 @@ enum KeyNames {
     tonic.alter > 0 ? tonic.letter + "#" : tonic.alter < 0 ? tonic.letter + "b" : tonic.letter
   }
 
+  /// Display form of a tonic alone, with glyph accidentals: "C", "F♯", "B♭" (the browse bar's tonic, beside
+  /// its mode picker).
+  static func tonicName(_ tonic: TonicJSON) -> String {
+    ChordSymbol.glyphs(text(tonic))
+  }
+
   /// Display form of a key: glyph tonic plus the mode's display name, e.g. "B♭ Harmonic Minor".
   static func displayName(_ key: KeyJSON) -> String {
-    ChordSymbol.glyphs(text(key.tonic)) + " " + modeDisplayName(key.mode)
+    tonicName(key.tonic) + " " + modeDisplayName(key.mode)
   }
 }

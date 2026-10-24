@@ -1,11 +1,12 @@
 import SwiftUI
 
-/// Project key pickers (tonic, mode), browsed-key steppers with home, undo/redo (⌘Z / ⇧⌘Z, as
-/// keyboard shortcuts on the buttons so they work whatever has focus; a host may swallow them before the
-/// plug-in sees them, a Live check), the label-mode toggle and the chord-relations chooser (plan R8).
-/// Everything shown comes from the snapshot (the pickers' items are its `modes` and `tonics` tables);
-/// every change is a command to the plugin. Without the tables (an older plug-in build) the pickers are
-/// disabled placeholders and ContentView says so.
+/// Project key pickers (tonic, mode), browsed-key steppers with the browsed-mode picker and home,
+/// undo/redo (⌘Z / ⇧⌘Z, as keyboard shortcuts on the buttons so they work whatever has focus; a host may
+/// swallow them before the plug-in sees them, a Live check), the label-mode toggle and the
+/// chord-relations chooser (plan R8). Everything shown comes from the snapshot (the pickers' items are
+/// its `modes` and `tonics` tables); every change is a command to the plugin. Without the tables (an
+/// older plug-in build) the project-key pickers are disabled placeholders, the browsed-mode picker is
+/// absent, and ContentView says so.
 struct KeyBarView: View {
   @EnvironmentObject var state: ChordLabState
   @AppStorage(LabelMode.storageKey) private var labelMode = LabelMode.defaultMode
@@ -33,6 +34,13 @@ struct KeyBarView: View {
   private var modeSelection: Binding<String> {
     Binding(get: { projectKey.mode },
             set: { setProjectKey(pc: KeyNames.pitchClass(of: projectKey.tonic), mode: $0) })
+  }
+
+  /// The browsed key's mode; choosing one sends `browseKey {"mode"}`, which keeps the browsed tonic and
+  /// switches to that parallel mode. The next snapshot moves the picker.
+  private var browsedModeSelection: Binding<String> {
+    Binding(get: { state.snapshot?.browsedKey.mode ?? "Ionian" },
+            set: { state.send(command: ["cmd": "browseKey", "mode": $0]) })
   }
 
   /// The snapshot's relation mode (a `RelationMode` raw value); choosing one sends `setRelationMode` and the
@@ -99,14 +107,30 @@ struct KeyBarView: View {
     }
   }
 
+  /// `<` tonic mode `>` Home. With the snapshot's `modes` the browsed key reads as its tonic beside a mode
+  /// picker (the parallel modes); without them (an older plug-in build) as one name, as before.
   private var browseControls: some View {
     HStack(spacing: 8) {
       Text("Browse").foregroundStyle(.secondary)
       Button("<") { state.send(command: ["cmd": "browseKey", "steps": -1]) }
         .accessibilityLabel("Browse a fifth down")
-      Text(state.snapshot.map { KeyNames.displayName($0.browsedKey) } ?? "—")
-        .foregroundStyle(.white).lineLimit(1).frame(minWidth: 130)
-        .accessibilityLabel("Browsed key")
+      if let modes = modes, let browsed = state.snapshot?.browsedKey {
+        Text(KeyNames.tonicName(browsed.tonic))
+          .foregroundStyle(.white).lineLimit(1).frame(minWidth: 26)
+          .accessibilityLabel("Browsed key")
+          .accessibilityValue(KeyNames.displayName(browsed))
+        Picker("Browsed mode", selection: browsedModeSelection) {
+          ForEach(modes, id: \.self) { mode in
+            Text(KeyNames.modeDisplayName(mode)).tag(mode)
+          }
+        }
+        .labelsHidden().fixedSize()
+        .accessibilityLabel("Browsed mode")
+      } else {
+        Text(state.snapshot.map { KeyNames.displayName($0.browsedKey) } ?? "—")
+          .foregroundStyle(.white).lineLimit(1).frame(minWidth: 130)
+          .accessibilityLabel("Browsed key")
+      }
       Button(">") { state.send(command: ["cmd": "browseKey", "steps": 1]) }
         .accessibilityLabel("Browse a fifth up")
       Button("Home") { state.send(command: ["cmd": "browseKey", "home": true]) }
