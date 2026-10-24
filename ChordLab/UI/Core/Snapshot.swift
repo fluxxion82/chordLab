@@ -5,7 +5,7 @@ import Foundation
 /// Fields the engine added under schema 1 (`modes`, `tonics`, `outOfKey`, and the Phase 2 fields:
 /// `function`, `tension`, the voicing fields, `why`, `sections`, `suggestions`, `autoVoiceLead`,
 /// `selectedEventId`, P2-M3's `homeTriads`, and the chord relations' `relationMode`, `relationReference`
-/// and per-cell `relation` / `relationText`) are optional so that a UI built against this file still decodes a snapshot from an
+/// and per-cell `relation` / `relationText`, and the progression presets' `presets`) are optional so that a UI built against this file still decodes a snapshot from an
 /// older plug-in build.
 
 /// `{"letter":"C","alter":0}`: a spelled tonic, `alter` -1 flat, 0 natural, 1 sharp.
@@ -152,6 +152,19 @@ struct SuggestionJSON: Codable, Equatable, Identifiable {
   var id: String { "\(root)/\(type)" }
 }
 
+/// One progression preset (plan P6): the engine's library entry, constant per build except `fits`. `id`
+/// is what `loadPreset {id, mode}` takes; `genre` the list's group; `tonality` "Major", "Minor" or "Any";
+/// `numerals` the steps as the engine spells them, resolved in C major (Major, Any) or A minor (Minor),
+/// joined with " – "; `fits` whether `tonality` suits the project key's mode (P3).
+struct PresetJSON: Codable, Equatable, Identifiable {
+  let id: String
+  let name: String
+  let genre: String
+  let tonality: String
+  let numerals: String
+  let fits: Bool
+}
+
 /// The whole document as the UI shows it, plus the palette of the browsed key.
 struct Snapshot: Codable, Equatable {
   let schema: Int
@@ -188,6 +201,9 @@ struct Snapshot: Codable, Equatable {
   let relationMode: String?
   /// The chord the cells' `relation` is measured against; nil (JSON null, or absent) for none.
   let relationReference: RelationReferenceJSON?
+  /// The progression presets in table order (genres grouped); absent from older plug-in builds, whose UI
+  /// then hides the Presets button.
+  let presets: [PresetJSON]?
 
   /// `relationMode` as a case; nil when absent or unknown.
   var relationModeValue: RelationMode? { relationMode.flatMap(RelationMode.init(rawValue:)) }
