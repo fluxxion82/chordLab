@@ -447,17 +447,22 @@ void ChordLab::HandleExportSection(std::string_view text)
   const int id = request->sectionId;
   chordlab::Compiled compiled;
   std::string label;
+  bool found = false;
   {
     std::lock_guard<std::mutex> lock(mModelMutex);
     const int index = mStore.findSectionIndex(id);
-    if (index < 0)
+    if (index >= 0)
     {
-      PushError("no such section");
-      return;
+      const chordlab::Document& doc = mStore.doc();
+      compiled = chordlab::compileSection(doc, index);
+      label = chordlab::keyName(doc.projectKey) + "-" + doc.sections[(size_t) index].name;
+      found = true;
     }
-    const chordlab::Document& doc = mStore.doc();
-    compiled = chordlab::compileSection(doc, index);
-    label = chordlab::keyName(doc.projectKey) + "-" + doc.sections[(size_t) index].name;
+  }
+  if (!found)
+  {
+    PushError("no such section");                                // outside the lock, like every call into the UI
+    return;
   }
   WriteExport(compiled, label);
   }

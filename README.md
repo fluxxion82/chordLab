@@ -21,7 +21,8 @@ Phase 1, the basics:
 - Playback that follows the host transport sample-accurately, with an optional loop, a playhead, and a
   Panic button.
 - MIDI drag-out of the progression as a `.mid` clip at the host tempo.
-- Everything is saved with the host project (the document, and the editor window size).
+- The document (progression, sections, voicings, keys, follow, loop, relation mode) and the editor
+  window size are saved with the host project.
 
 Phase 2, explainable harmony:
 
@@ -92,7 +93,7 @@ One script runs every suite; with no flags it runs the engine's Debug build and 
 
 ```
 scripts/check.sh            # engine (Debug) build + ctest
-scripts/check.sh --all      # + UBSan build, Swift tests, bridge tests, both Xcode schemes
+scripts/check.sh --all      # + UBSan, ASan and TSan builds, Swift tests, bridge tests, both Xcode schemes
 ```
 
 Flags combine (`--ubsan`, `--asan`, `--tsan`, `--swift`, `--bridge`, `--plugin`). The script stops at
