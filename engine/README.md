@@ -60,7 +60,8 @@ Three mechanisms, chosen by who can get it wrong:
 - **Status returns for expected failures.** Input from outside the process, or a resource that may be
   missing, is reported, never thrown: `applyCommandJson` / `loadStateJson` return false with a message and
   leave the store untouched; `appendChord` returns `kNoEventId` when the document is full or the ids
-  are exhausted, and `addSection` returns `kNoSectionId` for an index that is not a chord position or
+  are exhausted, `appendProgression` / `replaceProgression` return false for the cases
+  `progressionRefusal` names, and `addSection` returns `kNoSectionId` for an index that is not a chord position or
   already starts a section (through JSON that index is a no-op and only exhausted ids are refused);
   `writeSmf0` returns an empty vector and `writeFile` false; `pushPreview` returns false
   on a full queue and `process` returns false for a block it could not complete.

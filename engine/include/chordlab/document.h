@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <deque>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace chordlab {
@@ -157,6 +158,16 @@ inline bool operator!=(const Document& a, const Document& b) noexcept {
 /// document from outside the process must check before calling it.
 bool sectionsWellFormed(const Document& doc);
 
+/// How `DocumentStore::appendProgression` / `replaceProgression` would place a batch of chords: after the
+/// last chord, or instead of every chord and section.
+enum class ProgressionLoad { Append, Replace };
+
+/// Why `DocumentStore::progressionRefusal` says a batch would be refused, `None` when it would be
+/// accepted: an empty batch, a NaN or infinite length, more than `kMaxChords` chords in the result, an
+/// event id counter that cannot hand out one id per chord, or a section id counter that cannot hand out
+/// the one or two section ids the load needs.
+enum class ProgressionRefusal { None, Empty, NonFiniteLength, DocumentFull, EventIdsExhausted, SectionIdsExhausted };
+
 /// Owns a `Document` and its undo/redo history.
 ///
 /// Undoable state is `Document::events`, `Document::sections`, `Document::projectKey` and
@@ -203,6 +214,41 @@ public:
     /// is NaN or infinite, when the document already holds `kMaxChords` chords, or when the id counter
     /// has reached INT_MAX. The counter advances only once the append is committed.
     int appendChord(Chord chord, double lengthBeats = 4.0, int velocity = 100);
+
+    /// Appends a whole progression, `steps` being each chord with its length, as ONE undoable step, and
+    /// starts a section named `sectionName` on its first chord (the preset load of P4/P5, json_api.h's
+    /// `loadPreset`). Each chord gets a fresh id, in order, velocity 100, inversion 0, octave 0 and no
+    /// manual flag (so auto voice-leading applies), and its length clamped as `appendChord` clamps it.
+    /// The new section is made as `addSection` makes one (an empty name takes the default "Section <id>",
+    /// a long one is cut to `kMaxSectionNameBytes`, the colour is the id's turn in the cycle). Since the
+    /// first section must start at 0, appending onto a non-empty progression that has no sections first
+    /// gives the chords already there a section of their own (default name and colour, the lower of the
+    /// two ids); onto an empty or an already sectioned progression only the new section is added. Keys,
+    /// the voicing flag and live state are untouched, and the selection stays (its chord is still there).
+    /// Returns false and changes nothing (no chord, no section, no history, no id consumed, the selection
+    /// as it was) when `progressionRefusal(steps, ProgressionLoad::Append)` is not `None`. Every chord must
+    /// satisfy the `Chord` preconditions (chord.h), as for `appendChord`. Both counters advance only once
+    /// the load is committed.
+    bool appendProgression(const std::vector<std::pair<Chord, double>>& steps, std::string sectionName);
+
+    /// Replaces every chord and section with `steps`, as ONE undoable step (never `replace`, which clears
+    /// the history): the chords as `appendProgression` makes them, and one section named `sectionName`
+    /// at 0 covering them all, so a single section id is needed. Keys, the voicing flag and live state are
+    /// untouched; the selection is cleared, because its chord is gone (the existing rule), and undo does
+    /// not restore it. Returns false and changes nothing when `progressionRefusal(steps,
+    /// ProgressionLoad::Replace)` is not `None`.
+    bool replaceProgression(const std::vector<std::pair<Chord, double>>& steps, std::string sectionName);
+
+    /// Why `appendProgression` (`how == Append`) or `replaceProgression` (`Replace`) would refuse `steps`
+    /// now, checked in this order: `Empty`; `NonFiniteLength` for any NaN or infinite length;
+    /// `DocumentFull` when the result would hold more than `kMaxChords` chords (the current ones plus
+    /// `steps` for an append, `steps` alone for a replace); `EventIdsExhausted` when the event id
+    /// counter cannot hand out `steps.size()` ids below INT_MAX; `SectionIdsExhausted` when the section
+    /// id counter cannot hand out the ids the load needs (two for an append onto a non-empty progression
+    /// without sections, one otherwise). `None` means the call would succeed. Lets a caller report the
+    /// reason without repeating the rules.
+    ProgressionRefusal progressionRefusal(const std::vector<std::pair<Chord, double>>& steps,
+                                          ProgressionLoad how) const;
 
     /// Moves the event `id` so that it sits at `newIndex` in playback order; `newIndex` is clamped to
     /// 0..size-1. Every section keeps starting on the same chord as before (its index is recomputed from
@@ -342,6 +388,11 @@ private:
     /// for undo (dropping the oldest snapshot past `kMaxUndoDepth`) and clearing the redo stack. Returns
     /// whether anything changed.
     bool commit(Document next);
+
+    /// The one body of `appendProgression` and `replaceProgression`: checks `progressionRefusal`, builds
+    /// the next document (events and sections) and commits it once.
+    bool loadProgression(const std::vector<std::pair<Chord, double>>& steps, std::string sectionName,
+                         ProgressionLoad how);
 
     /// Clears the selection when no event of the current document has its id. Called after every change
     /// of `doc_` (a commit, an undo, a redo); `replace` clears unconditionally.

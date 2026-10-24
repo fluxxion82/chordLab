@@ -300,6 +300,80 @@ int DocumentStore::appendChord(Chord chord, double lengthBeats, int velocity) {
     return id;
 }
 
+namespace {
+
+/// Section ids a progression load needs: an append onto chords that have no sections also sections them
+/// (the first section starts at 0), every other load needs only the loaded block's own.
+int sectionIdsForLoad(const Document& doc, ProgressionLoad how) {
+    return how == ProgressionLoad::Append && !doc.events.empty() && doc.sections.empty() ? 2 : 1;
+}
+
+}  // namespace
+
+ProgressionRefusal DocumentStore::progressionRefusal(const std::vector<std::pair<Chord, double>>& steps,
+                                                     ProgressionLoad how) const {
+    if (steps.empty()) {
+        return ProgressionRefusal::Empty;
+    }
+    for (const auto& step : steps) {
+        if (!std::isfinite(step.second)) {
+            return ProgressionRefusal::NonFiniteLength;
+        }
+    }
+    const std::size_t kept = how == ProgressionLoad::Append ? doc_.events.size() : 0;
+    if (steps.size() > static_cast<std::size_t>(kMaxChords) - kept) {
+        return ProgressionRefusal::DocumentFull;
+    }
+    // Ids stop below INT_MAX (as `appendChord`'s do): the batch takes nextId_ .. nextId_ + n - 1.
+    if (nextId_ > INT_MAX - static_cast<int>(steps.size())) {  // n <= kMaxChords: no overflow
+        return ProgressionRefusal::EventIdsExhausted;
+    }
+    if (nextSectionId_ > INT_MAX - sectionIdsForLoad(doc_, how)) {
+        return ProgressionRefusal::SectionIdsExhausted;
+    }
+    return ProgressionRefusal::None;
+}
+
+bool DocumentStore::loadProgression(const std::vector<std::pair<Chord, double>>& steps, std::string sectionName,
+                                    ProgressionLoad how) {
+    if (progressionRefusal(steps, how) != ProgressionRefusal::None) {
+        return false;
+    }
+    const int sectionIds = sectionIdsForLoad(doc_, how);
+    Document next = doc_;
+    if (how == ProgressionLoad::Replace) {
+        next.events.clear();
+        next.sections.clear();
+    }
+    const int join = static_cast<int>(next.events.size());
+    next.events.reserve(next.events.size() + steps.size());
+    int id = nextId_;
+    for (const auto& [chord, lengthBeats] : steps) {
+        assertValidChord(chord);
+        next.events.push_back(ChordEvent{id++, chord, clampLength(lengthBeats), 100});  // appendChord's defaults (P8)
+    }
+    int sectionId = nextSectionId_;
+    if (sectionIds == 2) {
+        next.sections.push_back(makeSection(sectionId++, {}, 0));  // the chords already there, at 0
+    }
+    next.sections.push_back(makeSection(sectionId, std::move(sectionName), join));  // after every other start
+    assert(sectionsWellFormed(next));
+    [[maybe_unused]] const bool changed = commit(std::move(next));
+    assert(changed);  // fresh ids always make the sequence differ
+    // Only now: a throw above leaves both counters, like the rest of the store, untouched.
+    nextId_ += static_cast<int>(steps.size());
+    nextSectionId_ += sectionIds;
+    return true;
+}
+
+bool DocumentStore::appendProgression(const std::vector<std::pair<Chord, double>>& steps, std::string sectionName) {
+    return loadProgression(steps, std::move(sectionName), ProgressionLoad::Append);
+}
+
+bool DocumentStore::replaceProgression(const std::vector<std::pair<Chord, double>>& steps, std::string sectionName) {
+    return loadProgression(steps, std::move(sectionName), ProgressionLoad::Replace);
+}
+
 void DocumentStore::moveChord(int id, int newIndex) {
     const int from = findIndex(id);
     if (from < 0) {
