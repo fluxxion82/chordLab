@@ -2128,6 +2128,10 @@ TEST_CASE("loadPreset: a missing, mistyped or unknown mode is rejected, listing 
             CHECK_MESSAGE(error.find("\"append\"") != std::string::npos, error);
             CHECK_MESSAGE(error.find("\"replace\"") != std::string::npos, error);
             CHECK(error.find("\"mode\"") != std::string::npos);
+        } else {
+            // The id is validated before the mode, so an unknown id with a bad mode names the id.
+            CHECK_MESSAGE(error.find("\"nope\"") != std::string::npos, error);
+            CHECK_MESSAGE(error.find("\"append\"") == std::string::npos, error);
         }
     }
 }

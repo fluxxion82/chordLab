@@ -41,6 +41,13 @@ Phase 2, explainable harmony:
 - A home-key compare row: while another key is browsed, the project key's seven triads stay available
   under the palette.
 
+Phase 3, so far:
+
+- Progression presets: 29 well-known progressions (pop, rock, blues, jazz, folk, EDM, R&B, film, gospel,
+  classical) stored as roman numerals, transposed into the project key, loaded in one click as a new
+  progression or appended to the current one (one undo step, sectioned and named after the preset).
+- A tension curve over the sequence bar, and a browsed-mode picker for parallel-mode browsing.
+
 ## Requirements
 
 - macOS 15 or later (the deployment target; the UI uses current SwiftUI APIs).
