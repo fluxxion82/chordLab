@@ -291,6 +291,51 @@ final class SnapshotTests: XCTestCase {
     XCTAssertEqual(snapshot.homeRow.first?.relationText, "2 common tones (C, E) · up a fourth · cost 3")
   }
 
+  // MARK: - Progression presets (plan P6)
+
+  /// `phase2` with a top-level `presets` value (written as given) before the events.
+  private static func withPresets(_ presets: String) -> String {
+    phase2.replacingOccurrences(of: "\"events\":", with: "\"presets\":\(presets),\"events\":")
+  }
+
+  static let twoPresets = """
+    [{"id":"axis","name":"Axis","genre":"Pop","tonality":"Major","numerals":"I – V – vi – IV","fits":true},
+     {"id":"andalusian","name":"Andalusian","genre":"Film / Epic","tonality":"Minor","numerals":"i – bVII – bVI – V7","fits":false}]
+    """
+
+  func testOlderSnapshotHasNoPresets() throws {
+    XCTAssertNil(try Self.decode(Snapshot.self, Self.phase1).presets)
+    XCTAssertNil(try Self.decode(Snapshot.self, Self.phase2).presets)
+  }
+
+  func testPresetsDecodeInOrderWithEveryField() throws {
+    let snapshot = try Self.decode(Snapshot.self, Self.withPresets(Self.twoPresets))
+    XCTAssertEqual(snapshot.presets, [
+      PresetJSON(id: "axis", name: "Axis", genre: "Pop", tonality: "Major", numerals: "I – V – vi – IV", fits: true),
+      PresetJSON(id: "andalusian", name: "Andalusian", genre: "Film / Epic", tonality: "Minor",
+                 numerals: "i – bVII – bVI – V7", fits: false),
+    ])
+    XCTAssertEqual(snapshot.presets?.map(\.id), ["axis", "andalusian"])
+  }
+
+  func testEmptyPresetsArrayIsEmptyNotNil() throws {
+    XCTAssertEqual(try Self.decode(Snapshot.self, Self.withPresets("[]")).presets, [])
+  }
+
+  func testPresetsLeaveTheRestOfTheSnapshotUnaffected() throws {
+    let plain = try Self.decode(Snapshot.self, Self.phase2)
+    let withPresets = try Self.decode(Snapshot.self, Self.withPresets(Self.twoPresets))
+    XCTAssertEqual(withPresets.events, plain.events)
+    XCTAssertEqual(withPresets.sections, plain.sections)
+    XCTAssertEqual(withPresets.suggestions, plain.suggestions)
+  }
+
+  /// A preset missing a required field fails the decode (the engine always sends all six).
+  func testPresetWithoutFitsFailsToDecode() {
+    let bad = #"[{"id":"axis","name":"Axis","genre":"Pop","tonality":"Major","numerals":"I"}]"#
+    XCTAssertThrowsError(try Self.decode(Snapshot.self, Self.withPresets(bad)))
+  }
+
   // MARK: - Other payloads
 
   func testMessagePayloadsDecode() throws {
@@ -394,6 +439,11 @@ final class SnapshotTests: XCTestCase {
         XCTFail("\(name) does not decode: \(error)")
       }
     }
+  }
+
+  /// The legacy Phase 1 fixture predates presets; the generated ones decode with or without them.
+  func testLegacyFixtureHasNoPresets() throws {
+    XCTAssertNil(try snapshotFixture("snapshot-legacy-phase1.json").presets)
   }
 
   /// The persistent state (`stateJson`) as far as these tests read it. The UI itself has no type for it
