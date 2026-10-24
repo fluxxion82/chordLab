@@ -97,7 +97,7 @@ scripts/check.sh --all      # + UBSan build, Swift tests, bridge tests, both Xco
 
 Flags combine (`--ubsan`, `--asan`, `--tsan`, `--swift`, `--bridge`, `--plugin`). The script stops at
 the first failure and prints a PASS/FAIL table. Every sanitizer step runs under a hard timeout because
-older Apple clang releases hung under ASan and TSan (see "Known limits").
+older Apple clang releases hung under ASan and TSan (see "Status").
 
 The suites, each runnable on its own:
 
@@ -126,87 +126,31 @@ prints the iteration and the escaped input, so it reproduces exactly.
 A new pure UI file belongs in `ChordLab/UI/Core/` so the package tests see it; a new pure plug-in helper
 belongs in `ChordLab/bridge/` with a case in `ChordLab/bridge/tests/`.
 
-## Using it in Ableton Live
+## Documentation
 
-ChordLab is an instrument that makes no sound: it emits MIDI, which a second track receives.
+- [docs/user-guide.md](docs/user-guide.md): setting ChordLab up in Ableton Live, every control in the
+  window, chord relations, keyboard shortcuts, what is saved with the set, limits and troubleshooting.
+- [docs/architecture.md](docs/architecture.md): how it works inside, for developers: layers, threads,
+  the engine module map, the message protocol between engine and UI, persistence, MIDI export, the
+  editor's structure, build layout and the test suites.
+- [engine/README.md](engine/README.md): the engine's own notes (layout, JSON surface, error handling,
+  real-time rules, threading contract); [engine/include/chordlab/json_api.h](engine/include/chordlab/json_api.h)
+  is the engine ↔ UI contract.
+- [docs/plans/](docs/plans/): the Phase 1, Phase 2 and chord-relations plans with their decision records.
+- [docs/testing/](docs/testing/): the first-look test script for Ableton Live.
 
-1. Create a MIDI track (track A) and drop **ChordLab** (Plug-Ins → VST3) on it.
-2. Create a second MIDI track (track B) holding the instrument you want to hear.
-3. On track B, set **MIDI From** to track A. In the second chooser directly below it, pick **ChordLab**
-   (the MIDI coming out of the plug-in) instead of the default *Pre FX*.
-4. Set track B's **Monitor** to **In** (or arm the track).
-5. Press a palette cell: track B's instrument should sound, with Live's transport stopped or running.
-
-Notes:
-
-- With **Follow Live** on, the progression plays whenever Live's transport runs, locked to Live's beat
-  position (the progression's first beat sits at the start of the arrangement); with **Loop** on it
-  repeats from there, otherwise it plays once and is silent past its end.
-  With Follow Live off the progression is silent and cell previews still work.
-- Live merges all MIDI channels on internal track-to-track routing, so channels cannot be used to
-  separate parts; use one ChordLab instance per receiving track.
-- Use the VST3. The AU build is not useful in Live: Live cannot route MIDI out of an AU instrument.
-- To commit a progression to a track, drag the **♫ … drag to Live** control (bottom right) onto a MIDI
-  track: it lands as a MIDI clip at Live's tempo. The **♫** at the right end of a section span does the
-  same for that section alone.
-
-## A tour of the window
-
-Top to bottom:
-
-- **Key bar.** *Key*: tonic and mode pickers for the project key (choosing one also brings the browsed
-  key home). *Browse*: `<` and `>` step the browsed key a fifth down or up, *Home* returns to the
-  project key. Undo / redo buttons (⌘Z / ⇧⌘Z). *Names / Numerals / Both* chooses how chords are
-  labelled in palette cells, the home row, sequence blocks and cell drag previews (default Both: the symbol over the numeral and function, e.g. `C` / `I · T`).
-  *Relations*: which relation to the selected (else the last) chord sizes the palette cells — *Off*,
-  *Common tones*, *Voice leading*, *Function* or *Blend* (the default: the same score that ranks the
-  suggestions strip); a caption names the reference chord ("to G7").
-- **Transport row.** *Follow Live*, *Loop*, *Panic* (silences every sounding note), *Auto voice-lead*,
-  and *+ Section* (starts a section on the selected chord, else the last one).
-- **Sequence bar.** A sections header, the chord blocks, and a ruler with bar numbers.
-  - Drop a palette or home cell anywhere on the bar to append the chord.
-  - Click a block to select it (the suggestions follow the selection); click the empty bar to deselect.
-  - Drag a block sideways to reorder; drag the handle on its right edge to change its length.
-  - Delete or Forward Delete removes the selected block.
-  - Click the small **v** badge for the voicing popover (inversion, octave, Auto). Right-click a block
-    for *Voicing…*, *Inversion*, *Octave*, *Auto voicing* and *Remove chord*. A chord with its own
-    voicing is marked "manual".
-  - Rest the mouse on a block for its details and the "why" against the previous chord.
-  - Sections header: double-click a span to rename it (Return commits, Escape cancels); right-click for
-    *Rename…*, *Colour* and *Remove section*; drag a span's left edge to move where the section starts
-    (the first section always starts at the first chord); drag its **♫** to a MIDI track to export it.
-- **Suggestions strip.** "Start with" (empty progression) or "Next": up to 8 chips numbered 1–8. Click a
-  chip, or press its digit 1–8, to append that chord; rest the mouse on it for the reasons.
-- **Palette.** The browsed key's chords, one column per scale degree, power chords at the bottom and
-  richer chords above. Press and hold a cell to hear it, release to stop; drag it to the sequence bar;
-  rest the mouse on it for its notes, function, tension and any out-of-key notes. A filled circle is
-  entirely in the project key, a ring is borrowed. While a chord is selected (or the progression has a
-  last chord), each cell grows and brightens or shrinks and dims by how related it is to that chord
-  under the chosen relation mode, Klimper-style; the popover adds "Relation to G7 · 72" with the
-  reason (common tones, root motion, voice-leading cost, borrowed-from key). The hit area stays the
-  whole slot, so a shrunken cell is as easy to press as before.
-- **Home row.** Appears under the palette only while the browsed key differs from the project key:
-  "Home · <project key>" and that key's seven triads. The cells behave exactly like palette cells
-  (press to preview, drag to the sequence bar, hover for details).
-- **Bottom line.** A status readout (cell and event counts, end beat, follow/loop state, errors), a
-  development "Append C" button, and the MIDI drag-out control.
-
-## Known limits and what is not yet verified
+## Status
 
 - **Live verification is pending.** The engine is covered by tests and both the VST3 and the standalone
-  app build cleanly, but the Phase 2 UI and the home row have not yet been checked end to end inside
-  Live (routing, transport follow, drag-out, keyboard shortcuts).
-- Live may swallow the bare digit keys 1–8 (and possibly ⌘Z / ⇧⌘Z) before the plug-in window sees
-  them; clicking the chips and buttons always works. The digits are also only active while the plug-in
-  window is the key window and no section name is being edited.
+  app build cleanly, but the window has not yet been checked end to end inside Live (routing, transport
+  follow, drag-out, keyboard shortcuts). The user guide describes the intended behaviour.
 - Sanitizers: with Apple clang 17 (Xcode 16) ASan deadlocked before `main()` and TSan hung; since
   Apple clang 21 (Xcode 27.1) UBSan, ASan and TSan all run the engine suite cleanly
   (`scripts/check.sh --ubsan --asan --tsan`, each step under a hard timeout).
-- No piano roll, melody tracks or key detection yet (planned for Phase 3); chords are contiguous, with
-  no gaps or rests between them.
-- macOS and VST3 only. The Xcode project still carries iPlug2's other targets (AU, AUv3, AAX, VST2, iOS)
-  and Windows project files from the template; they are not maintained or tested.
-- One suggestion style ("pop"); the ruler assumes 4 beats per bar.
+- Not yet: piano roll, melody tracks, key detection (Phase 3); chords are contiguous; the ruler assumes
+  4/4; one suggestion style (pop); macOS and VST3 only. The Xcode project still carries iPlug2's other
+  targets (AU, AUv3, AAX, VST2, iOS) and Windows project files from the template; they are not
+  maintained or tested.
 
 ## Repository layout
 
@@ -226,6 +170,8 @@ ChordLab/                   the iPlug2 plug-in
   projects/                 Xcode projects (ChordLab-macOS.xcodeproj)
   resources/                Info.plists, icons, fonts
 scripts/check.sh            runs every suite (see Testing)
-docs/plans/                 the Phase 1 and Phase 2 plans and decision records
+docs/user-guide.md          how to set it up and use it
+docs/architecture.md        how it works inside
+docs/plans/                 the Phase 1, Phase 2 and chord-relations plans and decision records
 docs/testing/               the first-look test script for Ableton Live
 ```
