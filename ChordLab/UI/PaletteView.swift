@@ -47,6 +47,12 @@ struct PaletteView: View {
         }
       }
       .defaultScrollAnchor(.bottom)   // tier 0 visible first, and kept in view when the tier count changes
+      // A related cell is drawn up to 1.10× its slot (`RelationStyle`), and at the 700-pt minimum width the
+      // grid fills the scroll view edge to edge, so an enlarged first- or last-column circle overhangs the
+      // scroll view by up to 4.4 pt. Clip vertically as before, but 5 pt wider on each side (the window's
+      // 12-pt padding has room); the grid geometry is unchanged.
+      .scrollClipDisabled()
+      .mask { Rectangle().padding(.horizontal, -5) }
     }
     .background(Self.background)
   }
@@ -66,7 +72,8 @@ struct PaletteView: View {
 /// A cell with its gestures, as the palette grid and the home row (`HomeRowView`) both use it: the look
 /// of `PaletteCellView` (with its hover popover), press to preview through `ChordLabState.pressCell` /
 /// `releaseCell`, and a drag that carries the chord's `ChordRef` to the sequence bar under a
-/// `ChordDragPreview`. The one place these are wired, so the two can not drift apart.
+/// `ChordDragPreview`. The one place these are wired, so the two can not drift apart; the relatedness
+/// look (`RelationStyle`) and the popover's relation line come with it, so home cells get them too.
 struct PaletteCellControl: View {
   @EnvironmentObject var state: ChordLabState
   let cell: CellJSON
@@ -74,7 +81,8 @@ struct PaletteCellControl: View {
   let labelMode: LabelMode
 
   var body: some View {
-    PaletteCellView(cell: cell, size: size, labelMode: labelMode, isPressed: state.heldCellId == cell.id)
+    PaletteCellView(cell: cell, size: size, labelMode: labelMode, isPressed: state.heldCellId == cell.id,
+                    reference: state.snapshot?.relationReference)
       .pressAction(onPress: { state.pressCell(cell) },
                    onRelease: { state.releaseCell(cell) })
       .draggable(ChordRef(root: cell.root, type: cell.type)) {
@@ -89,11 +97,23 @@ struct PaletteCellControl: View {
 /// name after the numeral ("I · T"). While pressed it gets a white ring and a brighter fill (Klimper's
 /// selected look). Resting the mouse on it for a moment opens a popover with the chord's details
 /// (`HoverPopover`); the popover goes away on hover exit and while the cell is pressed.
+///
+/// Chord relations (plan R7): when the cell carries a `relation`, everything drawn (circle, ring, labels,
+/// dot, pressed ring) is scaled by `RelationStyle.scale` about the slot's centre and faded to
+/// `RelationStyle.opacity`, animated with `RelationStyle.animation`. Only the drawing changes: the view's
+/// frame stays `size` × `size` and its content shape is the full-size circle, so the grid does not move
+/// and the press, hover and drag hit area of a shrunken cell is the whole slot circle. At the 1.10 maximum
+/// (plan R7, kept on purpose) two neighbouring score-100 cells at the 96-pt maximum size come within 0.4 pt
+/// of each other across the 10-pt spacing; they never overlap. The palette's scroll view widens its
+/// horizontal clip so enlarged edge columns are not cut. A pressed cell is
+/// drawn at full opacity, so the pressed look always shows. `reference` (the snapshot's
+/// `relationReference`) names the chord in the popover's relation line.
 struct PaletteCellView: View {
   let cell: CellJSON
   let size: CGFloat
   let labelMode: LabelMode
   var isPressed = false
+  var reference: RelationReferenceJSON? = nil
 
   static let dotSize: CGFloat = 6
 
@@ -143,10 +163,15 @@ struct PaletteCellView: View {
         .offset(x: -size * 0.255, y: size * 0.255)
     }
     .frame(width: size, height: size)
-    .contentShape(Circle())
-    .accessibilityLabel(ChordSymbol.spokenName(symbol: cell.symbol, type: cell.type) + (cell.filled ? ", in key" : ", borrowed"))
+    .scaleEffect(RelationStyle.scale(relation: cell.relation))   // drawing only: layout keeps the slot
+    .opacity(isPressed ? 1 : RelationStyle.opacity(relation: cell.relation))
+    .animation(RelationStyle.animation, value: cell.relation)
+    .frame(width: size, height: size)   // the unchanged slot
+    .contentShape(Circle())             // full-size: the hit area ignores the relation scale
+    .accessibilityLabel(ChordSymbol.spokenName(symbol: cell.symbol, type: cell.type) + (cell.filled ? ", in key" : ", borrowed")
+                        + (cell.relation.map { ", relation \($0)" } ?? ""))
     .hoverPopover(suppressed: isPressed) {
-      ChordDetailView(cell: cell).padding(12)
+      ChordDetailView(cell: cell, reference: reference).padding(12)
     }
   }
 }
@@ -184,9 +209,11 @@ struct ChordDragPreview: View {
 /// bar, and the engine's verdict on the project key: "In key" or the borrowed notes (`outOfKey`). The
 /// function, tension and out-of-key lines are omitted when an older plug-in build sends no such field.
 /// (A cell carries no "borrowed from" key, only its out-of-key notes; the block popover, whose event has a
-/// `why`, names the key.)
+/// `why`, names the key.) With a `relation` the popover ends with "Relation to G7 · 72" and the engine's
+/// `relationText` below it.
 struct ChordDetailView: View {
   let cell: CellJSON
+  var reference: RelationReferenceJSON? = nil
 
   var body: some View {
     VStack(alignment: .leading, spacing: 6) {
@@ -213,8 +240,15 @@ struct ChordDetailView: View {
             .font(.callout).foregroundStyle(.orange)
         }
       }
+      if let headline = RelationStyle.headline(reference: reference, relation: cell.relation) {
+        Text(headline).font(.callout)
+        if let text = cell.relationText {
+          Text(text).font(.callout).foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+      }
     }
-    .frame(minWidth: 160, alignment: .leading)
+    .frame(minWidth: 160, maxWidth: 320, alignment: .leading)
   }
 }
 
