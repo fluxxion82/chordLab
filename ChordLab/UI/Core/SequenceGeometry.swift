@@ -103,6 +103,28 @@ enum SequenceGeometry {
     return boundaryIndex(nearestTo: layout.frames[from].x + dx, in: layout)
   }
 
+  /// The tension curve over the blocks: one point per chord, at its block's horizontal centre, with
+  /// tension 0 at the bottom of the band and 100 at its top (`y = inset + (height − 2·inset) × (1 −
+  /// tension/100)`, tension clamped to 0…100). The band is the strip's `height` less `inset` at either
+  /// end, so a dot drawn on an extreme point stays inside the strip; an inset past half the height
+  /// collapses the band to the middle line. Nil when any chord has no tension (an older plug-in build)
+  /// or the counts disagree with the layout, so the curve is never drawn partly or against the wrong
+  /// blocks; an empty progression gives no points.
+  static func tensionPoints(tensions: [Int?], in layout: Layout, height: CGFloat,
+                            inset: CGFloat = 0) -> [CGPoint]? {
+    guard tensions.count == layout.frames.count else { return nil }
+    let inset = min(max(0, inset), height / 2)
+    let band = height - 2 * inset
+    var points: [CGPoint] = []
+    points.reserveCapacity(tensions.count)
+    for (tension, frame) in zip(tensions, layout.frames) {
+      guard let tension else { return nil }
+      let fraction = CGFloat(min(100, max(0, tension))) / 100
+      points.append(CGPoint(x: frame.centre, y: inset + band * (1 - fraction)))
+    }
+    return points
+  }
+
   /// `lengthBeats` after dragging its handle by `dx` points: snapped to `snap` and clamped to `range`.
   static func resizedLength(_ lengthBeats: Double, by dx: CGFloat, pxPerBeat: CGFloat,
                             snap: Double, range: ClosedRange<Double>) -> Double {

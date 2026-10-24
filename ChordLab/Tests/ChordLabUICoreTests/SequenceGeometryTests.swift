@@ -3,7 +3,8 @@ import XCTest
 @testable import ChordLabUICore
 
 /// The sequence bar's geometry (UI/Core/SequenceGeometry.swift): block layout, reorder targets, resize
-/// snapping, section spans and section-edge snapping. All at the fixed zoom of 24 pt per beat.
+/// snapping, section spans, section-edge snapping and the tension curve's points. All at the fixed zoom
+/// of 24 pt per beat.
 final class SequenceGeometryTests: XCTestCase {
   private let px: CGFloat = 24
   private typealias Span = SequenceGeometry.SpanFrame
@@ -219,5 +220,55 @@ final class SequenceGeometryTests: XCTestCase {
 
   func testDroppedBoundaryOfANegativeSourceIsItself() {
     XCTAssertEqual(SequenceGeometry.droppedBoundaryIndex(from: -1, draggedBy: 96, in: fourBars), -1)
+  }
+
+  // MARK: - Tension curve
+
+  func testTensionPointsOfAnEmptyProgressionAreEmptyNotNil() {
+    XCTAssertEqual(SequenceGeometry.tensionPoints(tensions: [], in: empty, height: 18), [])
+  }
+
+  func testOneChordIsOnePointAtItsBlockCentre() {
+    let layout = SequenceGeometry.layout(lengths: [4], pxPerBeat: px)
+    XCTAssertEqual(SequenceGeometry.tensionPoints(tensions: [50], in: layout, height: 18), [CGPoint(x: 48, y: 9)])
+  }
+
+  func testPointsSitAtBlockCentresWithTensionMeasuredUpFromTheBottom() {
+    let points = SequenceGeometry.tensionPoints(tensions: [0, 25, 100], in: mixed, height: 20)
+    XCTAssertEqual(points?.map(\.x), [48, 99, 126], "x is each block's centre, quarter-beat block included")
+    XCTAssertEqual(points?.map(\.y), [20, 15, 0], "0 at the bottom, 25 a quarter up, 100 at the top")
+  }
+
+  func testExtremesMapToTheBottomAndTopOfTheInsetBand() {
+    let points = SequenceGeometry.tensionPoints(tensions: [0, 100, 50], in: mixed, height: 18, inset: 3)
+    XCTAssertEqual(points?.map(\.y), [15, 3, 9], "the band is 3…15 so a 6-pt dot at either end stays inside")
+  }
+
+  func testOutOfRangeTensionsClampToTheBand() {
+    let points = SequenceGeometry.tensionPoints(tensions: [-20, 250], in: fourBars.prefix(2), height: 18)
+    XCTAssertEqual(points?.map(\.y), [18, 0])
+  }
+
+  func testAnyMissingTensionHidesTheWholeCurve() {
+    XCTAssertNil(SequenceGeometry.tensionPoints(tensions: [3, nil, 27], in: mixed, height: 18))
+    XCTAssertNil(SequenceGeometry.tensionPoints(tensions: [nil], in: SequenceGeometry.layout(lengths: [4], pxPerBeat: px),
+                                                height: 18))
+  }
+
+  func testATensionCountThatDisagreesWithTheLayoutIsNil() {
+    XCTAssertNil(SequenceGeometry.tensionPoints(tensions: [3, 27], in: mixed, height: 18), "a stale pairing: no curve")
+  }
+
+  func testAnInsetLargerThanHalfTheHeightCollapsesToTheMiddle() {
+    let points = SequenceGeometry.tensionPoints(tensions: [0, 100], in: fourBars.prefix(2), height: 10, inset: 8)
+    XCTAssertEqual(points?.map(\.y), [5, 5])
+  }
+}
+
+private extension SequenceGeometry.Layout {
+  /// The first `n` frames, ending where the n-th block ends.
+  func prefix(_ n: Int) -> SequenceGeometry.Layout {
+    let kept = Array(frames.prefix(n))
+    return SequenceGeometry.Layout(frames: kept, endX: kept.last.map { $0.x + $0.width } ?? 0)
   }
 }
