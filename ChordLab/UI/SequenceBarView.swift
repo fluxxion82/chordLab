@@ -23,6 +23,13 @@ import SwiftUI
 ///   for the popover. A chord with its own voicing wears a "manual" badge at the top right.
 /// The sections (P2-D6) sit in a header row above the blocks (`SectionsHeaderView`, in the same scroll
 /// and geometry), and a thin line through the block row marks each section's start.
+///
+/// Between the header and the blocks, an 18-pt strip draws the progression's tension as a curve: a point
+/// per chord at its block's centre (`SequenceGeometry.tensionPoints`), tension 0 at the bottom and 100 at
+/// the top, straight neutral segments between the points and a function-coloured dot on each (larger on
+/// the selected chord). It follows a block being resized or dragged, takes no clicks and is hidden from
+/// accessibility (the blocks carry the tension); with any chord lacking a tension (an older plug-in
+/// build) nothing is drawn there.
 /// Undo/redo are the key bar's buttons (⌘Z / ⇧⌘Z), so they work whatever has focus.
 ///
 /// The playhead (`state.transport`, ~15 Hz from the plug-in) is a 2-pt line at the position's beat, folded
@@ -34,7 +41,7 @@ struct SequenceBarView: View {
   @AppStorage(LabelMode.storageKey) private var labelMode = LabelMode.defaultMode
 
   static let pxPerBeat: CGFloat = 24
-  static let height: CGFloat = 118
+  static let height: CGFloat = 138
   static let blockHeight: CGFloat = 56
   static let rulerHeight: CGFloat = 20
   static let handleWidth: CGFloat = 6
@@ -44,6 +51,12 @@ struct SequenceBarView: View {
   static let cornerRadius: CGFloat = 6
   static let dotSize: CGFloat = 6
   static let tensionStripHeight: CGFloat = 2
+  /// The tension curve's strip above the blocks, and its dots (the selected chord's is larger).
+  static let curveHeight: CGFloat = 18
+  static let curveDotSize: CGFloat = 4
+  static let curveSelectedDotSize: CGFloat = 6
+  /// Vertical spacing between the header, the curve, the blocks and the ruler.
+  static let rowSpacing: CGFloat = 2
 
   /// A resize in progress: the handle of `id` is being dragged and the block shows `lengthBeats`.
   struct Resize: Equatable {
@@ -89,8 +102,9 @@ struct SequenceBarView: View {
       let contentWidth = max(geometry.size.width, layout.endX + CGFloat(Self.beatsPerBar) * Self.pxPerBeat)
       ScrollView(.horizontal) {
         ZStack(alignment: .topLeading) {
-          VStack(alignment: .leading, spacing: 2) {
+          VStack(alignment: .leading, spacing: Self.rowSpacing) {
             SectionsHeaderView(sections: sections, layout: layout, width: contentWidth)
+            tensionCurve(layout: layout, width: contentWidth)
             ZStack(alignment: .leading) {
               Color.clear
                 .frame(width: contentWidth, height: Self.blockHeight)
@@ -121,7 +135,8 @@ struct SequenceBarView: View {
           if let beat = playheadBeat {
             Rectangle()
               .fill(Color.white)
-              .frame(width: 2, height: SectionsHeaderView.height + 2 + Self.blockHeight + 2 + Self.rulerHeight)
+              .frame(width: 2, height: SectionsHeaderView.height + Self.curveHeight + Self.blockHeight + Self.rulerHeight
+                                       + 3 * Self.rowSpacing)
               .offset(x: SequenceGeometry.x(ofBeat: beat, pxPerBeat: Self.pxPerBeat) - 1)
               .allowsHitTesting(false)
               .accessibilityHidden(true)
@@ -172,6 +187,39 @@ struct SequenceBarView: View {
   private func displayedLength(_ event: EventJSON) -> Double {
     if let resize = resize, resize.id == event.id { return resize.lengthBeats }
     return event.lengthBeats
+  }
+
+  // MARK: - Tension curve
+
+  /// The curve strip, `width` wide and `curveHeight` tall in the blocks' coordinates: the points come from
+  /// the same layout as the blocks (a resize in progress included), the dragged block's point moves with
+  /// it, and the band is inset by half the selected dot so no dot is clipped at 0 or 100.
+  private func tensionCurve(layout: SequenceGeometry.Layout, width: CGFloat) -> some View {
+    let events = self.events
+    let selected = selectedEventId
+    let move = self.move
+    let points = SequenceGeometry.tensionPoints(tensions: events.map(\.tension), in: layout,
+                                                height: Self.curveHeight, inset: Self.curveSelectedDotSize / 2)?
+      .enumerated().map { index, point in
+        move?.id == events[index].id ? CGPoint(x: point.x + (move?.offset ?? 0), y: point.y) : point
+      }
+    return Canvas { context, _ in
+      guard let points else { return }
+      if points.count > 1 {
+        var line = Path()
+        line.addLines(points)
+        context.stroke(line, with: .color(.white.opacity(0.45)),
+                       style: StrokeStyle(lineWidth: 1.25, lineCap: .round, lineJoin: .round))
+      }
+      for (point, event) in zip(points, events) {
+        let size = event.id == selected ? Self.curveSelectedDotSize : Self.curveDotSize
+        let dot = Path(ellipseIn: CGRect(x: point.x - size / 2, y: point.y - size / 2, width: size, height: size))
+        context.fill(dot, with: .color(FunctionStyle.color(event.function)))
+      }
+    }
+    .frame(width: width, height: Self.curveHeight)
+    .allowsHitTesting(false)
+    .accessibilityHidden(true)
   }
 
   // MARK: - Blocks
