@@ -71,14 +71,14 @@ Chord chordOf(PitchClass root, const char* typeId) {
     return Chord{root, &chordType(typeId)};
 }
 
-/// Every top-level member of a snapshot, as documented in json_api.h (17 of them). A contract change updates
+/// Every top-level member of a snapshot, as documented in json_api.h (19 of them). A contract change updates
 /// this list and the fixtures together: the snapshot's key set must equal it, so an undocumented key and a
 /// missing documented one both fail.
 const std::set<std::string> kSnapshotKeys = {
     "schema",         "projectKey",     "browsedKey",   "projectKeyName", "browsedKeyName",
     "progressionLoop", "followHost",    "autoVoiceLead", "endBeat",       "selectedEventId",
     "modes",          "tonics",         "events",       "sections",       "suggestions",
-    "palette",        "homeTriads"};
+    "palette",        "homeTriads",     "relationMode", "relationReference"};
 
 void checkSnapshotShape(const std::string& text) {
     const json j = json::parse(text);
@@ -171,6 +171,12 @@ TEST_CASE("golden fixtures: generated snapshots carry the documented top-level k
     CHECK(empty.at("selectedEventId").is_null());
     CHECK(empty.at("homeTriads").empty());
     CHECK(empty.at("projectKeyName") == "C Ionian");
+    CHECK(empty.at("relationMode") == "blend");
+    CHECK(empty.at("relationReference").is_null());
+    for (const json& cell : empty.at("palette").at("cells")) {
+        CHECK_FALSE(cell.contains("relation"));
+        CHECK_FALSE(cell.contains("relationText"));
+    }
 
     const json home = json::parse(homeProgression());
     CHECK(home.at("events").size() == 4);
@@ -179,10 +185,20 @@ TEST_CASE("golden fixtures: generated snapshots carry the documented top-level k
     CHECK(home.at("autoVoiceLead") == true);
     CHECK(home.at("homeTriads").empty());
     CHECK(home.at("events").at(1).at("manualVoicing") == true);
+    CHECK(home.at("relationReference") == json({{"eventId", 3}, {"symbol", "F"}}));  // the selection
+    for (const json& cell : home.at("palette").at("cells")) {
+        CHECK(cell.at("relation").is_number_integer());
+        CHECK(cell.at("relationText").is_string());
+    }
 
     const json browsing = json::parse(browsingProgression());
     CHECK(browsing.at("browsedKeyName") == "A Aeolian");
     CHECK(browsing.at("homeTriads").size() == 7);
+    CHECK(browsing.at("relationReference") == json({{"eventId", 3}, {"symbol", "F"}}));
+    for (const json& triad : browsing.at("homeTriads")) {
+        CHECK(triad.at("relation").is_number_integer());
+        CHECK(triad.at("relationText").is_string());
+    }
 }
 
 TEST_CASE("golden fixtures: the state fixture round-trips") {

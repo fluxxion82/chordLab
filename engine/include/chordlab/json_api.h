@@ -15,8 +15,9 @@ struct Palette;
 /// Version of the wire format. Every message (snapshot, command, state) carries `"schema": kJsonSchema`;
 /// a message with a different or missing schema is rejected.
 /// Adding a field is not a schema change: the readers here ignore members they do not know, and the UI
-/// reads only the members it needs, so a new field (the snapshot's `modes`, `tonics`, `outOfKey` and
-/// `homeTriads` were added under schema 1) costs nothing to a reader that has not heard of it. The number bumps only
+/// reads only the members it needs, so a new field (the snapshot's `modes`, `tonics`, `outOfKey`,
+/// `homeTriads`, `relationMode`, `relationReference` and the cells' `relation` / `relationText` were added
+/// under schema 1) costs nothing to a reader that has not heard of it. The number bumps only
 /// when an existing field changes meaning or shape, or a required one is removed.
 constexpr int kJsonSchema = 1;
 
@@ -79,8 +80,10 @@ constexpr int kMaxJsonDepth = 64;
 ///  "palette":{"tiers":5,
 ///             "cells":[{"degree":0,"tier":1,"root":0,"type":"maj","symbol":"C","roman":"I",
 ///                       "family":"Major","function":"T","tension":3,"filled":true,
-///                       "voicing":[60,64,67],"outOfKey":[]}, ...]},
-///  "homeTriads":[]}
+///                       "voicing":[60,64,67],"outOfKey":[],
+///                       "relation":92,"relationText":"1 common tone (C) · up a fifth · cost 3"}, ...]},
+///  "homeTriads":[],
+///  "relationMode":"blend", "relationReference":{"eventId":3,"symbol":"F"}|null}
 /// ```
 /// Events are in playback order with `startBeat` accumulated as `Document::startBeatOf` does; `symbol` is
 /// the Klimper-style symbol spelled in the project key, `roman` the Standard-style numeral relative to the
@@ -154,6 +157,19 @@ constexpr int kMaxJsonDepth = 64;
 ///   equals the tier-1 cell the palette holds for that degree when the project key itself is browsed;
 ///   `filled` is therefore always true and `outOfKey` always empty. `id` is "home-<degree>"; palette
 ///   cells carry no `id` (the UI derives one from tier and degree), so the two cannot collide.
+/// - `relationMode` (additive, schema still 1; always present): `relationModeName(doc.relationMode)`
+///   (relatedness.h), one of "off", "commonTones", "voiceLeading", "function", "blend".
+/// - `relationReference` (additive): the chord the palette is sized against (R1): the selected event when
+///   `selectedEventId` names one, else the last event, as `{"eventId": <its id>, "symbol": <its symbol as
+///   the events write it>}`; null when the document has no chords or `relationMode` is "off". It is the
+///   same chord the suggestions follow (`previous` below).
+/// - per cell, in `palette.cells` and `homeTriads` alike (additive), present exactly when
+///   `relationReference` is not null and ABSENT otherwise (absent, not null):
+///   `relation`, the cell's `Relatedness::score` 0..100 against the reference under `relationMode`, and
+///   `relationText`, its `Relatedness::text` ("2 common tones (C, E) · down a third · cost 2", with
+///   " · borrowed from C Aeolian" for a borrowed chord). All of them come from one `relatedness` call over
+///   the palette cells followed by the home triads, so `blend`'s min–max normalisation spans both rows
+///   together: the best of either row is 100, the worst 0, and a cell equal to the reference is 100.
 /// - `suggestions`: `suggestNext(previous, projectKey, browsedKey)` (suggest.h, Pop style, at most 8),
 ///   where `previous` is the selected event's chord when `selectedEventId` names an event, else the last
 ///   event's chord, else null (the opening suggestions of an empty document). Each entry carries the

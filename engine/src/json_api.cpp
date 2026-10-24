@@ -133,9 +133,10 @@ json outOfKeyJson(const Chord& chord, const Key& key) {
 }
 
 /// One palette cell as the snapshot writes it (`palette.cells` and `homeTriads` alike): the cell's own
-/// position, chord, symbol, numeral and `filled`, plus what is read against `projectKey`.
-json cellJson(const PaletteCell& c, const Key& projectKey) {
-    return {{"degree", c.degree},
+/// position, chord, symbol, numeral and `filled`, plus what is read against `projectKey`, plus `relation`
+/// and `relationText` from `relation` when it is non-null (absent otherwise: no reference, or mode off).
+json cellJson(const PaletteCell& c, const Key& projectKey, const Relatedness* relation) {
+    json cell = {{"degree", c.degree},
             {"tier", c.tier},
             {"root", c.chord.root},
             {"type", c.chord.type->id},
@@ -147,27 +148,36 @@ json cellJson(const PaletteCell& c, const Key& projectKey) {
             {"filled", c.filled},
             {"voicing", closeVoicing(c.chord)},
             {"outOfKey", outOfKeyJson(c.chord, projectKey)}};
+    if (relation != nullptr) {
+        cell["relation"] = relation->score;
+        cell["relationText"] = relation->text;
+    }
+    return cell;
 }
 
-/// The snapshot's `homeTriads`: nothing while the project key is the one browsed (the palette already
-/// shows it); otherwise the project key's seven diatonic triads in degree order, each the cell the
-/// palette's triad row would hold for it when browsing the project key, plus an `id` ("home-<degree>")
-/// that no palette cell has.
-json homeTriadsJson(const Document& doc) {
-    json out = json::array();
+/// The cells of the snapshot's home row: nothing while the project key is the one browsed (the palette
+/// already shows it); otherwise the project key's seven diatonic triads in degree order, each the cell the
+/// palette's triad row would hold for it when browsing the project key.
+std::vector<PaletteCell> homeTriadCells(const Document& doc) {
+    std::vector<PaletteCell> out;
     if (doc.browsedKey == doc.projectKey) {
         return out;
     }
     for (int degree = 0; degree < 7; ++degree) {
         const Chord triad = diatonicTriad(doc.projectKey, degree);
-        const PaletteCell cell{degree,
-                               kPaletteTriadTier,
-                               triad,
-                               fullyInKey(triad, doc.projectKey),
-                               chordSymbol(triad, doc.projectKey),
-                               romanNumeral(triad, doc.projectKey)};
-        json entry = cellJson(cell, doc.projectKey);
-        entry["id"] = "home-" + std::to_string(degree);
+        out.push_back(PaletteCell{degree, kPaletteTriadTier, triad, fullyInKey(triad, doc.projectKey),
+                                  chordSymbol(triad, doc.projectKey), romanNumeral(triad, doc.projectKey)});
+    }
+    return out;
+}
+
+/// The snapshot's `homeTriads`: `homeTriadCells` as `cellJson` writes them, each with an `id`
+/// ("home-<degree>") that no palette cell has. `relations` is null, or holds one entry per home cell.
+json homeTriadsJson(const std::vector<PaletteCell>& home, const Key& projectKey, const Relatedness* relations) {
+    json out = json::array();
+    for (std::size_t i = 0; i < home.size(); ++i) {
+        json entry = cellJson(home[i], projectKey, relations != nullptr ? &relations[i] : nullptr);
+        entry["id"] = "home-" + std::to_string(home[i].degree);
         out.push_back(std::move(entry));
     }
     return out;
@@ -1131,17 +1141,34 @@ std::string snapshotJson(const Document& doc, const Palette& palette, int select
         beat += e.lengthBeats;
     }
 
-    json cells = json::array();
-    for (const PaletteCell& c : palette.cells) {
-        cells.push_back(cellJson(c, doc.projectKey));
-    }
+    // Suggestions and relations follow the selected chord, else the last one; with neither, suggestions
+    // open the progression and there is no relation reference.
+    const int referenceIndex = selectedIndex >= 0 ? selectedIndex : static_cast<int>(doc.events.size()) - 1;
+    const ChordEvent* reference = referenceIndex >= 0 ? &doc.events[static_cast<std::size_t>(referenceIndex)] : nullptr;
+    const Chord* previous = reference != nullptr ? &reference->chord : nullptr;
 
-    // Suggestions follow the selected chord, else the last one, else open the progression.
-    const Chord* previous = nullptr;
-    if (selectedIndex >= 0) {
-        previous = &doc.events[static_cast<std::size_t>(selectedIndex)].chord;
-    } else if (!doc.events.empty()) {
-        previous = &doc.events.back().chord;
+    // Relatedness of every sized cell, palette then home row, in one call so that blend normalises over both.
+    const std::vector<PaletteCell> home = homeTriadCells(doc);
+    std::vector<Relatedness> relations;
+    json relationReference;  // null
+    if (reference != nullptr && doc.relationMode != RelationMode::Off) {
+        std::vector<Chord> sized;
+        sized.reserve(palette.cells.size() + home.size());
+        for (const PaletteCell& c : palette.cells) {
+            sized.push_back(c.chord);
+        }
+        for (const PaletteCell& c : home) {
+            sized.push_back(c.chord);
+        }
+        relations = relatedness(reference->chord, sized, doc.projectKey, doc.browsedKey, doc.relationMode);
+        relationReference = {{"eventId", reference->id}, {"symbol", chordSymbol(reference->chord, doc.projectKey)}};
+    }
+    const Relatedness* cellRelations = relations.empty() ? nullptr : relations.data();
+    const Relatedness* homeRelations = relations.empty() ? nullptr : relations.data() + palette.cells.size();
+
+    json cells = json::array();
+    for (std::size_t i = 0; i < palette.cells.size(); ++i) {
+        cells.push_back(cellJson(palette.cells[i], doc.projectKey, cellRelations != nullptr ? &cellRelations[i] : nullptr));
     }
 
     const json snapshot = {{"schema", kJsonSchema},
@@ -1159,7 +1186,9 @@ std::string snapshotJson(const Document& doc, const Palette& palette, int select
                            {"events", std::move(events)},
                            {"sections", sectionsJson(doc)},
                            {"suggestions", suggestionsJson(previous, doc)},
-                           {"homeTriads", homeTriadsJson(doc)},
+                           {"homeTriads", homeTriadsJson(home, doc.projectKey, homeRelations)},
+                           {"relationMode", relationModeName(doc.relationMode)},
+                           {"relationReference", std::move(relationReference)},
                            {"palette", {{"tiers", palette.tiers}, {"cells", std::move(cells)}}}};
     return snapshot.dump();
 }

@@ -727,6 +727,160 @@ TEST_CASE("snapshot: a home triad is the palette's triad cell of the project key
     }
 }
 
+// --- Relations ---------------------------------------------------------------------------
+
+namespace {
+
+/// The store's snapshot with its live selection, parsed back.
+json selectedSnapshot(const DocumentStore& store) {
+    const Document& d = store.doc();
+    return json::parse(snapshotJson(d, buildPalette(d.browsedKey, d.projectKey), store.selectedEventId()));
+}
+
+/// Every cell the UI sizes: the palette's, then the home row's.
+std::vector<json> sizedCells(const json& snap) {
+    std::vector<json> out(snap.at("palette").at("cells").begin(), snap.at("palette").at("cells").end());
+    out.insert(out.end(), snap.at("homeTriads").begin(), snap.at("homeTriads").end());
+    return out;
+}
+
+/// True when no sized cell carries either relation member.
+bool noCellRelations(const json& snap) {
+    for (const json& c : sizedCells(snap)) {
+        if (c.contains("relation") || c.contains("relationText")) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// The engine's own relatedness of every sized cell to `reference`, in `sizedCells` order.
+std::vector<Relatedness> expectedRelations(const json& snap, const Document& doc, const Chord& reference) {
+    std::vector<Chord> chords;
+    for (const json& c : sizedCells(snap)) {
+        chords.push_back(chord(c.at("root").get<int>(), c.at("type").get<std::string>()));
+    }
+    return relatedness(reference, chords, doc.projectKey, doc.browsedKey, doc.relationMode);
+}
+
+}  // namespace
+
+TEST_CASE("snapshot: relationMode is always there; no chords means no reference and no cell relations") {
+    DocumentStore store;
+    json snap = selectedSnapshot(store);
+    CHECK(snap.at("relationMode") == "blend");
+    REQUIRE(snap.contains("relationReference"));
+    CHECK(snap.at("relationReference").is_null());
+    CHECK(noCellRelations(snap));
+
+    store.setBrowsedKey(key('A', 0, Mode::Aeolian));  // home row present, still nothing to relate to
+    snap = selectedSnapshot(store);
+    CHECK(snap.at("homeTriads").size() == 7);
+    CHECK(snap.at("relationReference").is_null());
+    CHECK(noCellRelations(snap));
+
+    for (const char* mode : {"off", "commonTones", "voiceLeading", "function", "blend"}) {
+        applyOk(store, {{"cmd", "setRelationMode"}, {"mode", mode}});
+        CHECK(selectedSnapshot(store).at("relationMode") == mode);
+    }
+}
+
+TEST_CASE("snapshot: the reference is the selected event, else the last; every sized cell carries its relation") {
+    DocumentStore store = threeChords();  // C (1), F (2), G7 (3)
+    json snap = selectedSnapshot(store);
+    CHECK(snap.at("relationReference") == json({{"eventId", 3}, {"symbol", "G7"}}));
+    for (const json& c : sizedCells(snap)) {
+        CHECK(c.contains("relation"));
+        CHECK(c.at("relation").is_number_integer());
+        CHECK(c.at("relationText").is_string());
+    }
+    std::vector<Relatedness> expected = expectedRelations(snap, store.doc(), kG7);
+    std::vector<json> cells = sizedCells(snap);
+    REQUIRE(cells.size() == expected.size());
+    for (std::size_t i = 0; i < cells.size(); ++i) {
+        CHECK(cells[i].at("relation") == expected[i].score);
+        CHECK(cells[i].at("relationText") == expected[i].text);
+    }
+    // After G7, C is the best cell (D -> T with a cadence): 100.
+    CHECK(cellAt(snap, 0, 1).at("relation") == 100);
+    REQUIRE(cellAt(snap, 4, 3).at("symbol") == "G7");
+    CHECK(cellAt(snap, 4, 3).at("relation") == 100);  // the reference itself
+
+    store.setSelectedEvent(1);  // C
+    applyOk(store, {{"cmd", "setRelationMode"}, {"mode", "commonTones"}});
+    snap = selectedSnapshot(store);
+    CHECK(snap.at("relationReference") == json({{"eventId", 1}, {"symbol", "C"}}));
+    CHECK(cellAt(snap, 5, 1).at("relation") == 67);  // Am
+    CHECK(cellAt(snap, 5, 1).at("relationText") == "2 common tones (C, E) · down a third · cost 2");
+    CHECK(cellAt(snap, 0, 3).at("relation") == 75);  // CΔ7
+    CHECK(cellAt(snap, 1, 1).at("relation") == 0);   // Dm
+    CHECK(cellAt(snap, 0, 1).at("relation") == 100);
+
+    applyOk(store, {{"cmd", "setRelationMode"}, {"mode", "function"}});
+    snap = selectedSnapshot(store);
+    CHECK(cellAt(snap, 4, 1).at("relation") == 60);  // C -> G
+    CHECK(cellAt(snap, 3, 1).at("relation") == 80);  // C -> F
+    CHECK(cellAt(snap, 0, 1).at("relation") == 30);  // C -> C: T -> T
+
+    // A stale selection reads as none: back to the last chord.
+    snap = json::parse(snapshotJson(store.doc(), buildPalette(store.doc().browsedKey, store.doc().projectKey), 99));
+    CHECK(snap.at("relationReference") == json({{"eventId", 3}, {"symbol", "G7"}}));
+}
+
+TEST_CASE("snapshot: mode off drops the reference and every cell relation") {
+    DocumentStore store = threeChords();
+    store.setBrowsedKey(key('E', 0, Mode::Ionian));
+    applyOk(store, {{"cmd", "setRelationMode"}, {"mode", "off"}});
+    const json snap = selectedSnapshot(store);
+    CHECK(snap.at("relationMode") == "off");
+    CHECK(snap.at("relationReference").is_null());
+    CHECK(snap.at("homeTriads").size() == 7);
+    CHECK(noCellRelations(snap));
+}
+
+TEST_CASE("snapshot: blend is normalised over the palette and the home row together") {
+    DocumentStore store = threeChords();
+    store.setSelectedEvent(2);  // F
+    store.setBrowsedKey(key('E', 0, Mode::Ionian));
+    const json snap = selectedSnapshot(store);
+    CHECK(snap.at("relationReference") == json({{"eventId", 2}, {"symbol", "F"}}));
+    const std::vector<json> cells = sizedCells(snap);
+    REQUIRE(snap.at("homeTriads").size() == 7);
+    const std::vector<Relatedness> expected = expectedRelations(snap, store.doc(), kF);
+    REQUIRE(cells.size() == expected.size());
+    int lo = 100;
+    int hi = 0;
+    for (std::size_t i = 0; i < cells.size(); ++i) {
+        CHECK(cells[i].at("relation") == expected[i].score);
+        CHECK(cells[i].at("relationText") == expected[i].text);
+        lo = std::min(lo, cells[i].at("relation").get<int>());
+        hi = std::max(hi, cells[i].at("relation").get<int>());
+    }
+    CHECK(lo == 0);
+    CHECK(hi == 100);
+    // One population: the home row is not normalised on its own (its worst is not forced to 0).
+    const json& home = snap.at("homeTriads");
+    CHECK(home[3].at("relation") == 100);  // F itself
+    CHECK(home[4].at("relation") == 100);  // G: the best chord after F, D after PD, the top of the population
+    // The relation text is spelled in the project key, borrowings and all.
+    CHECK(home[0].at("relationText") == "1 common tone (C) · up a fifth · cost 3");
+}
+
+TEST_CASE("snapshot: the reference symbol is the event's own symbol, spelled in the project key") {
+    DocumentStore store;
+    store.setProjectKey(key('E', -1, Mode::Ionian));
+    store.appendChord(chord(3, "maj"));   // Eb
+    store.appendChord(chord(10, "7"));    // Bb7
+    store.appendChord(chord(1, "maj"));   // Db: borrowed bVII
+    json snap = selectedSnapshot(store);
+    CHECK(snap.at("relationReference") == json({{"eventId", 3}, {"symbol", "Db"}}));
+    CHECK(snap.at("relationReference").at("symbol") == snap.at("events")[2].at("symbol"));
+    store.setSelectedEvent(2);
+    snap = selectedSnapshot(store);
+    CHECK(snap.at("relationReference") == json({{"eventId", 2}, {"symbol", snap.at("events")[1].at("symbol")}}));
+    CHECK(snap.at("relationReference").at("symbol") == "Bb7");
+}
+
 // --- browseKey -------------------------------------------------------------------------
 
 TEST_CASE("browseKey steps: moves the browsed key along the fifths and hollows the borrowed cells") {
