@@ -7,6 +7,12 @@ import SwiftUI
 /// its digit) appends that chord (`appendChord`); resting the mouse on it shows the engine's reasons
 /// (`reasonTexts`). Nothing is shown for a snapshot without `suggestions` (an older plug-in build).
 ///
+/// The chips never truncate. `ViewThatFits` takes the first of three rows whose ideal width fits: the
+/// one-line chips (digit, symbol, numeral, dot), else two-line chips (the symbol over the digit, numeral and
+/// dot), which keep all 8 of the longest realistic chords in view at the 700-pt minimum width, else, for
+/// a list longer still, the two-line row in a sideways scroll view. Only the chosen row exists, so each
+/// digit shortcut is registered once, and the digits always follow the engine's order.
+///
 /// The digit shortcuts are bare keys (no modifier) on hidden buttons beside the chips, armed only while
 /// the chip's own window is the key window (`controlActiveState == .key`: macOS offers a key equivalent
 /// to the key window and then to the main window, so without this a ChordLab main window would eat digits
@@ -34,28 +40,41 @@ struct SuggestionsView: View {
         .foregroundStyle(.secondary)
         .frame(minWidth: 64, alignment: .leading)
         .accessibilityHidden(true)
-      ForEach(Array(suggestions.enumerated()), id: \.element.id) { index, suggestion in
-        SuggestionChip(suggestion: suggestion, number: index + 1) {
-          state.send(command: ["cmd": "appendChord", "root": suggestion.root, "type": suggestion.type])
-        }
-      }
       if suggestions.isEmpty {
         Text("—").foregroundStyle(.gray)
+      } else {
+        ViewThatFits(in: .horizontal) {
+          chipRow(compact: false)
+          chipRow(compact: true)
+          ScrollView(.horizontal, showsIndicators: false) { chipRow(compact: true) }
+        }
       }
-      Spacer(minLength: 0)
     }
     .font(.body)
+    .frame(maxWidth: .infinity, alignment: .leading)   // no trailing Spacer: its 8-pt gap would cost the chips
     .frame(height: Self.height)
     .accessibilityElement(children: .contain)
     .accessibilityLabel(heading == "Next" ? "Next chord suggestions" : "Opening chord suggestions")
   }
+
+  private func chipRow(compact: Bool) -> some View {
+    HStack(spacing: compact ? 5 : 8) {
+      ForEach(Array(suggestions.enumerated()), id: \.element.id) { index, suggestion in
+        SuggestionChip(suggestion: suggestion, number: index + 1, compact: compact) {
+          state.send(command: ["cmd": "appendChord", "root": suggestion.root, "type": suggestion.type])
+        }
+      }
+    }
+  }
 }
 
 /// One chip: a button that appends the chord on click, plus a hidden button carrying the digit `number`
-/// as a bare-key shortcut, armed only while this window is key and no text is being edited.
+/// as a bare-key shortcut, armed only while this window is key and no text is being edited. `compact`
+/// stacks the symbol over the digit, numeral and dot, for a strip too narrow for one line per chip.
 struct SuggestionChip: View {
   let suggestion: SuggestionJSON
   let number: Int
+  var compact = false
   let append: () -> Void
 
   @EnvironmentObject var state: ChordLabState
@@ -68,22 +87,41 @@ struct SuggestionChip: View {
     controlActiveState == .key && !state.editingText
   }
 
+  private var digitText: some View {
+    Text("\(number)")
+      .font(.system(size: 9).monospacedDigit())
+      .foregroundStyle(.white.opacity(0.45))
+  }
+
+  private var symbolText: some View {
+    Text(ChordSymbol.glyphs(suggestion.symbol)).font(.system(size: 13, weight: .medium))
+  }
+
+  private var numeralText: some View {
+    Text(ChordSymbol.glyphs(suggestion.roman)).font(.system(size: 10)).opacity(0.8)
+  }
+
   var body: some View {
     Button(action: append) {
-      HStack(spacing: 5) {
-        Text("\(number)")
-          .font(.system(size: 9).monospacedDigit())
-          .foregroundStyle(.white.opacity(0.45))
-        Text(ChordSymbol.glyphs(suggestion.symbol))
-          .font(.system(size: 13, weight: .medium))
-        Text(ChordSymbol.glyphs(suggestion.roman))
-          .font(.system(size: 10))
-          .opacity(0.8)
-        FunctionDot(function: suggestion.function)
+      Group {
+        if compact {
+          VStack(alignment: .leading, spacing: 1) {
+            symbolText
+            HStack(spacing: 4) { digitText; numeralText; FunctionDot(function: suggestion.function) }
+          }
+          .padding(.horizontal, 6).padding(.vertical, 3)
+        } else {
+          HStack(spacing: 5) {
+            digitText
+            symbolText
+            numeralText
+            FunctionDot(function: suggestion.function)
+          }
+          .padding(.horizontal, 9).padding(.vertical, 6)
+        }
       }
       .foregroundStyle(.white)
       .lineLimit(1)
-      .padding(.horizontal, 9).padding(.vertical, 6)
       .background(RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(hovering ? 0.16 : 0.08)))
       .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(FunctionStyle.color(suggestion.function).opacity(0.5), lineWidth: 1))
       .contentShape(RoundedRectangle(cornerRadius: 8))
