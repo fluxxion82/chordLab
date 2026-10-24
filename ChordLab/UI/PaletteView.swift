@@ -47,6 +47,12 @@ struct PaletteView: View {
         }
       }
       .defaultScrollAnchor(.bottom)   // tier 0 visible first, and kept in view when the tier count changes
+      // A related cell is drawn up to 1.10× its slot (`RelationStyle`), and at the 700-pt minimum width the
+      // grid fills the scroll view edge to edge, so an enlarged first- or last-column circle overhangs the
+      // scroll view by up to 4.4 pt. Clip vertically as before, but 5 pt wider on each side (the window's
+      // 12-pt padding has room); the grid geometry is unchanged.
+      .scrollClipDisabled()
+      .mask { Rectangle().padding(.horizontal, -5) }
     }
     .background(Self.background)
   }
@@ -96,7 +102,10 @@ struct PaletteCellControl: View {
 /// dot, pressed ring) is scaled by `RelationStyle.scale` about the slot's centre and faded to
 /// `RelationStyle.opacity`, animated with `RelationStyle.animation`. Only the drawing changes: the view's
 /// frame stays `size` × `size` and its content shape is the full-size circle, so the grid does not move
-/// and the press, hover and drag hit area of a shrunken cell is the whole slot circle. A pressed cell is
+/// and the press, hover and drag hit area of a shrunken cell is the whole slot circle. At the 1.10 maximum
+/// (plan R7, kept on purpose) two neighbouring score-100 cells at the 96-pt maximum size come within 0.4 pt
+/// of each other across the 10-pt spacing; they never overlap. The palette's scroll view widens its
+/// horizontal clip so enlarged edge columns are not cut. A pressed cell is
 /// drawn at full opacity, so the pressed look always shows. `reference` (the snapshot's
 /// `relationReference`) names the chord in the popover's relation line.
 struct PaletteCellView: View {

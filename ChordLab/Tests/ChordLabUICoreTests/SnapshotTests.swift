@@ -288,6 +288,7 @@ final class SnapshotTests: XCTestCase {
     let snapshot = try Self.decode(Snapshot.self, Self.withHome(Self.phase2, entry))
     XCTAssertEqual(snapshot.homeRow.first?.id, "home-0")
     XCTAssertEqual(snapshot.homeRow.first?.relation, 100)
+    XCTAssertEqual(snapshot.homeRow.first?.relationText, "2 common tones (C, E) · up a fourth · cost 3")
   }
 
   // MARK: - Other payloads
