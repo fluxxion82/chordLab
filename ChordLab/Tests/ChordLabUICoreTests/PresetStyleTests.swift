@@ -84,6 +84,17 @@ final class PresetStyleTests: XCTestCase {
     XCTAssertNil(PresetStyle.footnote(fits: false, tonality: "Modal"))
   }
 
+  // MARK: - Numerals
+
+  /// The engine's ASCII accidentals become glyphs, as on every other numeral; the separators and the
+  /// quality marks pass through.
+  func testNumeralsTakeGlyphs() {
+    let andalusian = Self.preset("andalusian", genre: "Film / Epic", tonality: "Minor", numerals: "i – bVII – bVI – V7")
+    XCTAssertEqual(PresetStyle.numerals(andalusian), "i – ♭VII – ♭VI – V7")
+    let rnb = Self.preset("rnb-ii-v", genre: "R&B / Neo-soul", numerals: "ii9 – V7 – IΔ9 – vi7")
+    XCTAssertEqual(PresetStyle.numerals(rnb), "ii9 – V7 – IΔ9 – vi7")
+  }
+
   // MARK: - Accessibility
 
   func testAccessibilityLabelOfAFittingPreset() {
@@ -93,7 +104,7 @@ final class PresetStyleTests: XCTestCase {
 
   func testAccessibilityLabelSaysWhenAPresetDoesNotFit() {
     let lament = Self.preset("lament", genre: "Classical", tonality: "Minor", fits: false, name: "Lament",
-                             numerals: "i – ♭VII – ♭VI – V")
+                             numerals: "i – bVII – bVI – V")
     XCTAssertEqual(PresetStyle.accessibilityLabel(lament),
                    "Lament, Classical, i – ♭VII – ♭VI – V, written for a minor key, does not fit the project key")
   }

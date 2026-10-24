@@ -40,6 +40,10 @@ enum PresetStyle {
     return order.map { PresetGroup(genre: $0, presets: byGenre[$0] ?? []) }
   }
 
+  /// The row's numerals text: the engine's spelling with its ASCII accidentals as glyphs ("i – ♭VII – ♭VI
+  /// – V7"), as every other numeral in the editor is shown.
+  static func numerals(_ preset: PresetJSON) -> String { ChordSymbol.glyphs(preset.numerals) }
+
   /// The row's tonality badge: "major", "minor", "any"; a tonality this UI does not know, lowercased.
   static func badge(tonality: String) -> String { tonality.lowercased() }
 
@@ -53,7 +57,7 @@ enum PresetStyle {
   /// VoiceOver's label for a row: "Axis, Pop, I – V – vi – IV, written for a major key", with
   /// ", does not fit the project key" when greyed; "fits any key" for `Any`.
   static func accessibilityLabel(_ preset: PresetJSON) -> String {
-    var parts = [preset.name, preset.genre, preset.numerals]
+    var parts = [preset.name, preset.genre, numerals(preset)]
     if let kind = keyKind(preset.tonality) {
       parts.append("written for a \(kind) key")
     } else if preset.tonality == "Any" {

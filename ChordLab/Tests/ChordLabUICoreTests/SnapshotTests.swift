@@ -300,7 +300,7 @@ final class SnapshotTests: XCTestCase {
 
   static let twoPresets = """
     [{"id":"axis","name":"Axis","genre":"Pop","tonality":"Major","numerals":"I – V – vi – IV","fits":true},
-     {"id":"andalusian","name":"Andalusian","genre":"Film / Epic","tonality":"Minor","numerals":"i – ♭VII – ♭VI – V7","fits":false}]
+     {"id":"andalusian","name":"Andalusian","genre":"Film / Epic","tonality":"Minor","numerals":"i – bVII – bVI – V7","fits":false}]
     """
 
   func testOlderSnapshotHasNoPresets() throws {
@@ -313,7 +313,7 @@ final class SnapshotTests: XCTestCase {
     XCTAssertEqual(snapshot.presets, [
       PresetJSON(id: "axis", name: "Axis", genre: "Pop", tonality: "Major", numerals: "I – V – vi – IV", fits: true),
       PresetJSON(id: "andalusian", name: "Andalusian", genre: "Film / Epic", tonality: "Minor",
-                 numerals: "i – ♭VII – ♭VI – V7", fits: false),
+                 numerals: "i – bVII – bVI – V7", fits: false),
     ])
     XCTAssertEqual(snapshot.presets?.map(\.id), ["axis", "andalusian"])
   }
