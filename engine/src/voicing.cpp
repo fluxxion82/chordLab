@@ -34,7 +34,7 @@ bool validVoicingRange(int lowest, int highest) {
 }
 
 /// `voiceLeadingCost`'s precondition: one to `kMaxVoiceLeadingNotes` MIDI notes.
-bool isMidiVoicing(const std::vector<int>& notes) {
+[[maybe_unused]] bool isMidiVoicing(const std::vector<int>& notes) {
     return !notes.empty() && notes.size() <= static_cast<std::size_t>(kMaxVoiceLeadingNotes) &&
            std::all_of(notes.begin(), notes.end(), [](int n) { return n >= 0 && n <= kMidiMax; });
 }

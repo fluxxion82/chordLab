@@ -42,7 +42,7 @@ const std::array<Mode, kNumModes>& borrowOrder(Mode projectMode) {
     return isMajorFamily(projectMode) ? kMajorFamilyBorrowOrder : kMinorFamilyBorrowOrder;
 }
 
-bool withinVoiceLimit(std::size_t count) {
+[[maybe_unused]] bool withinVoiceLimit(std::size_t count) {
     return count > 0 && count <= static_cast<std::size_t>(kMaxVoiceLeadingNotes);
 }
 
