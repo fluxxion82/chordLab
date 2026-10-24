@@ -138,6 +138,8 @@ bridge_tests() {
 
 # One Xcode scheme, built unsigned. Fails when "BUILD SUCCEEDED" is missing from the log, or when the log
 # holds any error or warning that points into ChordLab/ or engine/ (third-party and SDK noise is ignored).
+# The Swift driver's "Could not read priors" warning names a .priors file under ChordLab/build-mac/; it only
+# means the incremental-build cache was stale (first build after an Xcode update), so it is ignored too.
 plugin_scheme() {
     local scheme="$1"
     local log="$LOG_DIR/chordlab-xcodebuild-$scheme.log"
@@ -162,7 +164,7 @@ plugin_scheme() {
         return 1
     fi
     local noise
-    noise="$(grep -E "error:|warning:" "$log" | grep -E "ChordLab/|engine/")"
+    noise="$(grep -E "error:|warning:" "$log" | grep -E "ChordLab/|engine/" | grep -v "Could not read priors")"
     if [ -n "$noise" ]; then
         echo "check.sh: diagnostics in project sources for scheme $scheme (see $log):" >&2
         echo "$noise" >&2
