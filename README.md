@@ -31,6 +31,9 @@ Phase 2, explainable harmony:
   tones, voice-leading cost, D→T resolution, the parallel mode a chord is borrowed from).
 - A suggestions strip: up to 8 ranked next chords for the selected (else the last) chord, each with its
   reasons.
+- Chord relations in the palette: every cell is sized and shaded by its relatedness to the selected
+  (else the last) chord, under a chooser of relation modes (common tones, voice leading, function, or
+  the blended suggestion score). The home row follows.
 - Voicing: per-chord inversion and octave (−1/0/+1), and an Auto voice-lead mode that picks them for
   the smoothest motion from the previous chord.
 - Sections: named, coloured spans over the progression (8 colours), each exportable as its own clip.
@@ -155,6 +158,9 @@ Top to bottom:
   key home). *Browse*: `<` and `>` step the browsed key a fifth down or up, *Home* returns to the
   project key. Undo / redo buttons (⌘Z / ⇧⌘Z). *Names / Numerals / Both* chooses how chords are
   labelled in palette cells, the home row, sequence blocks and cell drag previews (default Both: the symbol over the numeral and function, e.g. `C` / `I · T`).
+  *Relations*: which relation to the selected (else the last) chord sizes the palette cells — *Off*,
+  *Common tones*, *Voice leading*, *Function* or *Blend* (the default: the same score that ranks the
+  suggestions strip); a caption names the reference chord ("to G7").
 - **Transport row.** *Follow Live*, *Loop*, *Panic* (silences every sounding note), *Auto voice-lead*,
   and *+ Section* (starts a section on the selected chord, else the last one).
 - **Sequence bar.** A sections header, the chord blocks, and a ruler with bar numbers.
@@ -174,7 +180,11 @@ Top to bottom:
 - **Palette.** The browsed key's chords, one column per scale degree, power chords at the bottom and
   richer chords above. Press and hold a cell to hear it, release to stop; drag it to the sequence bar;
   rest the mouse on it for its notes, function, tension and any out-of-key notes. A filled circle is
-  entirely in the project key, a ring is borrowed.
+  entirely in the project key, a ring is borrowed. While a chord is selected (or the progression has a
+  last chord), each cell grows and brightens or shrinks and dims by how related it is to that chord
+  under the chosen relation mode, Klimper-style; the popover adds "Relation to G7 · 72" with the
+  reason (common tones, root motion, voice-leading cost, borrowed-from key). The hit area stays the
+  whole slot, so a shrunken cell is as easy to press as before.
 - **Home row.** Appears under the palette only while the browsed key differs from the project key:
   "Home · <project key>" and that key's seven triads. The cells behave exactly like palette cells
   (press to preview, drag to the sequence bar, hover for details).
