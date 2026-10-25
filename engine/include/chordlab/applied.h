@@ -14,7 +14,8 @@ struct AppliedChord {
     /// The applied chord: type `7` a perfect fifth above the target's root, or type `dim7` a semitone
     /// below it.
     Chord chord;
-    /// Scale degree (1..6) of the key whose diatonic triad is tonicised; never 0, the key's own tonic.
+    /// Scale degree (0-based, 1..6) of the key whose diatonic triad is tonicised; never 0, the key's own
+    /// tonic.
     int targetDegree;
     /// `V7/` or `vii°7/` followed by the Standard-style `romanNumeral` of the target triad in the key:
     /// `V7/ii`, `vii°7/V`, and in A minor `V7/bVI`, since numerals read against the parallel major.
@@ -30,12 +31,15 @@ struct AppliedChord {
     Key spellingKey;
 };
 
-/// The applied chords of `key`: for each scale degree 1..6 whose diatonic triad is not diminished (a
-/// diminished chord is not tonicised), the dominant seventh `V7/x` on the pitch class a perfect fifth
-/// above the target's root and the leading-tone seventh `vii°7/x` on the pitch class a semitone below
-/// it. Ordered by target degree, `V7/x` before `vii°7/x`. In C major: A7, C#°7, B7, D#°7, C7, E°7, D7,
-/// F#°7, E7, G#°7 (ii, iii, IV, V, vi; nothing for vii°). An applied chord usually has a note outside
-/// the key, but not always: G7 in A Aeolian is both V7/bIII and the diatonic VII7.
+/// The applied chords of `key`: for each scale degree 1..6 whose diatonic triad is major or minor (a
+/// diminished or augmented chord is not tonicised), the dominant seventh `V7/x` on the pitch class a
+/// perfect fifth above the target's root and the leading-tone seventh `vii°7/x` on the pitch class a
+/// semitone below it. Ordered by target degree, `V7/x` before `vii°7/x`. In C major: A7, C#°7, B7, D#°7,
+/// C7, E°7, D7, F#°7, E7, G#°7 (ii, iii, IV, V, vi; nothing for vii°). Harmonic and melodic minor have
+/// six each (their augmented bIII+ is skipped with the diminished degrees: A harmonic minor tonicises
+/// iv, V and bVI, A melodic minor ii, IV and V), every other mode ten or, in Locrian, twelve. An applied
+/// chord usually has a note outside the key, but not always: G7 in A Aeolian is both V7/bIII and the
+/// diatonic VII7.
 std::vector<AppliedChord> appliedChords(const Key& key);
 
 }  // namespace chordlab

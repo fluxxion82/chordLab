@@ -1,5 +1,6 @@
 #include "doctest.h"
 
+#include "chordlab/applied.h"
 #include "chordlab/chord.h"
 #include "chordlab/compiler.h"
 #include "chordlab/document.h"
@@ -13,6 +14,7 @@
 #include "chordlab/relatedness.h"
 #include "chordlab/scale.h"
 #include "chordlab/suggest.h"
+#include "chordlab/symbol.h"
 #include "chordlab/tension.h"
 #include "chordlab/voicing.h"
 
@@ -2227,4 +2229,312 @@ TEST_CASE("snapshot presets: fits follows the project key, not the browsed key")
     CHECK_FALSE(fits("lament"));
     applyOk(store, {{"cmd", "setKey"}, {"letter", "E"}, {"alter", 0}, {"mode", "HarmonicMinor"}});
     CHECK(fits("lament"));
+}
+
+// --- Applied chords ------------------------------------------------------------------------
+
+namespace {
+
+/// One member of every `applied` entry, in order.
+template <typename T>
+std::vector<T> appliedField(const json& snap, const char* member) {
+    std::vector<T> out;
+    for (const json& entry : snap.at("applied")) {
+        out.push_back(entry.at(member).get<T>());
+    }
+    return out;
+}
+
+/// The members every palette cell carries without relations.
+const std::vector<std::string> kCellMembers{"degree", "tier",   "root",    "type",    "symbol",  "roman",
+                                            "family", "function", "tension", "filled", "voicing", "outOfKey"};
+
+/// Checks what every `applied` entry carries beyond the expectations of each test: the members of a
+/// palette cell plus `id`, `label`, `target`; each one the cell `cellJson` writes for the chord against the
+/// project key; and the label, column and spelling of the matching `appliedChords(browsedKey)` entry.
+void checkAppliedEntries(const json& snap, const Document& doc) {
+    const std::vector<AppliedChord> applied = appliedChords(doc.browsedKey);
+    const json& entries = snap.at("applied");
+    REQUIRE(entries.is_array());
+    REQUIRE(entries.size() == applied.size());
+    for (std::size_t i = 0; i < applied.size(); ++i) {
+        const AppliedChord& a = applied[i];
+        const json& e = entries[i];
+        CAPTURE(e.dump());
+        for (const std::string& member : kCellMembers) {
+            CHECK(e.contains(member));
+        }
+        const bool dominant = std::string_view(a.chord.type->id) == "7";
+        CHECK(e.size() == kCellMembers.size() + 3 + (e.contains("relation") ? 2 : 0));
+        CHECK(e.at("degree") == a.targetDegree);
+        CHECK(e.at("tier") == (dominant ? 1 : 0));
+        CHECK(e.at("id") == "applied-" + std::to_string(a.targetDegree) + "-" + (dominant ? "1" : "0"));
+        CHECK(e.at("label") == a.label);
+        const Chord target = diatonicTriad(doc.browsedKey, a.targetDegree);
+        CHECK(e.at("target") == chordSymbol(target, doc.browsedKey));
+        CHECK(e.at("root") == a.chord.root);
+        CHECK(e.at("type") == a.chord.type->id);
+        CHECK(e.at("symbol") == chordSymbol(a.chord, a.spellingKey));
+        CHECK(e.at("roman") == romanNumeral(a.chord, doc.projectKey));
+        CHECK(e.at("function") == functionShortName(functionOf(a.chord, doc.projectKey)));
+        CHECK(e.at("tension") == tension(a.chord, doc.projectKey));
+        CHECK(e.at("filled") == fullyInKey(a.chord, doc.projectKey));
+        CHECK(e.at("voicing") == json(closeVoicing(a.chord)));
+        CHECK(e.at("outOfKey").empty() == fullyInKey(a.chord, doc.projectKey));
+        CHECK(e.at("family") == (dominant ? "Major" : "Other"));
+    }
+}
+
+}  // namespace
+
+TEST_CASE("snapshot applied: C Ionian has V7 and vii°7 of ii, iii, IV, V and vi, by column and row") {
+    DocumentStore store;
+    const json snap = snapshot(store);
+    REQUIRE(snap.contains("applied"));
+    checkAppliedEntries(snap, store.doc());
+    CHECK(appliedField<std::string>(snap, "symbol") ==
+          std::vector<std::string>{"A7", "C#dim7", "B7", "D#dim7", "C7", "Edim7", "D7", "F#dim7", "E7", "G#dim7"});
+    CHECK(appliedField<std::string>(snap, "label") ==
+          std::vector<std::string>{"V7/ii", "vii°7/ii", "V7/iii", "vii°7/iii", "V7/IV", "vii°7/IV", "V7/V",
+                                   "vii°7/V", "V7/vi", "vii°7/vi"});
+    CHECK(appliedField<std::string>(snap, "target") ==
+          std::vector<std::string>{"Dm", "Dm", "Em", "Em", "F", "F", "G", "G", "Am", "Am"});
+    CHECK(appliedField<int>(snap, "degree") == std::vector<int>{1, 1, 2, 2, 3, 3, 4, 4, 5, 5});
+    CHECK(appliedField<int>(snap, "tier") == std::vector<int>{1, 0, 1, 0, 1, 0, 1, 0, 1, 0});
+    CHECK(appliedField<std::string>(snap, "id") ==
+          std::vector<std::string>{"applied-1-1", "applied-1-0", "applied-2-1", "applied-2-0", "applied-3-1",
+                                   "applied-3-0", "applied-4-1", "applied-4-0", "applied-5-1", "applied-5-0"});
+    CHECK(appliedField<bool>(snap, "filled") == std::vector<bool>(10, false));
+    CHECK(appliedField<std::string>(snap, "function") == std::vector<std::string>(10, "D"));
+    // The full first entry, so the wire shape is pinned once.
+    CHECK(snap.at("applied")[0] == json({{"id", "applied-1-1"},
+                                        {"label", "V7/ii"},
+                                        {"target", "Dm"},
+                                        {"degree", 1},
+                                        {"tier", 1},
+                                        {"root", 9},
+                                        {"type", "7"},
+                                        {"symbol", "A7"},
+                                        {"roman", romanNumeral(chord(9, "7"), store.doc().projectKey)},
+                                        {"family", "Major"},
+                                        {"function", "D"},
+                                        {"tension", tension(chord(9, "7"), store.doc().projectKey)},
+                                        {"filled", false},
+                                        {"voicing", closeVoicing(chord(9, "7"))},
+                                        {"outOfKey", {1}}}));
+    CHECK(snap.at("schema") == 1);  // additive
+}
+
+TEST_CASE("snapshot applied: A Aeolian tonicises bIII, iv, v, bVI and bVII; G7 is in the key") {
+    DocumentStore store;
+    store.setProjectKey(key('A', 0, Mode::Aeolian));
+    store.setBrowsedKey(key('A', 0, Mode::Aeolian));
+    const json snap = snapshot(store);
+    checkAppliedEntries(snap, store.doc());
+    CHECK(appliedField<std::string>(snap, "symbol") ==
+          std::vector<std::string>{"G7", "Bdim7", "A7", "C#dim7", "B7", "D#dim7", "C7", "Edim7", "D7", "F#dim7"});
+    CHECK(appliedField<std::string>(snap, "label") ==
+          std::vector<std::string>{"V7/bIII", "vii°7/bIII", "V7/iv", "vii°7/iv", "V7/v", "vii°7/v", "V7/bVI",
+                                   "vii°7/bVI", "V7/bVII", "vii°7/bVII"});
+    CHECK(appliedField<std::string>(snap, "target") ==
+          std::vector<std::string>{"C", "C", "Dm", "Dm", "Em", "Em", "F", "F", "G", "G"});
+    CHECK(appliedField<int>(snap, "degree") == std::vector<int>{2, 2, 3, 3, 4, 4, 5, 5, 6, 6});
+    std::vector<bool> filled(10, false);
+    filled[0] = true;  // G7 = G B D F, the diatonic VII7
+    CHECK(appliedField<bool>(snap, "filled") == filled);
+}
+
+TEST_CASE("snapshot applied: harmonic and melodic minor tonicise no augmented triad") {
+    DocumentStore store;
+    store.setProjectKey(key('A', 0, Mode::HarmonicMinor));
+    store.setBrowsedKey(key('A', 0, Mode::HarmonicMinor));
+    json snap = snapshot(store);
+    checkAppliedEntries(snap, store.doc());
+    CHECK(appliedField<std::string>(snap, "label") ==
+          std::vector<std::string>{"V7/iv", "vii°7/iv", "V7/V", "vii°7/V", "V7/bVI", "vii°7/bVI"});
+    CHECK(appliedField<std::string>(snap, "symbol") ==
+          std::vector<std::string>{"A7", "C#dim7", "B7", "D#dim7", "C7", "Edim7"});
+    CHECK(appliedField<std::string>(snap, "target") == std::vector<std::string>{"Dm", "Dm", "E", "E", "F", "F"});
+    CHECK(appliedField<int>(snap, "degree") == std::vector<int>{3, 3, 4, 4, 5, 5});
+
+    store.setProjectKey(key('A', 0, Mode::MelodicMinor));
+    store.setBrowsedKey(key('A', 0, Mode::MelodicMinor));
+    snap = snapshot(store);
+    checkAppliedEntries(snap, store.doc());
+    CHECK(appliedField<std::string>(snap, "label") ==
+          std::vector<std::string>{"V7/ii", "vii°7/ii", "V7/IV", "vii°7/IV", "V7/V", "vii°7/V"});
+    CHECK(appliedField<std::string>(snap, "symbol") ==
+          std::vector<std::string>{"F#7", "A#dim7", "A7", "C#dim7", "B7", "D#dim7"});
+    CHECK(appliedField<std::string>(snap, "target") == std::vector<std::string>{"Bm", "Bm", "D", "D", "E", "E"});
+    CHECK(appliedField<int>(snap, "degree") == std::vector<int>{1, 1, 3, 3, 4, 4});
+    for (const std::string& label : appliedField<std::string>(snap, "label")) {
+        CHECK(label.find('+') == std::string::npos);
+    }
+}
+
+TEST_CASE("snapshot applied: Locrian places each chord by its target's degree, not by its label's numeral") {
+    DocumentStore store;
+    store.setProjectKey(key('C', 0, Mode::Locrian));
+    store.setBrowsedKey(key('C', 0, Mode::Locrian));
+    const json snap = snapshot(store);
+    checkAppliedEntries(snap, store.doc());
+    CHECK(appliedField<int>(snap, "degree") == std::vector<int>{1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6});
+    // Gb, the fifth degree, reads as #IV against the parallel major; the cell still sits in column 4.
+    const json& v7OfV = snap.at("applied")[6];
+    CHECK(v7OfV.at("label") == "V7/#IV");
+    CHECK(v7OfV.at("degree") == 4);
+    CHECK(v7OfV.at("tier") == 1);
+    CHECK(v7OfV.at("target") == "Gb");
+    CHECK(v7OfV.at("symbol") == "Db7");
+    // Every column but the tonic's is filled, two rows each.
+    for (int degree = 1; degree < 7; ++degree) {
+        int count = 0;
+        for (const json& e : snap.at("applied")) {
+            count += e.at("degree") == degree ? 1 : 0;
+        }
+        CHECK(count == 2);
+    }
+}
+
+TEST_CASE("snapshot applied: follows the browsed key; numerals, filled and outOfKey stay the project key's") {
+    DocumentStore store;
+    store.setBrowsedKey(key('G', 0, Mode::Ionian));
+    json snap = snapshot(store);
+    checkAppliedEntries(snap, store.doc());
+    CHECK(appliedField<std::string>(snap, "symbol") ==
+          std::vector<std::string>{"E7", "G#dim7", "F#7", "A#dim7", "G7", "Bdim7", "A7", "C#dim7", "B7", "D#dim7"});
+    CHECK(appliedField<std::string>(snap, "label") ==
+          std::vector<std::string>{"V7/ii", "vii°7/ii", "V7/iii", "vii°7/iii", "V7/IV", "vii°7/IV", "V7/V",
+                                   "vii°7/V", "V7/vi", "vii°7/vi"});
+    CHECK(appliedField<std::string>(snap, "target") ==
+          std::vector<std::string>{"Am", "Am", "Bm", "Bm", "C", "C", "D", "D", "Em", "Em"});
+    // G7, V7/IV of G, is the project key's own V7: filled, numbered V7, nothing out of key.
+    const json& g7 = snap.at("applied")[4];
+    CHECK(g7.at("symbol") == "G7");
+    CHECK(g7.at("filled") == true);
+    CHECK(g7.at("roman") == "V7");
+    CHECK(g7.at("outOfKey").empty());
+
+    // Browsing home again gives C's list back.
+    applyOk(store, {{"cmd", "browseKey"}, {"home", true}});
+    snap = snapshot(store);
+    CHECK(appliedField<std::string>(snap, "symbol").front() == "A7");
+
+    // Browsing a key with flats spells its applied chords there.
+    store.setBrowsedKey(key('F', 0, Mode::Ionian));
+    snap = snapshot(store);
+    checkAppliedEntries(snap, store.doc());
+    CHECK(appliedField<std::string>(snap, "symbol") ==
+          std::vector<std::string>{"D7", "F#dim7", "E7", "G#dim7", "F7", "Adim7", "G7", "Bdim7", "A7", "C#dim7"});
+    CHECK(appliedField<std::string>(snap, "target") ==
+          std::vector<std::string>{"Gm", "Gm", "Am", "Am", "Bb", "Bb", "C", "C", "Dm", "Dm"});
+}
+
+TEST_CASE("snapshot applied: relation fields exactly when there is a reference and the mode is not off") {
+    DocumentStore store;
+    const auto noAppliedRelations = [](const json& snap) {
+        for (const json& e : snap.at("applied")) {
+            if (e.contains("relation") || e.contains("relationText")) {
+                return false;
+            }
+        }
+        return true;
+    };
+    // No chords: no reference.
+    CHECK(noAppliedRelations(selectedSnapshot(store)));
+    store = threeChords();
+    store.setBrowsedKey(key('G', 0, Mode::Ionian));
+    for (const char* mode : {"commonTones", "voiceLeading", "function", "blend"}) {
+        CAPTURE(mode);
+        applyOk(store, {{"cmd", "setRelationMode"}, {"mode", mode}});
+        const json snap = selectedSnapshot(store);
+        checkAppliedEntries(snap, store.doc());
+        for (const json& e : snap.at("applied")) {
+            CHECK(e.at("relation").is_number_integer());
+            CHECK(e.at("relationText").is_string());
+        }
+    }
+    applyOk(store, {{"cmd", "setRelationMode"}, {"mode", "off"}});
+    const json off = selectedSnapshot(store);
+    CHECK(off.at("applied").size() == 10);
+    CHECK(noAppliedRelations(off));
+}
+
+TEST_CASE("snapshot applied: sized on the palette and home row's scale, which the applied chords leave unchanged") {
+    for (const char* mode : {"commonTones", "voiceLeading", "function", "blend"}) {
+        for (const Key& browsed : {key('C', 0, Mode::Ionian), key('E', 0, Mode::Ionian), key('D', 0, Mode::Dorian)}) {
+            for (int selected : {1, 2, 3}) {
+                CAPTURE(mode);
+                CAPTURE(keyName(browsed));
+                CAPTURE(selected);
+                DocumentStore store = threeChords();  // C (1), F (2), G7 (3)
+                store.setBrowsedKey(browsed);
+                store.setSelectedEvent(selected);
+                applyOk(store, {{"cmd", "setRelationMode"}, {"mode", mode}});
+                const json snap = selectedSnapshot(store);
+                const Document& doc = store.doc();
+                const Chord reference = doc.events[static_cast<std::size_t>(selected - 1)].chord;
+
+                // Palette and home row: exactly the relatedness of their own population, as before.
+                const std::vector<json> cells = sizedCells(snap);
+                const std::vector<Relatedness> population = expectedRelations(snap, doc, reference);
+                REQUIRE(cells.size() == population.size());
+                for (std::size_t i = 0; i < cells.size(); ++i) {
+                    CHECK(cells[i].at("relation") == population[i].score);
+                    CHECK(cells[i].at("relationText") == population[i].text);
+                }
+
+                // Applied chords: the extras of the same call.
+                std::vector<Chord> sized;
+                for (const json& c : cells) {
+                    sized.push_back(chord(c.at("root").get<int>(), c.at("type").get<std::string>()));
+                }
+                std::vector<Chord> extras;
+                for (const AppliedChord& a : appliedChords(doc.browsedKey)) {
+                    extras.push_back(a.chord);
+                }
+                const std::vector<Relatedness> all =
+                    relatedness(reference, sized, extras, doc.projectKey, doc.browsedKey, doc.relationMode);
+                const json& applied = snap.at("applied");
+                REQUIRE(applied.size() == extras.size());
+                for (std::size_t i = 0; i < extras.size(); ++i) {
+                    const json& e = applied[i];
+                    CHECK(e.at("relation") == all[sized.size() + i].score);
+                    CHECK(e.at("relationText") == all[sized.size() + i].text);
+                    CHECK(e.at("relation").get<int>() >= 0);
+                    CHECK(e.at("relation").get<int>() <= 100);
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("snapshot applied: blend scores are clamped to 0..100 against the population's range") {
+    // After G7 in C, the applied chords score below the palette's best (C, the cadence) and some below its
+    // worst; whatever happens, none leaves 0..100, and the palette's own range is still exactly 0..100.
+    for (const Key& browsed : {key('C', 0, Mode::Ionian), key('G', 0, Mode::Ionian), key('A', 0, Mode::Aeolian),
+                               key('E', -1, Mode::Ionian), key('F', 1, Mode::HarmonicMinor)}) {
+        for (int selected : {1, 2, 3}) {
+            CAPTURE(keyName(browsed));
+            CAPTURE(selected);
+            DocumentStore store = threeChords();
+            store.setBrowsedKey(browsed);
+            store.setSelectedEvent(selected);
+            const json snap = selectedSnapshot(store);
+            REQUIRE(snap.at("relationMode") == "blend");
+            int lo = 100;
+            int hi = 0;
+            for (const json& c : sizedCells(snap)) {
+                lo = std::min(lo, c.at("relation").get<int>());
+                hi = std::max(hi, c.at("relation").get<int>());
+            }
+            CHECK(lo == 0);
+            CHECK(hi == 100);
+            for (const json& e : snap.at("applied")) {
+                CAPTURE(e.at("symbol").get<std::string>());
+                CHECK(e.at("relation").get<int>() >= 0);
+                CHECK(e.at("relation").get<int>() <= 100);
+            }
+        }
+    }
 }

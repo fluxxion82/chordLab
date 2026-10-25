@@ -70,12 +70,18 @@ std::optional<RelationMode> parseRelationMode(std::string_view name) {
 
 std::vector<Relatedness> relatedness(const Chord& reference, const std::vector<Chord>& candidates,
                                      const Key& projectKey, const Key& browsedKey, RelationMode mode, Style style) {
+    return relatedness(reference, candidates, {}, projectKey, browsedKey, mode, style);
+}
+
+std::vector<Relatedness> relatedness(const Chord& reference, const std::vector<Chord>& candidates,
+                                     const std::vector<Chord>& extras, const Key& projectKey, const Key& browsedKey,
+                                     RelationMode mode, Style style) {
     assert(reference.type != nullptr && reference.root >= 0 && reference.root < 12);
     std::vector<Relatedness> out;
     if (mode == RelationMode::Off) {
         return out;
     }
-    out.reserve(candidates.size());
+    out.reserve(candidates.size() + extras.size());
 
     if (mode == RelationMode::Blend) {
         const std::vector<int> raw = suggestionHundredths(&reference, candidates, projectKey, browsedKey, style);
@@ -92,18 +98,35 @@ std::vector<Relatedness> relatedness(const Chord& reference, const std::vector<C
             const int score = full ? kFull : roundedRatio(kFull * (raw[i] - lo), hi - lo);
             out.push_back(Relatedness{score, relationText(relate(reference, candidates[i], projectKey), projectKey)});
         }
+        // Extras are placed on the population's scale without widening it: clamped at both ends, and with
+        // no range to place them on (a tie, one chord, none) at or above it is 100 and below it 0.
+        const std::vector<int> extraRaw = suggestionHundredths(&reference, extras, projectKey, browsedKey, style);
+        for (std::size_t i = 0; i < extras.size(); ++i) {
+            const int r = extraRaw[i];
+            int score = 0;
+            if (extras[i] == reference || r >= hi) {  // hi is INT_MIN when the range is empty
+                score = kFull;
+            } else if (r <= lo) {
+                score = 0;
+            } else {
+                score = roundedRatio(kFull * (r - lo), hi - lo);
+            }
+            out.push_back(Relatedness{score, relationText(relate(reference, extras[i], projectKey), projectKey)});
+        }
         return out;
     }
 
     const int referencePcs = distinctPcs(reference);
     const Function referenceFunction = functionOf(reference, projectKey);
-    for (const Chord& candidate : candidates) {
-        const Relation relation = relate(reference, candidate, projectKey);
-        const bool same = candidate == reference && mode != RelationMode::Function;
-        const int score = same ? kFull
-                               : singleScore(candidate, relation, referencePcs, referenceFunction, projectKey, mode,
-                                             style);
-        out.push_back(Relatedness{score, relationText(relation, projectKey)});
+    for (const std::vector<Chord>* list : {&candidates, &extras}) {
+        for (const Chord& candidate : *list) {
+            const Relation relation = relate(reference, candidate, projectKey);
+            const bool same = candidate == reference && mode != RelationMode::Function;
+            const int score = same ? kFull
+                                   : singleScore(candidate, relation, referencePcs, referenceFunction, projectKey,
+                                                 mode, style);
+            out.push_back(Relatedness{score, relationText(relation, projectKey)});
+        }
     }
     return out;
 }

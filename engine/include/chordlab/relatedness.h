@@ -47,11 +47,15 @@ struct Relatedness {
 /// - `Function`: `transitionHundredths(functionOf(reference), functionOf(candidate), style)`, the
 ///   transition table read as a percentage (C to G 60, C to F 80, G7 to C 100, 20 wherever Other is
 ///   involved). The one mode in which a candidate equal to the reference is not 100: C to C is T -> T, 30;
-/// - `Blend`: the candidates' `suggestionHundredths` after `reference` (suggest.h, with `browsedKey`
-///   deciding which chords count as applied), min–max normalised over the candidates that differ from
-///   the reference and rounded: the best 100, the worst 0, and 100 for all when they tie or there is
-///   only one. Sorting by it is therefore `suggestNext`'s order (ties aside, since the rounding can
-///   merge neighbours). The candidates passed are the population: pass every cell the UI sizes at once.
+/// - `Blend`: the candidates' `suggestionHundredths` after `reference` (suggest.h), min–max normalised
+///   over the candidates that differ from the reference and rounded: the best 100, the worst 0, and 100
+///   for all when they tie or there is only one. Sorting by it is therefore `suggestNext`'s order (ties
+///   aside, since the rounding can merge neighbours). The candidates passed are the population: pass
+///   every cell the UI sizes at once. As all scoring, it is project-key relative: a chord scores as an
+///   applied chord exactly when it is one of `appliedChords(projectKey)` and not a cell of
+///   `buildPalette(browsedKey, projectKey)` (`browsedKey` decides only which chords are palette cells),
+///   so an applied chord of a browsed key that is not one of the project key's scores as the plain
+///   chromatic chord it is there.
 /// In every mode but `Function`, a candidate equal to the reference (same root and type) scores 100.
 /// Allocates; not for the audio thread.
 ///
@@ -60,5 +64,20 @@ struct Relatedness {
 std::vector<Relatedness> relatedness(const Chord& reference, const std::vector<Chord>& candidates,
                                      const Key& projectKey, const Key& browsedKey, RelationMode mode,
                                      Style style = Style::Pop);
+
+/// `relatedness(reference, candidates, ...)` followed by a score for each of `extras`, chords sized on the
+/// same scale as the population without being part of it (the snapshot's applied chords, sized beside
+/// the palette and the home row). The first `candidates.size()` entries are exactly the call without
+/// `extras`; then one entry per extra, in order. `Off` returns nothing. In the per-candidate modes an
+/// extra scores as it would anywhere (those scores are absolute). In `Blend`, an extra's raw
+/// `suggestionHundredths` is normalised with the population's min and max (the reference excluded, as
+/// above) and clamped to 0..100, so an extra better than the population's best is 100 and one worse
+/// than its worst 0; when the population has no range (its non-reference chords tie, or there are
+/// none), an extra at or above their score, or every extra when there are none, is 100 and one below
+/// it 0. An extra equal to the reference is 100 (in every mode but `Function`, as above). Same
+/// preconditions; every extra as a candidate. Allocates; not for the audio thread.
+std::vector<Relatedness> relatedness(const Chord& reference, const std::vector<Chord>& candidates,
+                                     const std::vector<Chord>& extras, const Key& projectKey, const Key& browsedKey,
+                                     RelationMode mode, Style style = Style::Pop);
 
 }  // namespace chordlab

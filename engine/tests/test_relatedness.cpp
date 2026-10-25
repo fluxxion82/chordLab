@@ -1,5 +1,6 @@
 #include "doctest.h"
 
+#include "chordlab/applied.h"
 #include "chordlab/chord.h"
 #include "chordlab/harmony.h"
 #include "chordlab/palette.h"
@@ -295,5 +296,176 @@ TEST_CASE("relatedness: blend orders the browsed palette exactly as suggestNext 
             CAPTURE(d);
             checkBlendFollowsSuggestNext(diatonicTriad(k, d), k, k);
         }
+    }
+}
+
+// --- Extra candidates ------------------------------------------------------------------------------
+
+namespace {
+
+/// The palette of `browsed` followed by the project key's seven triads: the population the snapshot sizes
+/// while another key is browsed.
+std::vector<Chord> populationOf(const Key& project, const Key& browsed) {
+    std::vector<Chord> out = chordsOf(buildPalette(browsed, project));
+    for (int d = 0; d < 7; ++d) {
+        out.push_back(diatonicTriad(project, d));
+    }
+    return out;
+}
+
+/// The applied chords of `key`, as chords.
+std::vector<Chord> appliedOf(const Key& key) {
+    std::vector<Chord> out;
+    for (const AppliedChord& a : appliedChords(key)) {
+        out.push_back(a.chord);
+    }
+    return out;
+}
+
+/// The blend score the extra-candidate rule gives a raw score against the population range lo..hi.
+int expectedExtraBlend(int raw, int lo, int hi, bool emptyRange) {
+    if (emptyRange || raw >= hi) {
+        return 100;
+    }
+    if (raw <= lo) {
+        return 0;
+    }
+    return (2 * 100 * (raw - lo) + (hi - lo)) / (2 * (hi - lo));
+}
+
+}  // namespace
+
+TEST_CASE("relatedness with extras: the population scores exactly as it does without them, in every mode") {
+    const Key gIonian = key('G', 0, Mode::Ionian);
+    const Key eIonian = key('E', 0, Mode::Ionian);
+    struct Case {
+        Key project;
+        Key browsed;
+    };
+    for (const Case& c : {Case{kCIonian, kCIonian}, Case{kCIonian, gIonian}, Case{kCIonian, eIonian},
+                          Case{kAAeolian, kAAeolian}, Case{kAAeolian, kCIonian}}) {
+        const std::vector<Chord> population = populationOf(c.project, c.browsed);
+        const std::vector<Chord> extras = appliedOf(c.browsed);
+        for (const Chord& reference : {kC, kF, kG7, kAm, kBdim, chord(A, "7"), chord(Ab, "maj")}) {
+            for (const RelationMode mode : kAllModes) {
+                CAPTURE(static_cast<int>(mode));
+                CAPTURE(reference.root);
+                CAPTURE(reference.type->id);
+                const auto alone = relatedness(reference, population, c.project, c.browsed, mode);
+                const auto with = relatedness(reference, population, extras, c.project, c.browsed, mode);
+                if (mode == RelationMode::Off) {
+                    CHECK(with.empty());
+                    continue;
+                }
+                REQUIRE(alone.size() == population.size());
+                REQUIRE(with.size() == population.size() + extras.size());
+                for (std::size_t i = 0; i < population.size(); ++i) {
+                    CHECK(with[i].score == alone[i].score);
+                    CHECK(with[i].text == alone[i].text);
+                }
+                // An empty list of extras is the call without them.
+                const auto none = relatedness(reference, population, {}, c.project, c.browsed, mode);
+                REQUIRE(none.size() == alone.size());
+                for (std::size_t i = 0; i < alone.size(); ++i) {
+                    CHECK(none[i].score == alone[i].score);
+                    CHECK(none[i].text == alone[i].text);
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("relatedness with extras: the per-candidate modes score an extra as if it stood alone") {
+    const Key gIonian = key('G', 0, Mode::Ionian);
+    const std::vector<Chord> population = populationOf(kCIonian, gIonian);
+    const std::vector<Chord> extras = appliedOf(gIonian);
+    for (const RelationMode mode : {RelationMode::CommonTones, RelationMode::VoiceLeading, RelationMode::Function}) {
+        for (const Chord& reference : {kC, kG7, kAm}) {
+            CAPTURE(static_cast<int>(mode));
+            const auto with = relatedness(reference, population, extras, kCIonian, gIonian, mode);
+            REQUIRE(with.size() == population.size() + extras.size());
+            for (std::size_t i = 0; i < extras.size(); ++i) {
+                const auto alone = relatedness(reference, {extras[i]}, kCIonian, gIonian, mode);
+                CHECK(with[population.size() + i].score == alone[0].score);
+                CHECK(with[population.size() + i].text == alone[0].text);
+            }
+        }
+    }
+}
+
+TEST_CASE("relatedness with extras: blend normalises extras with the population's range, clamped to 0..100") {
+    const Key gIonian = key('G', 0, Mode::Ionian);
+    struct Case {
+        Key project;
+        Key browsed;
+    };
+    for (const Case& c : {Case{kCIonian, kCIonian}, Case{kCIonian, gIonian}, Case{kAAeolian, kAAeolian}}) {
+        const std::vector<Chord> population = populationOf(c.project, c.browsed);
+        const std::vector<Chord> extras = appliedOf(c.browsed);
+        for (const Chord& reference : {kC, kF, kG7, kAm, chord(A, "7")}) {
+            CAPTURE(reference.root);
+            CAPTURE(reference.type->id);
+            const auto with = relatedness(reference, population, extras, c.project, c.browsed, RelationMode::Blend);
+            REQUIRE(with.size() == population.size() + extras.size());
+            const std::vector<int> rawPopulation =
+                suggestionHundredths(&reference, population, c.project, c.browsed);
+            const std::vector<int> rawExtras = suggestionHundredths(&reference, extras, c.project, c.browsed);
+            int lo = 1 << 30;
+            int hi = -(1 << 30);
+            for (std::size_t i = 0; i < population.size(); ++i) {
+                if (population[i] != reference) {
+                    lo = std::min(lo, rawPopulation[i]);
+                    hi = std::max(hi, rawPopulation[i]);
+                }
+            }
+            for (std::size_t i = 0; i < extras.size(); ++i) {
+                CAPTURE(i);
+                const Relatedness& r = with[population.size() + i];
+                CHECK(r.score >= 0);
+                CHECK(r.score <= 100);
+                const int expected =
+                    extras[i] == reference ? 100 : expectedExtraBlend(rawExtras[i], lo, hi, hi <= lo);
+                CHECK(r.score == expected);
+                CHECK(r.text == relationText(relate(reference, extras[i], c.project), c.project));
+            }
+        }
+    }
+}
+
+TEST_CASE("relatedness with extras: an extra outside the population's range is clamped, the reference is 100") {
+    // Dm and Em are a narrow population after C: F and G score above both, Bdim below both.
+    const std::vector<Chord> population{kDm, kEm};
+    const std::vector<Chord> extras{kF, kG, kBdim, kC};
+    const std::vector<int> rawPopulation = suggestionHundredths(&kC, population, kCIonian, kCIonian);
+    const std::vector<int> rawExtras = suggestionHundredths(&kC, extras, kCIonian, kCIonian);
+    const int hi = std::max(rawPopulation[0], rawPopulation[1]);
+    const int lo = std::min(rawPopulation[0], rawPopulation[1]);
+    REQUIRE(lo < hi);
+    REQUIRE(rawExtras[0] > hi);
+    REQUIRE(rawExtras[1] > hi);
+    REQUIRE(rawExtras[2] < lo);
+    const auto r = relatedness(kC, population, extras, kCIonian, kCIonian, RelationMode::Blend);
+    REQUIRE(r.size() == 6);
+    CHECK(r[0].score + r[1].score == 100);  // the population alone: 0 and 100
+    CHECK(r[2].score == 100);  // F
+    CHECK(r[3].score == 100);  // G
+    CHECK(r[4].score == 0);    // Bdim
+    CHECK(r[5].score == 100);  // the reference
+    // A population with no range (a tie, a single chord, only the reference, nothing at all): an extra
+    // at or above its score is 100, one below 0, and every extra 100 when there is no range at all.
+    const auto single = relatedness(kC, {kDm}, {kF, kBdim, kC}, kCIonian, kCIonian, RelationMode::Blend);
+    REQUIRE(single.size() == 4);
+    CHECK(single[0].score == 100);
+    CHECK(single[1].score == 100);
+    CHECK(single[2].score == 0);
+    CHECK(single[3].score == 100);
+    const auto tie = relatedness(kC, {kDm, kDm}, {kDm}, kCIonian, kCIonian, RelationMode::Blend);
+    REQUIRE(tie.size() == 3);
+    CHECK(tie[2].score == 100);
+    for (const std::vector<Chord>& empty : {std::vector<Chord>{}, std::vector<Chord>{kC}}) {
+        const auto r2 = relatedness(kC, empty, {kF, kBdim}, kCIonian, kCIonian, RelationMode::Blend);
+        REQUIRE(r2.size() == empty.size() + 2);
+        CHECK(r2[empty.size()].score == 100);
+        CHECK(r2[empty.size() + 1].score == 100);
     }
 }

@@ -1,5 +1,6 @@
 #include "chordlab/json_api.h"
 
+#include "chordlab/applied.h"
 #include "chordlab/chord.h"
 #include "chordlab/compiler.h"
 #include "chordlab/document.h"
@@ -179,6 +180,41 @@ json homeTriadsJson(const std::vector<PaletteCell>& home, const Key& projectKey,
     for (std::size_t i = 0; i < home.size(); ++i) {
         json entry = cellJson(home[i], projectKey, relations != nullptr ? &relations[i] : nullptr);
         entry["id"] = "home-" + std::to_string(home[i].degree);
+        out.push_back(std::move(entry));
+    }
+    return out;
+}
+
+/// Rows of the snapshot's applied-chord grid: the secondary dominant above the leading-tone chord.
+constexpr int kAppliedDominantTier = 1;
+constexpr int kAppliedLeadingToneTier = 0;
+
+/// The cells of the snapshot's `applied`, parallel to `applied` (`appliedChords(doc.browsedKey)`): each in
+/// the column of the degree it tonicises, the dominant seventh on the upper row, spelled in its own
+/// `spellingKey` and read against the project key like every cell.
+std::vector<PaletteCell> appliedCells(const Document& doc, const std::vector<AppliedChord>& applied) {
+    std::vector<PaletteCell> out;
+    out.reserve(applied.size());
+    for (const AppliedChord& a : applied) {
+        const bool dominant = std::string_view(a.chord.type->id) == "7";
+        out.push_back(PaletteCell{a.targetDegree, dominant ? kAppliedDominantTier : kAppliedLeadingToneTier, a.chord,
+                                  fullyInKey(a.chord, doc.projectKey), chordSymbol(a.chord, a.spellingKey),
+                                  romanNumeral(a.chord, doc.projectKey)});
+    }
+    return out;
+}
+
+/// The snapshot's `applied`: `appliedCells` as `cellJson` writes them, each with an `id`
+/// ("applied-<degree>-<tier>"), the `label` ("V7/ii", relative to the browsed key) and the `target`, the
+/// tonicised triad's symbol in the browsed key. `relations` is null, or holds one entry per cell.
+json appliedJson(const Document& doc, const std::vector<AppliedChord>& applied, const std::vector<PaletteCell>& cells,
+                 const Relatedness* relations) {
+    json out = json::array();
+    for (std::size_t i = 0; i < cells.size(); ++i) {
+        json entry = cellJson(cells[i], doc.projectKey, relations != nullptr ? &relations[i] : nullptr);
+        entry["id"] = "applied-" + std::to_string(cells[i].degree) + "-" + std::to_string(cells[i].tier);
+        entry["label"] = applied[i].label;
+        entry["target"] = chordSymbol(diatonicTriad(doc.browsedKey, applied[i].targetDegree), doc.browsedKey);
         out.push_back(std::move(entry));
     }
     return out;
@@ -1243,8 +1279,11 @@ std::string snapshotJson(const Document& doc, const Palette& palette, int select
     const ChordEvent* reference = referenceIndex >= 0 ? &doc.events[static_cast<std::size_t>(referenceIndex)] : nullptr;
     const Chord* previous = reference != nullptr ? &reference->chord : nullptr;
 
-    // Relatedness of every sized cell, palette then home row, in one call so that blend normalises over both.
+    // Relatedness of every sized cell, palette then home row, in one call so that blend normalises over both;
+    // the applied chords are sized on that scale as extras, without entering the range.
     const std::vector<PaletteCell> home = homeTriadCells(doc);
+    const std::vector<AppliedChord> applied = appliedChords(doc.browsedKey);
+    const std::vector<PaletteCell> appliedCellList = appliedCells(doc, applied);
     std::vector<Relatedness> relations;
     json relationReference;  // null
     if (reference != nullptr && doc.relationMode != RelationMode::Off) {
@@ -1256,11 +1295,18 @@ std::string snapshotJson(const Document& doc, const Palette& palette, int select
         for (const PaletteCell& c : home) {
             sized.push_back(c.chord);
         }
-        relations = relatedness(reference->chord, sized, doc.projectKey, doc.browsedKey, doc.relationMode);
+        std::vector<Chord> extras;
+        extras.reserve(applied.size());
+        for (const AppliedChord& a : applied) {
+            extras.push_back(a.chord);
+        }
+        relations = relatedness(reference->chord, sized, extras, doc.projectKey, doc.browsedKey, doc.relationMode);
         relationReference = {{"eventId", reference->id}, {"symbol", chordSymbol(reference->chord, doc.projectKey)}};
     }
     const Relatedness* cellRelations = relations.empty() ? nullptr : relations.data();
     const Relatedness* homeRelations = relations.empty() ? nullptr : relations.data() + palette.cells.size();
+    const Relatedness* appliedRelations =
+        relations.empty() ? nullptr : relations.data() + palette.cells.size() + home.size();
 
     json cells = json::array();
     for (std::size_t i = 0; i < palette.cells.size(); ++i) {
@@ -1286,6 +1332,7 @@ std::string snapshotJson(const Document& doc, const Palette& palette, int select
                            {"relationMode", relationModeName(doc.relationMode)},
                            {"relationReference", std::move(relationReference)},
                            {"presets", presetsJson(doc.projectKey)},
+                           {"applied", appliedJson(doc, applied, appliedCellList, appliedRelations)},
                            {"palette", {{"tiers", palette.tiers}, {"cells", std::move(cells)}}}};
     return snapshot.dump();
 }
