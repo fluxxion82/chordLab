@@ -240,6 +240,16 @@ std::string invariantProblem(const DocumentStore& store, bool snapshot = true) {
         if (sel == kNoEventId ? !sId.is_null() : sId != sel) {
             return "snapshot selectedEventId disagrees with the store";
         }
+        // The applied chords are sized exactly when there is a reference, on the palette's 0..100 scale.
+        const bool sized = !j.at("relationReference").is_null();
+        for (const json& cell : j.at("applied")) {
+            if (cell.contains("relation") != sized) {
+                return "applied cell relation disagrees with relationReference";
+            }
+            if (sized && (cell.at("relation").get<int>() < 0 || cell.at("relation").get<int>() > 100)) {
+                return "applied cell relation outside 0..100";
+            }
+        }
     } catch (const std::exception& ex) {
         return std::string("snapshot threw: ") + ex.what();
     }
