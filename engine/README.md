@@ -45,8 +45,9 @@ the voicing `compile` gives them and the "why" of each against the chord before 
 the sections, the live selection, the next-chord suggestions, `homeTriads`, the project key's seven
 diatonic triads in the palette cells' shape while another key is browsed, empty otherwise, and the chord
 relations: `relationMode`, `relationReference` and each sized cell's `relation` score and
-`relationText` against it, from `relatedness.h`, and `presets`, the progression library of `presets.h`
-with each record's numerals and whether it fits the project key), the commands (`applyCommandJson`: keys
+`relationText` against it, from `relatedness.h`, `presets`, the progression library of `presets.h`
+with each record's numerals and whether it fits the project key, and `applied`, the browsed key's
+applied chords of `applied.h` in the palette cells' shape plus `label` and `target`), the commands (`applyCommandJson`: keys
 and browsing, chord edits, voicing and auto voice-leading, sections, selection, the relation mode, loading
 a preset, undo/redo) and the
 persisted state (`stateJson` / `loadStateJson`). The rules behind the "why" sentence, the validation of

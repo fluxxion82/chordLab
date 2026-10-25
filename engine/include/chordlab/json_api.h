@@ -86,7 +86,11 @@ constexpr int kMaxJsonDepth = 64;
 ///  "homeTriads":[],
 ///  "relationMode":"blend", "relationReference":{"eventId":3,"symbol":"F"}|null,
 ///  "presets":[{"id":"axis","name":"Axis","genre":"Pop","tonality":"Major","numerals":"I – V – vi – IV",
-///              "fits":true}, ...]}
+///              "fits":true}, ...],
+///  "applied":[{"id":"applied-1-1","label":"V7/ii","target":"Dm","degree":1,"tier":1,"root":9,"type":"7",
+///              "symbol":"A7","roman":"VI7","family":"Major","function":"D","tension":43,"filled":false,
+///              "voicing":[69,73,76,79],"outOfKey":[1],
+///              "relation":59,"relationText":"1 common tone (A) · up a third · cost 4"}, ...]}
 /// ```
 /// Events are in playback order with `startBeat` accumulated as `Document::startBeatOf` does; `symbol` is
 /// the Klimper-style symbol spelled in the project key, `roman` the Standard-style numeral relative to the
@@ -166,13 +170,18 @@ constexpr int kMaxJsonDepth = 64;
 ///   `selectedEventId` names one, else the last event, as `{"eventId": <its id>, "symbol": <its symbol as
 ///   the events write it>}`; null when the document has no chords or `relationMode` is "off". It is the
 ///   same chord the suggestions follow (`previous` below).
-/// - per cell, in `palette.cells` and `homeTriads` alike (additive), present exactly when
+/// - per cell, in `palette.cells`, `homeTriads` and `applied` alike (additive), present exactly when
 ///   `relationReference` is not null and ABSENT otherwise (absent, not null):
 ///   `relation`, the cell's `Relatedness::score` 0..100 against the reference under `relationMode`, and
 ///   `relationText`, its `Relatedness::text` ("2 common tones (C, E) · down a third · cost 2", with
 ///   " · borrowed from C Aeolian" for a borrowed chord). All of them come from one `relatedness` call over
 ///   the palette cells followed by the home triads, so `blend`'s min–max normalisation spans both rows
 ///   together: the best of either row is 100, the worst 0, and a cell equal to the reference is 100.
+///   The `applied` cells are that call's extras (relatedness.h): scored on the same scale without
+///   entering its range, so they leave every palette and home score as it would be without them, and
+///   under `blend` an applied chord better than the population's best is 100, one worse than its worst 0
+///   (clamped). Their blend provenance is the project key's, as all scoring: an applied chord of the
+///   browsed key that is not one of `appliedChords(projectKey)` scores as the chromatic chord it is there.
 /// - `presets` (additive, schema still 1; always present, 29 entries): the built-in progression library
 ///   (presets.h), every record of `allPresets()` in table order (so grouped by genre), each
 ///   `{id, name, genre, tonality, numerals, fits}`: `id` the handle `loadPreset` takes, `name` and
@@ -182,6 +191,27 @@ constexpr int kMaxJsonDepth = 64;
 ///   repeats kept) and `fits` `presetFits` against `projectKey` (a Major preset fits Ionian, Lydian and
 ///   Mixolydian, a Minor one the other six modes, Any all nine). Everything but `fits` is constant for a
 ///   build, like `modes` and `tonics`.
+/// - `applied` (additive, schema still 1; always present, an array that a future key could leave empty):
+///   the applied chords of the BROWSED key, `appliedChords(browsedKey)` (applied.h) in its order (by
+///   target degree, `V7/x` before `vii°7/x`), laid out as a second palette grid: each entry has every
+///   member of a palette cell, written by the same writer, plus `id`, `label` and `target`:
+///   - `degree` is the applied chord's `targetDegree`, the column of the chord it resolves to (1..6 of
+///     the browsed scale; the tonic's column and a diminished or augmented target's stay empty), and
+///     `tier` is 1 for the dominant seventh `V7/x` and 0 for the leading-tone seventh `vii°7/x`;
+///   - `symbol` is `chordSymbol(chord, spellingKey)`, Klimper style like every palette symbol, so the
+///     leading-tone chord is spelled as the leading tone of its target (`C#dim7` for vii°7/ii in C, not
+///     `Dbdim7`);
+///   - `roman`, `function`, `tension`, `filled` and `outOfKey` are read against the PROJECT key as for
+///     every cell (`roman` is `romanNumeral(chord, projectKey)`; most applied chords are not `filled`,
+///     but G7 is V7/IV of G and V7 of C);
+///   - `id` is "applied-<degree>-<tier>" ("applied-1-1" is V7/ii), which no palette or home cell has;
+///   - `label` is `AppliedChord::label`, the name relative to the browsed key ("V7/ii", "vii°7/bVI",
+///     numerals read against the parallel major as `romanNumeral` does); a UI shows it in place of `roman`;
+///   - `target` is the tonicised triad's symbol in the browsed key, `chordSymbol(diatonicTriad(browsedKey,
+///     degree), browsedKey)` ("Dm" for V7/ii in C).
+///   C Ionian has ten: A7, C#dim7 (ii, column 1), B7, D#dim7 (iii), C7, Edim7 (IV), D7, F#dim7 (V), E7,
+///   G#dim7 (vi, column 5). Harmonic and melodic minor have six (their bIII+ is not tonicised), Locrian
+///   twelve, every other mode ten.
 /// - `suggestions`: `suggestNext(previous, projectKey, browsedKey)` (suggest.h, Pop style, at most 8),
 ///   where `previous` is the selected event's chord when `selectedEventId` names an event, else the last
 ///   event's chord, else null (the opening suggestions of an empty document). Each entry carries the
