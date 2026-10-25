@@ -47,6 +47,8 @@ Phase 3, so far:
   classical) stored as roman numerals, transposed into the project key, loaded in one click as a new
   progression or appended to the current one (one undo step, sectioned and named after the preset).
 - A tension curve over the sequence bar, and a browsed-mode picker for parallel-mode browsing.
+- An Applied view of the palette: the browsed key's secondary dominants (V7/x) and leading-tone sevenths
+  (vii°7/x), each above the chord it leads to, previewable and draggable like palette cells.
 
 ## Requirements
 
