@@ -5,8 +5,9 @@ import Foundation
 /// Fields the engine added under schema 1 (`modes`, `tonics`, `outOfKey`, and the Phase 2 fields:
 /// `function`, `tension`, the voicing fields, `why`, `sections`, `suggestions`, `autoVoiceLead`,
 /// `selectedEventId`, P2-M3's `homeTriads`, and the chord relations' `relationMode`, `relationReference`
-/// and per-cell `relation` / `relationText`, and the progression presets' `presets`) are optional so that a UI built against this file still decodes a snapshot from an
-/// older plug-in build.
+/// and per-cell `relation` / `relationText`, the progression presets' `presets`, and the applied chords'
+/// `applied` with its cells' `label` / `target`) are optional so that a UI built against this file still
+/// decodes a snapshot from an older plug-in build.
 
 /// `{"letter":"C","alter":0}`: a spelled tonic, `alter` -1 flat, 0 natural, 1 sharp.
 struct TonicJSON: Codable, Equatable {
@@ -79,6 +80,10 @@ struct EventJSON: Codable, Equatable, Identifiable {
 /// and the mode is not off, and absent from older plug-in builds.
 /// The snapshot's `homeTriads` entries are cells too: the project key's triads (`degree` of the project
 /// scale, `tier` 1), with the engine's own `id` ("home-0" … "home-6"), which palette cells do not carry.
+/// So are the snapshot's `applied` entries (plan A3): `degree` is the column of the chord they lead to
+/// (1..6), `tier` 1 for `V7/x` and 0 for `vii°7/x`, `id` "applied-<degree>-<tier>", plus `label` (the
+/// numeral relative to the browsed key, "V7/ii") and `target` (the chord resolved to, "Dm"). `roman`
+/// stays the numeral against the project key, like every cell's.
 struct CellJSON: Codable, Equatable, Identifiable {
   let degree: Int
   let tier: Int
@@ -92,20 +97,27 @@ struct CellJSON: Codable, Equatable, Identifiable {
   let outOfKey: [Int]?
   let function: String?
   let tension: Int?
-  /// The wire `id`: nil on palette cells, "home-<degree>" on `homeTriads` entries.
+  /// The wire `id`: nil on palette cells, "home-<degree>" on `homeTriads` entries, "applied-<degree>-<tier>"
+  /// on `applied` entries.
   let engineId: String?
   /// How related the chord is to the reference chord, 0...100; drives `RelationStyle`.
   let relation: Int?
   /// The engine's short account of that relation ("2 common tones (C, E) · up a fourth · cost 3").
   let relationText: String?
+  /// Applied chords only: the name musicians use, relative to the browsed key ("V7/ii"). Shown in place
+  /// of `roman` (`PaletteViewMode.numeralText`).
+  let label: String?
+  /// Applied chords only: the symbol of the chord this one resolves to ("Dm").
+  let target: String?
 
   /// The engine's id when it sent one, else the grid position ("1/0": unique within a palette, one cell
-  /// per tier and degree). The two forms cannot collide, so a held home cell never lights a palette cell.
+  /// per tier and degree). The forms cannot collide, so a held home or applied cell never lights a palette
+  /// cell (or each other).
   var id: String { engineId ?? "\(tier)/\(degree)" }
 
   enum CodingKeys: String, CodingKey {
     case degree, tier, root, type, symbol, roman, family, filled, voicing, outOfKey, function, tension
-    case relation, relationText
+    case relation, relationText, label, target
     case engineId = "id"
   }
 }
@@ -204,6 +216,10 @@ struct Snapshot: Codable, Equatable {
   /// The progression presets in table order (genres grouped); absent from older plug-in builds, whose UI
   /// then hides the Presets button.
   let presets: [PresetJSON]?
+  /// The browsed key's applied chords (plan A5): secondary dominants and leading-tone sevenths as cells,
+  /// in the engine's order; empty when the key has none. Absent from older plug-in builds, whose UI then
+  /// hides the Diatonic / Applied switch. Laid out by `PaletteViewMode.appliedLayout`.
+  let applied: [CellJSON]?
 
   /// `relationMode` as a case; nil when absent or unknown.
   var relationModeValue: RelationMode? { relationMode.flatMap(RelationMode.init(rawValue:)) }

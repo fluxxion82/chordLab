@@ -2,7 +2,18 @@ import SwiftUI
 
 /// The Klimper-style palette grid of the browsed key: 7 columns (scale degrees), one row per tier with
 /// tier 0 (power chords) at the bottom and higher tiers above. A degree with no chord in a tier leaves
-/// an empty slot so the columns stay aligned. Everything shown comes from the snapshot. Pressing a cell
+/// an empty slot so the columns stay aligned. Everything shown comes from the snapshot.
+///
+/// A compact *Diatonic / Applied* switch (plan A6) sits at the top left, above the scroll view, and
+/// picks the grid: the diatonic one above, or the applied one, the snapshot's `applied` cells in two
+/// rows (`V7/x` on top, `vii°7/x` below) in the column of the chord each resolves to
+/// (`PaletteViewMode.appliedLayout`), at the same cell size and through the same `PaletteCellControl`.
+/// The choice is remembered under `PaletteViewMode.storageKey`. A snapshot without `applied` (an older
+/// plug-in build) hides the switch and shows the diatonic grid, without touching the saved choice; an
+/// empty `applied` shows "No applied chords in this key". The scroll view is rebuilt per view (`.id`), so
+/// switching removes the old grid's cells and `PressAction`'s disappearance path releases a held one
+/// (never the same views reused for other chords, whose release would not match the held id), and each
+/// view opens at its own anchor: the diatonic grid at tier 0, the applied grid at its `V7/x` row. Pressing a cell
 /// previews its voicing through `ChordLabState.pressCell` / `releaseCell` (press, release, cancel and
 /// disappearance are all handled by `PressAction`); dragging a cell carries a `ChordRef` to the
 /// sequence bar (both wired in `PaletteCellControl`). The press is a simultaneous gesture under `.draggable`: the preview starts on mouse
@@ -13,48 +24,82 @@ import SwiftUI
 struct PaletteView: View {
   @EnvironmentObject var state: ChordLabState
   @AppStorage(LabelMode.storageKey) private var labelMode = LabelMode.defaultMode
+  @AppStorage(PaletteViewMode.storageKey) private var savedView = PaletteViewMode.defaultMode
 
-  static let columns = 7
+  static let columns = PaletteViewMode.columns
   static let spacing: CGFloat = 10
   static let minCell: CGFloat = 56
   static let maxCell: CGFloat = 96
   static let background = Color(red: 0.043, green: 0.071, blue: 0.251)   // #0B1240
 
   var body: some View {
-    GeometryReader { geometry in
-      let available = geometry.size.width - Self.spacing * CGFloat(Self.columns - 1)
-      let cellSize = min(Self.maxCell, max(Self.minCell, available / CGFloat(Self.columns)))
-      ScrollView(.vertical) {
-        if let snapshot = state.snapshot {
-          let rows = Self.layout(snapshot.palette)
-          VStack(spacing: Self.spacing) {
-            ForEach(rows.indices.reversed(), id: \.self) { tier in
-              HStack(spacing: Self.spacing) {
-                ForEach(0..<Self.columns, id: \.self) { degree in
-                  if let cell = rows[tier][degree] {
-                    PaletteCellControl(cell: cell, size: cellSize, labelMode: labelMode)
-                  } else {
-                    Color.clear.frame(width: cellSize, height: cellSize)
-                  }
-                }
-              }
-            }
-          }
-          .frame(maxWidth: .infinity)
-          .padding(.vertical, Self.spacing)
-        } else {
-          Text("Waiting for a snapshot…").foregroundStyle(.gray).frame(maxWidth: .infinity).padding()
+    let hasApplied = state.snapshot?.applied != nil
+    let view = PaletteViewMode.effective(saved: savedView, snapshotHasApplied: hasApplied)
+    VStack(alignment: .leading, spacing: 6) {
+      if hasApplied {
+        Picker("Palette view", selection: $savedView) {
+          ForEach(PaletteViewMode.allCases) { Text($0.title).tag($0) }
         }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .controlSize(.small)
+        .fixedSize()
+        .help("Diatonic: the key's chords. Applied: the chords that lead into them (V7/x, vii°7/x).")
       }
-      .defaultScrollAnchor(.bottom)   // tier 0 visible first, and kept in view when the tier count changes
-      // A related cell is drawn up to 1.10× its slot (`RelationStyle`), and at the 700-pt minimum width the
-      // grid fills the scroll view edge to edge, so an enlarged first- or last-column circle overhangs the
-      // scroll view by up to 4.4 pt. Clip vertically as before, but 5 pt wider on each side (the window's
-      // 12-pt padding has room); the grid geometry is unchanged.
-      .scrollClipDisabled()
-      .mask { Rectangle().padding(.horizontal, -5) }
+      GeometryReader { geometry in
+        let available = geometry.size.width - Self.spacing * CGFloat(Self.columns - 1)
+        let cellSize = min(Self.maxCell, max(Self.minCell, available / CGFloat(Self.columns)))
+        ScrollView(.vertical) {
+          if let snapshot = state.snapshot {
+            if view == .applied, let applied = snapshot.applied {
+              if applied.isEmpty {
+                Text("No applied chords in this key")
+                  .foregroundStyle(.gray)
+                  .frame(maxWidth: .infinity, minHeight: geometry.size.height)
+              } else {
+                grid(PaletteViewMode.appliedLayout(applied), cellSize: cellSize)
+              }
+            } else {
+              grid(Self.layout(snapshot.palette), cellSize: cellSize)
+            }
+          } else {
+            Text("Waiting for a snapshot…").foregroundStyle(.gray).frame(maxWidth: .infinity).padding()
+          }
+        }
+        // Diatonic: tier 0 visible first, and kept in view when the tier count changes. Applied: the V7/x row
+        // (top) first when both rows do not fit.
+        .defaultScrollAnchor(view == .applied ? .top : .bottom)
+        // A related cell is drawn up to 1.10× its slot (`RelationStyle`), and at the 700-pt minimum width the
+        // grid fills the scroll view edge to edge, so an enlarged first- or last-column circle overhangs the
+        // scroll view by up to 4.4 pt. Clip vertically as before, but 5 pt wider on each side (the window's
+        // 12-pt padding has room); the grid geometry is unchanged.
+        .scrollClipDisabled()
+        .mask { Rectangle().padding(.horizontal, -5) }
+        // A fresh scroll view per view: the default anchor applies only to a new one, and the old grid's
+        // cells disappear (releasing a held one) rather than being reused.
+        .id(view)
+      }
     }
     .background(Self.background)
+  }
+
+  /// `rows` (indexed `[tier][degree]`) top tier first, an empty slot where a row has no chord.
+  private func grid(_ rows: [[CellJSON?]], cellSize: CGFloat) -> some View {
+    VStack(spacing: Self.spacing) {
+      ForEach(rows.indices.reversed(), id: \.self) { tier in
+        HStack(spacing: Self.spacing) {
+          ForEach(0..<Self.columns, id: \.self) { degree in
+            if let cell = rows[tier][degree] {
+              PaletteCellControl(cell: cell, size: cellSize, labelMode: labelMode)
+            } else {
+              Color.clear.frame(width: cellSize, height: cellSize)
+            }
+          }
+        }
+      }
+    }
+    .frame(maxWidth: .infinity)
+    .padding(.vertical, Self.spacing)
   }
 
   /// Cells indexed `[tier][degree]`, nil where the palette has no chord. Rows cover 0..<tiers (at least
@@ -96,7 +141,8 @@ struct PaletteCellControl: View {
 /// (`FunctionStyle`) at the bottom left, inside the circle. Label mode "both" writes the function's short
 /// name after the numeral ("I · T"). While pressed it gets a white ring and a brighter fill (Klimper's
 /// selected look). Resting the mouse on it for a moment opens a popover with the chord's details
-/// (`HoverPopover`); the popover goes away on hover exit and while the cell is pressed.
+/// (`HoverPopover`); the popover goes away on hover exit and while the cell is pressed. The numeral is
+/// `PaletteViewMode.numeralText`: an applied chord's `label` ("V7/ii · D"), else the `roman`.
 ///
 /// Chord relations (plan R7): when the cell carries a `relation`, everything drawn (circle, ring, labels,
 /// dot, pressed ring) is scaled by `RelationStyle.scale` about the slot's centre and faded to
@@ -149,7 +195,7 @@ struct PaletteCellView: View {
             .font(.system(size: size * 0.24, weight: .medium))
         }
         if labelMode != .names {
-          Text(Self.numeralLabel(roman: cell.roman, function: cell.function, labelMode: labelMode))
+          Text(Self.numeralLabel(roman: PaletteViewMode.numeralText(cell), function: cell.function, labelMode: labelMode))
             .font(.system(size: size * 0.16))
             .opacity(labelMode == .both ? 0.85 : 1)
         }
@@ -195,7 +241,8 @@ struct ChordDragPreview: View {
           Text(ChordSymbol.glyphs(cell.symbol)).font(.system(size: 13, weight: .medium))
         }
         if labelMode != .names {
-          Text(PaletteCellView.numeralLabel(roman: cell.roman, function: cell.function, labelMode: labelMode))
+          Text(PaletteCellView.numeralLabel(roman: PaletteViewMode.numeralText(cell), function: cell.function,
+                                            labelMode: labelMode))
             .font(.system(size: 11)).opacity(labelMode == .both ? 0.85 : 1)
         }
       }
@@ -210,7 +257,8 @@ struct ChordDragPreview: View {
 /// function, tension and out-of-key lines are omitted when an older plug-in build sends no such field.
 /// (A cell carries no "borrowed from" key, only its out-of-key notes; the block popover, whose event has a
 /// `why`, names the key.) With a `relation` the popover ends with "Relation to G7 · 72" and the engine's
-/// `relationText` below it.
+/// `relationText` below it. The numeral is `PaletteViewMode.numeralText`; an applied chord adds "Leads to
+/// Dm (V7/ii)" under the header.
 struct ChordDetailView: View {
   let cell: CellJSON
   var reference: RelationReferenceJSON? = nil
@@ -219,7 +267,10 @@ struct ChordDetailView: View {
     VStack(alignment: .leading, spacing: 6) {
       HStack(alignment: .firstTextBaseline, spacing: 10) {
         Text(ChordSymbol.glyphs(cell.symbol)).font(.title2.weight(.semibold))
-        Text(ChordSymbol.glyphs(cell.roman)).font(.title3).foregroundStyle(.secondary)
+        Text(ChordSymbol.glyphs(PaletteViewMode.numeralText(cell))).font(.title3).foregroundStyle(.secondary)
+      }
+      if let leads = Self.leadsToLine(cell) {
+        Text(leads).font(.callout)
       }
       HStack(spacing: 6) {
         Text(cell.family).font(.callout).foregroundStyle(.secondary)
@@ -249,6 +300,12 @@ struct ChordDetailView: View {
       }
     }
     .frame(minWidth: 160, maxWidth: 320, alignment: .leading)
+  }
+
+  /// An applied chord's "Leads to Dm (V7/ii)" (glyphs applied); nil for a cell without a `target`.
+  static func leadsToLine(_ cell: CellJSON) -> String? {
+    guard let target = cell.target else { return nil }
+    return "Leads to " + ChordSymbol.glyphs(target) + (cell.label.map { " (" + ChordSymbol.glyphs($0) + ")" } ?? "")
   }
 }
 

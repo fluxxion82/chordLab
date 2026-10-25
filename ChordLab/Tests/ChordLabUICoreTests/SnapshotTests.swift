@@ -336,6 +336,79 @@ final class SnapshotTests: XCTestCase {
     XCTAssertThrowsError(try Self.decode(Snapshot.self, Self.withPresets(bad)))
   }
 
+  // MARK: - Applied chords (plan A3, A5)
+
+  /// `phase2` with a top-level `applied` value (written as given) before the events.
+  private static func withApplied(_ applied: String) -> String {
+    phase2.replacingOccurrences(of: "\"events\":", with: "\"applied\":\(applied),\"events\":")
+  }
+
+  /// Two applied entries as the engine writes them in C Ionian: V7/ii (A7, tier 1 over column 1) with a
+  /// relation, and vii°7/ii (C#dim7, tier 0) without one.
+  static let twoApplied = """
+    [{"id":"applied-1-1","degree":1,"tier":1,"root":9,"type":"7","symbol":"A7","roman":"VI7","family":"Major",
+      "function":"D","tension":45,"filled":false,"voicing":[57,61,64,67],"outOfKey":[1],
+      "relation":64,"relationText":"1 common tone (E) · up a sixth · cost 5","label":"V7/ii","target":"Dm"},
+     {"id":"applied-1-0","degree":1,"tier":0,"root":1,"type":"dim7","symbol":"C#dim7","roman":"#Idim7","family":"Other",
+      "function":"D","tension":70,"filled":false,"voicing":[49,52,55,58],"outOfKey":[1,10],"label":"vii°7/ii","target":"Dm"}]
+    """
+
+  func testOlderSnapshotHasNoApplied() throws {
+    XCTAssertNil(try Self.decode(Snapshot.self, Self.phase1).applied)
+    XCTAssertNil(try Self.decode(Snapshot.self, Self.phase2).applied)
+  }
+
+  func testEmptyAppliedArrayIsEmptyNotNil() throws {
+    XCTAssertEqual(try Self.decode(Snapshot.self, Self.withApplied("[]")).applied, [])
+  }
+
+  func testAppliedCellsDecodeWithLabelTargetAndEngineIds() throws {
+    let applied = try XCTUnwrap(try Self.decode(Snapshot.self, Self.withApplied(Self.twoApplied)).applied)
+    XCTAssertEqual(applied.map(\.id), ["applied-1-1", "applied-1-0"])
+    XCTAssertEqual(applied.map(\.degree), [1, 1])
+    XCTAssertEqual(applied.map(\.tier), [1, 0])
+    XCTAssertEqual(applied.map(\.symbol), ["A7", "C#dim7"])
+    XCTAssertEqual(applied.map(\.roman), ["VI7", "#Idim7"])
+    XCTAssertEqual(applied.map(\.label), ["V7/ii", "vii°7/ii"])
+    XCTAssertEqual(applied.map(\.target), ["Dm", "Dm"])
+    XCTAssertEqual(applied.map(\.filled), [false, false])
+    XCTAssertEqual(applied.map(\.outOfKey), [[1], [1, 10]])
+    XCTAssertEqual(applied.map(\.relation), [64, nil])
+    XCTAssertEqual(applied[0].relationText, "1 common tone (E) · up a sixth · cost 5")
+    XCTAssertNil(applied[1].relationText)
+  }
+
+  /// No applied id is a palette or home id, so a held applied cell never lights one of those.
+  func testAppliedIdsDifferFromPaletteAndHomeIds() throws {
+    let snapshot = try Self.decode(Snapshot.self, Self.withHome(Self.withApplied(Self.twoApplied), Self.homeEntries))
+    let applied = Set(try XCTUnwrap(snapshot.applied).map(\.id))
+    XCTAssertTrue(applied.isDisjoint(with: snapshot.palette.cells.map(\.id)))
+    XCTAssertTrue(applied.isDisjoint(with: snapshot.homeRow.map(\.id)))
+  }
+
+  /// Palette and home cells carry no `label` / `target`.
+  func testPaletteAndHomeCellsHaveNoLabelOrTarget() throws {
+    let snapshot = try Self.decode(Snapshot.self, Self.withHome(Self.withApplied(Self.twoApplied), Self.homeEntries))
+    for cell in snapshot.palette.cells + snapshot.homeRow {
+      XCTAssertNil(cell.label, "cell \(cell.id)")
+      XCTAssertNil(cell.target, "cell \(cell.id)")
+    }
+  }
+
+  func testAppliedLeavesTheRestOfTheSnapshotUnaffected() throws {
+    let plain = try Self.decode(Snapshot.self, Self.phase2)
+    let withApplied = try Self.decode(Snapshot.self, Self.withApplied(Self.twoApplied))
+    XCTAssertEqual(withApplied.events, plain.events)
+    XCTAssertEqual(withApplied.palette, plain.palette)
+    XCTAssertEqual(withApplied.suggestions, plain.suggestions)
+  }
+
+  /// An applied entry missing a required cell field fails the decode, as a palette cell would.
+  func testAppliedCellWithoutSymbolFailsToDecode() {
+    let bad = #"[{"id":"applied-1-1","degree":1,"tier":1,"root":9,"type":"7","roman":"VI7","family":"Major","filled":false,"voicing":[57]}]"#
+    XCTAssertThrowsError(try Self.decode(Snapshot.self, Self.withApplied(bad)))
+  }
+
   // MARK: - Other payloads
 
   func testMessagePayloadsDecode() throws {
@@ -435,6 +508,9 @@ final class SnapshotTests: XCTestCase {
         XCTAssertFalse(snapshot.palette.cells.isEmpty, name)
         XCTAssertEqual(Set(snapshot.palette.cells.map(\.id)).count, snapshot.palette.cells.count, "\(name): cell ids unique")
         XCTAssertEqual(Set(snapshot.events.map(\.id)).count, snapshot.events.count, "\(name): event ids unique")
+        if let applied = snapshot.applied {
+          XCTAssertEqual(Set(applied.map(\.id)).count, applied.count, "\(name): applied ids unique")
+        }
       } catch {
         XCTFail("\(name) does not decode: \(error)")
       }
@@ -577,6 +653,7 @@ final class SnapshotTests: XCTestCase {
     XCTAssertNil(snapshot.suggestions)
     XCTAssertNil(snapshot.homeTriads)
     XCTAssertTrue(snapshot.homeRow.isEmpty)
+    XCTAssertNil(snapshot.applied)
     for event in snapshot.events {
       XCTAssertNil(event.function, "event \(event.id)")
       XCTAssertNil(event.tension, "event \(event.id)")
