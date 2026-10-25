@@ -26,6 +26,9 @@ struct HomeRowView: View {
           PaletteCellControl(cell: cell, size: Self.cellSize, labelMode: labelMode)
         }
         Spacer(minLength: 0)
+        if snapshot.applied != nil {
+          PaletteViewSwitch()
+        }
       }
     }
   }

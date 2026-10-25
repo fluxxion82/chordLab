@@ -36,15 +36,10 @@ struct PaletteView: View {
     let hasApplied = state.snapshot?.applied != nil
     let view = PaletteViewMode.effective(saved: savedView, snapshotHasApplied: hasApplied)
     VStack(alignment: .leading, spacing: 6) {
-      if hasApplied {
-        Picker("Palette view", selection: $savedView) {
-          ForEach(PaletteViewMode.allCases) { Text($0.title).tag($0) }
-        }
-        .pickerStyle(.segmented)
-        .labelsHidden()
-        .controlSize(.small)
-        .fixedSize()
-        .help("Diatonic: the key's chords. Applied: the chords that lead into them (V7/x, vii°7/x).")
+      // While the home row is shown the switch sits at its trailing end instead (`HomeRowView`), so the
+      // grid keeps its viewport at the 700×480 minimum.
+      if hasApplied, state.snapshot?.homeRow.isEmpty ?? true {
+        PaletteViewSwitch()
       }
       GeometryReader { geometry in
         let available = geometry.size.width - Self.spacing * CGFloat(Self.columns - 1)
@@ -214,7 +209,9 @@ struct PaletteCellView: View {
     .animation(RelationStyle.animation, value: cell.relation)
     .frame(width: size, height: size)   // the unchanged slot
     .contentShape(Circle())             // full-size: the hit area ignores the relation scale
-    .accessibilityLabel(ChordSymbol.spokenName(symbol: cell.symbol, type: cell.type) + (cell.filled ? ", in key" : ", borrowed")
+    .accessibilityLabel(ChordSymbol.spokenName(symbol: cell.symbol, type: cell.type)
+                        + ", " + PaletteViewMode.numeralText(cell)
+                        + (cell.filled ? ", in key" : ", borrowed")
                         + (cell.relation.map { ", relation \($0)" } ?? ""))
     .hoverPopover(suppressed: isPressed) {
       ChordDetailView(cell: cell, reference: reference).padding(12)
@@ -313,5 +310,22 @@ struct PaletteView_Previews: PreviewProvider {
   static var previews: some View {
     PaletteView().environmentObject(ChordLabState(numParams: kNumParams))
       .frame(width: 900, height: 460)
+  }
+}
+
+/// The *Diatonic / Applied* switch over the palette (plan A6), bound to the per-user preference. Drawn above
+/// the grid, or at the trailing end of the home row while that row is shown.
+struct PaletteViewSwitch: View {
+  @AppStorage(PaletteViewMode.storageKey) private var savedView = PaletteViewMode.defaultMode
+
+  var body: some View {
+    Picker("Palette view", selection: $savedView) {
+      ForEach(PaletteViewMode.allCases) { Text($0.title).tag($0) }
+    }
+    .pickerStyle(.segmented)
+    .labelsHidden()
+    .controlSize(.small)
+    .fixedSize()
+    .help("Diatonic: the key's chords. Applied: the chords that lead into them (V7/x, vii°7/x).")
   }
 }
