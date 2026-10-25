@@ -41,7 +41,8 @@ std::vector<AppliedChord> appliedChords(const Key& key) {
     out.reserve(12);
     for (int degree = 1; degree < 7; ++degree) {
         const Chord target = diatonicTriad(key, degree);
-        if (std::string_view(target.type->id) == "dim") {
+        const std::string_view quality = target.type->id;
+        if (quality == "dim" || quality == "aug") {  // only major and minor triads are tonicised
             continue;
         }
         const std::string numeral = romanNumeral(target, key, SymbolStyle::Standard);

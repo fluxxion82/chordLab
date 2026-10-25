@@ -132,10 +132,9 @@ TEST_CASE("appliedChords: in A Aeolian only V7/bIII happens to be diatonic") {
     }
 }
 
-TEST_CASE("appliedChords: A harmonic minor skips both diminished degrees and tonicises III+") {
+TEST_CASE("appliedChords: A harmonic minor skips both diminished degrees and the augmented bIII+") {
+    // A B C D E F G#: i, ii° (skipped), bIII+ (skipped), iv, V, bVI, vii° (skipped).
     checkList(key('A', 0, Mode::HarmonicMinor), {
-                                                    {G, "7", 2, "V7/bIII+", "G7"},
-                                                    {B, "dim7", 2, "vii°7/bIII+", "Bdim7"},
                                                     {A, "7", 3, "V7/iv", "A7"},
                                                     {Cs, "dim7", 3, "vii°7/iv", "C#dim7"},
                                                     {B, "7", 4, "V7/V", "B7"},
@@ -143,6 +142,35 @@ TEST_CASE("appliedChords: A harmonic minor skips both diminished degrees and ton
                                                     {C, "7", 5, "V7/bVI", "C7"},
                                                     {E, "dim7", 5, "vii°7/bVI", "Edim7"},
                                                 });
+}
+
+TEST_CASE("appliedChords: A melodic minor skips its two diminished degrees and the augmented bIII+") {
+    // A B C D E F# G#: i, ii, bIII+ (skipped), IV, V, vi° (skipped), vii° (skipped).
+    checkList(key('A', 0, Mode::MelodicMinor), {
+                                                   {Fs, "7", 1, "V7/ii", "F#7"},
+                                                   {Bb, "dim7", 1, "vii°7/ii", "A#dim7"},
+                                                   {A, "7", 3, "V7/IV", "A7"},
+                                                   {Cs, "dim7", 3, "vii°7/IV", "C#dim7"},
+                                                   {B, "7", 4, "V7/V", "B7"},
+                                                   {Ds, "dim7", 4, "vii°7/V", "D#dim7"},
+                                               });
+}
+
+TEST_CASE("appliedChords: no augmented triad is tonicised in any key") {
+    for (PitchClass pc = 0; pc < 12; ++pc) {
+        for (const Mode m : {Mode::HarmonicMinor, Mode::MelodicMinor}) {
+            const Key k{canonicalTonic(pc, m), m};
+            CAPTURE(pc);
+            CAPTURE(static_cast<int>(m));
+            const std::vector<AppliedChord> applied = appliedChords(k);
+            CHECK(applied.size() == 6);
+            for (const AppliedChord& a : applied) {
+                CAPTURE(a.label);
+                CHECK(a.targetDegree != 2);  // bIII+ in both minors
+                CHECK(a.label.find('+') == std::string::npos);
+            }
+        }
+    }
 }
 
 // --- Other modes ------------------------------------------------------------------------------------
@@ -235,7 +263,7 @@ TEST_CASE("appliedChords: every entry of every key is well-formed, ordered and s
             CAPTURE(m);
             const std::vector<AppliedChord> applied = appliedChords(k);
             CHECK(applied.size() % 2 == 0);
-            CHECK(applied.size() >= 8);  // at most two of the six degrees are diminished
+            CHECK(applied.size() >= 6);  // at most three of the six degrees are diminished or augmented
             CHECK(applied.size() <= 12);
             for (std::size_t i = 0; i < applied.size(); ++i) {
                 const AppliedChord& a = applied[i];
@@ -245,6 +273,7 @@ TEST_CASE("appliedChords: every entry of every key is well-formed, ordered and s
                 REQUIRE(a.targetDegree <= 6);
                 const Chord target = diatonicTriad(k, a.targetDegree);
                 CHECK(std::string_view(target.type->id) != "dim");
+                CHECK(std::string_view(target.type->id) != "aug");
                 const std::string numeral = romanNumeral(target, k);
                 const bool isDominant = i % 2 == 0;
                 if (isDominant) {
