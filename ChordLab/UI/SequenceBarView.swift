@@ -29,7 +29,9 @@ import SwiftUI
 /// was measured in (the flicker of the first Live session); and a space attached to the strip is no better,
 /// because shortening the last block shrinks the scrolled content and, with the strip scrolled to its right
 /// end, the clamped scroll offset moves the content under the mouse, which would feed back into the length.
-/// The window does not move during a drag. The handle's hit target is `handleHitWidth` (14 pt) wide on a
+/// The window does not move during a drag. That same clamping would still slide the strip under a resize
+/// (the length right, the handle no longer under the mouse), so while a handle is dragged the content keeps
+/// its width from before the drag, with trailing space for what the block gave up. The handle's hit target is `handleHitWidth` (14 pt) wide on a
 /// block of 28 pt or more, around a `handleWidth` bar, and the voicing badge and "manual" text keep clear of
 /// it; a block drag starts only after `moveThreshold` (8 pt), so a slightly missed handle press does not
 /// slide the block. The drag in progress lives in `@GestureState`, which SwiftUI resets when the gesture
@@ -76,9 +78,12 @@ struct SequenceBarView: View {
   static let rowSpacing: CGFloat = 2
 
   /// A resize in progress: the handle of `id` is being dragged and the block shows `lengthBeats`.
+  /// `startEndX` is the progression's end before the drag, captured on its first update: the strip keeps
+  /// its content at least that wide until the drag ends (see `body`).
   struct Resize: Equatable {
     let id: Int
     var lengthBeats: Double
+    var startEndX: CGFloat
   }
 
   /// A reorder in progress: block `id` is drawn `offset` points from its place.
@@ -119,8 +124,13 @@ struct SequenceBarView: View {
       // The layout of what is drawn: the snapshot's lengths, except for a block being resized, which
       // follows the mouse. The ruler's end marker and the content width follow it too.
       let layout = SequenceGeometry.layout(lengths: events.map(displayedLength), pxPerBeat: Self.pxPerBeat)
-      // Room for the progression plus a bar of slack to drop into; never narrower than the strip.
-      let contentWidth = max(geometry.size.width, layout.endX + CGFloat(Self.beatsPerBar) * Self.pxPerBeat)
+      // Room for the progression plus a bar of slack to drop into; never narrower than the strip. While a
+      // handle is dragged the content also keeps its width from before the drag (trailing space for what
+      // the shortened block gave up): content that shrank under a strip scrolled to its right end would
+      // make the scroll view clamp its offset and slide the strip, so the handle would leave the mouse.
+      // The space goes with the gesture state when the drag ends or is cancelled.
+      let keptEndX = max(layout.endX, resize?.startEndX ?? 0)
+      let contentWidth = max(geometry.size.width, keptEndX + CGFloat(Self.beatsPerBar) * Self.pxPerBeat)
       ScrollView(.horizontal) {
         ZStack(alignment: .topLeading) {
           VStack(alignment: .leading, spacing: Self.rowSpacing) {
@@ -448,7 +458,9 @@ struct SequenceBarView: View {
   private func resizeGesture(_ event: EventJSON) -> some Gesture {
     DragGesture(minimumDistance: 1, coordinateSpace: .global)
       .updating($resize) { value, state, _ in
-        state = Resize(id: event.id, lengthBeats: Self.resizedLength(event.lengthBeats, by: value.translation.width))
+        let startEndX = state?.startEndX ?? Self.layout(events: events).endX
+        state = Resize(id: event.id, lengthBeats: Self.resizedLength(event.lengthBeats, by: value.translation.width),
+                       startEndX: startEndX)
       }
       .onChanged { _ in if selectedEventId != event.id { select(event) } }
       .onEnded { value in
