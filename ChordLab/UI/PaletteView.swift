@@ -4,8 +4,9 @@ import SwiftUI
 /// `PaletteLayout.diatonicRows` order: the power row (tier 0) on top, then the colour, 7 / add9 and 6 / 7
 /// rows, and the triads (tier 1) at the bottom, as in Klimper. Every row is labelled in a 44-pt gutter on
 /// its left (hidden from accessibility: each cell speaks its own name), and each labelled row is centred
-/// as a whole, so the circles sit 27 pt right of the centre while the home row below, which has no gutter,
-/// stays centred. A degree with no chord in a tier leaves an empty slot so the columns stay aligned. The
+/// as a whole, so the circles sit 27 pt right of the centre (the home row below is laid out on its own,
+/// from the leading edge, and does not line up with the columns). A degree with no chord in a tier leaves
+/// an empty slot so the columns stay aligned. The
 /// cells fit the height when they can (`PaletteLayout.cellSize`: every row in view, 56…96 pt), counting
 /// the diatonic rows in both views so switching views does not resize them; below that the grid scrolls.
 /// Everything shown comes from the snapshot.
