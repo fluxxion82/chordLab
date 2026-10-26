@@ -40,6 +40,12 @@ public:
   void OnReset() override;
   void ProcessBlock(sample** inputs, sample** outputs, int nFrames) override;
   bool OnMessage(int msgTag, int ctrlTag, int dataSize, const void* pData) override;
+  // Keys the host delivers through the plug-in API (VST3 onKeyDown): forwarded to the Swift editor's
+  // key router (ChordLabViewController.handleKey); true when the editor consumed the key.
+  bool OnKeyDown(const IKeyPress& key) override;
+  // Their releases (VST3 onKeyUp), forwarded the same way (ChordLabViewController.handleKeyUp): they end a
+  // held key, since onKeyDown carries no repeat flag; true for a key the editor would consume.
+  bool OnKeyUp(const IKeyPress& key) override;
 
   // Versioned state chunk: u8 version, i32 payload length, stateJson payload, then iPlug2's params.
   bool SerializeState(IByteChunk& chunk) const override;

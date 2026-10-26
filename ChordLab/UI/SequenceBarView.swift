@@ -13,7 +13,8 @@ import SwiftUI
 /// - drop a palette cell anywhere on the strip → `appendChord`;
 /// - click a block → `selectEvent {id}` (the snapshot's `selectedEventId` is the selection: the white ring,
 ///   the suggestions strip and the plug-in agree on it); click the empty strip → `selectEvent {id: null}`;
-///   Delete / Forward Delete → `removeChord` of the selection;
+///   Delete / Forward Delete → `removeChord` of the selection, through the key routes
+///   (`ChordLabState.perform`);
 /// - drag the handle at a block's right edge → `setLength`, snapped to quarter beats and clamped to
 ///   0.25…64, sent when the drag ends (the width follows the mouse meanwhile, as local state);
 /// - drag a block sideways → `moveChord` to the index its centre lands on, sent when the drag ends
@@ -30,7 +31,7 @@ import SwiftUI
 /// the selected chord). It follows a block being resized or dragged, takes no clicks and is hidden from
 /// accessibility (the block's hover popover shows the tension); with any chord lacking a tension (an older
 /// plug-in build) nothing is drawn there.
-/// Undo/redo are the key bar's buttons (⌘Z / ⇧⌘Z), so they work whatever has focus.
+/// Undo/redo are the key bar's buttons, and ⌘Z / ⇧⌘Z through the key routes.
 ///
 /// The playhead (`state.transport`, ~15 Hz from the plug-in) is a 2-pt line at the position's beat, folded
 /// into the progression when it loops; the block sounding there is drawn brighter. Hidden while the
@@ -75,7 +76,6 @@ struct SequenceBarView: View {
   /// The block whose voicing popover is open, if any.
   @State private var voicingPopoverId: Int?
   @State private var dropTargeted = false
-  @FocusState private var focused: Bool
 
   private var events: [EventJSON] { state.snapshot?.events ?? [] }
   private var sections: [SectionJSON] { state.snapshot?.sections ?? [] }
@@ -151,11 +151,6 @@ struct SequenceBarView: View {
     .overlay(
       RoundedRectangle(cornerRadius: 8)
         .strokeBorder(Color.white.opacity(dropTargeted ? 0.8 : 0.12), lineWidth: dropTargeted ? 2 : 1))
-    .focusable()
-    .focused($focused)
-    .focusEffectDisabled()
-    .onKeyPress(.delete) { deleteSelection() }
-    .onKeyPress(.deleteForward) { deleteSelection() }
     .dropDestination(for: ChordRef.self) { refs, _ in
       guard let ref = refs.first else { return false }
       state.send(command: ["cmd": "appendChord", "root": ref.root, "type": ref.type])
@@ -395,7 +390,6 @@ struct SequenceBarView: View {
     if selectedEventId != event.id {
       state.send(command: ["cmd": "selectEvent", "id": event.id])
     }
-    focused = true
   }
 
   private func deselect() {
@@ -435,12 +429,6 @@ struct SequenceBarView: View {
           state.send(command: ["cmd": "moveChord", "id": event.id, "index": target])
         }
       }
-  }
-
-  private func deleteSelection() -> KeyPress.Result {
-    guard let id = selectedEventId else { return .ignored }
-    state.send(command: ["cmd": "removeChord", "id": id])
-    return .handled
   }
 
   // MARK: - Ruler

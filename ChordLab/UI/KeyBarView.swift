@@ -1,12 +1,11 @@
 import SwiftUI
 
 /// Project key pickers (tonic, mode), browsed-key steppers with the browsed-mode picker and home,
-/// undo/redo (⌘Z / ⇧⌘Z, as keyboard shortcuts on the buttons so they work whatever has focus; a host may
-/// swallow them before the plug-in sees them, a Live check), the label-mode toggle and the
-/// chord-relations chooser (plan R8). Everything shown comes from the snapshot (the pickers' items are
-/// its `modes` and `tonics` tables); every change is a command to the plugin. Without the tables (an
-/// older plug-in build) the project-key pickers are disabled placeholders, the browsed-mode picker is
-/// absent, and ContentView says so.
+/// undo/redo (the buttons; ⌘Z / ⇧⌘Z arrive through the key routes, `EditorKeyRouter`), the label-mode
+/// toggle and the chord-relations chooser (plan R8). Everything shown comes from the snapshot (the
+/// pickers' items are its `modes` and `tonics` tables); every change is a command to the plugin. Without
+/// the tables (an older plug-in build) the project-key pickers are disabled placeholders, the
+/// browsed-mode picker is absent, and ContentView says so.
 struct KeyBarView: View {
   @EnvironmentObject var state: ChordLabState
   @AppStorage(LabelMode.storageKey) private var labelMode = LabelMode.defaultMode
@@ -141,11 +140,9 @@ struct KeyBarView: View {
   private var historyControls: some View {
     HStack(spacing: 4) {
       Button { state.send(command: ["cmd": "undo"]) } label: { Image(systemName: "arrow.uturn.backward") }
-        .keyboardShortcut("z", modifiers: .command)
         .help("Undo (⌘Z)")
         .accessibilityLabel("Undo")
       Button { state.send(command: ["cmd": "redo"]) } label: { Image(systemName: "arrow.uturn.forward") }
-        .keyboardShortcut("z", modifiers: [.command, .shift])
         .help("Redo (⇧⌘Z)")
         .accessibilityLabel("Redo")
     }
