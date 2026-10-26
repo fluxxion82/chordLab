@@ -54,4 +54,55 @@ final class TipGeometryTests: XCTestCase {
                                   in: container, preferAbove: true, gap: 6)
     XCTAssertEqual(frame, CGRect(x: 450, y: 294, width: 0, height: 0), "before the tip is measured")
   }
+  func testATranslatedContainerPlacesAndClampsInItsOwnBounds() {
+    let shifted = CGRect(x: 100, y: 50, width: 900, height: 620)
+    let frame = TipGeometry.frame(anchor: CGRect(x: 500, y: 350, width: 100, height: 56), tipSize: tip,
+                                  in: shifted, preferAbove: true, gap: 6)
+    XCTAssertEqual(frame, CGRect(x: 450, y: 244, width: 200, height: 100))
+    let left = TipGeometry.frame(anchor: CGRect(x: 100, y: 350, width: 40, height: 56), tipSize: tip,
+                                 in: shifted, preferAbove: true, gap: 6)
+    XCTAssertEqual(left.minX, 100 + TipGeometry.margin)
+    let top = TipGeometry.frame(anchor: CGRect(x: 500, y: 60, width: 100, height: 56), tipSize: tip,
+                                in: shifted, preferAbove: true, gap: 6)
+    XCTAssertEqual(top.minY, 122, "no room above inside the container (its top is 50): below, 116 + 6")
+  }
+
+  func testATipLargerThanTheContainerIsPinnedToItsTopLeadingMargin() {
+    let huge = CGSize(width: 1000, height: 700)
+    let frame = TipGeometry.frame(anchor: CGRect(x: 400, y: 300, width: 100, height: 56), tipSize: huge,
+                                  in: container, preferAbove: true, gap: 6)
+    XCTAssertEqual(frame.origin, CGPoint(x: TipGeometry.margin, y: TipGeometry.margin),
+                   "the start of the content stays in view; the overflow is at the trailing and bottom edges")
+    XCTAssertEqual(frame.size, huge)
+  }
+
+  func testExactlyEnoughRoomAboveKeepsTheTipAboveWithTheFullGap() {
+    // 100 high + 6 gap + 4 margin = 110 above the anchor: just fits.
+    let anchor = CGRect(x: 400, y: 110, width: 100, height: 56)
+    let frame = TipGeometry.frame(anchor: anchor, tipSize: tip, in: container, preferAbove: true, gap: 6)
+    XCTAssertEqual(frame.maxY, 104)
+    XCTAssertEqual(frame.minY, TipGeometry.margin)
+    let tight = TipGeometry.frame(anchor: anchor.offsetBy(dx: 0, dy: -1), tipSize: tip, in: container,
+                                  preferAbove: true, gap: 6)
+    XCTAssertEqual(tight.minY, 109 + 56 + 6, "one point less: below")
+  }
+
+  func testExactlyEnoughRoomBelowKeepsTheTipBelow() {
+    // Anchor bottom 510: 620 − 4 margin − 6 gap − 100 = 510.
+    let anchor = CGRect(x: 400, y: 454, width: 100, height: 56)
+    let frame = TipGeometry.frame(anchor: anchor, tipSize: tip, in: container, preferAbove: false, gap: 6)
+    XCTAssertEqual(frame.minY, 516)
+    XCTAssertEqual(frame.maxY, 620 - TipGeometry.margin)
+  }
+
+  func testWhenNeitherSideFitsATieGoesToThePreferredSide() {
+    // 300 high; anchor 200…256 in 0…456: 190 above and 190 below once gap and margin are taken.
+    let tall = CGSize(width: 200, height: 300)
+    let box = CGRect(x: 0, y: 0, width: 900, height: 456)
+    let anchor = CGRect(x: 400, y: 200, width: 100, height: 56)
+    let above = TipGeometry.frame(anchor: anchor, tipSize: tall, in: box, preferAbove: true, gap: 6)
+    XCTAssertEqual(above.minY, TipGeometry.margin, "above, pushed down to the margin")
+    let below = TipGeometry.frame(anchor: anchor, tipSize: tall, in: box, preferAbove: false, gap: 6)
+    XCTAssertEqual(below.maxY, 456 - TipGeometry.margin, "below, pushed up to the margin")
+  }
 }

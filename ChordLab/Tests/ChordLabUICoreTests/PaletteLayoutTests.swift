@@ -43,6 +43,16 @@ final class PaletteLayoutTests: XCTestCase {
     XCTAssertEqual(rows[0].cells.compactMap { $0 }.count, 0)
   }
 
+  func testAOneTierPaletteIsJustThePowerRow() {
+    let rows = PaletteLayout.diatonicRows(palette(tiers: 1, cells: [cell(degree: 2, tier: 0, symbol: "E5"),
+                                                                     cell(degree: 2, tier: 1, symbol: "Em")]))
+    XCTAssertEqual(rows.map(\.tier), [0])
+    XCTAssertEqual(rows.map(\.label), ["power"])
+    XCTAssertEqual(rows[0].cells.compactMap { $0?.symbol }, ["E5"], "a cell in a tier past the count is ignored")
+    XCTAssertEqual(PaletteLayout.cellSize(viewport: CGSize(width: 900, height: 100), rows: 1), 80,
+                   "one row: (100 − 2·10) / 1, under the width fit")
+  }
+
   func testAPaletteWithNoTiersStillHasOneRow() {
     let rows = PaletteLayout.diatonicRows(palette(tiers: 0, cells: []))
     XCTAssertEqual(rows.map(\.tier), [0])
