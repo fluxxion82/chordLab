@@ -4,8 +4,8 @@ import SwiftUI
 /// `lengthBeats × pxPerBeat` wide, coloured by family, a ring instead of a fill when the chord has notes
 /// outside the project key, labelled per the label mode, with the function dot at the top left and a
 /// 2-pt tension strip along the bottom edge (the function colour at 40 %, brightened over `tension`/100
-/// of the width). Resting the mouse on a block opens its popover (`BlockDetailView`: the voicing, the
-/// tension and the engine's "why" against the previous chord). Everything drawn comes from the snapshot, and
+/// of the width). Resting the mouse on a block shows its tip (`BlockDetailView`: the voicing, the
+/// tension and the engine's "why" against the previous chord; `HoverTip`). Everything drawn comes from the snapshot, and
 /// every position comes from `SequenceGeometry`: the blocks, the ruler, the playhead and the reorder
 /// arithmetic share one linear layout, so what is drawn is what is computed.
 ///
@@ -28,7 +28,7 @@ import SwiftUI
 /// per chord at its block's centre (`SequenceGeometry.tensionPoints`), tension 0 at the bottom and 100 at
 /// the top, straight neutral segments between the points and a function-coloured dot on each (larger on
 /// the selected chord). It follows a block being resized or dragged, takes no clicks and is hidden from
-/// accessibility (the block's hover popover shows the tension); with any chord lacking a tension (an older
+/// accessibility (the block's hover tip shows the tension); with any chord lacking a tension (an older
 /// plug-in build) nothing is drawn there.
 /// Undo/redo are the key bar's buttons (⌘Z / ⇧⌘Z), so they work whatever has focus.
 ///
@@ -267,8 +267,8 @@ struct SequenceBarView: View {
     .contentShape(Rectangle())
     .onTapGesture { select(event) }
     .gesture(moveGesture(event))
-    .hoverPopover(suppressed: moving || resize?.id == event.id || voicingPopoverId == event.id) {
-      BlockDetailView(event: event, autoVoiceLead: state.snapshot?.autoVoiceLead ?? false).padding(12)
+    .hoverTip(id: "event-\(event.id)", suppressed: moving || resize?.id == event.id || voicingPopoverId == event.id) {
+      BlockDetailView(event: event, autoVoiceLead: state.snapshot?.autoVoiceLead ?? false)
     }
     .popover(isPresented: voicingPresented(event), arrowEdge: .bottom) {
       VoicingPopoverView(eventId: event.id).environmentObject(state).padding(12)
@@ -475,7 +475,7 @@ struct SequenceBarView: View {
   }
 }
 
-/// A block's hover popover: symbol and numeral, family and function word, the voicing that sounds (note
+/// A block's hover tip: symbol and numeral, family and function word, the voicing that sounds (note
 /// names, C4 = MIDI 60) with one line on how it was chosen (`HarmonyText.voicingStatus`: the stored
 /// inversion and octave only when they are what sounds), the tension bar, then the engine's "why"
 /// against the previous chord: its

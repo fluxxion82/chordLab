@@ -39,7 +39,7 @@ enum PaletteViewMode: String, CaseIterable, Identifiable {
     return rows
   }
 
-  /// The numeral a cell shows wherever one is shown (the cell, its drag preview, its popover): an applied
+  /// The numeral a cell shows wherever one is shown (the cell, its drag preview, its tip): an applied
   /// chord's `label` ("V7/ii", relative to the browsed key), else the `roman` against the project key.
   /// ASCII as the engine writes it; the views apply `ChordSymbol.glyphs`.
   static func numeralText(_ cell: CellJSON) -> String {

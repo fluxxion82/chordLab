@@ -140,15 +140,15 @@ struct SuggestionChip: View {
         .allowsHitTesting(false)
         .accessibilityHidden(true))
     .onHover { hovering = $0 }
-    .hoverPopover(arrowEdge: .bottom) {
-      SuggestionDetailView(suggestion: suggestion).padding(12)
+    .hoverTip(id: "chip-\(number)", preferAbove: false) {
+      SuggestionDetailView(suggestion: suggestion)
     }
     .accessibilityLabel("Append " + ChordSymbol.spokenName(symbol: suggestion.symbol, type: suggestion.type) +
                         ", suggestion \(number)")
   }
 }
 
-/// The chip's hover popover: symbol, numeral and function word, then the reasons on one line.
+/// The chip's hover tip: symbol, numeral and function word, then the reasons on one line.
 struct SuggestionDetailView: View {
   let suggestion: SuggestionJSON
 

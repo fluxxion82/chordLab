@@ -110,10 +110,10 @@ struct PaletteView: View {
 }
 
 /// A cell with its gestures, as the palette grid and the home row (`HomeRowView`) both use it: the look
-/// of `PaletteCellView` (with its hover popover), press to preview through `ChordLabState.pressCell` /
+/// of `PaletteCellView` (with its hover tip), press to preview through `ChordLabState.pressCell` /
 /// `releaseCell`, and a drag that carries the chord's `ChordRef` to the sequence bar under a
 /// `ChordDragPreview`. The one place these are wired, so the two can not drift apart; the relatedness
-/// look (`RelationStyle`) and the popover's relation line come with it, so home cells get them too.
+/// look (`RelationStyle`) and the tip's relation line come with it, so home cells get them too.
 struct PaletteCellControl: View {
   @EnvironmentObject var state: ChordLabState
   let cell: CellJSON
@@ -135,8 +135,8 @@ struct PaletteCellControl: View {
 /// otherwise (a borrowed chord), with the symbol and/or roman numeral inside and a 6-pt function dot
 /// (`FunctionStyle`) at the bottom left, inside the circle. Label mode "both" writes the function's short
 /// name after the numeral ("I · T"). While pressed it gets a white ring and a brighter fill (Klimper's
-/// selected look). Resting the mouse on it for a moment opens a popover with the chord's details
-/// (`HoverPopover`); the popover goes away on hover exit and while the cell is pressed. The numeral is
+/// selected look). Resting the mouse on it for a moment shows a tip with the chord's details
+/// (`HoverTip`); the tip goes away on hover exit and when the cell is pressed. The numeral is
 /// `PaletteViewMode.numeralText`: an applied chord's `label` ("V7/ii · D"), else the `roman`.
 ///
 /// Chord relations (plan R7): when the cell carries a `relation`, everything drawn (circle, ring, labels,
@@ -148,7 +148,7 @@ struct PaletteCellControl: View {
 /// of each other across the 10-pt spacing; they never overlap. The palette's scroll view widens its
 /// horizontal clip so enlarged edge columns are not cut. A pressed cell is
 /// drawn at full opacity, so the pressed look always shows. `reference` (the snapshot's
-/// `relationReference`) names the chord in the popover's relation line.
+/// `relationReference`) names the chord in the tip's relation line.
 struct PaletteCellView: View {
   let cell: CellJSON
   let size: CGFloat
@@ -213,8 +213,8 @@ struct PaletteCellView: View {
                         + ", " + PaletteViewMode.numeralText(cell)
                         + (cell.filled ? ", in key" : ", borrowed")
                         + (cell.relation.map { ", relation \($0)" } ?? ""))
-    .hoverPopover(suppressed: isPressed) {
-      ChordDetailView(cell: cell, reference: reference).padding(12)
+    .hoverTip(id: cell.id, suppressed: isPressed) {
+      ChordDetailView(cell: cell, reference: reference)
     }
   }
 }
@@ -249,11 +249,11 @@ struct ChordDragPreview: View {
   }
 }
 
-/// Popover body: symbol and numeral, family and function word, the voicing as note names, the tension
+/// The cell's tip: symbol and numeral, family and function word, the voicing as note names, the tension
 /// bar, and the engine's verdict on the project key: "In key" or the borrowed notes (`outOfKey`). The
 /// function, tension and out-of-key lines are omitted when an older plug-in build sends no such field.
-/// (A cell carries no "borrowed from" key, only its out-of-key notes; the block popover, whose event has a
-/// `why`, names the key.) With a `relation` the popover ends with "Relation to G7 · 72" and the engine's
+/// (A cell carries no "borrowed from" key, only its out-of-key notes; the block tip, whose event has a
+/// `why`, names the key.) With a `relation` the tip ends with "Relation to G7 · 72" and the engine's
 /// `relationText` below it. The numeral is `PaletteViewMode.numeralText`; an applied chord adds "Leads to
 /// Dm (V7/ii)" under the header.
 struct ChordDetailView: View {

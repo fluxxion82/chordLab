@@ -39,14 +39,14 @@ struct TensionBar: View {
   }
 }
 
-/// A row of small rounded chips (the "why" reasons under a popover's sentence), wrapping onto new lines
+/// A row of small rounded chips (the "why" reasons under a tip's sentence), wrapping onto new lines
 /// when the row would be wider than `maxWidth`.
 struct ChipRow: View {
   let chips: [String]
   var maxWidth: CGFloat = 260
 
   var body: some View {
-    // Chips are short, so a greedy line break on a character estimate is close enough; the popover is
+    // Chips are short, so a greedy line break on a character estimate is close enough; the tip is
     // not a layout anyone resizes.
     let lines = Self.lines(chips, maxWidth: maxWidth)
     VStack(alignment: .leading, spacing: 4) {
