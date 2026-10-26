@@ -14,7 +14,9 @@ Phase 1, the basics:
 - A project key (12 tonics × 9 modes: the seven church modes, harmonic minor and melodic minor) and a
   separately browsed key, stepped along the circle of fifths or switched to a parallel mode.
 - A palette of the browsed key: 7 scale degrees × up to 5 tiers (power chord, triad, sixth/seventh,
-  seventh/add9, colour chords). Chords with notes outside the project key are drawn as rings.
+  seventh/add9, colour chords), triads at the bottom and power chords on top, every row named, the cells
+  sized to show every row when the window is tall enough. Chords with notes outside the project key are
+  drawn as rings.
 - Press a cell to hear it; drag it into the sequence bar to append it.
 - A sequence bar of chord blocks over a beat ruler: reorder, resize (quarter-beat snap, 0.25–64 beats),
   select, delete; undo and redo.
@@ -22,14 +24,16 @@ Phase 1, the basics:
   Panic button.
 - MIDI drag-out of the progression as a `.mid` clip at the host tempo.
 - The document (progression, sections, voicings, keys, follow, loop, relation mode) and the editor
-  window size are saved with the host project.
+  window size (900 × 800 for a new instance, resizable down to 700 × 480) are saved with the host project.
 
 Phase 2, explainable harmony:
 
 - A harmonic function (Tonic / Predominant / Dominant / Other) and a 0–100 tension score on every
   chord, shown as a coloured dot and a tension bar.
-- "Why" popovers on sequence blocks: how the chord relates to the one before it (root motion, common
-  tones, voice-leading cost, D→T resolution, the parallel mode a chord is borrowed from).
+- Hover tips, drawn inside the window so they never take a click: a palette cell's notes, function and
+  tension; a suggestion's reasons; and the "why" on sequence blocks: how the chord relates to the one
+  before it (root motion, common tones, voice-leading cost, D→T resolution, the parallel mode a chord is
+  borrowed from).
 - A suggestions strip: up to 8 ranked next chords for the selected (else the last) chord, each with its
   reasons.
 - Chord relations in the palette: every cell is sized and shaded by its relatedness to the selected
