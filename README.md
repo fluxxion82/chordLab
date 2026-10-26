@@ -20,6 +20,8 @@ Phase 1, the basics:
 - Press a cell to hear it; drag it into the sequence bar to append it.
 - A sequence bar of chord blocks over a beat ruler: reorder, resize (quarter-beat snap, 0.25–64 beats),
   select, delete; undo and redo.
+- Keyboard: 1–8 append suggestions, Delete removes the selected chord, ⌘Z/⇧⌘Z undo and redo, whenever
+  the plug-in window has the keyboard and you last clicked inside it.
 - Playback that follows the host transport sample-accurately, with an optional loop, a playhead, and a
   Panic button.
 - MIDI drag-out of the progression as a `.mid` clip at the host tempo.

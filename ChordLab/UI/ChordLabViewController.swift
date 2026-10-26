@@ -14,6 +14,9 @@ public typealias MIDIVelocity = UInt8
       self?.sendArbitraryMsgFromUI(msgTag: tag, ctrlTag: kNoCtrlTag, msg: data)
     })
 
+  /// The keyboard routes (`EditorKeyRouter`): installed while the view is on screen.
+  private lazy var keyRouter = EditorKeyRouter(view: view, state: state)
+
   override init(nibName nibNameOrNil: PlatformNibName?, bundle nibBundleOrNil: Bundle?) {
     super.init(nibName: nibNameOrNil, bundle: nibBundleOrNil)
   }
@@ -53,6 +56,29 @@ public typealias MIDIVelocity = UInt8
 
     view.addSubview(hostingController.view)
     hostingController.view.pinToSuperviewEdges()
+  }
+
+  override func viewDidAppear() {
+    super.viewDidAppear()
+    keyRouter.install()
+  }
+
+  override func viewDidDisappear() {
+    super.viewDidDisappear()
+    keyRouter.remove()
+  }
+
+  /// Route B: the host delivered the key through the plug-in API (VST3 `IPlugView::onKeyDown` →
+  /// iPlug2 `IEditorDelegate::OnKeyDown` → `ChordLab::OnKeyDown`). Same router, same map.
+  @objc func handleKey(characters: String, virtualKey: Int, shift: Bool, command: Bool, option: Bool) -> Bool {
+    keyRouter.handle(characters: characters, virtualKey: virtualKey, shift: shift, command: command, option: option)
+  }
+
+  /// Route B's key-up (VST3 `IPlugView::onKeyUp` → `ChordLab::OnKeyUp`): ends the key's hold in the router's
+  /// repeat filter; true for a key the editor would consume, so the host sees the release go where the
+  /// press went.
+  @objc func handleKeyUp(characters: String, virtualKey: Int, shift: Bool, command: Bool, option: Bool) -> Bool {
+    keyRouter.keyUp(characters: characters, virtualKey: virtualKey, shift: shift, command: command, option: option)
   }
 
   /// Messages from C++ (SendArbitraryMsgFromDelegate): snapshots, errors, scheduler status, the playhead,

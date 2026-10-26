@@ -10,16 +10,11 @@ import SwiftUI
 /// The chips never truncate. `ViewThatFits` takes the first of three rows whose ideal width fits: the
 /// one-line chips (digit, symbol, numeral, dot), else two-line chips (the symbol over the digit, numeral and
 /// dot), which keep all 8 of the longest realistic chords in view at the 700-pt minimum width, else, for
-/// a list longer still, the two-line row in a sideways scroll view. Only the chosen row exists, so each
-/// digit shortcut is registered once, and the digits always follow the engine's order.
+/// a list longer still, the two-line row in a sideways scroll view. Only the chosen row exists, and the
+/// digits always follow the engine's order.
 ///
-/// The digit shortcuts are bare keys (no modifier) on hidden buttons beside the chips, armed only while
-/// the chip's own window is the key window (`controlActiveState == .key`: macOS offers a key equivalent
-/// to the key window and then to the main window, so without this a ChordLab main window would eat digits
-/// typed into another panel) and no text field is being edited (`state.editingText`, a section rename),
-/// and both conditions are checked again when the shortcut fires. Clicking a chip is never gated. Live
-/// may swallow bare digits before the plug-in window sees them (a Live check); in the standalone APP they
-/// work from any focus within the window.
+/// The digits 1–8 append the chips through the key routes (`KeyCommandMap`, `EditorKeyRouter`), never
+/// through this view.
 struct SuggestionsView: View {
   @EnvironmentObject var state: ChordLabState
 
@@ -68,24 +63,15 @@ struct SuggestionsView: View {
   }
 }
 
-/// One chip: a button that appends the chord on click, plus a hidden button carrying the digit `number`
-/// as a bare-key shortcut, armed only while this window is key and no text is being edited. `compact`
-/// stacks the symbol over the digit, numeral and dot, for a strip too narrow for one line per chip.
+/// One chip: a button that appends the chord on click, showing its digit `number`. `compact` stacks the
+/// symbol over the digit, numeral and dot, for a strip too narrow for one line per chip.
 struct SuggestionChip: View {
   let suggestion: SuggestionJSON
   let number: Int
   var compact = false
   let append: () -> Void
 
-  @EnvironmentObject var state: ChordLabState
-  @Environment(\.controlActiveState) private var controlActiveState
   @State private var hovering = false
-
-  /// Whether the digit should act right now: the containing window is key (not merely the app's main
-  /// window) and no text field has the keyboard.
-  private var shortcutArmed: Bool {
-    controlActiveState == .key && !state.editingText
-  }
 
   private var digitText: some View {
     Text("\(number)")
@@ -127,18 +113,6 @@ struct SuggestionChip: View {
       .contentShape(RoundedRectangle(cornerRadius: 8))
     }
     .buttonStyle(.plain)
-    .background(
-      // The shortcut lives on a hidden button so that a click is never gated: the window may have become
-      // key on the very mouse-down, before this view saw the new state. The action re-checks at invocation
-      // because the environment can lag a window switch by a frame.
-      Button("") { if shortcutArmed { append() } }
-        .keyboardShortcut(shortcutArmed ? KeyboardShortcut(KeyEquivalent(Character(String(number))), modifiers: []) : nil)
-        .buttonStyle(.plain)
-        .focusable(false)                                   // never a Tab stop: Space must not append
-        .frame(width: 0, height: 0)
-        .opacity(0)
-        .allowsHitTesting(false)
-        .accessibilityHidden(true))
     .onHover { hovering = $0 }
     .hoverTip(id: "chip-\(number)", preferAbove: false) {
       SuggestionDetailView(suggestion: suggestion)

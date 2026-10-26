@@ -13,7 +13,8 @@ import SwiftUI
 /// - drop a palette cell anywhere on the strip → `appendChord`;
 /// - click a block → `selectEvent {id}` (the snapshot's `selectedEventId` is the selection: the white ring,
 ///   the suggestions strip and the plug-in agree on it); click the empty strip → `selectEvent {id: null}`;
-///   Delete / Forward Delete → `removeChord` of the selection;
+///   Delete / Forward Delete → `removeChord` of the selection, through the key routes
+///   (`ChordLabState.perform`);
 /// - drag the handle at a block's right edge → `setLength`, snapped to quarter beats and clamped to
 ///   0.25…64, sent when the drag ends (the width follows the mouse meanwhile, as gesture state);
 /// - drag a block sideways → `moveChord` to the index its centre lands on, sent when the drag ends
@@ -31,10 +32,10 @@ import SwiftUI
 /// end, the clamped scroll offset moves the content under the mouse, which would feed back into the length.
 /// The window does not move during a drag. That same clamping would still slide the strip under a resize
 /// (the length right, the handle no longer under the mouse), so while a handle is dragged the content keeps
-/// its width from before the drag, with trailing space for what the block gave up. The handle's hit target is `handleHitWidth` (14 pt) wide on a
-/// block of 28 pt or more, around a `handleWidth` bar, and the voicing badge and "manual" text keep clear of
-/// it; a block drag starts only after `moveThreshold` (8 pt), so a slightly missed handle press does not
-/// slide the block. The drag in progress lives in `@GestureState`, which SwiftUI resets when the gesture
+/// its width from before the drag, with trailing space for what the block gave up. The handle's hit target
+/// is `handleHitWidth` (14 pt) wide on a block of 28 pt or more, around a `handleWidth` bar, and the voicing
+/// badge and "manual" text keep clear of it; a block drag starts only after `moveThreshold` (8 pt), so a
+/// slightly missed handle press does not slide the block. The drag in progress lives in `@GestureState`, which SwiftUI resets when the gesture
 /// ends and when it is cancelled, so no block is left at a dragged length or offset. One cursor rule: the
 /// resize cursor shows while a handle is under the mouse or a resize is in progress, pushed and popped
 /// exactly once each way (`setResizeCursor`), and popped when the bar goes away.
@@ -45,7 +46,7 @@ import SwiftUI
 /// the selected chord). It follows a block being resized or dragged, takes no clicks and is hidden from
 /// accessibility (the block's hover tip shows the tension); with any chord lacking a tension (an older
 /// plug-in build) nothing is drawn there.
-/// Undo/redo are the key bar's buttons (⌘Z / ⇧⌘Z), so they work whatever has focus.
+/// Undo/redo are the key bar's buttons, and ⌘Z / ⇧⌘Z through the key routes.
 ///
 /// The playhead (`state.transport`, ~15 Hz from the plug-in) is a 2-pt line at the position's beat, folded
 /// into the progression when it loops; the block sounding there is drawn brighter. Hidden while the
@@ -101,7 +102,6 @@ struct SequenceBarView: View {
   /// The block whose voicing popover is open, if any.
   @State private var voicingPopoverId: Int?
   @State private var dropTargeted = false
-  @FocusState private var focused: Bool
 
   private var events: [EventJSON] { state.snapshot?.events ?? [] }
   private var sections: [SectionJSON] { state.snapshot?.sections ?? [] }
@@ -182,11 +182,6 @@ struct SequenceBarView: View {
     .overlay(
       RoundedRectangle(cornerRadius: 8)
         .strokeBorder(Color.white.opacity(dropTargeted ? 0.8 : 0.12), lineWidth: dropTargeted ? 2 : 1))
-    .focusable()
-    .focused($focused)
-    .focusEffectDisabled()
-    .onKeyPress(.delete) { deleteSelection() }
-    .onKeyPress(.deleteForward) { deleteSelection() }
     .dropDestination(for: ChordRef.self) { refs, _ in
       guard let ref = refs.first else { return false }
       state.send(command: ["cmd": "appendChord", "root": ref.root, "type": ref.type])
@@ -444,7 +439,6 @@ struct SequenceBarView: View {
     if selectedEventId != event.id {
       state.send(command: ["cmd": "selectEvent", "id": event.id])
     }
-    focused = true
   }
 
   private func deselect() {
@@ -485,12 +479,6 @@ struct SequenceBarView: View {
           state.send(command: ["cmd": "moveChord", "id": event.id, "index": target])
         }
       }
-  }
-
-  private func deleteSelection() -> KeyPress.Result {
-    guard let id = selectedEventId else { return .ignored }
-    state.send(command: ["cmd": "removeChord", "id": id])
-    return .handled
   }
 
   // MARK: - Ruler

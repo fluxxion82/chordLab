@@ -19,8 +19,8 @@ class ChordLabState: NSObject, ObservableObject {
   @Published var transport: TransportJSON?
   /// The MIDI file of the last export request (`kMsgTagExportReady`), or nil while none is ready.
   @Published var exportPath: String?
-  /// Whether a text field (a section rename) is being edited: bare-key shortcuts (the suggestion digits)
-  /// stand down meanwhile, so typing a name never appends chords.
+  /// Whether a text field (a section rename) is being edited: the key routes (`EditorKeyRouter`) stand
+  /// down meanwhile, so typing a name never appends or removes chords.
   @Published var editingText = false
   /// Id of the palette cell whose voicing is sounding (pressed), or nil.
   @Published private(set) var heldCellId: String?
@@ -102,6 +102,26 @@ class ChordLabState: NSObject, ObservableObject {
   /// here. The plugin answers with a snapshot (`kMsgTagSnapshot`) or an error (`kMsgTagError`).
   @MainActor func send(command: [String: Any]) {
     send(command, tag: kMsgTagCommand)
+  }
+
+  /// Runs a keyboard command. Digits append the suggestion chip of that number (nothing when there is
+  /// no such chip); Delete removes the selected chord (nothing without a selection); undo and redo are
+  /// the key bar's commands. The router consumes every mapped key whether or not it did anything, so
+  /// the host never acts on it (see `KeyCommandMap`, `EditorKeyRouter`).
+  @MainActor func perform(_ command: KeyCommand) {
+    switch command {
+    case .appendSuggestion(let n):
+      guard let suggestions = snapshot?.suggestions, suggestions.indices.contains(n - 1) else { return }
+      let suggestion = suggestions[n - 1]
+      send(command: ["cmd": "appendChord", "root": suggestion.root, "type": suggestion.type])
+    case .deleteSelection:
+      guard let id = snapshot?.selectedEventId else { return }
+      send(command: ["cmd": "removeChord", "id": id])
+    case .undo:
+      send(command: ["cmd": "undo"])
+    case .redo:
+      send(command: ["cmd": "redo"])
+    }
   }
 
   /// JSON-encodes `fields` plus `"schema": 1` and sends it under `tag`.
