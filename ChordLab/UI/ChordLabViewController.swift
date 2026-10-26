@@ -14,6 +14,9 @@ public typealias MIDIVelocity = UInt8
       self?.sendArbitraryMsgFromUI(msgTag: tag, ctrlTag: kNoCtrlTag, msg: data)
     })
 
+  /// The keyboard routes (`EditorKeyRouter`): installed while the view is on screen.
+  private lazy var keyRouter = EditorKeyRouter(view: view, state: state)
+
   override init(nibName nibNameOrNil: PlatformNibName?, bundle nibBundleOrNil: Bundle?) {
     super.init(nibName: nibNameOrNil, bundle: nibBundleOrNil)
   }
@@ -53,6 +56,16 @@ public typealias MIDIVelocity = UInt8
 
     view.addSubview(hostingController.view)
     hostingController.view.pinToSuperviewEdges()
+  }
+
+  override func viewDidAppear() {
+    super.viewDidAppear()
+    keyRouter.install()
+  }
+
+  override func viewDidDisappear() {
+    super.viewDidDisappear()
+    keyRouter.remove()
   }
 
   /// Messages from C++ (SendArbitraryMsgFromDelegate): snapshots, errors, scheduler status, the playhead,

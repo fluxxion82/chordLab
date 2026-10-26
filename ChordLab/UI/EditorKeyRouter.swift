@@ -1,0 +1,96 @@
+import AppKit
+
+/// Both keyboard routes for one editor view, ending in `ChordLabState.perform`.
+///
+/// Route A (`install`): a local key-down monitor sees every key the application dispatches, before any
+/// window does. It acts only when the event is for the editor's own window, the editor owns the keyboard
+/// in that window, no text is being edited, and the key maps. Ownership: true when the editor appears,
+/// then follows the last mouse-down in that window — inside the editor's view it is ours, elsewhere in
+/// the window it is the host's (a host that puts its own controls, or a second editor, in the same window
+/// keeps its keys). Route B (`handle(characters:…)`): the host delivered the key through the plug-in API
+/// (VST3 `onKeyDown` → `ChordLab::OnKeyDown`); the host already chose the plug-in, so only the text gate
+/// applies. `KeyRepeatFilter` makes one physical press one command on either route, or on both when a
+/// host uses both. A mapped key is consumed either way; everything else goes on to the host.
+final class EditorKeyRouter {
+  private unowned let view: NSView
+  private unowned let state: ChordLabState
+  private var keyMonitor: Any?
+  private var mouseMonitor: Any?
+  private(set) var ownsKeyboard = false
+  private var filter = KeyRepeatFilter()
+
+  init(view: NSView, state: ChordLabState) {
+    self.view = view
+    self.state = state
+  }
+
+  deinit { remove() }
+
+  func install() {
+    guard keyMonitor == nil else { return }
+    ownsKeyboard = true
+    keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+      guard let self else { return event }
+      return MainActor.assumeIsolated { self.handle(event) } ? nil : event
+    }
+    mouseMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] event in
+      self?.noteMouseDown(event)
+      return event
+    }
+  }
+
+  func remove() {
+    if let monitor = keyMonitor { NSEvent.removeMonitor(monitor) }
+    if let monitor = mouseMonitor { NSEvent.removeMonitor(monitor) }
+    keyMonitor = nil
+    mouseMonitor = nil
+    ownsKeyboard = false
+  }
+
+  /// A click in the editor's window decides who has the keyboard there; clicks in other windows change nothing.
+  func noteMouseDown(_ event: NSEvent) {
+    guard let window = view.window, event.window === window else { return }
+    ownsKeyboard = view.bounds.contains(view.convert(event.locationInWindow, from: nil))
+  }
+
+  /// Route A. Whether the event was consumed.
+  @MainActor func handle(_ event: NSEvent) -> Bool {
+    guard let window = view.window, event.window === window, ownsKeyboard else { return false }
+    return deliver(KeyInput(event: event), isRepeat: event.isARepeat)
+  }
+
+  /// Route B. Whether the key was consumed. Control is read from the live modifier flags because iPlug2's
+  /// translation does not carry it.
+  @MainActor func handle(characters: String, virtualKey: Int, shift: Bool, command: Bool, option: Bool) -> Bool {
+    let control = NSEvent.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.control)
+    return deliver(KeyInput(characters: characters, virtualKey: virtualKey, shift: shift, command: command,
+                            option: option, control: control), isRepeat: false)
+  }
+
+  @MainActor private func deliver(_ input: KeyInput, isRepeat: Bool) -> Bool {
+    guard !state.editingText, !(view.window?.firstResponder is NSTextView) else { return false }
+    guard let command = KeyCommandMap.command(for: input) else { return false }
+    if filter.shouldAct(input, at: ProcessInfo.processInfo.systemUptime, isRepeat: isRepeat) {
+      state.perform(command)
+    }
+    return true
+  }
+}
+
+extension KeyInput {
+  /// Route A: macOS hardware key codes for the delete keys (51 = delete, 117 = forward delete), the
+  /// unmodified character for the rest; modifiers masked to the device-independent flags.
+  init(event: NSEvent) {
+    let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+    let key: Key
+    switch event.keyCode {
+    case 51: key = .delete
+    case 117: key = .forwardDelete
+    default:
+      let text = event.charactersIgnoringModifiers ?? ""
+      key = text.count == 1 ? .character(text.first!) : .other
+    }
+    self.init(key: key, command: flags.contains(.command), shift: flags.contains(.shift),
+              option: flags.contains(.option), control: flags.contains(.control))
+  }
+}
