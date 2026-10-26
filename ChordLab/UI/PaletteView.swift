@@ -1,19 +1,26 @@
 import SwiftUI
 
-/// The Klimper-style palette grid of the browsed key: 7 columns (scale degrees), one row per tier with
-/// tier 0 (power chords) at the bottom and higher tiers above. A degree with no chord in a tier leaves
-/// an empty slot so the columns stay aligned. Everything shown comes from the snapshot.
+/// The Klimper-style palette grid of the browsed key: 7 columns (scale degrees), one row per tier, in
+/// `PaletteLayout.diatonicRows` order: the power row (tier 0) on top, then the colour, 7 / add9 and 6 / 7
+/// rows, and the triads (tier 1) at the bottom, as in Klimper. Every row is labelled in a 44-pt gutter on
+/// its left (hidden from accessibility: each cell speaks its own name), and each labelled row is centred
+/// as a whole, so the circles sit 27 pt right of the centre while the home row below, which has no gutter,
+/// stays centred. A degree with no chord in a tier leaves an empty slot so the columns stay aligned. The
+/// cells fit the height when they can (`PaletteLayout.cellSize`: every row in view, 56…96 pt), counting
+/// the diatonic rows in both views so switching views does not resize them; below that the grid scrolls.
+/// Everything shown comes from the snapshot.
 ///
 /// A compact *Diatonic / Applied* switch (plan A6) sits at the top left, above the scroll view, and
 /// picks the grid: the diatonic one above, or the applied one, the snapshot's `applied` cells in two
-/// rows (`V7/x` on top, `vii°7/x` below) in the column of the chord each resolves to
-/// (`PaletteViewMode.appliedLayout`), at the same cell size and through the same `PaletteCellControl`.
+/// rows (`V7/x` on top, `vii°7/x` below, labelled in the same gutter) in the column of the chord each
+/// resolves to (`PaletteLayout.appliedRows`), at the same cell size and through the same `PaletteCellControl`.
 /// The choice is remembered under `PaletteViewMode.storageKey`. A snapshot without `applied` (an older
 /// plug-in build) hides the switch and shows the diatonic grid, without touching the saved choice; an
 /// empty `applied` shows "No applied chords in this key". The scroll view is rebuilt per view (`.id`), so
 /// switching removes the old grid's cells and `PressAction`'s disappearance path releases a held one
 /// (never the same views reused for other chords, whose release would not match the held id), and each
-/// view opens at its own anchor: the diatonic grid at tier 0, the applied grid at its `V7/x` row. Pressing a cell
+/// view opens at its own anchor: the diatonic grid at its bottom row (the triads), the applied grid at its
+/// `V7/x` row. Pressing a cell
 /// previews its voicing through `ChordLabState.pressCell` / `releaseCell` (press, release, cancel and
 /// disappearance are all handled by `PressAction`); dragging a cell carries a `ChordRef` to the
 /// sequence bar (both wired in `PaletteCellControl`). The press is a simultaneous gesture under `.draggable`: the preview starts on mouse
@@ -26,10 +33,8 @@ struct PaletteView: View {
   @AppStorage(LabelMode.storageKey) private var labelMode = LabelMode.defaultMode
   @AppStorage(PaletteViewMode.storageKey) private var savedView = PaletteViewMode.defaultMode
 
-  static let columns = PaletteViewMode.columns
-  static let spacing: CGFloat = 10
-  static let minCell: CGFloat = 56
-  static let maxCell: CGFloat = 96
+  /// The grid's gap, which the home row (`HomeRowView`) shares.
+  static let spacing = PaletteLayout.spacing
   static let background = Color(red: 0.043, green: 0.071, blue: 0.251)   // #0B1240
 
   var body: some View {
@@ -42,8 +47,9 @@ struct PaletteView: View {
         PaletteViewSwitch()
       }
       GeometryReader { geometry in
-        let available = geometry.size.width - Self.spacing * CGFloat(Self.columns - 1)
-        let cellSize = min(Self.maxCell, max(Self.minCell, available / CGFloat(Self.columns)))
+        // The diatonic row count in both views (D4c), so switching views keeps the cell size.
+        let diatonicRowCount = max(1, state.snapshot?.palette.tiers ?? 1)
+        let cellSize = PaletteLayout.cellSize(viewport: geometry.size, rows: diatonicRowCount)
         ScrollView(.vertical) {
           if let snapshot = state.snapshot {
             if view == .applied, let applied = snapshot.applied {
@@ -52,17 +58,17 @@ struct PaletteView: View {
                   .foregroundStyle(.gray)
                   .frame(maxWidth: .infinity, minHeight: geometry.size.height)
               } else {
-                grid(PaletteViewMode.appliedLayout(applied), cellSize: cellSize)
+                grid(PaletteLayout.appliedRows(applied), cellSize: cellSize)
               }
             } else {
-              grid(Self.layout(snapshot.palette), cellSize: cellSize)
+              grid(PaletteLayout.diatonicRows(snapshot.palette), cellSize: cellSize)
             }
           } else {
             Text("Waiting for a snapshot…").foregroundStyle(.gray).frame(maxWidth: .infinity).padding()
           }
         }
-        // Diatonic: tier 0 visible first, and kept in view when the tier count changes. Applied: the V7/x row
-        // (top) first when both rows do not fit.
+        // Diatonic: the bottom row (the triads) visible first, and kept in view when the tier count changes.
+        // Applied: the V7/x row (top) first when both rows do not fit.
         .defaultScrollAnchor(view == .applied ? .top : .bottom)
         // A related cell is drawn up to 1.10× its slot (`RelationStyle`), and at the 700-pt minimum width the
         // grid fills the scroll view edge to edge, so an enlarged first- or last-column circle overhangs the
@@ -78,13 +84,20 @@ struct PaletteView: View {
     .background(Self.background)
   }
 
-  /// `rows` (indexed `[tier][degree]`) top tier first, an empty slot where a row has no chord.
-  private func grid(_ rows: [[CellJSON?]], cellSize: CGFloat) -> some View {
-    VStack(spacing: Self.spacing) {
-      ForEach(rows.indices.reversed(), id: \.self) { tier in
-        HStack(spacing: Self.spacing) {
-          ForEach(0..<Self.columns, id: \.self) { degree in
-            if let cell = rows[tier][degree] {
+  /// `rows` top to bottom, each its gutter label and then its seven columns, an empty slot where a row has
+  /// no chord.
+  private func grid(_ rows: [PaletteRow], cellSize: CGFloat) -> some View {
+    VStack(spacing: PaletteLayout.spacing) {
+      ForEach(rows, id: \.tier) { row in
+        HStack(spacing: PaletteLayout.spacing) {
+          Text(row.label)
+            .font(.system(size: 10))
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .frame(width: PaletteLayout.gutter, alignment: .trailing)
+            .accessibilityHidden(true)
+          ForEach(0..<PaletteLayout.columns, id: \.self) { degree in
+            if let cell = row.cells[degree] {
               PaletteCellControl(cell: cell, size: cellSize, labelMode: labelMode)
             } else {
               Color.clear.frame(width: cellSize, height: cellSize)
@@ -94,18 +107,7 @@ struct PaletteView: View {
       }
     }
     .frame(maxWidth: .infinity)
-    .padding(.vertical, Self.spacing)
-  }
-
-  /// Cells indexed `[tier][degree]`, nil where the palette has no chord. Rows cover 0..<tiers (at least
-  /// one); a cell outside the grid is ignored rather than trusted.
-  static func layout(_ palette: PaletteJSON) -> [[CellJSON?]] {
-    let tiers = max(1, palette.tiers)
-    var rows = [[CellJSON?]](repeating: [CellJSON?](repeating: nil, count: columns), count: tiers)
-    for cell in palette.cells where (0..<tiers).contains(cell.tier) && (0..<columns).contains(cell.degree) {
-      rows[cell.tier][cell.degree] = cell
-    }
-    return rows
+    .padding(.vertical, PaletteLayout.spacing)
   }
 }
 
