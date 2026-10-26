@@ -41,8 +41,9 @@ private struct TipButtonsDownKey: EnvironmentKey {
 /// Every request carries a generation: an exit, a press, a change of `suppressed` or `id`, a dismissal or
 /// disappearance starts a new one, so a delayed callback from before it shows nothing. The root overlay
 /// drops a tip whose view is not under the pointer (a missed hover exit) and every tip when the pointer
-/// leaves the editor, the application deactivates or the editor's window resigns key. The palette cells,
-/// the sequence blocks and the suggestion chips share this one mechanism.
+/// leaves the editor, any mouse button goes down in the window (a right-click's context menu included, which
+/// the left-button gesture above never sees), the application deactivates or the editor's window resigns
+/// key. The palette cells, the sequence blocks and the suggestion chips share this one mechanism.
 struct HoverTip<Tip: View>: ViewModifier {
   static var defaultDelay: TimeInterval { 0.6 }
 
@@ -138,8 +139,8 @@ struct TipHost: ViewModifier {
 /// from the mouse events the application dispatches to its window, through a local event monitor, so a
 /// move counts however deep the view under the mouse is: SwiftUI's own hover tracking at the root
 /// (`onContinuousHover`) missed moves, and every move over the palette's and the strip's scroll views,
-/// in the harness. Nil when the pointer leaves, when the application resigns active and when the window
-/// resigns key. It takes no clicks.
+/// in the harness. Nil when the pointer leaves, on any mouse-down in the window (every tip comes down), when
+/// the application resigns active and when the window resigns key. It takes no clicks.
 private struct PointerTracker: NSViewRepresentable {
   let onPointer: (CGPoint?) -> Void
 
@@ -167,7 +168,8 @@ private final class PointerTrackingView: NSView {
     stop()
     guard let window else { return }
     let events: NSEvent.EventTypeMask = [.mouseMoved, .mouseEntered, .mouseExited,
-                                         .leftMouseDragged, .rightMouseDragged, .otherMouseDragged]
+                                         .leftMouseDragged, .rightMouseDragged, .otherMouseDragged,
+                                         .leftMouseDown, .rightMouseDown, .otherMouseDown]
     monitor = NSEvent.addLocalMonitorForEvents(matching: events) { [weak self] event in
       MainActor.assumeIsolated { self?.track(event) }
       return event
@@ -187,6 +189,10 @@ private final class PointerTrackingView: NSView {
 
   private func track(_ event: NSEvent) {
     guard let window, event.window === window else { return }
+    if [.leftMouseDown, .rightMouseDown, .otherMouseDown].contains(event.type) {
+      onPointer?(nil)
+      return
+    }
     let point = convert(event.locationInWindow, from: nil)
     onPointer?(bounds.contains(point) ? point : nil)
   }
