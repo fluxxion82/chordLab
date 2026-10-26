@@ -5,9 +5,10 @@ import AppKit
 /// Route A (`install`): a local key-down monitor sees every key the application dispatches, before any
 /// window does. It acts only when the event is for the editor's own window, the editor owns the keyboard
 /// in that window, no text is being edited, and the key maps. Ownership: true when the editor appears,
-/// then follows the last mouse-down in that window — inside the editor's view it is ours, elsewhere in
-/// the window it is the host's (a host that puts its own controls, or a second editor, in the same window
-/// keeps its keys). Route B (`handle(characters:…)`): the host delivered the key through the plug-in API
+/// then follows the last mouse-down in that window's content view — inside the editor's view it is ours,
+/// elsewhere in the content view it is the host's (a host that puts its own controls, or a second editor,
+/// in the same window keeps its keys); a mouse-down outside the content view (a title-bar drag, a
+/// traffic-light click, a resize-edge grab) chooses neither and changes nothing. Route B (`handle(characters:…)`): the host delivered the key through the plug-in API
 /// (VST3 `onKeyDown` → `ChordLab::OnKeyDown`); the host already chose the plug-in, so only the text gate
 /// applies. `KeyRepeatFilter` makes one physical press one command on either route, or on both when a
 /// host uses both. A mapped key is consumed either way; everything else goes on to the host.
@@ -47,9 +48,11 @@ final class EditorKeyRouter {
     ownsKeyboard = false
   }
 
-  /// A click in the editor's window decides who has the keyboard there; clicks in other windows change nothing.
+  /// A click in the editor's window decides who has the keyboard there; clicks in other windows, and on
+  /// the window's frame outside its content view, change nothing.
   func noteMouseDown(_ event: NSEvent) {
-    guard let window = view.window, event.window === window else { return }
+    guard let window = view.window, event.window === window, let content = window.contentView else { return }
+    guard content.bounds.contains(content.convert(event.locationInWindow, from: nil)) else { return }
     ownsKeyboard = view.bounds.contains(view.convert(event.locationInWindow, from: nil))
   }
 
