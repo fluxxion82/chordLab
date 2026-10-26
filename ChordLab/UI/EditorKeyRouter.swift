@@ -19,6 +19,7 @@ final class EditorKeyRouter {
   private unowned let state: ChordLabState
   private var keyMonitor: Any?
   private var mouseMonitor: Any?
+  private var focusObservers: [NSObjectProtocol] = []
   private(set) var ownsKeyboard = false
   private var filter = KeyRepeatFilter()
 
@@ -41,6 +42,17 @@ final class EditorKeyRouter {
       self?.noteMouseDown(event)
       return event
     }
+    // Focus loss: the releases of keys held now may go to another window or app, so their holds and
+    // recorded key-down answers go (click ownership stays as it is).
+    let center = NotificationCenter.default
+    focusObservers = [
+      center.addObserver(forName: NSWindow.didResignKeyNotification, object: nil, queue: .main) { [weak self] note in
+        MainActor.assumeIsolated { self?.windowDidResignKey(note.object as? NSWindow) }
+      },
+      center.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+        self?.filter.clearHolds()
+      },
+    ]
   }
 
   func remove() {
@@ -48,8 +60,16 @@ final class EditorKeyRouter {
     if let monitor = mouseMonitor { NSEvent.removeMonitor(monitor) }
     keyMonitor = nil
     mouseMonitor = nil
+    focusObservers.forEach { NotificationCenter.default.removeObserver($0) }
+    focusObservers = []
     ownsKeyboard = false
     filter = KeyRepeatFilter()   // no hold or duplicate history survives the editor going away
+  }
+
+  /// The editor's own window lost key status; another window's resignation changes nothing.
+  @MainActor private func windowDidResignKey(_ window: NSWindow?) {
+    guard let window, window === view.window else { return }
+    filter.clearHolds()
   }
 
   /// A click in the editor's window decides who has the keyboard there; clicks in other windows, and on
