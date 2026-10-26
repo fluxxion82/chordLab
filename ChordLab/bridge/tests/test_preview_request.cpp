@@ -14,6 +14,7 @@ namespace {
 const std::string kHeaderProblem = "preview message needs schema 1, an id and on:true|false";
 const std::string kStartProblem = "preview start needs 1..8 pitches and a velocity in 1..127";
 const std::string kPitchProblem = "preview pitches must be integers in 0..127";
+const std::string kExtendProblem = "preview extend needs extend:true and no on";
 
 // The problem text for a payload parsePreviewRequest refuses; fails the test if it was accepted.
 std::string problemOf(const std::string& json) {
@@ -187,4 +188,20 @@ TEST_CASE("parsePreviewRequest: extra members are ignored") {
     const PreviewCmd c = accepted(R"({"schema":1,"id":2,"on":true,"pitches":[60],"label":"I","extra":{"a":[1]}})");
     CHECK(c.kind == PreviewCmd::Start);
     CHECK(c.count == 1);
+}
+
+TEST_CASE("parsePreviewRequest: an Extend") {
+    const PreviewCmd c = accepted(R"({"schema":1,"id":4,"extend":true})");
+    CHECK(c.kind == PreviewCmd::Extend);
+    CHECK(c.id == 4);
+    CHECK(c.count == 0);
+}
+
+TEST_CASE("parsePreviewRequest: extend must be true, alone, with schema and id") {
+    CHECK(problemOf(R"({"schema":1,"id":4,"extend":false})") == kExtendProblem);
+    CHECK(problemOf(R"({"schema":1,"id":4,"extend":1})") == kExtendProblem);
+    CHECK(problemOf(R"({"schema":1,"id":4,"extend":true,"on":true,"pitches":[60]})") == kExtendProblem);
+    CHECK(problemOf(R"({"schema":1,"id":4,"extend":true,"on":false})") == kExtendProblem);
+    CHECK(problemOf(R"({"schema":1,"extend":true})") == kHeaderProblem);
+    CHECK(problemOf(R"({"id":4,"extend":true})") == kHeaderProblem);
 }
