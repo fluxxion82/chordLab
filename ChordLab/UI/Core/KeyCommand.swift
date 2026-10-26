@@ -69,12 +69,15 @@ enum KeyCommandMap {
 /// without a repeat flag (VST3), or the one press reaching the editor through both routes. Either way
 /// the delivery is consumed by the caller. The window is measured from the previous delivery, so a chain
 /// of repeats stays suppressed; a deliberate second press is slower than the window (macOS's fastest
-/// autorepeat is about 33 ms apart, a double tap 120 ms or more).
+/// autorepeat is about 33 ms apart, a double tap 120 ms or more). A character is compared case-folded:
+/// with Shift held one route may report "Z" and the other "z" for the same press.
 struct KeyRepeatFilter {
   static let window: TimeInterval = 0.1
   private var last: (input: KeyInput, time: TimeInterval)?
 
   mutating func shouldAct(_ input: KeyInput, at time: TimeInterval, isRepeat: Bool) -> Bool {
+    var input = input
+    if case .character(let c) = input.key, let folded = c.lowercased().first { input.key = .character(folded) }
     defer { last = (input, time) }
     if isRepeat { return false }
     if let last, last.input == input, time - last.time < Self.window { return false }

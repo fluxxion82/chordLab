@@ -96,6 +96,13 @@ final class KeyCommandTests: XCTestCase {
     XCTAssertTrue(filter.shouldAct(input(.character("2")), at: 10.15, isRepeat: false), "a double tap")
   }
 
+  func testTheSameKeyInEitherCaseIsADuplicate() {
+    // ⇧⌘Z may arrive as "Z" on one route and "z" on the other; it is still one press.
+    var filter = KeyRepeatFilter()
+    XCTAssertTrue(filter.shouldAct(input(.character("Z"), command: true, shift: true), at: 10.0, isRepeat: false))
+    XCTAssertFalse(filter.shouldAct(input(.character("z"), command: true, shift: true), at: 10.03, isRepeat: false))
+  }
+
   func testADifferentKeyActsAtOnce() {
     var filter = KeyRepeatFilter()
     XCTAssertTrue(filter.shouldAct(input(.character("2")), at: 10.0, isRepeat: false))
