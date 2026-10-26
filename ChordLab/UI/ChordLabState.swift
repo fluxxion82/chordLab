@@ -28,12 +28,20 @@ class ChordLabState: NSObject, ObservableObject {
   private var heldPreviewId: Int?
   private var previewCounter = 0
   /// While a cell is held, an `extend` for its preview every `keepAliveInterval` from a main-run-loop
-  /// timer in the common modes (so it fires during mouse tracking): the scheduler's four-second deadline
-  /// then only ends a preview whose release never arrived. Each tick first asks `mouseButtonsDown`: a hold
-  /// with no button down is a release the view never reported, and is released here instead of renewed.
-  /// Invalidated on release, panic and deinit, always on the main thread.
+  /// timer in the common modes (so it fires during mouse tracking). The scheduler ends a preview four
+  /// seconds of processed audio after its Start or its last applied Extend, so it ends a held one only
+  /// when the extends stop reaching it: a main thread stalled for several seconds (the cell then shows
+  /// pressed until released and pressed again). It also ends a preview whose release never arrived;
+  /// while the host processes no audio nothing expires. Each tick also stands in for a release the view
+  /// never reported (`PreviewKeepAlive`): a hold that began with a mouse button down is released once no
+  /// button is down; one that began without (touch input is outside the button mask) is renewed for at
+  /// most `PreviewKeepAlive.maxTicksWithoutButton` ticks. Invalidated on release, panic and deinit,
+  /// always on the main thread.
   static let keepAliveInterval: TimeInterval = 1.0
   private var keepAlive: Timer?
+  /// Whether a mouse button was down when the held cell was pressed, and the keep-alive ticks since.
+  private var holdHasButton = false
+  private var keepAliveTicks = 0
   /// The physical button state (`NSEvent.pressedMouseButtons`); a harness that synthesizes events
   /// passes its own.
   private let mouseButtonsDown: () -> Bool
@@ -93,6 +101,7 @@ class ChordLabState: NSObject, ObservableObject {
     heldCellId = cell.id
     let pitches = Array(cell.voicing.filter { (0...127).contains($0) }.prefix(8))
     send(["id": id, "on": true, "velocity": 100, "pitches": pitches], tag: kMsgTagPreview)
+    holdHasButton = mouseButtonsDown()
     startKeepAlive(id: id)
   }
 
@@ -137,6 +146,7 @@ class ChordLabState: NSObject, ObservableObject {
 
   @MainActor private func startKeepAlive(id: Int) {
     stopKeepAlive()
+    keepAliveTicks = 0
     let timer = Timer(timeInterval: Self.keepAliveInterval, target: KeepAliveTarget(state: self, id: id),
                       selector: #selector(KeepAliveTarget.tick(_:)), userInfo: nil, repeats: true)
     RunLoop.main.add(timer, forMode: .common)
@@ -148,12 +158,15 @@ class ChordLabState: NSObject, ObservableObject {
     keepAlive = nil
   }
 
-  /// One tick: the timer is done when `id` is no longer held; a hold with no mouse button down is
-  /// released; otherwise an `extend`.
+  /// One tick: the timer is done when `id` is no longer held; otherwise `PreviewKeepAlive` decides
+  /// between an `extend` and a release.
   @MainActor private func keepAliveTick(id: Int) {
     guard heldPreviewId == id else { stopKeepAlive(); return }
-    guard mouseButtonsDown() else { releaseHeld(); return }
-    send(["id": id, "extend": true], tag: kMsgTagPreview)
+    keepAliveTicks += 1
+    switch PreviewKeepAlive.action(tick: keepAliveTicks, holdHasButton: holdHasButton, buttonDown: mouseButtonsDown()) {
+    case .extend: send(["id": id, "extend": true], tag: kMsgTagPreview)
+    case .release: releaseHeld()
+    }
   }
 
   // MARK: - Commands (engine wire format, json_api.h)
