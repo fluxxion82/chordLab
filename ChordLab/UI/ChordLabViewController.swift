@@ -68,6 +68,12 @@ public typealias MIDIVelocity = UInt8
     keyRouter.remove()
   }
 
+  /// Route B: the host delivered the key through the plug-in API (VST3 `IPlugView::onKeyDown` →
+  /// iPlug2 `IEditorDelegate::OnKeyDown` → `ChordLab::OnKeyDown`). Same router, same map.
+  @objc func handleKey(characters: String, virtualKey: Int, shift: Bool, command: Bool, option: Bool) -> Bool {
+    keyRouter.handle(characters: characters, virtualKey: virtualKey, shift: shift, command: command, option: option)
+  }
+
   /// Messages from C++ (SendArbitraryMsgFromDelegate): snapshots, errors, scheduler status, the playhead,
   /// the export file.
   override func onMessage(_ msgTag: Int, _ ctrlTag: Int, _ msg: Data!) -> Bool {

@@ -206,6 +206,23 @@ void ChordLab::OnParentWindowResize(int width, int height)
   vc.view.frame = MAKERECT(0.f, 0.f, (float) width, (float) height);
 }
 
+bool ChordLab::OnKeyDown(const IKeyPress& key)
+{
+  // Main thread: the host calls IPlugView::onKeyDown on the UI thread, between OpenWindow and
+  // CloseWindow, so mViewController is valid or null. iPlug2's IKeyPress: utf8 text, a Windows virtual
+  // key (kVK_BACK 0x08, kVK_DELETE 0x2E, digits 0x30..0x39), S = shift, C = command on macOS
+  // (IPlugVST3_View.h TranslateKeyMessage reads kCommandKey into C), A = alt; Control is not carried.
+  auto* vc = (ChordLabViewController*) mViewController;
+  if (!vc)
+    return false;
+  @autoreleasepool   // ARC is off here: the bridged string is autoreleased
+  {
+    NSString* characters = [NSString stringWithUTF8String:key.utf8] ?: @"";   // nil only for invalid UTF-8
+    return [vc handleKeyWithCharacters:characters
+                            virtualKey:key.VK shift:key.S command:key.C option:key.A];
+  }
+}
+
 // AUv3 only
 bool ChordLab::OnHostRequestingSupportedViewConfiguration(int width, int height)
 {
