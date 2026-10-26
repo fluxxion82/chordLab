@@ -46,9 +46,13 @@ struct Snapshot {
 };
 
 /// A preview request from the UI: `Start` sounds `pitches[0..count)` at `velocity` until a `Stop` with
-/// the same `id` arrives or four seconds pass; `Stop` releases the preview with that `id`.
+/// the same `id` arrives or four seconds pass; `Stop` releases the preview with that `id`; `Extend` gives
+/// the sounding preview with that `id` another four seconds from the block it is applied in and touches
+/// no note (the UI sends one every second while a cell is held, so the four seconds only ever end a
+/// preview whose release never arrived). An `Extend` for an id that is not sounding does nothing, and
+/// one applied in a block with no usable sample rate leaves the deadline as it is.
 struct PreviewCmd {
-    enum Kind : std::uint8_t { Start, Stop };
+    enum Kind : std::uint8_t { Start, Stop, Extend };
     Kind kind;
     int id;
     int velocity;
@@ -66,7 +70,8 @@ constexpr std::uint8_t kOwnerPreview = 2;
 /// Ownership: a pitch has up to two owners, the progression and the previews. The first owner to acquire
 /// a pitch produces the physical note-on; the last to release it produces the note-off. The progression
 /// attacking a pitch that already sounds retriggers it (off then on); a preview joining a sounding pitch
-/// is silent. Previews release themselves four seconds after they start, counted in samples.
+/// is silent. Previews release themselves four seconds after they start, or after their last `Extend`,
+/// counted in processed samples.
 ///
 /// Position: progression beat 0 sits at host ppq 0. With `Snapshot::loop` the progression repeats every
 /// `endBeat` beats; without it, it plays once and nothing sounds at or after `endBeat`. The progression
@@ -146,7 +151,9 @@ public:
     void adopt(const Snapshot& snapshot) noexcept;
 
     /// Queues a preview command for the next block. Returns false, and queues nothing, when the queue is
-    /// full. `count` must be at most 8 and every pitch below 128.
+    /// full. `count` must be at most 8 and every pitch below 128. An `Extend` whose id matches the last
+    /// command still queued, itself an `Extend`, is merged into it and reported as queued, so a host that
+    /// is not processing cannot fill the ring with them.
     bool pushPreview(const PreviewCmd& cmd) noexcept;
 
     /// Produces this block's events into `out[0..capacity)`, setting `written`. Returns false if the block

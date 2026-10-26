@@ -203,7 +203,7 @@ TEST_CASE("rt alloc: the scheduler allocates nothing across 10k random blocks wi
             refusedPreviews += scheduler.pushPreview(cmd) ? 0 : 1;
         } else if (roll < 17 && previewId > 0) {
             PreviewCmd cmd{};
-            cmd.kind = PreviewCmd::Stop;
+            cmd.kind = roll == 16 ? PreviewCmd::Extend : PreviewCmd::Stop;  // one roll in five an extend
             cmd.id = previewId;
             refusedPreviews += scheduler.pushPreview(cmd) ? 0 : 1;
         } else if (roll == 17) {

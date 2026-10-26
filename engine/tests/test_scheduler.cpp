@@ -163,6 +163,20 @@ PreviewCmd previewStop(int id) {
     return cmd;
 }
 
+PreviewCmd previewExtend(int id) {
+    PreviewCmd cmd{};
+    cmd.kind = PreviewCmd::Extend;
+    cmd.id = id;
+    return cmd;
+}
+
+/// One stopped 48 kHz block of `nFrames`, which must be complete (`process` returned true).
+std::vector<Ev> previewBlock(Host& host, int nFrames = 4800) {
+    std::vector<Ev> events = host.run(0.0, nFrames, false);
+    REQUIRE(host.lastOk);
+    return events;
+}
+
 const std::vector<Ev> kNone{};
 
 }  // namespace
@@ -586,6 +600,219 @@ TEST_CASE("scheduler: a preview auto-releases after four seconds of blocks witho
     }
 }
 
+TEST_CASE("scheduler: an extend moves a preview's deadline out and retriggers nothing") {
+    Host host;
+    CHECK(host.scheduler.pushPreview(previewStart(1, {60, 64, 67})));
+    REQUIRE(previewBlock(host) == std::vector<Ev>{on(0, 60, 90), on(0, 64, 90), on(0, 67, 90)});
+    for (int block = 1; block < 20; ++block) {
+        CAPTURE(block);
+        REQUIRE(previewBlock(host) == kNone);
+    }
+    // Applied at clock 96000 (2 s): the deadline becomes 96000 + 192000 = 288000, block 60.
+    CHECK(host.scheduler.pushPreview(previewExtend(1)));
+    for (int block = 20; block < 60; ++block) {  // block 40, the old deadline, included
+        CAPTURE(block);
+        REQUIRE(previewBlock(host) == kNone);
+    }
+    const std::vector<Ev> expired = previewBlock(host);
+    CAPTURE(describe(expired));
+    CHECK(expired == std::vector<Ev>{off(0, 60), off(0, 64), off(0, 67)});
+    CHECK(host.owners(60) == 0);
+    CHECK(previewBlock(host) == kNone);
+}
+
+TEST_CASE("scheduler: an extend applied in the block of the old deadline keeps the preview sounding") {
+    SUBCASE("old deadline at offset 0 of the block") {
+        Host host;
+        CHECK(host.scheduler.pushPreview(previewStart(1, {60})));
+        REQUIRE(previewBlock(host) == std::vector<Ev>{on(0, 60, 90)});
+        for (int block = 1; block < 40; ++block) {
+            CAPTURE(block);
+            REQUIRE(previewBlock(host) == kNone);
+        }
+        CHECK(host.scheduler.pushPreview(previewExtend(1)));  // applied at clock 192000, the old deadline itself
+        REQUIRE(previewBlock(host) == kNone);                 // block 40: the stale expiry at offset 0 is a no-op
+        for (int block = 41; block < 80; ++block) {
+            CAPTURE(block);
+            REQUIRE(previewBlock(host) == kNone);
+        }
+        CHECK(previewBlock(host) == std::vector<Ev>{off(0, 60)});  // block 80 = 384000
+    }
+    SUBCASE("old deadline inside the block") {
+        // 7000-frame blocks: the first deadline is 3000 samples into block 27 (27 * 7000 = 189000).
+        Host host;
+        CHECK(host.scheduler.pushPreview(previewStart(2, {72})));
+        REQUIRE(previewBlock(host, 7000) == std::vector<Ev>{on(0, 72, 90)});
+        for (int block = 1; block < 27; ++block) {
+            CAPTURE(block);
+            REQUIRE(previewBlock(host, 7000) == kNone);
+        }
+        CHECK(host.scheduler.pushPreview(previewExtend(2)));  // applied at clock 189000, before the expiry event
+        REQUIRE(previewBlock(host, 7000) == kNone);           // block 27: the stale deadline at 3000 is a no-op
+        // New deadline 189000 + 192000 = 381000 = block 54 at offset 3000.
+        for (int block = 28; block < 54; ++block) {
+            CAPTURE(block);
+            REQUIRE(previewBlock(host, 7000) == kNone);
+        }
+        const std::vector<Ev> expired = previewBlock(host, 7000);
+        CAPTURE(describe(expired));
+        CHECK(expired == std::vector<Ev>{off(3000, 72)});
+    }
+}
+
+TEST_CASE("scheduler: an extend for an id that is not sounding does nothing") {
+    SUBCASE("nothing sounds") {
+        Host host;
+        CHECK(host.scheduler.pushPreview(previewExtend(9)));
+        CHECK(previewBlock(host) == kNone);
+        CHECK(host.owners(60) == 0);
+    }
+    SUBCASE("after its stop") {
+        Host host;
+        CHECK(host.scheduler.pushPreview(previewStart(3, {60})));
+        REQUIRE(previewBlock(host) == std::vector<Ev>{on(0, 60, 90)});
+        CHECK(host.scheduler.pushPreview(previewStop(3)));
+        REQUIRE(previewBlock(host) == std::vector<Ev>{off(0, 60)});
+        CHECK(host.scheduler.pushPreview(previewExtend(3)));
+        for (int block = 0; block < 50; ++block) {
+            CAPTURE(block);
+            REQUIRE(previewBlock(host) == kNone);  // never resurrected, never released twice
+        }
+        CHECK(host.owners(60) == 0);
+    }
+}
+
+TEST_CASE("scheduler: extend with a stop or a start in the same batch, both orders") {
+    SUBCASE("extend then stop") {
+        Host host;
+        CHECK(host.scheduler.pushPreview(previewStart(4, {64})));
+        REQUIRE(previewBlock(host) == std::vector<Ev>{on(0, 64, 90)});
+        CHECK(host.scheduler.pushPreview(previewExtend(4)));
+        CHECK(host.scheduler.pushPreview(previewStop(4)));
+        REQUIRE(previewBlock(host) == std::vector<Ev>{off(0, 64)});
+        CHECK(host.owners(64) == 0);
+    }
+    SUBCASE("stop then extend") {
+        Host host;
+        CHECK(host.scheduler.pushPreview(previewStart(4, {64})));
+        REQUIRE(previewBlock(host) == std::vector<Ev>{on(0, 64, 90)});
+        CHECK(host.scheduler.pushPreview(previewStop(4)));
+        CHECK(host.scheduler.pushPreview(previewExtend(4)));
+        REQUIRE(previewBlock(host) == std::vector<Ev>{off(0, 64)});
+        for (int block = 0; block < 50; ++block) {
+            CAPTURE(block);
+            REQUIRE(previewBlock(host) == kNone);
+        }
+        CHECK(host.owners(64) == 0);
+    }
+    SUBCASE("start then extend, and extend then start: the deadline is the start's") {
+        for (const bool startFirst : {true, false}) {
+            CAPTURE(startFirst);
+            Host host;
+            if (startFirst) {
+                CHECK(host.scheduler.pushPreview(previewStart(6, {67})));
+                CHECK(host.scheduler.pushPreview(previewExtend(6)));
+            } else {
+                CHECK(host.scheduler.pushPreview(previewExtend(6)));
+                CHECK(host.scheduler.pushPreview(previewStart(6, {67})));
+            }
+            REQUIRE(previewBlock(host) == std::vector<Ev>{on(0, 67, 90)});
+            for (int block = 1; block < 40; ++block) {
+                CAPTURE(block);
+                REQUIRE(previewBlock(host) == kNone);
+            }
+            CHECK(previewBlock(host) == std::vector<Ev>{off(0, 67)});
+        }
+    }
+}
+
+TEST_CASE("scheduler: an extend after a restarted id extends the restart") {
+    Host host;
+    CHECK(host.scheduler.pushPreview(previewStart(5, {60})));
+    REQUIRE(previewBlock(host) == std::vector<Ev>{on(0, 60, 90)});
+    for (int block = 1; block < 10; ++block) {
+        REQUIRE(previewBlock(host) == kNone);
+    }
+    CHECK(host.scheduler.pushPreview(previewStart(5, {62})));  // block 10: restart, same id
+    REQUIRE(previewBlock(host) == std::vector<Ev>{off(0, 60), on(0, 62, 90)});
+    for (int block = 11; block < 30; ++block) {
+        REQUIRE(previewBlock(host) == kNone);
+    }
+    CHECK(host.scheduler.pushPreview(previewExtend(5)));  // block 30: deadline 144000 + 192000 = 336000 = block 70
+    for (int block = 30; block < 70; ++block) {
+        CAPTURE(block);
+        REQUIRE(previewBlock(host) == kNone);
+    }
+    CHECK(previewBlock(host) == std::vector<Ev>{off(0, 62)});
+}
+
+TEST_CASE("scheduler: an extend applied in a block with no usable rate leaves the deadline alone") {
+    // No reset: the rate comes from each block. A block with a non-finite ppqStart is invalid
+    // (scheduler.h, "Bounded work"): previews are served, but no rate is usable for a new deadline
+    // (previewSamples is 0) and the preview clock does not advance (the block counts as 0 frames).
+    Scheduler scheduler;
+    std::array<MidiOut, kBig> buffer{};
+    std::size_t written = 0;
+    bool ok = true;
+    auto run = [&](double ppq, int nFrames) {
+        const BlockInfo info{ppq, nFrames, kSr, kBpm, false};
+        ok = scheduler.process(info, buffer.data(), buffer.size(), written);
+        return decode(buffer.data(), written);
+    };
+    CHECK(scheduler.pushPreview(previewStart(7, {60})));
+    REQUIRE(run(0.0, 4800) == std::vector<Ev>{on(0, 60, 90)});  // deadline 192000
+    REQUIRE(ok);
+    for (int block = 1; block < 20; ++block) {
+        REQUIRE(run(0.0, 4800) == kNone);
+        REQUIRE(ok);
+    }
+    CHECK(scheduler.pushPreview(previewExtend(7)));
+    REQUIRE(run(std::numeric_limits<double>::quiet_NaN(), 4800) == kNone);  // invalid: deadline kept, clock stays 96000
+    CHECK_FALSE(ok);                                                        // an invalid block is reported
+    // The clock reaches 192000 at the start of the 40th valid block, which the loop index calls 41.
+    for (int block = 21; block < 41; ++block) {
+        CAPTURE(block);
+        REQUIRE(run(0.0, 4800) == kNone);  // not expired at once
+        REQUIRE(ok);
+    }
+    CHECK(run(0.0, 4800) == std::vector<Ev>{off(0, 60)});  // the original deadline, 192000
+    CHECK(ok);
+}
+
+TEST_CASE("scheduler: pending extends for one id coalesce in the queue") {
+    Host host;
+    CHECK(host.scheduler.pushPreview(previewStart(1, {60})));
+    for (int i = 0; i < 200; ++i) {
+        CAPTURE(i);
+        REQUIRE(host.scheduler.pushPreview(previewExtend(1)));  // never refused: the second and later merge into the first
+    }
+    // The ring now holds Start + one Extend: 62 more commands fit, the 63rd does not.
+    for (int id = 2; id < 64; ++id) {
+        CAPTURE(id);
+        REQUIRE(host.scheduler.pushPreview(previewStop(id)));
+    }
+    CHECK_FALSE(host.scheduler.pushPreview(previewStop(64)));
+    CHECK_FALSE(host.scheduler.pushPreview(previewExtend(1)));  // the newest entry is a stop: nothing to merge into, ring full
+    REQUIRE(previewBlock(host) == std::vector<Ev>{on(0, 60, 90)});  // all 64 drained in one block
+    CHECK(host.scheduler.pushPreview(previewStop(1)));              // drained: a stop fits again
+    REQUIRE(previewBlock(host) == std::vector<Ev>{off(0, 60)});
+}
+
+TEST_CASE("scheduler: an extend merges into the pending extend even when the ring is full") {
+    Host host;
+    CHECK(host.scheduler.pushPreview(previewStart(1, {60})));
+    for (int id = 2; id < 64; ++id) {
+        CAPTURE(id);
+        REQUIRE(host.scheduler.pushPreview(previewStop(id)));  // 63 entries
+    }
+    CHECK(host.scheduler.pushPreview(previewExtend(1)));      // 64: full
+    CHECK(host.scheduler.pushPreview(previewExtend(1)));      // merged into the newest entry, reported queued
+    CHECK_FALSE(host.scheduler.pushPreview(previewStop(1)));  // still full
+    REQUIRE(previewBlock(host) == std::vector<Ev>{on(0, 60, 90)});
+    CHECK(host.scheduler.pushPreview(previewStop(1)));
+    REQUIRE(previewBlock(host) == std::vector<Ev>{off(0, 60)});
+}
+
 TEST_CASE("scheduler: a pitch repeated within one preview command sounds and releases once") {
     Host host;
     CHECK(host.scheduler.pushPreview(previewStart(4, {75, 65, 65, 60})));
@@ -735,15 +962,18 @@ TEST_CASE("scheduler: 10000 random blocks and commands keep the ownership invari
             }
             host.adopt(snapshotOf(docs[current], loop, generation));
         } else if (action < 25) {
-            if (randInt(0, 1) == 0) {
+            const int draw = randInt(0, 7);  // 3 in 8 a start, 3 in 8 a stop, 1 in 4 an extend
+            if (draw < 3) {
                 std::vector<int> pitches;
                 const int count = randInt(1, 8);
                 for (int i = 0; i < count; ++i) {
                     pitches.push_back(randInt(36, 84));
                 }
                 host.scheduler.pushPreview(previewStart(randInt(1, 4), pitches, randInt(1, 127)));
-            } else {
+            } else if (draw < 6) {
                 host.scheduler.pushPreview(previewStop(randInt(1, 4)));
+            } else {
+                host.scheduler.pushPreview(previewExtend(randInt(1, 4)));
             }
         } else if (action < 28) {
             host.scheduler.reset(kSr);
