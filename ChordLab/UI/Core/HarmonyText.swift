@@ -1,7 +1,7 @@
 import Foundation
 
 /// Display formatting for the Phase 2 harmony fields (function, tension, "why", voicings), pure and in one
-/// place so that the palette's popover, the block's popover and the suggestion chips word things the same
+/// place so that the palette's tip, the block's tip and the suggestion chips word things the same
 /// way. Nothing here computes theory: every input is a snapshot field. Depends on Foundation only; unit-tested
 /// by the `ChordLabUICore` package (ChordLab/Package.swift, Tests/ChordLabUICoreTests/HarmonyTextTests.swift).
 enum HarmonyText {
@@ -22,7 +22,7 @@ enum HarmonyText {
     Double(min(100, max(0, tension ?? 0))) / 100
   }
 
-  /// The first line of a block's hover popover: the engine's sentence, or "first chord" for the first
+  /// The first line of a block's hover tip: the engine's sentence, or "first chord" for the first
   /// block (its `why` is null).
   static func whyHeadline(_ why: WhyJSON?) -> String {
     why?.text ?? "first chord"

@@ -5,7 +5,8 @@ import SwiftUI
 /// .sectionSpans`), so a span sits exactly over its chords. Everything shown is the snapshot's `sections`;
 /// every change is a command:
 /// - double-click a span → rename it in place (`renameSection`, the name kept within the engine's 64
-///   UTF-8 bytes); Return commits, Escape cancels, so does losing focus (commit);
+///   UTF-8 bytes); Return commits, Escape cancels, and losing focus commits (a click elsewhere in the
+///   window takes it: `EditorKeyRouter` resigns the field editor);
 /// - right-click → Rename…, the Colour submenu (`setSectionColour`) and Remove section (`removeSection`);
 /// - drag a span's left edge → `moveSectionStart` to the nearest block boundary when the drag ends (the
 ///   edge follows the mouse meanwhile; the first section is pinned to the start and has no edge handle);

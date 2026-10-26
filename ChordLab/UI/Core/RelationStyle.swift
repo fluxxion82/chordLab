@@ -40,7 +40,7 @@ enum RelationStyle {
     return minOpacity + opacityRange * Double(clamped(relation)) / 100
   }
 
-  /// The popover's line for a cell: "Relation to G7 · 72" (glyphs applied); nil without a relation.
+  /// The tip's line for a cell: "Relation to G7 · 72" (glyphs applied); nil without a relation.
   static func headline(reference: RelationReferenceJSON?, relation: Int?) -> String? {
     guard let relation = relation else { return nil }
     guard let reference = reference else { return "Relation · \(relation)" }

@@ -46,6 +46,8 @@ struct ContentView: View {
       }
       .padding(12)
     }
+    // Hover tips (`HoverTip`) are drawn here, over everything and inside the window, never as popovers.
+    .tipHost()
     .edgesIgnoringSafeArea(.all)
     .onAppear { state.requestSnapshot() }
     .onDisappear { state.releaseHeld() }      // editor closed mid-press: never leave a note sounding
