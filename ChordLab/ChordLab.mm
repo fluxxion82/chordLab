@@ -223,6 +223,20 @@ bool ChordLab::OnKeyDown(const IKeyPress& key)
   }
 }
 
+bool ChordLab::OnKeyUp(const IKeyPress& key)
+{
+  // Main thread, like OnKeyDown, with the same translation; the router ends the key's hold.
+  auto* vc = (ChordLabViewController*) mViewController;
+  if (!vc)
+    return false;
+  @autoreleasepool
+  {
+    NSString* characters = [NSString stringWithUTF8String:key.utf8] ?: @"";
+    return [vc handleKeyUpWithCharacters:characters
+                              virtualKey:key.VK shift:key.S command:key.C option:key.A];
+  }
+}
+
 // AUv3 only
 bool ChordLab::OnHostRequestingSupportedViewConfiguration(int width, int height)
 {

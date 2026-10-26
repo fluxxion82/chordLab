@@ -74,6 +74,13 @@ public typealias MIDIVelocity = UInt8
     keyRouter.handle(characters: characters, virtualKey: virtualKey, shift: shift, command: command, option: option)
   }
 
+  /// Route B's key-up (VST3 `IPlugView::onKeyUp` → `ChordLab::OnKeyUp`): ends the key's hold in the router's
+  /// repeat filter; true for a key the editor would consume, so the host sees the release go where the
+  /// press went.
+  @objc func handleKeyUp(characters: String, virtualKey: Int, shift: Bool, command: Bool, option: Bool) -> Bool {
+    keyRouter.keyUp(characters: characters, virtualKey: virtualKey, shift: shift, command: command, option: option)
+  }
+
   /// Messages from C++ (SendArbitraryMsgFromDelegate): snapshots, errors, scheduler status, the playhead,
   /// the export file.
   override func onMessage(_ msgTag: Int, _ ctrlTag: Int, _ msg: Data!) -> Bool {
