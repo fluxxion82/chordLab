@@ -104,6 +104,26 @@ class ChordLabState: NSObject, ObservableObject {
     send(command, tag: kMsgTagCommand)
   }
 
+  /// Runs a keyboard command. Digits append the suggestion chip of that number (nothing when there is
+  /// no such chip); Delete removes the selected chord (nothing without a selection); undo and redo are
+  /// the key bar's commands. The router consumes every mapped key whether or not it did anything, so
+  /// the host never acts on it (see `KeyCommandMap`, `EditorKeyRouter`).
+  @MainActor func perform(_ command: KeyCommand) {
+    switch command {
+    case .appendSuggestion(let n):
+      guard let suggestions = snapshot?.suggestions, suggestions.indices.contains(n - 1) else { return }
+      let suggestion = suggestions[n - 1]
+      send(command: ["cmd": "appendChord", "root": suggestion.root, "type": suggestion.type])
+    case .deleteSelection:
+      guard let id = snapshot?.selectedEventId else { return }
+      send(command: ["cmd": "removeChord", "id": id])
+    case .undo:
+      send(command: ["cmd": "undo"])
+    case .redo:
+      send(command: ["cmd": "redo"])
+    }
+  }
+
   /// JSON-encodes `fields` plus `"schema": 1` and sends it under `tag`.
   @MainActor private func send(_ fields: [String: Any], tag: Int) {
     var message = fields
