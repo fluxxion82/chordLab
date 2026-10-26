@@ -16,11 +16,19 @@ struct TipPreferenceKey: PreferenceKey {
   static func reduce(value: inout [TipItem], nextValue: () -> [TipItem]) { value += nextValue() }
 }
 
-/// The live mouse-button state a tip checks before it shows: a drag that began on another view never
-/// disarmed the view it passes over, so the cached hover state alone cannot tell. `NSEvent.pressedMouseButtons`
-/// is the hardware state; the offscreen harness, whose synthesized events never reach it, substitutes its own.
-enum TipPointer {
-  static var buttonsDown: () -> Bool = { NSEvent.pressedMouseButtons != 0 }
+extension EnvironmentValues {
+  /// Whether a mouse button is down right now, which a tip checks before it shows: a drag that began on
+  /// another view never disarmed the view it passes over, so the cached hover state alone cannot tell.
+  /// The default is the hardware state (`NSEvent.pressedMouseButtons`); whoever hosts the editor with
+  /// synthesized events, which never reach that state, sets its own at the root.
+  var tipButtonsDown: () -> Bool {
+    get { self[TipButtonsDownKey.self] }
+    set { self[TipButtonsDownKey.self] = newValue }
+  }
+}
+
+private struct TipButtonsDownKey: EnvironmentKey {
+  static let defaultValue: () -> Bool = { NSEvent.pressedMouseButtons != 0 }
 }
 
 /// A tip that opens after the mouse rests on the view for `delay` and closes on hover exit, drawn by
@@ -48,6 +56,7 @@ struct HoverTip<Tip: View>: ViewModifier {
   @State private var showing = false
   @State private var armed = true          // false from a mouse-down until the next hover exit
   @State private var generation = 0
+  @Environment(\.tipButtonsDown) private var buttonsDown
 
   func body(content: Content) -> some View {
     content
@@ -89,8 +98,9 @@ struct HoverTip<Tip: View>: ViewModifier {
     guard hovering, armed, !suppressed else { return }
     generation &+= 1
     let request = generation
+    let buttonsDown = self.buttonsDown
     DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-      guard request == generation, hovering, armed, !TipPointer.buttonsDown() else { return }
+      guard request == generation, hovering, armed, !buttonsDown() else { return }
       showing = true
     }
   }
