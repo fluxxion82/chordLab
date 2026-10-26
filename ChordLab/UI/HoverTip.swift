@@ -1,27 +1,40 @@
 import SwiftUI
 
-/// What a hovered view publishes: its bounds anchor, which side it prefers, and the tip to draw.
+/// What a hovered view publishes: its bounds anchor, which side it prefers, the tip to draw, and how to
+/// take the tip down again (the root overlay calls `dismiss` when it finds the item stale).
 struct TipItem: Identifiable {
   let id: String
   let anchor: Anchor<CGRect>
   let preferAbove: Bool
   let content: AnyView
+  let dismiss: () -> Void
 }
 
-/// Empty except while one tip shows (the hovered view's).
+/// Empty except while a tip shows (the hovered view's).
 struct TipPreferenceKey: PreferenceKey {
   static var defaultValue: [TipItem] = []
   static func reduce(value: inout [TipItem], nextValue: () -> [TipItem]) { value += nextValue() }
 }
 
+/// The live mouse-button state a tip checks before it shows: a drag that began on another view never
+/// disarmed the view it passes over, so the cached hover state alone cannot tell. `NSEvent.pressedMouseButtons`
+/// is the hardware state; the offscreen harness, whose synthesized events never reach it, substitutes its own.
+enum TipPointer {
+  static var buttonsDown: () -> Bool = { NSEvent.pressedMouseButtons != 0 }
+}
+
 /// A tip that opens after the mouse rests on the view for `delay` and closes on hover exit, drawn by
-/// `TipOverlay` at the editor's root — inside the window, never a popover, never hit-testable, so it
-/// cannot take a click or key status. It never opens while the mouse button is down on the view, closes
-/// on mouse-down, stays closed after a click until the mouse leaves and comes back (so a press, then a
-/// drag of the handle, is never covered), closes the moment `suppressed` turns true and is scheduled
-/// again when `suppressed` turns false with the mouse still there (entering a block over its handle,
-/// then moving onto the block). The palette cells, the sequence blocks and the suggestion chips share
-/// this one mechanism.
+/// `TipOverlay` at the editor's root (`tipHost()`) — inside the window, never a popover, never
+/// hit-testable, so it cannot take a click or key status. It never opens while a mouse button is down
+/// (on this view or anywhere: the live button state is checked when the delay ends), closes on mouse-down,
+/// stays closed after a click until the mouse leaves and comes back (so a press, then a drag of the handle,
+/// is never covered), closes the moment `suppressed` turns true and is scheduled again when `suppressed`
+/// turns false with the mouse still there (entering a block over its handle, then moving onto the block).
+/// Every request carries a generation: an exit, a press, a change of `suppressed` or `id`, a dismissal or
+/// disappearance starts a new one, so a delayed callback from before it shows nothing. The root overlay
+/// drops a tip whose view is not under the pointer (a missed hover exit) and every tip when the pointer
+/// leaves the editor, the application deactivates or the editor's window resigns key. The palette cells,
+/// the sequence blocks and the suggestion chips share this one mechanism.
 struct HoverTip<Tip: View>: ViewModifier {
   static var defaultDelay: TimeInterval { 0.6 }
 
@@ -34,17 +47,16 @@ struct HoverTip<Tip: View>: ViewModifier {
   @State private var hovering = false
   @State private var showing = false
   @State private var armed = true          // false from a mouse-down until the next hover exit
-  @State private var pending: DispatchWorkItem?
+  @State private var generation = 0
 
   func body(content: Content) -> some View {
     content
       .onHover { over in
         hovering = over
-        pending?.cancel()
         if over {
           schedule()
         } else {
-          showing = false
+          invalidate()
           armed = true
         }
       }
@@ -52,24 +64,35 @@ struct HoverTip<Tip: View>: ViewModifier {
         DragGesture(minimumDistance: 0)
           .onChanged { _ in
             armed = false
-            pending?.cancel()
-            showing = false
+            invalidate()
           })
       .onChange(of: suppressed) { _, now in
-        pending?.cancel()
-        if now { showing = false } else { schedule() }
+        invalidate()
+        if !now { schedule() }
       }
-      .onDisappear { pending?.cancel(); showing = false }
+      .onChange(of: id) { _, _ in invalidate() }
+      .onDisappear { invalidate() }
       .anchorPreference(key: TipPreferenceKey.self, value: .bounds) { anchor in
-        showing ? [TipItem(id: id, anchor: anchor, preferAbove: preferAbove, content: AnyView(tip()))] : []
+        guard showing else { return [] }
+        return [TipItem(id: id, anchor: anchor, preferAbove: preferAbove, content: AnyView(tip()),
+                        dismiss: { hovering = false; invalidate() })]
       }
+  }
+
+  /// Hides the tip and makes every pending request obsolete.
+  private func invalidate() {
+    generation &+= 1
+    showing = false
   }
 
   private func schedule() {
     guard hovering, armed, !suppressed else { return }
-    let work = DispatchWorkItem { if hovering && armed && !suppressed { showing = true } }
-    pending = work
-    DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    generation &+= 1
+    let request = generation
+    DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+      guard request == generation, hovering, armed, !TipPointer.buttonsDown() else { return }
+      showing = true
+    }
   }
 }
 
@@ -81,18 +104,105 @@ extension View {
                            @ViewBuilder _ tip: @escaping () -> Tip) -> some View {
     modifier(HoverTip(id: id, delay: delay, suppressed: suppressed, preferAbove: preferAbove, tip: tip))
   }
+
+  /// Draws the hover tips of this view tree (`TipHost`); applied once, at the editor's root.
+  func tipHost() -> some View { modifier(TipHost()) }
 }
 
-/// The root overlay: resolves the first published tip's anchor in the editor's space and hands it to a
-/// `TipCard` keyed by the tip's id, so every tip starts with fresh measurement state. Not hit-testable.
+/// The editor's root: tracks the pointer in the root's space (`PointerTracker`) and draws the published
+/// tips over everything with `TipOverlay`. The pointer is forgotten when it leaves the editor, when the
+/// application resigns active and when the editor's window resigns key, which takes every tip down. Kept
+/// in a modifier of its own so that the pointer's state, which changes on every mouse move, re-renders only
+/// the overlay.
+struct TipHost: ViewModifier {
+  @State private var pointer: CGPoint?
+
+  func body(content: Content) -> some View {
+    content
+      .background(PointerTracker { pointer = $0 })
+      .overlayPreferenceValue(TipPreferenceKey.self) { items in TipOverlay(items: items, pointer: pointer) }
+  }
+}
+
+/// Reports the pointer in its own top-left coordinates (the editor root's, as it sits behind the root)
+/// from the mouse events the application dispatches to its window, through a local event monitor, so a
+/// move counts however deep the view under the mouse is: SwiftUI's own hover tracking at the root
+/// (`onContinuousHover`) missed moves, and every move over the palette's and the strip's scroll views,
+/// in the harness. Nil when the pointer leaves, when the application resigns active and when the window
+/// resigns key. It takes no clicks.
+private struct PointerTracker: NSViewRepresentable {
+  let onPointer: (CGPoint?) -> Void
+
+  func makeNSView(context: Context) -> PointerTrackingView {
+    let view = PointerTrackingView()
+    view.onPointer = onPointer
+    return view
+  }
+
+  func updateNSView(_ view: PointerTrackingView, context: Context) { view.onPointer = onPointer }
+
+  static func dismantleNSView(_ view: PointerTrackingView, coordinator: ()) { view.stop() }
+}
+
+private final class PointerTrackingView: NSView {
+  var onPointer: ((CGPoint?) -> Void)?
+  private var monitor: Any?
+  private var observers: [NSObjectProtocol] = []
+
+  override var isFlipped: Bool { true }
+  override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+  override func viewDidMoveToWindow() {
+    super.viewDidMoveToWindow()
+    stop()
+    guard let window else { return }
+    let events: NSEvent.EventTypeMask = [.mouseMoved, .mouseEntered, .mouseExited,
+                                         .leftMouseDragged, .rightMouseDragged, .otherMouseDragged]
+    monitor = NSEvent.addLocalMonitorForEvents(matching: events) { [weak self] event in
+      MainActor.assumeIsolated { self?.track(event) }
+      return event
+    }
+    let center = NotificationCenter.default
+    let forget: (Notification) -> Void = { [weak self] _ in MainActor.assumeIsolated { self?.onPointer?(nil) } }
+    observers = [center.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main, using: forget),
+                 center.addObserver(forName: NSWindow.didResignKeyNotification, object: window, queue: .main, using: forget)]
+  }
+
+  func stop() {
+    if let monitor { NSEvent.removeMonitor(monitor) }
+    monitor = nil
+    observers.forEach { NotificationCenter.default.removeObserver($0) }
+    observers = []
+  }
+
+  private func track(_ event: NSEvent) {
+    guard let window, event.window === window else { return }
+    let point = convert(event.locationInWindow, from: nil)
+    onPointer?(bounds.contains(point) ? point : nil)
+  }
+}
+
+/// The root overlay: shows the published tip whose view is under the pointer, resolved in the editor's
+/// space and handed to a `TipCard` keyed by the tip's id, so every tip starts with fresh measurement
+/// state. Any other published tip is stale (its view missed a hover exit, or the pointer has left the
+/// editor) and is dismissed. Not hit-testable.
 struct TipOverlay: View {
   let items: [TipItem]
+  let pointer: CGPoint?
 
   var body: some View {
     GeometryReader { proxy in
-      if let item = items.first {
-        TipCard(item: item, anchor: proxy[item.anchor], container: CGRect(origin: .zero, size: proxy.size))
-          .id(item.id)
+      let live = pointer.flatMap { point in
+        items.first { proxy[$0.anchor].insetBy(dx: -1, dy: -1).contains(point) }
+      }
+      let stale = items.filter { $0.id != live?.id }
+      ZStack {
+        if let item = live {
+          TipCard(item: item, anchor: proxy[item.anchor], container: CGRect(origin: .zero, size: proxy.size))
+            .id(item.id)
+        }
+        // Dismissed after this update, never during it.
+        Color.clear.task(id: stale.map(\.id)) { for item in stale { item.dismiss() } }
       }
     }
     .allowsHitTesting(false)
