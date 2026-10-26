@@ -22,15 +22,17 @@
 //
 // Chord preview goes through the engine's Scheduler, not iPlug2's MIDI-from-UI queue (which holds 32
 // messages and drops silently, so a note-off could be lost while the host had processing suspended).
-// The Swift palette sends kMsgTagPreview {id, on, pitches, velocity}; OnMessage (main thread) parses it
-// and calls Scheduler::pushPreview, the scheduler's single other-thread entry (an SPSC ring of 64; a full
-// ring is reported to the UI as an error). ProcessBlock owns everything else: it consumes the pending
-// reset/panic flags, runs Scheduler::process and forwards the events with SendMidiMsg. The scheduler
-// owns the sounding notes: one physical note per pitch, Start/Stop paired by id, and a 4 s watchdog
-// releases a preview whose Stop never arrives (editor closed mid-press: Swift's onDisappear sends the
-// Stop, CloseWindow pushes one for an outstanding Start as well, and the watchdog covers the rest). The
-// watchdog counts processed audio time, not wall time: while the host has processing suspended a
-// preview stays armed and is released once blocks run again.
+// The Swift palette sends kMsgTagPreview {id, on, pitches, velocity}, and {id, extend} once a second
+// while a cell is held (merged in the ring while the host is not processing); OnMessage (main thread)
+// parses it and calls Scheduler::pushPreview, the scheduler's single other-thread entry (an SPSC ring of
+// 64; a full ring is reported to the UI as an error). ProcessBlock owns everything else: it consumes the
+// pending reset/panic flags, runs Scheduler::process and forwards the events with SendMidiMsg. The
+// scheduler owns the sounding notes: one physical note per pitch, Start/Stop paired by id, an Extend
+// moving a held preview's deadline, and a 4 s watchdog that releases a preview whose Stop never arrives
+// (editor closed mid-press: Swift's onDisappear sends the Stop, CloseWindow pushes one for an outstanding
+// Start as well, and the watchdog covers the rest). The watchdog counts processed audio time, not wall
+// time, from the Start or the last applied Extend: while the host has processing suspended a preview
+// stays armed and is released once blocks run again.
 //
 // Playback snapshots: the audio thread never reads the document; it plays a compiled copy. After every
 // accepted command and every state load (and once at construction), PublishSnapshotLocked runs
@@ -434,12 +436,25 @@ void ChordLab::HandlePreview(std::string_view text)
     return;
   }
   const chordlab::PreviewCmd& cmd = *parsed;
+#ifndef NDEBUG
+  // NSLog rather than DBGMSG (a printf to the host's stdout): the Live test reads these in Console.app.
+  NSLog(@"ChordLab: preview %s id %d",
+        cmd.kind == chordlab::PreviewCmd::Start ? "start" : cmd.kind == chordlab::PreviewCmd::Stop ? "stop" : "extend",
+        cmd.id);
+#endif
   if (!mScheduler.pushPreview(cmd))
   {
-    PushError("preview queue full");                             // the watchdog (4 s of processed audio) still ends what sounds
+    // Extends for one id merge in the ring, so they cannot fill it on their own. The watchdog (4 s of
+    // processed audio after the Start or the last applied Extend) still ends what sounds.
+    PushError("preview queue full");
     return;
   }
-  mOpenPreviewId = cmd.kind == chordlab::PreviewCmd::Start ? cmd.id : (cmd.id == mOpenPreviewId ? -1 : mOpenPreviewId);
+  switch (cmd.kind)
+  {
+    case chordlab::PreviewCmd::Start:  mOpenPreviewId = cmd.id; break;
+    case chordlab::PreviewCmd::Stop:   if (cmd.id == mOpenPreviewId) mOpenPreviewId = -1; break;
+    case chordlab::PreviewCmd::Extend: break;                    // the open Start stays open
+  }
 }
 
 void ChordLab::HandleExport()
