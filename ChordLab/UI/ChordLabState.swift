@@ -27,6 +27,16 @@ class ChordLabState: NSObject, ObservableObject {
   /// Preview id of the held cell: a per-press counter, so that Start and Stop pair up in the scheduler.
   private var heldPreviewId: Int?
   private var previewCounter = 0
+  /// While a cell is held, an `extend` for its preview every `keepAliveInterval` from a main-run-loop
+  /// timer in the common modes (so it fires during mouse tracking): the scheduler's four-second deadline
+  /// then only ends a preview whose release never arrived. Each tick first asks `mouseButtonsDown`: a hold
+  /// with no button down is a release the view never reported, and is released here instead of renewed.
+  /// Invalidated on release, panic and deinit, always on the main thread.
+  static let keepAliveInterval: TimeInterval = 1.0
+  private var keepAlive: Timer?
+  /// The physical button state (`NSEvent.pressedMouseButtons`); a harness that synthesizes events
+  /// passes its own.
+  private let mouseButtonsDown: () -> Bool
 
   let beginEdit: @MainActor (Int) -> Void
   let doEdit: @MainActor (Int, Double) -> Void
@@ -38,18 +48,28 @@ class ChordLabState: NSObject, ObservableObject {
     self.doEdit = { _, _ in }
     self.endEdit = { _ in }
     self.sendCommand = { _, _ in }
+    self.mouseButtonsDown = { NSEvent.pressedMouseButtons != 0 }
     super.init()
   }
 
   public init(beginEdit: @MainActor @escaping (Int) -> Void = { _ in },
               doEdit: @MainActor @escaping (Int, Double) -> Void = { _, _ in },
               endEdit: @MainActor @escaping (Int) -> Void = { _ in },
-              sendCommand: @MainActor @escaping (Int, Data?) -> Void = { _, _ in }) {
+              sendCommand: @MainActor @escaping (Int, Data?) -> Void = { _, _ in },
+              mouseButtonsDown: @escaping () -> Bool = { NSEvent.pressedMouseButtons != 0 }) {
     self.beginEdit = beginEdit
     self.doEdit = doEdit
     self.endEdit = endEdit
     self.sendCommand = sendCommand
+    self.mouseButtonsDown = mouseButtonsDown
     super.init()
+  }
+
+  deinit {
+    // The timer holds `self` weakly (`KeepAliveTarget`), so the last release can come from any thread; a run-loop timer must
+    // be invalidated on the thread it was scheduled on, the main thread here.
+    guard let timer = keepAlive else { return }
+    if Thread.isMainThread { timer.invalidate() } else { DispatchQueue.main.async { timer.invalidate() } }
   }
 
   convenience init(numParams: Int) {
@@ -59,11 +79,12 @@ class ChordLabState: NSObject, ObservableObject {
     }
   }
 
-  // MARK: - Preview (through the engine scheduler: kMsgTagPreview Start/Stop paired by id)
+  // MARK: - Preview (through the engine scheduler: kMsgTagPreview Start/Stop paired by id, Extend while held)
 
   /// Sounds `cell`'s voicing. At most one cell is held: pressing another first releases the held one,
   /// so every Start this object sends is matched by exactly one Stop with the same id (and the
-  /// scheduler's 4 s watchdog ends a preview whose Stop is lost).
+  /// scheduler's 4 s watchdog ends a preview whose Stop never arrived; `extend`s every second keep a
+  /// held one alive).
   @MainActor func pressCell(_ cell: CellJSON) {
     releaseHeld()
     previewCounter += 1
@@ -72,6 +93,7 @@ class ChordLabState: NSObject, ObservableObject {
     heldCellId = cell.id
     let pitches = Array(cell.voicing.filter { (0...127).contains($0) }.prefix(8))
     send(["id": id, "on": true, "velocity": 100, "pitches": pitches], tag: kMsgTagPreview)
+    startKeepAlive(id: id)
   }
 
   /// Releases `cell` if it is the held one; a cell that was already released (by a press elsewhere,
@@ -83,6 +105,7 @@ class ChordLabState: NSObject, ObservableObject {
 
   /// Releases whatever is held (view disappearance, window close).
   @MainActor func releaseHeld() {
+    stopKeepAlive()
     guard let id = heldPreviewId else { return }
     heldPreviewId = nil
     heldCellId = nil
@@ -91,9 +114,46 @@ class ChordLabState: NSObject, ObservableObject {
 
   /// Silences everything the scheduler is sounding (next audio block).
   @MainActor func panic() {
+    stopKeepAlive()
     heldPreviewId = nil
     heldCellId = nil
     sendCommand(kMsgTagPanic, Data())
+  }
+
+  /// The keep-alive timer's target. The timer retains it and it holds the state weakly, so a running
+  /// timer never keeps the state alive. (A target rather than a block: the SDK's block is `@Sendable`,
+  /// and this class is not.)
+  private final class KeepAliveTarget: NSObject {
+    weak var state: ChordLabState?
+    let id: Int
+    init(state: ChordLabState, id: Int) {
+      self.state = state
+      self.id = id
+    }
+    @objc func tick(_ timer: Timer) {
+      MainActor.assumeIsolated { state?.keepAliveTick(id: id) }   // scheduled on the main run loop
+    }
+  }
+
+  @MainActor private func startKeepAlive(id: Int) {
+    stopKeepAlive()
+    let timer = Timer(timeInterval: Self.keepAliveInterval, target: KeepAliveTarget(state: self, id: id),
+                      selector: #selector(KeepAliveTarget.tick(_:)), userInfo: nil, repeats: true)
+    RunLoop.main.add(timer, forMode: .common)
+    keepAlive = timer
+  }
+
+  @MainActor private func stopKeepAlive() {
+    keepAlive?.invalidate()
+    keepAlive = nil
+  }
+
+  /// One tick: the timer is done when `id` is no longer held; a hold with no mouse button down is
+  /// released; otherwise an `extend`.
+  @MainActor private func keepAliveTick(id: Int) {
+    guard heldPreviewId == id else { stopKeepAlive(); return }
+    guard mouseButtonsDown() else { releaseHeld(); return }
+    send(["id": id, "extend": true], tag: kMsgTagPreview)
   }
 
   // MARK: - Commands (engine wire format, json_api.h)
