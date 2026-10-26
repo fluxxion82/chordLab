@@ -19,8 +19,8 @@ class ChordLabState: NSObject, ObservableObject {
   @Published var transport: TransportJSON?
   /// The MIDI file of the last export request (`kMsgTagExportReady`), or nil while none is ready.
   @Published var exportPath: String?
-  /// Whether a text field (a section rename) is being edited: bare-key shortcuts (the suggestion digits)
-  /// stand down meanwhile, so typing a name never appends chords.
+  /// Whether a text field (a section rename) is being edited: the key routes (`EditorKeyRouter`) stand
+  /// down meanwhile, so typing a name never appends or removes chords.
   @Published var editingText = false
   /// Id of the palette cell whose voicing is sounding (pressed), or nil.
   @Published private(set) var heldCellId: String?
