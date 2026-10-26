@@ -779,6 +779,59 @@ TEST_CASE("scheduler: an extend applied in a block with no usable rate leaves th
     CHECK(ok);
 }
 
+TEST_CASE("scheduler: two previews extended at different blocks expire at their own deadlines") {
+    Host host;
+    CHECK(host.scheduler.pushPreview(previewStart(1, {60})));
+    CHECK(host.scheduler.pushPreview(previewStart(2, {64})));
+    REQUIRE(previewBlock(host) == std::vector<Ev>{on(0, 60, 90), on(0, 64, 90)});
+    for (int block = 1; block < 65; ++block) {
+        CAPTURE(block);
+        if (block == 10) {
+            CHECK(host.scheduler.pushPreview(previewExtend(1)));  // 48000 + 192000 = 240000, block 50
+        }
+        if (block == 25) {
+            CHECK(host.scheduler.pushPreview(previewExtend(2)));  // 120000 + 192000 = 312000, block 65
+        }
+        const std::vector<Ev> events = previewBlock(host);
+        CAPTURE(describe(events));
+        REQUIRE(events == (block == 50 ? std::vector<Ev>{off(0, 60)} : kNone));
+    }
+    CHECK(previewBlock(host) == std::vector<Ev>{off(0, 64)});  // block 65
+    CHECK(host.owners(60) == 0);
+    CHECK(host.owners(64) == 0);
+}
+
+TEST_CASE("scheduler: an extend for a start that acquired no pitch does nothing") {
+    // Every pitch invalid: the start acquires nothing and its slot is inactive at once.
+    Host host;
+    CHECK(host.scheduler.pushPreview(previewStart(8, {200, 255})));
+    REQUIRE(previewBlock(host) == kNone);
+    CHECK(host.scheduler.pushPreview(previewExtend(8)));
+    for (int block = 1; block < 50; ++block) {
+        CAPTURE(block);
+        REQUIRE(previewBlock(host) == kNone);
+    }
+    for (int pitch = 0; pitch < 128; ++pitch) {
+        REQUIRE_FALSE(host.scheduler.sounding(pitch));
+    }
+}
+
+TEST_CASE("scheduler: an extend in a block with output capacity 0 completes and still moves the deadline") {
+    Host host;
+    CHECK(host.scheduler.pushPreview(previewStart(1, {60})));
+    REQUIRE(previewBlock(host) == std::vector<Ev>{on(0, 60, 90)});
+    CHECK(host.scheduler.pushPreview(previewExtend(1)));
+    // Block 1, nothing may be written: the extend writes nothing, so the block is complete.
+    CHECK(host.run(0.0, 4800, false, kBpm, 0) == kNone);
+    CHECK(host.lastOk);
+    // Deadline 4800 + 192000 = 196800, block 41: block 40, the old deadline, stays silent.
+    for (int block = 2; block < 41; ++block) {
+        CAPTURE(block);
+        REQUIRE(previewBlock(host) == kNone);
+    }
+    CHECK(previewBlock(host) == std::vector<Ev>{off(0, 60)});
+}
+
 TEST_CASE("scheduler: pending extends for one id coalesce in the queue") {
     Host host;
     CHECK(host.scheduler.pushPreview(previewStart(1, {60})));
