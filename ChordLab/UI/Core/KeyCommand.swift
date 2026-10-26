@@ -3,7 +3,7 @@ import Foundation
 /// A key press as either native route reports it, reduced to what the shortcuts need: the key
 /// (a character, one of the two delete keys, or something else) and the four modifiers.
 struct KeyInput: Equatable {
-  enum Key: Equatable {
+  enum Key: Hashable {
     case character(Character)
     case delete          // Backspace / the Mac "delete" key
     case forwardDelete   // fn-delete / "⌦"
@@ -68,23 +68,63 @@ enum KeyCommandMap {
   }
 }
 
-/// Decides whether a delivered key acts. A key its route flags as a repeat never acts; nor does the
-/// same key delivered again within `window` of its previous delivery — that is an autorepeat on a route
-/// without a repeat flag (VST3), or the one press reaching the editor through both routes. Either way
-/// the delivery is consumed by the caller. The window is measured from the previous delivery, so a chain
-/// of repeats stays suppressed; a deliberate second press is slower than the window (macOS's fastest
-/// autorepeat is about 33 ms apart, a double tap 120 ms or more). A character is compared case-folded:
-/// with Shift held one route may report "Z" and the other "z" for the same press.
+/// Which route delivered a key. Route A (`appKit`) carries the system's repeat flag; route B (`host`,
+/// VST3 `onKeyDown`) carries none, but its key-ups arrive through `onKeyUp`.
+enum KeySource: Equatable {
+  case appKit(isRepeat: Bool)
+  case host
+}
+
+/// Decides whether a delivered key acts, so that one physical press is one command whichever route, or
+/// both, delivers it, and a held key does not repeat. The history is per key — the key alone, a
+/// character case-folded (with Shift held one route may report "Z" and the other "z"), modifiers not
+/// part of it (a key-up may come after a modifier was released) — so interleaved keys on two routes
+/// keep their own history. For each key:
+/// - a delivery within `window` of that key's previous delivery never acts, from either route: the one
+///   press reaching the editor through both routes, or an autorepeat chain (measured from the previous
+///   delivery, so the chain stays suppressed; macOS's fastest autorepeat is about 33 ms apart, a double
+///   tap 120 ms or more);
+/// - a route-A delivery the system flags as a repeat never acts;
+/// - route B has no repeat flag, so its deliveries mark the key held until its `keyUp`: a host delivery
+///   of a held key is an autorepeat and does not act. A hold also ends `heldExpiry` after the key's last
+///   delivery, the backstop for a host that never sends key-ups (macOS's slowest key repeat is about 2 s
+///   apart, so a key still held keeps refreshing it). Route A never marks a key held: it has its own
+///   repeat flag, and a route-A press must not block a deliberate second press.
+/// Every delivery is consumed by the caller whether or not it acts.
 struct KeyRepeatFilter {
   static let window: TimeInterval = 0.1
-  private var last: (input: KeyInput, time: TimeInterval)?
+  static let heldExpiry: TimeInterval = 2
 
-  mutating func shouldAct(_ input: KeyInput, at time: TimeInterval, isRepeat: Bool) -> Bool {
-    var input = input
-    if case .character(let c) = input.key, let folded = c.lowercased().first { input.key = .character(folded) }
-    defer { last = (input, time) }
-    if isRepeat { return false }
-    if let last, last.input == input, time - last.time < Self.window { return false }
-    return true
+  private struct History {
+    var time: TimeInterval
+    var heldByHost: Bool
+  }
+
+  private var history: [KeyInput.Key: History] = [:]
+
+  /// The key a delivery is remembered under.
+  private static func identity(_ input: KeyInput) -> KeyInput.Key {
+    if case .character(let c) = input.key, let folded = c.lowercased().first { return .character(folded) }
+    return input.key
+  }
+
+  mutating func shouldAct(_ input: KeyInput, at time: TimeInterval, source: KeySource) -> Bool {
+    let key = Self.identity(input)
+    let previous = history[key]
+    history[key] = History(time: time, heldByHost: source == .host || (previous?.heldByHost ?? false))
+    if let previous, time - previous.time < Self.window { return false }
+    switch source {
+    case .appKit(let isRepeat):
+      return !isRepeat
+    case .host:
+      if let previous, previous.heldByHost, time - previous.time < Self.heldExpiry { return false }
+      return true
+    }
+  }
+
+  /// Route B's key-up: the key is no longer held. `time` is not needed by the rules; it keeps the call
+  /// sites in step with `shouldAct`.
+  mutating func keyUp(_ input: KeyInput, at time: TimeInterval) {
+    history[Self.identity(input)]?.heldByHost = false
   }
 }

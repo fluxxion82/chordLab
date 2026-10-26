@@ -88,43 +88,109 @@ final class KeyCommandTests: XCTestCase {
 
   // MARK: - The repeat / duplicate filter
 
+  private let press = KeySource.appKit(isRepeat: false)
+
   func testAFirstPressActs() {
     var filter = KeyRepeatFilter()
-    XCTAssertTrue(filter.shouldAct(input(.character("2")), at: 10.0, isRepeat: false))
+    XCTAssertTrue(filter.shouldAct(input(.character("2")), at: 10.0, source: press))
   }
 
   func testARouteFlaggedRepeatNeverActs() {
     var filter = KeyRepeatFilter()
-    XCTAssertTrue(filter.shouldAct(input(.delete), at: 10.0, isRepeat: false))
-    XCTAssertFalse(filter.shouldAct(input(.delete), at: 10.5, isRepeat: true))
+    XCTAssertTrue(filter.shouldAct(input(.delete), at: 10.0, source: press))
+    XCTAssertFalse(filter.shouldAct(input(.delete), at: 10.5, source: .appKit(isRepeat: true)))
   }
 
   func testTheSameKeyWithinTheWindowIsADuplicateAndAChainOfRepeatsStaysSuppressed() {
     var filter = KeyRepeatFilter()
-    XCTAssertTrue(filter.shouldAct(input(.character("2")), at: 10.0, isRepeat: false))
-    XCTAssertFalse(filter.shouldAct(input(.character("2")), at: 10.03, isRepeat: false), "both routes, one press")
-    XCTAssertFalse(filter.shouldAct(input(.character("2")), at: 10.06, isRepeat: false), "autorepeat at 33 ms")
-    XCTAssertFalse(filter.shouldAct(input(.character("2")), at: 10.12, isRepeat: false),
+    XCTAssertTrue(filter.shouldAct(input(.character("2")), at: 10.0, source: press))
+    XCTAssertFalse(filter.shouldAct(input(.character("2")), at: 10.03, source: press), "both routes, one press")
+    XCTAssertFalse(filter.shouldAct(input(.character("2")), at: 10.06, source: press), "autorepeat at 33 ms")
+    XCTAssertFalse(filter.shouldAct(input(.character("2")), at: 10.12, source: press),
                    "measured from the previous delivery, not the first press")
   }
 
   func testADeliberateSecondPressActs() {
     var filter = KeyRepeatFilter()
-    XCTAssertTrue(filter.shouldAct(input(.character("2")), at: 10.0, isRepeat: false))
-    XCTAssertTrue(filter.shouldAct(input(.character("2")), at: 10.15, isRepeat: false), "a double tap")
+    XCTAssertTrue(filter.shouldAct(input(.character("2")), at: 10.0, source: press))
+    XCTAssertTrue(filter.shouldAct(input(.character("2")), at: 10.15, source: press), "a double tap")
   }
 
   func testTheSameKeyInEitherCaseIsADuplicate() {
     // ⇧⌘Z may arrive as "Z" on one route and "z" on the other; it is still one press.
     var filter = KeyRepeatFilter()
-    XCTAssertTrue(filter.shouldAct(input(.character("Z"), command: true, shift: true), at: 10.0, isRepeat: false))
-    XCTAssertFalse(filter.shouldAct(input(.character("z"), command: true, shift: true), at: 10.03, isRepeat: false))
+    XCTAssertTrue(filter.shouldAct(input(.character("Z"), command: true, shift: true), at: 10.0, source: press))
+    XCTAssertFalse(filter.shouldAct(input(.character("z"), command: true, shift: true), at: 10.03, source: .host))
   }
 
   func testADifferentKeyActsAtOnce() {
     var filter = KeyRepeatFilter()
-    XCTAssertTrue(filter.shouldAct(input(.character("2")), at: 10.0, isRepeat: false))
-    XCTAssertTrue(filter.shouldAct(input(.character("3")), at: 10.01, isRepeat: false))
-    XCTAssertTrue(filter.shouldAct(input(.delete), at: 10.02, isRepeat: false))
+    XCTAssertTrue(filter.shouldAct(input(.character("2")), at: 10.0, source: press))
+    XCTAssertTrue(filter.shouldAct(input(.character("3")), at: 10.01, source: press))
+    XCTAssertTrue(filter.shouldAct(input(.delete), at: 10.02, source: press))
+  }
+
+  func testInterleavedKeysOnBothRoutesActOncePerKey() {
+    var filter = KeyRepeatFilter()
+    let acted = [
+      filter.shouldAct(input(.character("2")), at: 10.00, source: press),
+      filter.shouldAct(input(.character("3")), at: 10.01, source: press),
+      filter.shouldAct(input(.character("2")), at: 10.02, source: .host),
+      filter.shouldAct(input(.character("3")), at: 10.03, source: .host),
+    ]
+    XCTAssertEqual(acted, [true, true, false, false], "the history is per key, not just the last delivery")
+  }
+
+  func testAKeypadDigitWithoutTextIsTheSameKeyAsRouteAsDigit() {
+    var filter = KeyRepeatFilter()
+    let keypad = KeyInput(characters: "", virtualKey: 0x62, shift: false, command: false, option: false, control: false)
+    XCTAssertTrue(filter.shouldAct(input(.character("2")), at: 10.0, source: press))
+    XCTAssertFalse(filter.shouldAct(keypad, at: 10.02, source: .host))
+  }
+
+  // MARK: - Held keys on the host route (no repeat flag; key-ups from OnKeyUp)
+
+  func testAKeyHeldOnTheHostRouteActsOnce() {
+    var filter = KeyRepeatFilter()
+    XCTAssertTrue(filter.shouldAct(input(.character("2")), at: 10.0, source: .host))
+    XCTAssertFalse(filter.shouldAct(input(.character("2")), at: 10.5, source: .host), "the initial repeat delay")
+    XCTAssertFalse(filter.shouldAct(input(.character("2")), at: 10.6, source: .host), "a slow repeat")
+    XCTAssertFalse(filter.shouldAct(input(.character("2")), at: 10.7, source: .host))
+  }
+
+  func testAKeyUpOnTheHostRouteEndsTheHold() {
+    var filter = KeyRepeatFilter()
+    XCTAssertTrue(filter.shouldAct(input(.character("2")), at: 10.0, source: .host))
+    XCTAssertFalse(filter.shouldAct(input(.character("2")), at: 10.5, source: .host))
+    filter.keyUp(input(.character("2")), at: 10.8)
+    XCTAssertTrue(filter.shouldAct(input(.character("2")), at: 10.9, source: .host))
+  }
+
+  func testAHoldWithoutAKeyUpExpiresAfterTwoSeconds() {
+    var filter = KeyRepeatFilter()
+    XCTAssertTrue(filter.shouldAct(input(.character("2")), at: 10.0, source: .host))
+    XCTAssertTrue(filter.shouldAct(input(.character("2")), at: 12.5, source: .host), "a host that never sends key-ups")
+  }
+
+  func testRouteANeverHoldsAKey() {
+    var filter = KeyRepeatFilter()
+    XCTAssertTrue(filter.shouldAct(input(.character("2")), at: 10.0, source: press))
+    XCTAssertTrue(filter.shouldAct(input(.character("2")), at: 10.3, source: press), "not a repeat: a second press")
+  }
+
+  func testADuplicateOnTheHostRouteHoldsTheKeyUntilItsKeyUp() {
+    var filter = KeyRepeatFilter()
+    XCTAssertTrue(filter.shouldAct(input(.character("2")), at: 10.0, source: press))
+    XCTAssertFalse(filter.shouldAct(input(.character("2")), at: 10.02, source: .host), "the same press on route B")
+    XCTAssertFalse(filter.shouldAct(input(.character("2")), at: 10.5, source: .host), "held: route B's repeat")
+    filter.keyUp(input(.character("2")), at: 10.6)
+    XCTAssertTrue(filter.shouldAct(input(.character("2")), at: 10.8, source: .host))
+  }
+
+  func testAKeyUpIgnoresModifiersAndCase() {
+    var filter = KeyRepeatFilter()
+    XCTAssertTrue(filter.shouldAct(input(.character("z"), command: true), at: 10.0, source: .host))
+    filter.keyUp(input(.character("Z")), at: 10.3)   // ⌘ released before the key
+    XCTAssertTrue(filter.shouldAct(input(.character("z"), command: true), at: 10.5, source: .host))
   }
 }

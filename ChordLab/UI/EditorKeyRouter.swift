@@ -10,8 +10,10 @@ import AppKit
 /// in the same window keeps its keys); a mouse-down outside the content view (a title-bar drag, a
 /// traffic-light click, a resize-edge grab) chooses neither and changes nothing. Route B (`handle(characters:…)`): the host delivered the key through the plug-in API
 /// (VST3 `onKeyDown` → `ChordLab::OnKeyDown`); the host already chose the plug-in, so only the text gate
-/// applies. `KeyRepeatFilter` makes one physical press one command on either route, or on both when a
-/// host uses both. A mapped key is consumed either way; everything else goes on to the host.
+/// applies; its key-ups (`keyUp(characters:…)`, VST3 `onKeyUp` → `ChordLab::OnKeyUp`) end a held key,
+/// since that route has no repeat flag. `KeyRepeatFilter` makes one physical press one command on either
+/// route, or on both when a host uses both, and keeps a held key from repeating. A mapped key is consumed
+/// either way; everything else goes on to the host.
 final class EditorKeyRouter {
   private unowned let view: NSView
   private unowned let state: ChordLabState
@@ -30,6 +32,7 @@ final class EditorKeyRouter {
   func install() {
     guard keyMonitor == nil else { return }
     ownsKeyboard = true
+    filter = KeyRepeatFilter()
     keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
       guard let self else { return event }
       return MainActor.assumeIsolated { self.handle(event) } ? nil : event
@@ -46,6 +49,7 @@ final class EditorKeyRouter {
     keyMonitor = nil
     mouseMonitor = nil
     ownsKeyboard = false
+    filter = KeyRepeatFilter()   // no hold or duplicate history survives the editor going away
   }
 
   /// A click in the editor's window decides who has the keyboard there; clicks in other windows, and on
@@ -59,21 +63,43 @@ final class EditorKeyRouter {
   /// Route A. Whether the event was consumed.
   @MainActor func handle(_ event: NSEvent) -> Bool {
     guard let window = view.window, event.window === window, ownsKeyboard else { return false }
-    return deliver(KeyInput(event: event), isRepeat: event.isARepeat)
+    return deliver(KeyInput(event: event), source: .appKit(isRepeat: event.isARepeat))
   }
 
-  /// Route B. Whether the key was consumed. Control is read from the live modifier flags because iPlug2's
-  /// translation does not carry it.
+  /// Route B. Whether the key was consumed.
   @MainActor func handle(characters: String, virtualKey: Int, shift: Bool, command: Bool, option: Bool) -> Bool {
-    let control = NSEvent.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.control)
-    return deliver(KeyInput(characters: characters, virtualKey: virtualKey, shift: shift, command: command,
-                            option: option, control: control), isRepeat: false)
+    deliver(Self.hostInput(characters: characters, virtualKey: virtualKey, shift: shift, command: command,
+                           option: option), source: .host)
   }
 
-  @MainActor private func deliver(_ input: KeyInput, isRepeat: Bool) -> Bool {
-    guard !state.editingText, !(view.window?.firstResponder is NSTextView) else { return false }
+  /// Route B's key-up: the key is no longer held (`KeyRepeatFilter.keyUp`). Answers what the key-down
+  /// answered — consumed when it is a key the map knows and no text is being edited — so the host sees
+  /// the press and the release go to the same place.
+  @MainActor func keyUp(characters: String, virtualKey: Int, shift: Bool, command: Bool, option: Bool) -> Bool {
+    let input = Self.hostInput(characters: characters, virtualKey: virtualKey, shift: shift, command: command,
+                               option: option)
+    filter.keyUp(input, at: ProcessInfo.processInfo.systemUptime)
+    return !editingText && KeyCommandMap.command(for: input) != nil
+  }
+
+  /// Route B's key: Control is read from the live modifier flags because iPlug2's translation does not
+  /// carry it.
+  private static func hostInput(characters: String, virtualKey: Int, shift: Bool, command: Bool,
+                                option: Bool) -> KeyInput {
+    let control = NSEvent.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.control)
+    return KeyInput(characters: characters, virtualKey: virtualKey, shift: shift, command: command,
+                    option: option, control: control)
+  }
+
+  /// A section name, or any other text, is being typed: no key is ours.
+  @MainActor private var editingText: Bool {
+    state.editingText || view.window?.firstResponder is NSTextView
+  }
+
+  @MainActor private func deliver(_ input: KeyInput, source: KeySource) -> Bool {
+    guard !editingText else { return false }
     guard let command = KeyCommandMap.command(for: input) else { return false }
-    if filter.shouldAct(input, at: ProcessInfo.processInfo.systemUptime, isRepeat: isRepeat) {
+    if filter.shouldAct(input, at: ProcessInfo.processInfo.systemUptime, source: source) {
       state.perform(command)
     }
     return true
