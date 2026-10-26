@@ -73,13 +73,29 @@ final class EditorKeyRouter {
   }
 
   /// A click in the editor's window decides who has the keyboard there; clicks in other windows, and on
-  /// the window's frame outside its content view, change nothing.
+  /// the window's frame outside its content view, change nothing. A left click there also ends text
+  /// editing when it lands outside the field being edited (`endTextEditing`).
   func noteMouseDown(_ event: NSEvent) {
     guard let window = view.window, event.window === window, let content = window.contentView else { return }
     guard content.bounds.contains(content.convert(event.locationInWindow, from: nil)) else { return }
+    if event.type == .leftMouseDown { endTextEditing(for: event, in: window, content: content) }
     let owns = view.bounds.contains(view.convert(event.locationInWindow, from: nil))
     if ownsKeyboard && !owns { filter.clearHolds() }   // the releases of keys held now may go elsewhere
     ownsKeyboard = owns
+  }
+
+  /// The macOS rule "a click outside a text field ends editing", which SwiftUI does not apply for a click
+  /// on a view that cannot take focus (a sequence block, the empty strip, a palette cell): with a field
+  /// editor first responder and the click neither on it nor on the field it edits (its delegate), the
+  /// window's first responder is resigned before the click goes on. A section rename then commits through
+  /// its focus change (`SectionsHeaderView`), and the click does what it does anyway (select a block).
+  private func endTextEditing(for event: NSEvent, in window: NSWindow, content: NSView) {
+    guard let editor = window.firstResponder as? NSTextView else { return }
+    let point = content.superview.map { $0.convert(event.locationInWindow, from: nil) } ?? event.locationInWindow
+    guard let hit = content.hitTest(point) else { return }
+    let field = (editor.delegate as? NSView) ?? editor
+    if hit === editor || hit.isDescendant(of: editor) || hit === field || hit.isDescendant(of: field) { return }
+    window.makeFirstResponder(nil)
   }
 
   /// Route A. Whether the event was consumed.
