@@ -21,6 +21,11 @@ final class KeyCommandTests: XCTestCase {
     XCTAssertNil(KeyCommandMap.command(for: input(.character("0"))))
   }
 
+  func testOnlyASCIIDigitsAreShortcuts() {
+    XCTAssertNil(KeyCommandMap.command(for: input(.character("٢"))), "Arabic-Indic two")
+    XCTAssertNil(KeyCommandMap.command(for: input(.character("²"))), "superscript two")
+  }
+
   func testDigitsWithAnyModifierAreNotShortcuts() {
     XCTAssertNil(KeyCommandMap.command(for: input(.character("2"), command: true)))
     XCTAssertNil(KeyCommandMap.command(for: input(.character("2"), shift: true)))
@@ -33,6 +38,7 @@ final class KeyCommandTests: XCTestCase {
     XCTAssertEqual(KeyCommandMap.command(for: input(.forwardDelete)), .deleteSelection)
     XCTAssertNil(KeyCommandMap.command(for: input(.delete, command: true)), "⌘Delete is not ours")
     XCTAssertNil(KeyCommandMap.command(for: input(.delete, control: true)))
+    XCTAssertNil(KeyCommandMap.command(for: input(.forwardDelete, option: true)), "⌥⌦ is not ours")
   }
 
   func testCommandZUndoesAndShiftCommandZRedoes() {
@@ -66,6 +72,18 @@ final class KeyCommandTests: XCTestCase {
                    input(.character("2"), control: true), "Control comes from the caller (iPlug2 drops it)")
     XCTAssertEqual(KeyInput(characters: "", virtualKey: 0x41, shift: false, command: false, option: false, control: false),
                    input(.other), "no character and not a delete key")
+  }
+
+  func testKeypadDigitsWithoutTextAreThatDigit() {
+    // VST3 keypad events may arrive with empty text and only the keypad virtual key (kVK_NUMPAD0..9).
+    XCTAssertEqual(KeyInput(characters: "", virtualKey: 0x62, shift: false, command: false, option: false, control: false),
+                   input(.character("2")), "keypad 2")
+    XCTAssertEqual(KeyInput(characters: "", virtualKey: 0x60, shift: false, command: false, option: false, control: false),
+                   input(.character("0")), "keypad 0")
+    XCTAssertEqual(KeyInput(characters: "", virtualKey: 0x69, shift: false, command: false, option: false, control: false),
+                   input(.character("9")), "keypad 9")
+    XCTAssertEqual(KeyInput(characters: "2", virtualKey: 0x62, shift: false, command: false, option: false, control: false),
+                   input(.character("2")), "keypad 2 with its text")
   }
 
   // MARK: - The repeat / duplicate filter

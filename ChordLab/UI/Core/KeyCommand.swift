@@ -23,12 +23,15 @@ struct KeyInput: Equatable {
   /// The VST3 route: iPlug2's `IKeyPress` carries the key's UTF-8 text, a Windows virtual key and
   /// three modifiers (S, C = command on macOS, A); it drops Control, so the caller supplies it from
   /// the live modifier flags. `kVK_BACK` 0x08 and `kVK_DELETE` 0x2E are the delete keys; any other key
-  /// with exactly one character is that character; the rest is `.other`.
+  /// with exactly one character is that character; a keypad digit (`kVK_NUMPAD0`…`9`, 0x60…0x69) without
+  /// text is that digit, because the VST3 translation leaves the text empty for keypad codes it cannot
+  /// turn into a character; the rest is `.other`.
   init(characters: String, virtualKey: Int, shift: Bool, command: Bool, option: Bool, control: Bool) {
     let key: Key
     switch virtualKey {
     case 0x08: key = .delete
     case 0x2E: key = .forwardDelete
+    case 0x60...0x69 where characters.isEmpty: key = .character(Character(String(virtualKey - 0x60)))
     default: key = characters.count == 1 ? .character(characters.first!) : .other
     }
     self.init(key: key, command: command, shift: shift, option: option, control: control)
@@ -45,13 +48,14 @@ enum KeyCommand: Equatable {
 
 /// The one key map, for both routes: bare digits 1–8 append that suggestion chip; Delete and Forward
 /// Delete remove the selected chord; ⌘Z and ⇧⌘Z undo and redo. Everything else (Space, letters, 9, 0,
-/// digits or deletes with a modifier) is nil: not ours, the host keeps it.
+/// digits or deletes with a modifier, digits of other scripts such as "٢" or "²") is nil: not ours, the
+/// host keeps it.
 enum KeyCommandMap {
   static func command(for input: KeyInput) -> KeyCommand? {
     let anyModifier = input.command || input.shift || input.option || input.control
     switch input.key {
     case .character(let c) where !anyModifier:
-      guard let n = c.wholeNumberValue, (1...8).contains(n) else { return nil }
+      guard c.isASCII, ("1"..."8").contains(c), let n = c.wholeNumberValue else { return nil }
       return .appendSuggestion(n)
     case .character(let c) where input.command && !input.option && !input.control:
       guard c == "z" || c == "Z" else { return nil }
