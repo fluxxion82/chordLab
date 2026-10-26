@@ -5,9 +5,9 @@ import SwiftUI
 /// outside the project key, labelled per the label mode, with the function dot at the top left and a
 /// 2-pt tension strip along the bottom edge (the function colour at 40 %, brightened over `tension`/100
 /// of the width). Resting the mouse on a block shows its tip (`BlockDetailView`: the voicing, the
-/// tension and the engine's "why" against the previous chord; `HoverTip`). Everything drawn comes from the snapshot, and
-/// every position comes from `SequenceGeometry`: the blocks, the ruler, the playhead and the reorder
-/// arithmetic share one linear layout, so what is drawn is what is computed.
+/// tension and the engine's "why" against the previous chord; `HoverTip`). Everything drawn comes from
+/// the snapshot, and every position comes from `SequenceGeometry`: the blocks, the ruler, the playhead and
+/// the reorder arithmetic share one linear layout, so what is drawn is what is computed.
 ///
 /// Editing, every step a command to the plugin (the snapshot it answers with redraws the strip):
 /// - drop a palette cell anywhere on the strip → `appendChord`;
@@ -15,7 +15,7 @@ import SwiftUI
 ///   the suggestions strip and the plug-in agree on it); click the empty strip → `selectEvent {id: null}`;
 ///   Delete / Forward Delete → `removeChord` of the selection;
 /// - drag the handle at a block's right edge → `setLength`, snapped to quarter beats and clamped to
-///   0.25…64, sent when the drag ends (the width follows the mouse meanwhile, as local state);
+///   0.25…64, sent when the drag ends (the width follows the mouse meanwhile, as gesture state);
 /// - drag a block sideways → `moveChord` to the index its centre lands on, sent when the drag ends
 ///   (only the dragged block moves meanwhile);
 /// - click the "v" badge at a block's bottom right → the voicing popover (`VoicingPopoverView`:
@@ -23,6 +23,19 @@ import SwiftUI
 ///   for the popover. A chord with its own voicing wears a "manual" badge at the top right.
 /// The sections (P2-D6) sit in a header row above the blocks (`SectionsHeaderView`, in the same scroll
 /// and geometry), and a thin line through the block row marks each section's start.
+///
+/// Both drags measure their translation in the `.global` space. In the block's own space the handle, which
+/// sits at the trailing edge of a block whose width follows the drag, moved the space each next translation
+/// was measured in (the flicker of the first Live session); and a space attached to the strip is no better,
+/// because shortening the last block shrinks the scrolled content and, with the strip scrolled to its right
+/// end, the clamped scroll offset moves the content under the mouse, which would feed back into the length.
+/// The window does not move during a drag. The handle's hit target is `handleHitWidth` (14 pt) wide on a
+/// block of 28 pt or more, around a `handleWidth` bar, and the voicing badge and "manual" text keep clear of
+/// it; a block drag starts only after `moveThreshold` (8 pt), so a slightly missed handle press does not
+/// slide the block. The drag in progress lives in `@GestureState`, which SwiftUI resets when the gesture
+/// ends and when it is cancelled, so no block is left at a dragged length or offset. One cursor rule: the
+/// resize cursor shows while a handle is under the mouse or a resize is in progress, pushed and popped
+/// exactly once each way (`setResizeCursor`), and popped when the bar goes away.
 ///
 /// Between the header and the blocks, an 18-pt strip draws the progression's tension as a curve: a point
 /// per chord at its block's centre (`SequenceGeometry.tensionPoints`), tension 0 at the bottom and 100 at
@@ -45,6 +58,10 @@ struct SequenceBarView: View {
   static let blockHeight: CGFloat = 56
   static let rulerHeight: CGFloat = 20
   static let handleWidth: CGFloat = 6
+  /// The handle's hit target, wider than the bar drawn in it (narrower on a narrow block).
+  static let handleHitWidth: CGFloat = 14
+  /// How far a press on a block must travel before it becomes a move.
+  static let moveThreshold: CGFloat = 8
   static let beatsPerBar = 4
   static let snapBeats = 0.25
   static let lengthRange = 0.25...64.0   // kMinLengthBeats...kMaxLengthBeats
@@ -70,8 +87,12 @@ struct SequenceBarView: View {
     var offset: CGFloat
   }
 
-  @State private var resize: Resize?
-  @State private var move: Move?
+  @GestureState private var resize: Resize?
+  @GestureState private var move: Move?
+  /// The block whose handle is under the mouse, if any: suppresses its tip and asks for the resize cursor.
+  @State private var handleHovered: Int?
+  /// Whether this bar has pushed the resize cursor (and owes the one pop).
+  @State private var resizeCursorPushed = false
   /// The block whose voicing popover is open, if any.
   @State private var voicingPopoverId: Int?
   @State private var dropTargeted = false
@@ -161,6 +182,8 @@ struct SequenceBarView: View {
       state.send(command: ["cmd": "appendChord", "root": ref.root, "type": ref.type])
       return true
     } isTargeted: { dropTargeted = $0 }
+    .onChange(of: wantsResizeCursor) { _, on in setResizeCursor(on) }
+    .onDisappear { setResizeCursor(false) }
     .onChange(of: state.snapshot) { _, snapshot in
       // The voicing popover belongs to a chord: removed or undone away, the popover goes with it.
       if let id = voicingPopoverId, snapshot?.events.contains(where: { $0.id == id }) != true {
@@ -253,7 +276,7 @@ struct SequenceBarView: View {
         Text("manual")
           .font(.system(size: 8)).foregroundStyle(.white.opacity(0.75))
           .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-          .padding(.top, 3).padding(.trailing, Self.handleWidth + 3)
+          .padding(.top, 3).padding(.trailing, Self.handleHitWidth + 3)
           .accessibilityHidden(true)
       }
       tensionStrip(event, width: frame.width)
@@ -267,7 +290,8 @@ struct SequenceBarView: View {
     .contentShape(Rectangle())
     .onTapGesture { select(event) }
     .gesture(moveGesture(event))
-    .hoverTip(id: "event-\(event.id)", suppressed: moving || resize?.id == event.id || voicingPopoverId == event.id) {
+    .hoverTip(id: "event-\(event.id)",
+              suppressed: moving || resize?.id == event.id || voicingPopoverId == event.id || handleHovered == event.id) {
       BlockDetailView(event: event, autoVoiceLead: state.snapshot?.autoVoiceLead ?? false)
     }
     .popover(isPresented: voicingPresented(event), arrowEdge: .bottom) {
@@ -321,8 +345,10 @@ struct SequenceBarView: View {
             set: { if !$0 && voicingPopoverId == event.id { voicingPopoverId = nil } })
   }
 
-  /// The "v" badge at the bottom right, left of the handle, when the block is wide enough to hold it.
-  /// A child of the block, so its click wins over the block's tap and move gestures.
+  /// The "v" badge at the bottom right, left of the handle's hit target, when the block is wide enough to
+  /// hold it. A child of the block, so its click wins over the block's tap and move gestures. It is in a
+  /// later overlay than the handle, so it would win the handle's clicks where they overlap: hence the
+  /// clearance.
   @ViewBuilder private func voicingBadge(_ event: EventJSON, blockWidth: CGFloat) -> some View {
     if event.inversion != nil && blockWidth >= 40 {
       Button { openVoicing(event) } label: {
@@ -333,7 +359,7 @@ struct SequenceBarView: View {
           .background(RoundedRectangle(cornerRadius: 3).fill(Color.black.opacity(0.35)))
       }
       .buttonStyle(.plain)
-      .padding(.trailing, Self.handleWidth + 4)
+      .padding(.trailing, Self.handleHitWidth + 2)
       .padding(.bottom, Self.tensionStripHeight + 3)
       .help("Inversion and octave")
       .accessibilityLabel("Voicing of " + ChordSymbol.spokenName(symbol: event.symbol, type: event.type))
@@ -370,21 +396,34 @@ struct SequenceBarView: View {
     voicingPopoverId = event.id
   }
 
-  /// The grab handle at the right edge, inside the block's frame (narrower on a narrow block). A child
-  /// of the block, so its gesture wins over the block's move gesture.
+  /// The grab handle at the right edge: a `handleWidth` bar drawn inside a `handleHitWidth` target (the
+  /// target extends inward over the block; narrower on a narrow block). A child of the block, so its
+  /// gesture wins over the block's move gesture. Hovering it suppresses the block's tip (so the tip never
+  /// sits where the mouse is about to press) and asks for the resize cursor.
   private func handle(_ event: EventJSON, selected: Bool, blockWidth: CGFloat) -> some View {
     let width = min(Self.handleWidth, max(2, blockWidth / 2))
-    let margin: CGFloat = blockWidth >= 4 * Self.handleWidth ? 3 : 0   // a wider hit area when there is room
+    let hit = min(Self.handleHitWidth, max(width, blockWidth / 2))
     return RoundedRectangle(cornerRadius: 2)
       .fill(Color.white.opacity(selected || resize?.id == event.id ? 0.6 : 0.25))
       .frame(width: width, height: Self.blockHeight - 16)
-      .padding(.horizontal, margin)
+      .frame(width: hit)
       .contentShape(Rectangle())
       .gesture(resizeGesture(event))
       .onHover { over in
-        if over { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
+        if over { handleHovered = event.id } else if handleHovered == event.id { handleHovered = nil }
       }
+      .onDisappear { if handleHovered == event.id { handleHovered = nil } }
       .accessibilityHidden(true)
+  }
+
+  /// One cursor rule: the resize cursor while a handle is under the mouse or a resize is in progress,
+  /// pushed and popped exactly once each way, and popped when the bar goes away.
+  private var wantsResizeCursor: Bool { handleHovered != nil || resize != nil }
+
+  private func setResizeCursor(_ on: Bool) {
+    guard on != resizeCursorPushed else { return }
+    if on { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
+    resizeCursorPushed = on
   }
 
   // MARK: - Gestures
@@ -404,14 +443,15 @@ struct SequenceBarView: View {
     }
   }
 
+  /// The handle drag. `.global`: see the header (neither the handle nor the strip's scrolling may move the
+  /// space the translation is measured in).
   private func resizeGesture(_ event: EventJSON) -> some Gesture {
-    DragGesture(minimumDistance: 1)
-      .onChanged { value in
-        if resize?.id != event.id { select(event) }
-        resize = Resize(id: event.id, lengthBeats: Self.resizedLength(event.lengthBeats, by: value.translation.width))
+    DragGesture(minimumDistance: 1, coordinateSpace: .global)
+      .updating($resize) { value, state, _ in
+        state = Resize(id: event.id, lengthBeats: Self.resizedLength(event.lengthBeats, by: value.translation.width))
       }
+      .onChanged { _ in if selectedEventId != event.id { select(event) } }
       .onEnded { value in
-        resize = nil
         let length = Self.resizedLength(event.lengthBeats, by: value.translation.width)
         if length != event.lengthBeats {
           state.send(command: ["cmd": "setLength", "id": event.id, "lengthBeats": length])
@@ -419,14 +459,12 @@ struct SequenceBarView: View {
       }
   }
 
+  /// The block drag, in `.global` space for the same reason, from `moveThreshold`.
   private func moveGesture(_ event: EventJSON) -> some Gesture {
-    DragGesture(minimumDistance: 4)
-      .onChanged { value in
-        if move?.id != event.id { select(event) }
-        move = Move(id: event.id, offset: value.translation.width)
-      }
+    DragGesture(minimumDistance: Self.moveThreshold, coordinateSpace: .global)
+      .updating($move) { value, state, _ in state = Move(id: event.id, offset: value.translation.width) }
+      .onChanged { _ in if selectedEventId != event.id { select(event) } }
       .onEnded { value in
-        move = nil
         let events = self.events
         guard let from = events.firstIndex(where: { $0.id == event.id }) else { return }
         let target = SequenceGeometry.targetIndex(from: from, droppedBy: value.translation.width,
