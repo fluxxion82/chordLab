@@ -57,7 +57,9 @@ final class EditorKeyRouter {
   func noteMouseDown(_ event: NSEvent) {
     guard let window = view.window, event.window === window, let content = window.contentView else { return }
     guard content.bounds.contains(content.convert(event.locationInWindow, from: nil)) else { return }
-    ownsKeyboard = view.bounds.contains(view.convert(event.locationInWindow, from: nil))
+    let owns = view.bounds.contains(view.convert(event.locationInWindow, from: nil))
+    if ownsKeyboard && !owns { filter.clearHolds() }   // the releases of keys held now may go elsewhere
+    ownsKeyboard = owns
   }
 
   /// Route A. Whether the event was consumed.
@@ -68,18 +70,20 @@ final class EditorKeyRouter {
 
   /// Route B. Whether the key was consumed.
   @MainActor func handle(characters: String, virtualKey: Int, shift: Bool, command: Bool, option: Bool) -> Bool {
-    deliver(Self.hostInput(characters: characters, virtualKey: virtualKey, shift: shift, command: command,
-                           option: option), source: .host)
+    let input = Self.hostInput(characters: characters, virtualKey: virtualKey, shift: shift, command: command,
+                               option: option)
+    let consumed = deliver(input, source: .host)
+    filter.noteHostKeyDown(input, consumed: consumed)
+    return consumed
   }
 
-  /// Route B's key-up: the key is no longer held (`KeyRepeatFilter.keyUp`). Answers what the key-down
-  /// answered — consumed when it is a key the map knows and no text is being edited — so the host sees
-  /// the press and the release go to the same place.
+  /// Route B's key-up: the key is no longer held (`KeyRepeatFilter.keyUp`). Answers what the key's last
+  /// route-B key-down answered, recorded then — not recomputed, since a modifier may have been released
+  /// or the text gate changed since — so the host sees the press and the release go to the same place.
   @MainActor func keyUp(characters: String, virtualKey: Int, shift: Bool, command: Bool, option: Bool) -> Bool {
     let input = Self.hostInput(characters: characters, virtualKey: virtualKey, shift: shift, command: command,
                                option: option)
-    filter.keyUp(input, at: ProcessInfo.processInfo.systemUptime)
-    return !editingText && KeyCommandMap.command(for: input) != nil
+    return filter.keyUp(input, at: ProcessInfo.processInfo.systemUptime)
   }
 
   /// Route B's key: Control is read from the live modifier flags because iPlug2's translation does not

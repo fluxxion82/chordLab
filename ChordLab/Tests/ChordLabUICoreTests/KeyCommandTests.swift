@@ -166,16 +166,53 @@ final class KeyCommandTests: XCTestCase {
     XCTAssertTrue(filter.shouldAct(input(.character("2")), at: 10.9, source: .host))
   }
 
-  func testAHoldWithoutAKeyUpExpiresAfterTwoSeconds() {
+  func testAHoldWhoseReleaseWasLostExpiresAfterTwoSeconds() {
+    // Models a release that never arrived (a host that sends no key-ups): the next delivery 2.5 s later
+    // acts. The expiry cannot tell this from a key still held with a repeat slower than 2 s.
     var filter = KeyRepeatFilter()
     XCTAssertTrue(filter.shouldAct(input(.character("2")), at: 10.0, source: .host))
-    XCTAssertTrue(filter.shouldAct(input(.character("2")), at: 12.5, source: .host), "a host that never sends key-ups")
+    XCTAssertTrue(filter.shouldAct(input(.character("2")), at: 12.5, source: .host))
   }
 
   func testRouteANeverHoldsAKey() {
     var filter = KeyRepeatFilter()
     XCTAssertTrue(filter.shouldAct(input(.character("2")), at: 10.0, source: press))
-    XCTAssertTrue(filter.shouldAct(input(.character("2")), at: 10.3, source: press), "not a repeat: a second press")
+    XCTAssertTrue(filter.shouldAct(input(.character("2")), at: 10.3, source: .host),
+                  "a host press outside the window: the route-A press left no hold")
+  }
+
+  func testUndoReleaseThenRedoAreTwoCommands() {
+    // Holds are per physical key, duplicates per key and modifiers: ⌘Z released, then ⇧⌘Z 50 ms later.
+    var filter = KeyRepeatFilter()
+    XCTAssertTrue(filter.shouldAct(input(.character("z"), command: true), at: 10.00, source: .host), "undo")
+    filter.keyUp(input(.character("z"), command: true), at: 10.03)
+    XCTAssertTrue(filter.shouldAct(input(.character("Z"), command: true, shift: true), at: 10.08, source: .host), "redo")
+  }
+
+  func testClearingHoldsLetsTheNextHostPressAct() {
+    var filter = KeyRepeatFilter()
+    XCTAssertTrue(filter.shouldAct(input(.character("2")), at: 10.0, source: .host))
+    filter.clearHolds()   // the editor lost the keyboard; the release may go elsewhere
+    XCTAssertTrue(filter.shouldAct(input(.character("2")), at: 10.4, source: .host))
+  }
+
+  // MARK: - Key-ups answer what their key-down answered
+
+  func testAKeyUpAnswersWhatItsKeyDownAnswered() {
+    var filter = KeyRepeatFilter()
+    filter.noteHostKeyDown(input(.character("2"), option: true), consumed: false)
+    XCTAssertFalse(filter.keyUp(input(.character("2")), at: 10.1), "⌥2 went to the host; Option released first")
+    filter.noteHostKeyDown(input(.character("z"), command: true), consumed: true)
+    XCTAssertTrue(filter.keyUp(input(.character("z")), at: 10.2), "⌘Z was ours; ⌘ released first")
+    XCTAssertFalse(filter.keyUp(input(.character("z")), at: 10.3), "the decision is forgotten after its release")
+    XCTAssertFalse(filter.keyUp(input(.character("3")), at: 10.4), "a release without a key-down is not ours")
+  }
+
+  func testClearingHoldsForgetsKeyDownDecisions() {
+    var filter = KeyRepeatFilter()
+    filter.noteHostKeyDown(input(.character("2")), consumed: true)
+    filter.clearHolds()
+    XCTAssertFalse(filter.keyUp(input(.character("2")), at: 10.1))
   }
 
   func testADuplicateOnTheHostRouteHoldsTheKeyUntilItsKeyUp() {
