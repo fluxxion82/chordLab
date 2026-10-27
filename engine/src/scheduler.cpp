@@ -195,6 +195,14 @@ bool Scheduler::pushPreview(const PreviewCmd& cmd) noexcept {
     assert(cmd.count <= 8);
     const std::uint32_t tail = mQueueTail.load(std::memory_order_relaxed);
     const std::uint32_t head = mQueueHead.load(std::memory_order_acquire);
+    if (cmd.kind == PreviewCmd::Extend && tail != head) {
+        // Only this thread writes entries, and the consumer never reuses a slot before this thread
+        // writes it again, so the newest queued entry is safe to read here.
+        const PreviewCmd& last = mQueue[(tail - 1) % kPreviewQueueCapacity];
+        if (last.kind == PreviewCmd::Extend && last.id == cmd.id) {
+            return true;  // the pending extend already does this
+        }
+    }
     if (tail - head >= kPreviewQueueCapacity) {
         return false;
     }
@@ -559,6 +567,20 @@ void Scheduler::applyBatch(State& state, const PreviewCmd* batch, std::size_t co
                            std::int64_t previewSamples, Writer& writer) noexcept {
     for (std::size_t c = 0; c < count; ++c) {
         const PreviewCmd& cmd = batch[c];
+        if (cmd.kind == PreviewCmd::Extend) {
+            // Only the deadline moves; `pushExpiries` reads it next block, and a stale expiry event
+            // queued for this block re-checks the deadline in `apply` and does nothing. A block with
+            // no usable rate (previewSamples 0) leaves the deadline alone rather than making it now.
+            if (previewSamples > 0) {
+                for (std::size_t s = 0; s < kMaxPreviews; ++s) {
+                    Preview& preview = state.previews[s];
+                    if (preview.active && preview.id == cmd.id) {
+                        preview.expireAt = clock + previewSamples;
+                    }
+                }
+            }
+            continue;
+        }
         // A stop, or a start that restarts an id, first releases every running preview with that id, so
         // the slot is free again before a start looks for one.
         for (std::size_t s = 0; s < kMaxPreviews; ++s) {

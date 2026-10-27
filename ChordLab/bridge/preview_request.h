@@ -18,17 +18,18 @@
 
 namespace chordlab::bridge {
 
-/// Parses a kMsgTagPreview payload, `{"schema":1,"id":n,"on":true|false,"velocity":v,"pitches":[..]}`,
-/// into the PreviewCmd the plug-in hands to Scheduler::pushPreview. Main thread, never real-time:
-/// nlohmann parses here, the scheduler only ever sees plain PreviewCmd.
+/// Parses a kMsgTagPreview payload, `{"schema":1,"id":n,"on":true|false,"velocity":v,"pitches":[..]}` or
+/// `{"schema":1,"id":n,"extend":true}`, into the PreviewCmd the plug-in hands to Scheduler::pushPreview.
+/// Main thread, never real-time: nlohmann parses here, the scheduler only ever sees plain PreviewCmd.
 ///
 /// Rules, checked in this order (the first failure decides the message written to `*problem`):
 ///  0. A raw NUL byte anywhere is "preview message could not be parsed", before any parse, as the
 ///     engine's readers refuse one (prescan in engine/src/json_api.cpp). An escaped `\u0000` inside a
 ///     JSON string is a different thing: an ordinary character of that string, accepted.
 ///  1. The text parses as a JSON object with `schema` the integer kJsonSchema, `id` an integer in
-///     0..INT_MAX and `on` a boolean; else "preview message needs schema 1, an id and on:true|false"
-///     (malformed JSON parses without throwing, as a non-object).
+///     0..INT_MAX and, when it has no `extend` member, `on` a boolean; else "preview message needs schema
+///     1, an id and on:true|false" (malformed JSON parses without throwing, as a non-object). A message
+///     with an `extend` member goes to rule 6 instead of rules 2 to 4.
 ///  2. `on:false` is a Stop for `id`; nothing else is read (no pitches needed, a bad velocity ignored).
 ///  3. `on:true` is a Start: `velocity`, when present, must be an integer in 1..127 (default 100), and
 ///     `pitches` must be an array of 1..8 elements; else "preview start needs 1..8 pitches and a velocity
@@ -36,11 +37,15 @@ namespace chordlab::bridge {
 ///  4. Every pitch must be an integer in 0..127, kept in order (duplicates allowed); else "preview pitches
 ///     must be integers in 0..127".
 ///  5. An exception (in practice only std::bad_alloc) is "preview message could not be parsed".
+///  6. `extend:true` with no `on` is an Extend for `id`; nothing else is read. `extend` must be the
+///     boolean true and `on` absent; else "preview extend needs extend:true and no on". (The UI and the
+///     engine ship together, so an older engine never sees `extend`; an older UI sends none, and its
+///     previews end after four seconds as before.)
 /// Without rule 0, nlohmann's lexer would read a raw NUL as the end of input and accept a complete message
 /// followed by `\0junk`. Duplicate members are nlohmann's call: the last one wins.
 /// On success `*problem` is left untouched. The returned command is value-initialised first, so a Stop
-/// carries velocity 0, count 0 and zero pitches, and a Start's unused pitch slots are 0. PreviewCmd has no
-/// plug-in-only fields; the plug-in itself only remembers a Start's id for CloseWindow.
+/// or an Extend carries velocity 0, count 0 and zero pitches, and a Start's unused pitch slots are 0.
+/// PreviewCmd has no plug-in-only fields; the plug-in itself only remembers a Start's id for CloseWindow.
 inline std::optional<chordlab::PreviewCmd> parsePreviewRequest(std::string_view json, std::string* problem = nullptr)
 {
     if (json.find('\0') != std::string_view::npos)
@@ -57,7 +62,20 @@ inline std::optional<chordlab::PreviewCmd> parsePreviewRequest(std::string_view 
         const std::optional<int> schema = boundedIntField(message, "schema", chordlab::kJsonSchema, chordlab::kJsonSchema);
         const std::optional<int> id = schema ? boundedIntField(message, "id", 0, INT_MAX) : std::nullopt;
         const auto on = message.is_object() ? message.find("on") : message.end();
-        if (!message.is_object() || !schema || !id || on == message.end() || !on->is_boolean())
+        const auto extend = message.is_object() ? message.find("extend") : message.end();
+        if (!message.is_object() || !schema || !id)
+            error = "preview message needs schema 1, an id and on:true|false";
+        else if (extend != message.end())
+        {
+            if (!extend->is_boolean() || !extend->get<bool>() || on != message.end())
+                error = "preview extend needs extend:true and no on";
+            else
+            {
+                cmd.kind = chordlab::PreviewCmd::Extend;
+                cmd.id = *id;
+            }
+        }
+        else if (on == message.end() || !on->is_boolean())
             error = "preview message needs schema 1, an id and on:true|false";
         else if (on->get<bool>())
         {
