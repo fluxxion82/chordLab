@@ -65,7 +65,7 @@ Phase 3, so far:
   ```
   parent/
     iPlug2/
-    musicTheoryPlugin/      <- this repository
+    chordLab/               <- this repository
   ```
 
   `ChordLab/config/ChordLab-mac.xcconfig` sets `IPLUG2_ROOT = ../../../iPlug2`, relative to
@@ -144,22 +144,15 @@ belongs in `ChordLab/bridge/` with a case in `ChordLab/bridge/tests/`.
 
 ## Documentation
 
-- [docs/user-guide.md](docs/user-guide.md): setting ChordLab up in Ableton Live, every control in the
-  window, chord relations, keyboard shortcuts, what is saved with the set, limits and troubleshooting.
-- [docs/architecture.md](docs/architecture.md): how it works inside, for developers: layers, threads,
-  the engine module map, the message protocol between engine and UI, persistence, MIDI export, the
-  editor's structure, build layout and the test suites.
 - [engine/README.md](engine/README.md): the engine's own notes (layout, JSON surface, error handling,
   real-time rules, threading contract); [engine/include/chordlab/json_api.h](engine/include/chordlab/json_api.h)
   is the engine ↔ UI contract.
-- [docs/plans/](docs/plans/): the Phase 1, Phase 2 and chord-relations plans with their decision records.
-- [docs/testing/](docs/testing/): the first-look test script for Ableton Live.
 
 ## Status
 
 - **Live verification is pending.** The engine is covered by tests and both the VST3 and the standalone
   app build cleanly, but the window has not yet been checked end to end inside Live (routing, transport
-  follow, drag-out, keyboard shortcuts). The user guide describes the intended behaviour.
+  follow, drag-out, keyboard shortcuts).
 - Sanitizers: with Apple clang 17 (Xcode 16) ASan deadlocked before `main()` and TSan hung; since
   Apple clang 21 (Xcode 27.1) UBSan, ASan and TSan all run the engine suite cleanly
   (`scripts/check.sh --ubsan --asan --tsan`, each step under a hard timeout).
@@ -186,8 +179,4 @@ ChordLab/                   the iPlug2 plug-in
   projects/                 Xcode projects (ChordLab-macOS.xcodeproj)
   resources/                Info.plists, icons, fonts
 scripts/check.sh            runs every suite (see Testing)
-docs/user-guide.md          how to set it up and use it
-docs/architecture.md        how it works inside
-docs/plans/                 the Phase 1, Phase 2 and chord-relations plans and decision records
-docs/testing/               the first-look test script for Ableton Live
 ```

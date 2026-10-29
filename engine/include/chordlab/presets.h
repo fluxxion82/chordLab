@@ -45,7 +45,7 @@ struct Preset {
     std::vector<PresetStep> steps;
 };
 
-/// The library: the 29 records of the plan (docs/plans/2026-10-24-progression-presets.md), grouped by
+/// The library: the 29 preset records, grouped by
 /// genre (Pop, Rock, Blues, Jazz, Folk / Country, EDM / Dance, R&B / Neo-soul, Film / Epic, Gospel,
 /// Classical) in that order. Constant for a build; the vector and every record in it are stable until
 /// static destruction, so `findPreset`'s pointers into it never go stale.

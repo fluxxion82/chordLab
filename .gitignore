@@ -28,3 +28,6 @@ engine/build/
 ChordLab/.build/
 ChordLab/.swiftpm/
 ChordLab/Package.resolved
+
+# local notes
+docs/
