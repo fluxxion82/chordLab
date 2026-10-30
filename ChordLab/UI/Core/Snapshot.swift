@@ -196,6 +196,12 @@ struct Snapshot: Codable, Equatable {
   let palette: PaletteJSON
   /// Whether `compile` picks each non-manual chord's inversion and octave (P2-D5).
   let autoVoiceLead: Bool?
+  /// Whether a project-key change moves the sequence's chords with it; absent from older plug-in builds
+  /// (read as off).
+  let transposeWithKey: Bool?
+  /// Whether the one-time "chords kept their notes" hint has been shown in this project; absent from older
+  /// plug-in builds.
+  let keyHintSeen: Bool?
   /// The selected event (the store's live selection), nil (JSON null, or absent) for none. The sequence
   /// bar's selection ring and the suggestions follow it.
   let selectedEventId: Int?

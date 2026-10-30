@@ -83,6 +83,28 @@ final class SnapshotTests: XCTestCase {
     XCTAssertTrue(snapshot.homeRow.isEmpty)
   }
 
+  func testPhase1SnapshotHasNoKeyTransposeFlags() throws {
+    let snapshot = try Self.decode(Snapshot.self, Self.phase1)
+    XCTAssertNil(snapshot.transposeWithKey)
+    XCTAssertNil(snapshot.keyHintSeen)
+  }
+
+  /// `json` with the two key-transpose flags written before the palette.
+  private static func withKeyFlags(_ json: String, transposeWithKey: Bool, keyHintSeen: Bool) -> String {
+    json.replacingOccurrences(
+      of: "\"palette\":",
+      with: "\"transposeWithKey\":\(transposeWithKey),\"keyHintSeen\":\(keyHintSeen),\"palette\":")
+  }
+
+  func testKeyTransposeFlagsDecodeExplicitTrueAndFalseIndependently() throws {
+    for (switchOn, seen) in [(true, true), (false, false), (true, false), (false, true)] {
+      let snapshot = try Self.decode(
+        Snapshot.self, Self.withKeyFlags(Self.phase2, transposeWithKey: switchOn, keyHintSeen: seen))
+      XCTAssertEqual(snapshot.transposeWithKey, switchOn)
+      XCTAssertEqual(snapshot.keyHintSeen, seen)
+    }
+  }
+
   // MARK: - Phase 2
 
   func testPhase2SnapshotDecodes() throws {
@@ -537,8 +559,24 @@ final class SnapshotTests: XCTestCase {
     let projectKey: KeyJSON
     let browsedKey: KeyJSON
     let autoVoiceLead: Bool?
+    let transposeWithKey: Bool?
+    let keyHintSeen: Bool?
     let events: [Event]
     let sections: [SectionJSON]?
+  }
+
+  func testStateReadsTheKeyTransposeFlags() throws {
+    let state = try JSONDecoder().decode(StateFixture.self, from: Data(contentsOf: fixtureURL("state-progression.json")))
+    XCTAssertEqual(state.transposeWithKey, false)
+    XCTAssertEqual(state.keyHintSeen, false)
+    let inline = """
+      {"schema":1,"projectKey":{"tonic":{"letter":"C","alter":0},"mode":"Ionian"},
+       "browsedKey":{"tonic":{"letter":"C","alter":0},"mode":"Ionian"},
+       "transposeWithKey":true,"keyHintSeen":true,"events":[]}
+      """
+    let on = try Self.decode(StateFixture.self, inline)
+    XCTAssertEqual(on.transposeWithKey, true)
+    XCTAssertEqual(on.keyHintSeen, true)
   }
 
   func testEveryStateFixtureIsASchemaOneDocument() throws {
