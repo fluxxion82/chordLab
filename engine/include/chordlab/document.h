@@ -59,7 +59,9 @@ static_assert(static_cast<std::size_t>(kMaxChords) * 8 * 2 <= kMaxSnapshotEvents
 /// `kMaxVoicingOctave`, 0 = the default register) are the chord's voicing as `voicing` in voicing.h reads
 /// them, and `manualVoicing` says the user chose them. `DocumentStore::setInversion` and `setOctave` set
 /// the flag along with the value (root position in the default register is a choice like any other), and
-/// `resetVoicing` clears all three, so an event the store was never asked to voice is at 0, 0, not manual.
+/// `resetVoicing` clears all three, so an event the store was never asked to voice is at 0, 0, not manual
+/// until a transpose (`transposeEvents`, transpose.h) moves its `octave` along with its root, flag clear,
+/// so that with auto voice-leading off its notes move by exactly the interval.
 /// With `Document::autoVoiceLead` on, `compile` chooses the voicing of every chord whose flag is clear and
 /// keeps the stored values of every chord whose flag is set; with it off every chord keeps its stored
 /// values, flag or not (see compiler.h).
@@ -108,14 +110,14 @@ inline bool operator!=(const Section& a, const Section& b) noexcept {
 }
 
 /// The whole editable state of a project: the two keys, the progression, its sections, the voicing flag,
-/// the transport toggles and the palette's relation mode. Plain data so that `DocumentStore` can snapshot it for undo; mutate it
-/// through the store, not directly.
+/// the transport toggles, the palette's relation mode and the key-transpose switch and hint flag. Plain data
+/// so that `DocumentStore` can snapshot it for undo; mutate it through the store, not directly.
 ///
 /// Undo scope: `events`, `sections`, `projectKey` and `autoVoiceLead` are undoable (they are what the user
 /// composes: the flag changes which notes `compile` produces, so toggling it is an edit of the progression,
-/// not a view of it). `browsedKey`, `progressionLoop`, `followHost` and `relationMode` are live session
-/// state: changing them never creates history, and undo/redo leave their current values alone while
-/// restoring the rest.
+/// not a view of it). `browsedKey`, `progressionLoop`, `followHost`, `relationMode`, `transposeWithKey` and
+/// `keyHintSeen` are live session state: changing them never creates history, and undo/redo leave their
+/// current values alone while restoring the rest.
 struct Document {
     Key projectKey{{'C', 0}, Mode::Ionian};
     Key browsedKey{{'C', 0}, Mode::Ionian};
@@ -125,6 +127,8 @@ struct Document {
     bool progressionLoop = true;
     bool followHost = true;
     RelationMode relationMode = RelationMode::Blend;  // what sizes the palette cells (relatedness.h, R5)
+    bool transposeWithKey = false;  // live, persisted: a tonic change of the project key transposes the sequence
+    bool keyHintSeen = false;       // live, persisted: the one-time "chords kept their notes" hint has shown
 
     /// Beat at which the event at `index` starts: the sum of the lengths before it. `index` must be in
     /// 0..events.size(); `startBeatOf(events.size())` is `endBeat()`.
@@ -144,7 +148,8 @@ inline bool operator==(const Document& a, const Document& b) noexcept {
     return a.projectKey == b.projectKey && a.browsedKey == b.browsedKey && a.events == b.events &&
            a.sections == b.sections && a.autoVoiceLead == b.autoVoiceLead &&
            a.progressionLoop == b.progressionLoop && a.followHost == b.followHost &&
-           a.relationMode == b.relationMode;
+           a.relationMode == b.relationMode && a.transposeWithKey == b.transposeWithKey &&
+           a.keyHintSeen == b.keyHintSeen;
 }
 
 inline bool operator!=(const Document& a, const Document& b) noexcept {
@@ -175,12 +180,12 @@ enum class ProgressionRefusal { None, Empty, NonFiniteLength, DocumentFull, Even
 /// undo stack and clears the redo stack. A call that changes nothing (an unknown id, a value equal to the
 /// current one after clamping, a move to the chord's current position, a rejected argument) pushes nothing
 /// and leaves the redo stack intact.
-/// `browsedKey`, `progressionLoop`, `followHost` and `relationMode` are live state: their setters never
-/// touch the history, and `undo()`/`redo()` keep their current values while restoring the undoable
-/// state. So is the selection (`selectedEventId`), which lives in the store rather than the document: it
-/// is kept across edits, undo and redo for as long as the selected event exists and is cleared the moment
-/// no event has its id (a remove, an undo of the append, a `replace`); it is never restored by undo and never
-/// persisted (`stateJson` leaves it out).
+/// `browsedKey`, `progressionLoop`, `followHost`, `relationMode`, `transposeWithKey` and `keyHintSeen` are
+/// live state: their setters never touch the history, and `undo()`/`redo()` keep their current values
+/// while restoring the undoable state. So is the selection (`selectedEventId`), which lives in the store
+/// rather than the document: it is kept across edits, undo and redo for as long as the selected event
+/// exists and is cleared the moment no event has its id (a remove, an undo of the append, a `replace`); it
+/// is never restored by undo and never persisted (`stateJson` leaves it out).
 /// The history holds at most `kMaxUndoDepth` snapshots; beyond that the oldest is dropped.
 /// Event ids are handed out from a counter that starts at `firstId` (1 by default), only ever increases
 /// and is not part of the undoable state, so an id is never reused even after undo or redo. Section ids
@@ -289,8 +294,25 @@ public:
     void removeChord(int id);
 
     /// Undoable. `key.tonic` must satisfy the `Tonic` preconditions of pitch.h and `key.mode` be a
-    /// declared `Mode`.
+    /// declared `Mode`. When `Document::transposeWithKey` is on and the tonic's pitch class changes (a
+    /// mode-only change or an enharmonic respelling does not), every chord of the sequence moves by the
+    /// interval between the two tonics in the same commit, so key and chords are one undo step: the
+    /// direction is `chooseKeyTranspose`'s, the move `transposeEvents`' (transpose.h). Sections, ids,
+    /// the selection and the id counters are untouched.
     void setProjectKey(Key key);
+
+    /// Moves every chord from `fromTonic` (a pitch class; reduced modulo 12) to the current project key's
+    /// tonic, as a key change with the switch on would (direction by `chooseKeyTranspose`), as ONE
+    /// undoable step. The key itself does not change. Returns false and changes nothing (no history)
+    /// when the sequence is empty or the two tonics are the same pitch class. What the one-time hint's
+    /// "Move once" does after a tonic change made with the switch off.
+    bool transposeFromKey(PitchClass fromTonic);
+
+    /// Moves every chord by `semitones` (-11..11, signed, exactly as given: no direction choice) as ONE
+    /// undoable step; see `transposeEvents` (transpose.h) for how the octaves follow. The key does not
+    /// change. Returns false and changes nothing (no history) when the sequence is empty, `semitones` is
+    /// 0 or outside -11..11.
+    bool transposeProgression(int semitones);
 
     /// Undoable: the flag changes what `compile` produces (see `Document`).
     void setAutoVoiceLead(bool on);
@@ -305,6 +327,14 @@ public:
     /// Live state, never recorded in the history: which relation sizes the palette cells (relatedness.h).
     /// Persisted by `stateJson`. `mode` must be a declared `RelationMode`.
     void setRelationMode(RelationMode mode);
+
+    /// Live state, never recorded in the history. Persisted by `stateJson`. Whether `setProjectKey`
+    /// transposes the sequence when the tonic changes.
+    void setTransposeWithKey(bool on);
+
+    /// Live state, never recorded in the history. Persisted by `stateJson`. Whether the one-time hint
+    /// offering to move the chords after a tonic change has been shown in this project.
+    void setKeyHintSeen(bool seen);
 
     /// The id of the event the UI has selected, or `kNoEventId`. Live state (see the class comment): kept
     /// while that event exists, whatever edits, undos and redos happen around it, and cleared as soon as

@@ -1,5 +1,6 @@
 #include "chordlab/document.h"
 
+#include "chordlab/transpose.h"
 #include "chordlab/voicing.h"
 
 #include <algorithm>
@@ -75,6 +76,11 @@ int clampInversion(const Chord& chord, int inversion) {
 
 int clampOctave(int octave) {
     return std::clamp(octave, kMinVoicingOctave, kMaxVoicingOctave);
+}
+
+/// `value` reduced into 0..11 (also for negative values).
+int wrapPitchClass(int value) {
+    return ((value % 12) + 12) % 12;
 }
 
 int clampColour(int colourIndex) {
@@ -193,6 +199,8 @@ void keepLiveState(Document& target, const Document& current) {
     target.progressionLoop = current.progressionLoop;
     target.followHost = current.followHost;
     target.relationMode = current.relationMode;
+    target.transposeWithKey = current.transposeWithKey;
+    target.keyHintSeen = current.keyHintSeen;
 }
 
 }  // namespace
@@ -487,8 +495,32 @@ void DocumentStore::removeChord(int id) {
 void DocumentStore::setProjectKey(Key key) {
     assertValidKey(key);
     Document next = doc_;
+    const int interval = wrapPitchClass(key.tonicPc() - doc_.projectKey.tonicPc());
+    if (doc_.transposeWithKey && interval != 0 && !doc_.events.empty()) {
+        // The chords move in the same commit as the key: one undo step restores both.
+        transposeEvents(next.events, chooseKeyTranspose(doc_.events, interval));
+    }
     next.projectKey = key;
     commit(std::move(next));
+}
+
+bool DocumentStore::transposeFromKey(PitchClass fromTonic) {
+    const int interval = wrapPitchClass(doc_.projectKey.tonicPc() - fromTonic);
+    if (doc_.events.empty() || interval == 0) {
+        return false;
+    }
+    Document next = doc_;
+    transposeEvents(next.events, chooseKeyTranspose(doc_.events, interval));
+    return commit(std::move(next));
+}
+
+bool DocumentStore::transposeProgression(int semitones) {
+    if (doc_.events.empty() || semitones == 0 || semitones < -11 || semitones > 11) {
+        return false;
+    }
+    Document next = doc_;
+    transposeEvents(next.events, semitones);
+    return commit(std::move(next));
 }
 
 void DocumentStore::setAutoVoiceLead(bool on) {
@@ -513,6 +545,14 @@ void DocumentStore::setFollowHost(bool follow) {
 void DocumentStore::setRelationMode(RelationMode mode) {
     assert(static_cast<int>(mode) >= 0 && static_cast<int>(mode) < kNumRelationModes);
     doc_.relationMode = mode;  // live state: no history
+}
+
+void DocumentStore::setTransposeWithKey(bool on) {
+    doc_.transposeWithKey = on;  // live state: no history
+}
+
+void DocumentStore::setKeyHintSeen(bool seen) {
+    doc_.keyHintSeen = seen;  // live state: no history
 }
 
 int DocumentStore::addSection(int firstEventIndex, std::string name) {
