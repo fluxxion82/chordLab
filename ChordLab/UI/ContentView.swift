@@ -1,8 +1,8 @@
 import SwiftUI
 
-/// Key bar, transport row, sequence bar, suggestions strip, palette grid and (only while another key is
-/// browsed) the home-key compare row, with a temporary status
-/// line and the MIDI drag-out control along the bottom.
+/// Key bar, the key transpose row (only while it has something to say), transport row, sequence bar,
+/// suggestions strip, palette grid and (only while another key is browsed) the home-key compare row, with a
+/// temporary status line and the MIDI drag-out control along the bottom.
 struct ContentView: View {
   @EnvironmentObject var state: ChordLabState
 
@@ -11,6 +11,12 @@ struct ContentView: View {
       PaletteView.background
       VStack(spacing: 12) {
         KeyBarView()
+
+        // The transpose hint or the moved note, in a row of its own: the rows below move down while it
+        // shows, so nothing (Follow Live, Loop, Panic) is covered.
+        if let row = state.keyRow {
+          KeyTransposeRow(row: row)
+        }
 
         TransportBarView()
 
@@ -45,6 +51,9 @@ struct ContentView: View {
         }
       }
       .padding(12)
+      // Top-aligned: at the 700×480 minimum, while the transpose row shows, the rows are taller than the
+      // window; the overflow then trims the status line at the bottom, never the key bar being used.
+      .frame(maxWidth: .infinity, minHeight: 0, maxHeight: .infinity, alignment: .top)
     }
     // Hover tips (`HoverTip`) are drawn here, over everything and inside the window, never as popovers.
     .tipHost()

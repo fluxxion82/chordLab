@@ -22,6 +22,23 @@ class ChordLabState: NSObject, ObservableObject {
   /// Whether a text field (a section rename) is being edited: the key routes (`EditorKeyRouter`) stand
   /// down meanwhile, so typing a name never appends or removes chords.
   @Published var editingText = false
+  /// The row under the key bar (`KeyTransposeRow`): the one-time "chords kept their notes" hint after a tonic
+  /// change with Transpose with key off, or the four-second "moved" note after one with it on (D8, D9).
+  enum KeyRow: Equatable {
+    /// Switch off: offer to move the chords from `fromPc`; `basis` is what the key change's own snapshot
+    /// showed, and the hint lives only while snapshots still match it (`KeyTransposeHint.stillValid`).
+    case hint(fromPc: Int, basis: KeyTransposeHint.Basis)
+    /// Switch on: `count` chords moved to `tonic` (display form).
+    case moved(count: Int, tonic: String)
+  }
+  @Published private(set) var keyRow: KeyRow?
+  /// A key change sent from the Key pickers whose snapshot (the one with its new tonic) has not arrived yet.
+  private var pendingKeyChange: (fromPc: Int, toPc: Int, showHint: Bool, transposing: Bool, count: Int)?
+  /// How long the moved note shows.
+  static let movedNoteDuration: TimeInterval = 4.0
+  /// Counts moved notes, so a note's timer clears that note only, never a later one.
+  private var movedNoteSerial = 0
+
   /// Id of the palette cell whose voicing is sounding (pressed), or nil.
   @Published private(set) var heldCellId: String?
   /// Preview id of the held cell: a per-press counter, so that Start and Stop pair up in the scheduler.
@@ -197,6 +214,79 @@ class ChordLabState: NSObject, ObservableObject {
     }
   }
 
+  // MARK: - Project key (the Key pickers) and the transpose row
+
+  /// Picking a tonic or a mode: sets the project key, spelled as the snapshot's table spells that pitch
+  /// class in that mode, and brings the browsed key home, so the palette follows. Any shown row closes.
+  /// The hint (or the moved note) is decided now, from the snapshot before the change, and shown once the
+  /// change's own snapshot arrives (`applySnapshot`), never here: the plug-in answers each command inline,
+  /// inside `send`, but this works as well when a reply comes later.
+  @MainActor func changeProjectKey(pc: Int, mode: String) {
+    guard let snapshot, let tonic = snapshot.tonics(for: mode)?[pc] else { return }
+    let fromPc = KeyNames.pitchClass(of: snapshot.projectKey.tonic)
+    let switchOn = snapshot.transposeWithKey ?? false
+    let count = snapshot.events.count
+    keyRow = nil
+    pendingKeyChange = (fromPc: fromPc, toPc: pc,
+                        showHint: KeyTransposeHint.shows(fromPc: fromPc, toPc: pc, transposeWithKey: switchOn,
+                                                         eventCount: count, hintSeen: snapshot.keyHintSeen ?? false),
+                        transposing: switchOn && fromPc != pc, count: count)
+    send(command: ["cmd": "setKey", "letter": tonic.letter, "alter": tonic.alter, "mode": mode])
+    send(command: ["cmd": "browseKey", "home": true])
+  }
+
+  /// The hint's Move once (`always` false) and Move and always transpose (`always` true): moves the chords
+  /// from the hint's old tonic, provided the sequence is still the one the hint was shown for.
+  @MainActor func moveChordsWithKey(always: Bool) {
+    guard case .hint(let fromPc, let basis)? = keyRow else { return }
+    guard let snapshot, KeyTransposeHint.stillValid(basis, in: snapshot) else {
+      keyRow = nil
+      return
+    }
+    keyRow = nil
+    if always { send(command: ["cmd": "setTransposeWithKey", "on": true]) }
+    send(command: ["cmd": "transposeFromKey", "fromTonicPc": fromPc])
+  }
+
+  /// The hint's Keep chords: closes it; the chords stay as they are.
+  @MainActor func keepChords() {
+    keyRow = nil
+  }
+
+  /// After a snapshot is decoded: resolves a pending key change by its own snapshot (the first whose
+  /// project tonic is the new one), else drops a hint the snapshot no longer matches.
+  private func updateKeyRow(for snapshot: Snapshot) {
+    if let pending = pendingKeyChange, KeyNames.pitchClass(of: snapshot.projectKey.tonic) == pending.toPc {
+      pendingKeyChange = nil
+      if pending.showHint {
+        keyRow = .hint(fromPc: pending.fromPc, basis: KeyTransposeHint.basis(of: snapshot))
+        // Once per project, even if closed at once. On a later main-queue turn: this runs inside the
+        // setKey reply, and the plug-in would answer setKeyHintSeen inline, re-entering here.
+        DispatchQueue.main.async { [weak self] in
+          self?.send(command: ["cmd": "setKeyHintSeen", "on": true])
+        }
+      } else if pending.transposing && pending.count > 0 {
+        showMovedNote(count: pending.count, tonic: KeyNames.tonicName(snapshot.projectKey.tonic))
+      }
+      return
+    }
+    if case .hint(_, let basis)? = keyRow, !KeyTransposeHint.stillValid(basis, in: snapshot) {
+      keyRow = nil
+    }
+  }
+
+  /// Shows the moved note for `movedNoteDuration`; its timer clears that note only.
+  private func showMovedNote(count: Int, tonic: String) {
+    movedNoteSerial += 1
+    let serial = movedNoteSerial
+    let note = KeyRow.moved(count: count, tonic: tonic)
+    keyRow = note
+    DispatchQueue.main.asyncAfter(deadline: .now() + Self.movedNoteDuration) { [weak self] in
+      guard let self, self.movedNoteSerial == serial, self.keyRow == note else { return }
+      self.keyRow = nil
+    }
+  }
+
   /// JSON-encodes `fields` plus `"schema": 1` and sends it under `tag`.
   @MainActor private func send(_ fields: [String: Any], tag: Int) {
     var message = fields
@@ -234,8 +324,10 @@ class ChordLabState: NSObject, ObservableObject {
   /// `kMsgTagSnapshot` payload.
   func applySnapshot(json: Data) {
     do {
-      snapshot = try JSONDecoder().decode(Snapshot.self, from: json)
+      let decoded = try JSONDecoder().decode(Snapshot.self, from: json)
+      snapshot = decoded
       lastError = nil
+      updateKeyRow(for: decoded)
     } catch {
       reportError("snapshot decode failed: \(error)")
     }
@@ -262,8 +354,10 @@ class ChordLabState: NSObject, ObservableObject {
     }
   }
 
-  /// `kMsgTagError` payload.
+  /// `kMsgTagError` payload. A key change still waiting for its snapshot was most likely the refused
+  /// command: it is dropped, so a later snapshot with that tonic (an undo, a redo) shows nothing.
   func applyError(json: Data) {
+    pendingKeyChange = nil
     if let message = try? JSONDecoder().decode(ErrorJSON.self, from: json) {
       reportError(message.error)
     } else {
