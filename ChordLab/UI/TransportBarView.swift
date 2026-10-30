@@ -11,11 +11,18 @@ import SwiftUI
 /// opens `PresetsPopoverView` (plan P7); it is hidden when the snapshot has no `presets` (an older
 /// plug-in build).
 ///
+/// Below the width the key bar needs to keep it beside the Key pickers (`ContentView.keyBarSwitchMinWidth`),
+/// the Transpose with key switch (`TransposeWithKeyToggle`) is here instead, right after Auto voice-lead
+/// (`showsTransposeSwitch`).
+///
 /// One row when it fits (the 900-pt default); at the 700-pt minimum the playback controls (Follow Live,
-/// Loop, Panic) and the editing ones (Auto voice-lead, + Section, Presets) take a row each.
+/// Loop, Panic) and the editing ones (Auto voice-lead, Transpose with key, + Section, Presets) take a row
+/// each.
 struct TransportBarView: View {
   @EnvironmentObject var state: ChordLabState
   @State private var showingPresets = false
+  /// Whether the Transpose with key switch sits here, after Auto voice-lead (ContentView's width rule).
+  var showsTransposeSwitch = false
 
   private var followHost: Binding<Bool> {
     Binding(get: { state.snapshot?.followHost ?? true },
@@ -86,6 +93,9 @@ struct TransportBarView: View {
         .toggleStyle(.switch)
         .help("Choose each chord's inversion and octave for the smoothest motion from the chord before (manual chords keep theirs)")
         .accessibilityLabel("Auto voice-lead")
+      if showsTransposeSwitch {
+        TransposeWithKeyToggle()
+      }
       Button("+ Section") { addSection() }
         .disabled(sectionIndex == nil)
         .help("Start a section on the selected chord (else the last one)")

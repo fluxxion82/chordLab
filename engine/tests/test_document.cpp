@@ -71,10 +71,12 @@ bool sameUndoableState(const Document& a, const Document& b) {
            a.autoVoiceLead == b.autoVoiceLead;
 }
 
-/// The live (session) part of a document: browsed key, the two transport toggles and the relation mode.
+/// The live (session) part of a document: browsed key, the two transport toggles, the relation mode and
+/// the key-transpose switch and hint flag.
 bool sameLiveState(const Document& a, const Document& b) {
     return a.browsedKey == b.browsedKey && a.progressionLoop == b.progressionLoop && a.followHost == b.followHost &&
-           a.relationMode == b.relationMode;
+           a.relationMode == b.relationMode && a.transposeWithKey == b.transposeWithKey &&
+           a.keyHintSeen == b.keyHintSeen;
 }
 
 /// Runs `mutate`, checks it changed the document, then checks that undo restores the document from before
@@ -105,6 +107,8 @@ TEST_CASE("Document: defaults to C Ionian, empty, looping and following the host
     CHECK(doc.autoVoiceLead == false);
     CHECK(doc.sections.empty());
     CHECK(doc.relationMode == RelationMode::Blend);
+    CHECK(doc.transposeWithKey == false);
+    CHECK(doc.keyHintSeen == false);
 }
 
 TEST_CASE("Document: empty document has endBeat 0 and startBeatOf(0) 0") {
@@ -165,6 +169,12 @@ TEST_CASE("ChordEvent / Document: equality compares every field") {
     CHECK(x != y);
     y = x;
     y.relationMode = RelationMode::Off;
+    CHECK(x != y);
+    y = x;
+    y.transposeWithKey = true;
+    CHECK(x != y);
+    y = x;
+    y.keyHintSeen = true;
     CHECK(x != y);
 }
 
@@ -1277,6 +1287,8 @@ TEST_CASE("DocumentStore: 200 random operations undo to the initial document and
             CHECK(e.inversion < inversionCount(e.chord));
             CHECK(e.octave >= kMinVoicingOctave);
             CHECK(e.octave <= kMaxVoicingOctave);
+            // Non-manual implies the default voicing only because this walk never transposes (a transpose
+            // moves the stored octave of non-manual chords).
             if (!e.manualVoicing) {  // what the store's own operations maintain
                 CHECK(e.inversion == 0);
                 CHECK(e.octave == 0);
@@ -2038,6 +2050,8 @@ TEST_CASE("DocumentStore: 200 random chord and section operations keep the secti
         CHECK(e.inversion < inversionCount(e.chord));
         CHECK(e.octave >= kMinVoicingOctave);
         CHECK(e.octave <= kMaxVoicingOctave);
+        // Non-manual implies the default voicing only because this walk never transposes (a transpose
+        // moves the stored octave of non-manual chords).
         if (!e.manualVoicing) {
             CHECK(e.inversion == 0);
             CHECK(e.octave == 0);

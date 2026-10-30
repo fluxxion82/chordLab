@@ -58,7 +58,7 @@ struct VoicingPopoverView: View {
         }
         .accessibilityLabel(storedSounds ? "Octave" : "Manual octave")
         Button("Auto") { state.send(command: ["cmd": "resetVoicing", "id": eventId]) }
-          .disabled(!manual)
+          .disabled(!VoicingReset.isAvailable(manual: manual, inversion: event.inversion, octave: event.octave))
           .help("Forget the manual inversion and octave; auto voice-leading chooses when it is on")
           .accessibilityLabel("Reset to automatic voicing")
       } else {

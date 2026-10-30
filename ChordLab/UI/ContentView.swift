@@ -1,24 +1,51 @@
 import SwiftUI
 
-/// Key bar, transport row, sequence bar, suggestions strip, palette grid and (only while another key is
-/// browsed) the home-key compare row, with a temporary status
-/// line and the MIDI drag-out control along the bottom.
+/// Key bar, the key transpose row (only while it has something to say), transport row, sequence bar,
+/// suggestions strip, palette grid and (only while another key is browsed) the home-key compare row, with a
+/// temporary status line and the MIDI drag-out control along the bottom.
+///
+/// The window's measured size decides three things once, here: where the Transpose with key switch is (the
+/// key bar from `keyBarSwitchMinWidth` up, else the transport row; exactly one of them shows it), whether the
+/// Diatonic / Applied switch keeps its row above the palette (not while the key transpose row shows in a
+/// window shorter than `compactHeight`), and whether the key transpose row draws compact (in a window shorter
+/// than `compactHeight`). The palette viewport is the row that gives up height; the status and export row
+/// along the bottom never does.
 struct ContentView: View {
   @EnvironmentObject var state: ChordLabState
 
+  /// The narrowest window in which the key bar's two-row layout keeps the Transpose with key switch beside
+  /// the Key pickers (KeyBarView's candidate (2)). Measured offscreen (the render harness, the key bar at
+  /// each window width, 850…900 pt): with the switch, candidate (2) first fits at 877 pt for C♯ Harmonic
+  /// Minor (the widest tonic menu) and at 875 pt for C Major; 3 pt added for margin. Below it the switch moves
+  /// to the transport row and the key bar keeps its two rows.
+  static let keyBarSwitchMinWidth: CGFloat = 880
+  /// Below this window height the key transpose row draws compact and takes the Diatonic / Applied switch's
+  /// row while it shows.
+  static let compactHeight: CGFloat = 700
+
+  /// The window's size, as last measured (900 × 620, the default window, until the first measurement).
+  @State private var size = CGSize(width: 900, height: 620)
+
   var body: some View {
+    let switchInKeyBar = size.width >= Self.keyBarSwitchMinWidth
     ZStack {
       PaletteView.background
       VStack(spacing: 12) {
-        KeyBarView()
+        KeyBarView(showsTransposeSwitch: switchInKeyBar)
 
-        TransportBarView()
+        // The transpose hint or the moved note, in a row of its own: the rows below move down while it
+        // shows, so nothing (Follow Live, Loop, Panic) is covered.
+        if let row = state.keyRow {
+          KeyTransposeRow(row: row, compact: size.height < Self.compactHeight)
+        }
+
+        TransportBarView(showsTransposeSwitch: !switchInKeyBar)
 
         SequenceBarView()
 
         SuggestionsView()
 
-        PaletteView()
+        PaletteView(showsViewSwitch: state.keyRow == nil || size.height >= Self.compactHeight)
 
         HomeRowView()
 
@@ -43,9 +70,13 @@ struct ContentView: View {
 
           ExportDragView()
         }
+        // Never shortened: the palette viewport above gives up height instead.
+        .fixedSize(horizontal: false, vertical: true)
+        .layoutPriority(1)
       }
       .padding(12)
     }
+    .onGeometryChange(for: CGSize.self) { $0.size } action: { size = $0 }
     // Hover tips (`HoverTip`) are drawn here, over everything and inside the window, never as popovers.
     .tipHost()
     .edgesIgnoringSafeArea(.all)

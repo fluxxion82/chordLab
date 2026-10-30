@@ -371,7 +371,8 @@ struct SequenceBarView: View {
     }
   }
 
-  /// The context menu: the voicing popover, the inversions and octaves directly, Auto, and Remove.
+  /// The context menu: the voicing popover, the inversions and octaves directly, Auto, Transpose all chords
+  /// (the whole sequence by a semitone), and Remove.
   @ViewBuilder private func voicingMenu(_ event: EventJSON) -> some View {
     if event.inversion != nil {
       Button("Voicing…") { openVoicing(event) }
@@ -390,7 +391,12 @@ struct SequenceBarView: View {
         }
       }
       Button("Auto voicing") { state.send(command: ["cmd": "resetVoicing", "id": event.id]) }
-        .disabled(!(event.manualVoicing ?? false))
+        .disabled(!VoicingReset.isAvailable(manual: event.manualVoicing, inversion: event.inversion, octave: event.octave))
+      // Every chord in the sequence, not just this one (one undo step each).
+      Menu("Transpose all chords") {
+        Button("Up a semitone") { state.send(command: ["cmd": "transposeProgression", "semitones": 1]) }
+        Button("Down a semitone") { state.send(command: ["cmd": "transposeProgression", "semitones": -1]) }
+      }
       Divider()
     }
     Button("Remove chord") { state.send(command: ["cmd": "removeChord", "id": event.id]) }

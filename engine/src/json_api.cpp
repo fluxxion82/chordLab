@@ -645,6 +645,10 @@ struct Command {
         SetOctave,
         ResetVoicing,
         SetAutoVoiceLead,
+        SetTransposeWithKey,
+        SetKeyHintSeen,
+        TransposeFromKey,
+        TransposeProgression,
         AddSection,
         RenameSection,
         SetSectionColour,
@@ -665,7 +669,8 @@ struct Command {
     int velocity = 100;        // AppendChord (optional, store default), SetVelocity
     int id = 0;                // MoveChord, SetLength, SetVelocity, RemoveChord, the voicing, section and selection commands
     int index = 0;             // MoveChord, AddSection, MoveSectionStart
-    bool on = false;           // SetProgressionLoop, SetFollowHost, SetAutoVoiceLead
+    bool on = false;           // SetProgressionLoop, SetFollowHost, SetAutoVoiceLead, SetTransposeWithKey, SetKeyHintSeen
+    int semitones = 0;         // TransposeFromKey (the pitch class moved from, 0..11), TransposeProgression (-11..11)
     int inversion = 0;         // SetInversion
     int octave = 0;            // SetOctave
     int colourIndex = 0;       // SetSectionColour
@@ -747,10 +752,22 @@ bool parseRemoveChord(Fields& fields, Command& out) {
     return fields.getInt("id", out.id);
 }
 
-/// `setProgressionLoop` / `setFollowHost` / `setAutoVoiceLead`.
+/// `setProgressionLoop` / `setFollowHost` / `setAutoVoiceLead` / `setTransposeWithKey` / `setKeyHintSeen`.
 bool parseToggle(Fields& fields, Command::Kind kind, Command& out) {
     out.kind = kind;
     return fields.getBool("on", out.on);
+}
+
+/// `transposeFromKey {fromTonicPc}`.
+bool parseTransposeFromKey(Fields& fields, Command& out) {
+    out.kind = Command::Kind::TransposeFromKey;
+    return fields.getIntIn("fromTonicPc", 0, 11, out.semitones);
+}
+
+/// `transposeProgression {semitones}`.
+bool parseTransposeProgression(Fields& fields, Command& out) {
+    out.kind = Command::Kind::TransposeProgression;
+    return fields.getIntIn("semitones", -11, 11, out.semitones);
 }
 
 /// `resetVoicing` / `removeSection`: an id and nothing else.
@@ -890,6 +907,18 @@ bool parseCommand(std::string_view text, Command& out, std::string& name, std::s
     }
     if (cmd == "setAutoVoiceLead") {
         return parseToggle(fields, Command::Kind::SetAutoVoiceLead, out);
+    }
+    if (cmd == "setTransposeWithKey") {
+        return parseToggle(fields, Command::Kind::SetTransposeWithKey, out);
+    }
+    if (cmd == "setKeyHintSeen") {
+        return parseToggle(fields, Command::Kind::SetKeyHintSeen, out);
+    }
+    if (cmd == "transposeFromKey") {
+        return parseTransposeFromKey(fields, out);
+    }
+    if (cmd == "transposeProgression") {
+        return parseTransposeProgression(fields, out);
     }
     if (cmd == "addSection") {
         return parseAddSection(fields, out, name);
@@ -1034,6 +1063,18 @@ Refusal applyCommand(DocumentStore& store, const Command& command, std::string& 
         case Command::Kind::SetAutoVoiceLead:
             store.setAutoVoiceLead(command.on);
             return Refusal::None;
+        case Command::Kind::SetTransposeWithKey:
+            store.setTransposeWithKey(command.on);
+            return Refusal::None;
+        case Command::Kind::SetKeyHintSeen:
+            store.setKeyHintSeen(command.on);
+            return Refusal::None;
+        case Command::Kind::TransposeFromKey:
+            store.transposeFromKey(static_cast<PitchClass>(command.semitones));
+            return Refusal::None;  // a move of nothing is a valid no-op
+        case Command::Kind::TransposeProgression:
+            store.transposeProgression(command.semitones);
+            return Refusal::None;
         case Command::Kind::AddSection:
             if (!canStartSection(doc, command.index)) {
                 return Refusal::None;  // a valid no-op, like an unknown id
@@ -1125,6 +1166,13 @@ bool parseState(std::string_view text, Document& doc, int& nextId, int& nextSect
         return false;
     }
     if (fields.has("autoVoiceLead") && !fields.getBool("autoVoiceLead", doc.autoVoiceLead)) {
+        return false;
+    }
+    // Optional (states saved before the key transpose switch have neither): false.
+    if (fields.has("transposeWithKey") && !fields.getBool("transposeWithKey", doc.transposeWithKey)) {
+        return false;
+    }
+    if (fields.has("keyHintSeen") && !fields.getBool("keyHintSeen", doc.keyHintSeen)) {
         return false;
     }
     // Optional (states saved before the relation modes have none): the default, blend.
@@ -1321,6 +1369,8 @@ std::string snapshotJson(const Document& doc, const Palette& palette, int select
                            {"progressionLoop", doc.progressionLoop},
                            {"followHost", doc.followHost},
                            {"autoVoiceLead", doc.autoVoiceLead},
+                           {"transposeWithKey", doc.transposeWithKey},
+                           {"keyHintSeen", doc.keyHintSeen},
                            {"endBeat", beat},
                            {"selectedEventId", selectedIndex >= 0 ? json(selectedEventId) : json()},
                            {"modes", modesJson()},
@@ -1357,6 +1407,8 @@ std::string stateJson(const DocumentStore& store, int editorWidth, int editorHei
                         {"progressionLoop", doc.progressionLoop},
                         {"followHost", doc.followHost},
                         {"autoVoiceLead", doc.autoVoiceLead},
+                        {"transposeWithKey", doc.transposeWithKey},
+                        {"keyHintSeen", doc.keyHintSeen},
                         {"relationMode", relationModeName(doc.relationMode)},
                         {"events", std::move(events)},
                         {"sections", sectionsJson(doc)},
