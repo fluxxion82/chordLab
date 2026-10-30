@@ -1,14 +1,17 @@
 import SwiftUI
 
-/// Project key pickers (tonic, mode) with the Transpose with key switch, browsed-key steppers with the
-/// browsed-mode picker and home, undo/redo (the buttons; ⌘Z / ⇧⌘Z arrive through the key routes,
-/// `EditorKeyRouter`), the label-mode toggle and the chord-relations chooser (plan R8). Everything shown
-/// comes from the snapshot (the pickers' items are its `modes` and `tonics` tables); every change is a
-/// command to the plugin. Without the tables (an older plug-in build) the project-key pickers are disabled
-/// placeholders, the browsed-mode picker is absent, and ContentView says so.
+/// Project key pickers (tonic, mode) with the Transpose with key switch (when `showsTransposeSwitch`: the
+/// window is wide enough, `ContentView.keyBarSwitchMinWidth`; else the switch is in the transport row),
+/// browsed-key steppers with the browsed-mode picker and home, undo/redo (the buttons; ⌘Z / ⇧⌘Z arrive
+/// through the key routes, `EditorKeyRouter`), the label-mode toggle and the chord-relations chooser (plan
+/// R8). Everything shown comes from the snapshot (the pickers' items are its `modes` and `tonics` tables);
+/// every change is a command to the plugin. Without the tables (an older plug-in build) the project-key
+/// pickers are disabled placeholders, the browsed-mode picker is absent, and ContentView says so.
 struct KeyBarView: View {
   @EnvironmentObject var state: ChordLabState
   @AppStorage(LabelMode.storageKey) private var labelMode = LabelMode.defaultMode
+  /// Whether the Transpose with key switch sits here, after the Key pickers (ContentView's width rule).
+  var showsTransposeSwitch = true
 
   private var projectKey: KeyJSON {
     state.snapshot?.projectKey ?? KeyJSON(tonic: TonicJSON(letter: "C", alter: 0), mode: "Ionian")
@@ -29,12 +32,6 @@ struct KeyBarView: View {
             set: { state.changeProjectKey(pc: KeyNames.pitchClass(of: projectKey.tonic), mode: $0) })
   }
 
-  /// The snapshot's `transposeWithKey`; the switch sends `setTransposeWithKey` and the next snapshot moves it.
-  private var transposeWithKey: Binding<Bool> {
-    Binding(get: { state.snapshot?.transposeWithKey ?? false },
-            set: { state.send(command: ["cmd": "setTransposeWithKey", "on": $0]) })
-  }
-
   /// The browsed key's mode; choosing one sends `browseKey {"mode"}`, which keeps the browsed tonic and
   /// switches to that parallel mode. The next snapshot moves the picker.
   private var browsedModeSelection: Binding<String> {
@@ -50,9 +47,9 @@ struct KeyBarView: View {
   }
 
   var body: some View {
-    // The first candidate that fits: (1) one row; (2) the key pickers and the switch with browse, then
-    // history, labels and relations (the 900-pt default); (3) at the 700-pt minimum, the key pickers and the
-    // switch alone, then browse and history, then labels and relations. The switch stays with the pickers.
+    // The first candidate that fits: (1) one row; (2) the key pickers (and the switch, when it is here)
+    // with browse, then history, labels and relations: the 900-pt default, and without the switch the
+    // 700-pt minimum. ContentView moves the switch to the transport row below the width (2) needs with it.
     ViewThatFits(in: .horizontal) {
       HStack(spacing: 16) {
         projectKeyControls
@@ -70,21 +67,6 @@ struct KeyBarView: View {
         }
         HStack(spacing: 16) {
           historyControls
-          labelModeControl
-          relationControls
-        }
-      }
-      VStack(alignment: .leading, spacing: 8) {
-        HStack(spacing: 16) {
-          projectKeyControls
-          Spacer(minLength: 0)
-        }
-        HStack(spacing: 16) {
-          browseControls
-          Spacer(minLength: 0)
-          historyControls
-        }
-        HStack(spacing: 16) {
           labelModeControl
           relationControls
         }
@@ -120,12 +102,9 @@ struct KeyBarView: View {
       .labelsHidden().fixedSize()
       .disabled(modes == nil)
       .accessibilityLabel("Project key mode")
-      Toggle(isOn: transposeWithKey) { Text("Transpose with key").foregroundStyle(.white) }
-        .toggleStyle(.switch)
-        .fixedSize()
-        .padding(.leading, 8)
-        .help(TransposeWithKeyHelp.text)
-        .accessibilityLabel("Transpose with key")
+      if showsTransposeSwitch {
+        TransposeWithKeyToggle().padding(.leading, 8)
+      }
     }
   }
 
@@ -212,12 +191,32 @@ struct KeyBarView_Previews: PreviewProvider {
   }
 }
 
-/// The tooltip for the Transpose with key switch, shared by every view that shows the switch.
+/// The Transpose with key switch: in the key bar after the Key pickers where the window is wide enough,
+/// else in the transport row after Auto voice-lead (ContentView decides; one of the two shows it). It shows
+/// the snapshot's `transposeWithKey` and sends `setTransposeWithKey`; the next snapshot moves it.
+struct TransposeWithKeyToggle: View {
+  @EnvironmentObject var state: ChordLabState
+
+  private var isOn: Binding<Bool> {
+    Binding(get: { state.snapshot?.transposeWithKey ?? false },
+            set: { state.send(command: ["cmd": "setTransposeWithKey", "on": $0]) })
+  }
+
+  var body: some View {
+    Toggle(isOn: isOn) { Text("Transpose with key").foregroundStyle(.white) }
+      .toggleStyle(.switch)
+      .fixedSize()
+      .help(TransposeWithKeyHelp.text)
+      .accessibilityLabel("Transpose with key")
+  }
+}
+
+/// The tooltip for the Transpose with key switch.
 enum TransposeWithKeyHelp {
   static let text = "When on, changing the key's tonic transposes every chord in the sequence by the same "
     + "interval and keeps each chord's type: C – Am – F – G in C becomes D – Bm – G – A in D. With Auto "
     + "voice-lead off every chord moves by exactly that interval (one already an octave up or down can land "
-    + "an octave off); with it on, the first chord and chords you voiced yourself move exactly and the others "
-    + "are re-voiced as usual, so they may change inversion. Changing only the mode relabels the chords. To hear the same chords as the relative "
-    + "minor, turn this off first."
+    + "an octave off); with it on, the first chord and chords you voiced yourself move exactly and the "
+    + "others are re-voiced as usual, so they may change inversion. Changing only the mode relabels the "
+    + "chords. To hear the same chords as the relative minor, turn this off first."
 }

@@ -33,6 +33,9 @@ struct PaletteView: View {
   @EnvironmentObject var state: ChordLabState
   @AppStorage(LabelMode.storageKey) private var labelMode = LabelMode.defaultMode
   @AppStorage(PaletteViewMode.storageKey) private var savedView = PaletteViewMode.defaultMode
+  /// Whether the Diatonic / Applied switch may take its row above the grid. ContentView clears it while the
+  /// key transpose row shows in a short window, so the grid keeps a viewport.
+  var showsViewSwitch = true
 
   /// The grid's gap, which the home row (`HomeRowView`) shares.
   static let spacing = PaletteLayout.spacing
@@ -44,7 +47,7 @@ struct PaletteView: View {
     VStack(alignment: .leading, spacing: 6) {
       // While the home row is shown the switch sits at its trailing end instead (`HomeRowView`), so the
       // grid keeps its viewport at the 700×480 minimum.
-      if hasApplied, state.snapshot?.homeRow.isEmpty ?? true {
+      if showsViewSwitch, hasApplied, state.snapshot?.homeRow.isEmpty ?? true {
         PaletteViewSwitch()
       }
       GeometryReader { geometry in
