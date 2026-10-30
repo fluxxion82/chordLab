@@ -49,7 +49,10 @@ struct KeyBarView: View {
   var body: some View {
     // The first candidate that fits: (1) one row; (2) the key pickers (and the switch, when it is here)
     // with browse, then history, labels and relations: the 900-pt default, and without the switch the
-    // 700-pt minimum. ContentView moves the switch to the transport row below the width (2) needs with it.
+    // 700-pt minimum. ContentView moves the switch to the transport row below the width (2) needs with it
+    // (`keyBarSwitchMinWidth`, measured for the English UI's widest tonic and mode); (3), only with the
+    // switch here, catches content longer than that measurement (a wider picker): the key pickers and the
+    // switch alone, then browse and history, then labels and relations, a row more instead of an overflow.
     ViewThatFits(in: .horizontal) {
       HStack(spacing: 16) {
         projectKeyControls
@@ -69,6 +72,23 @@ struct KeyBarView: View {
           historyControls
           labelModeControl
           relationControls
+        }
+      }
+      if showsTransposeSwitch {
+        VStack(alignment: .leading, spacing: 8) {
+          HStack(spacing: 16) {
+            projectKeyControls
+            Spacer(minLength: 0)
+          }
+          HStack(spacing: 16) {
+            browseControls
+            Spacer(minLength: 0)
+            historyControls
+          }
+          HStack(spacing: 16) {
+            labelModeControl
+            relationControls
+          }
         }
       }
     }
