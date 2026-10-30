@@ -965,6 +965,129 @@ TEST_CASE("setKey: sets the project key only and is undoable") {
     CHECK_FALSE(store.undo());
 }
 
+// --- Transpose commands ------------------------------------------------------------------
+
+TEST_CASE("setTransposeWithKey and setKeyHintSeen: set the live flags, no history, no-ops accepted") {
+    DocumentStore store = threeChords();
+    CHECK(snapshot(store).at("transposeWithKey") == false);
+    CHECK(snapshot(store).at("keyHintSeen") == false);
+    applyOk(store, {{"cmd", "setTransposeWithKey"}, {"on", true}});
+    applyOk(store, {{"cmd", "setKeyHintSeen"}, {"on", true}});
+    json snap = snapshot(store);
+    CHECK(snap.at("transposeWithKey") == true);
+    CHECK(snap.at("keyHintSeen") == true);
+    applyOk(store, {{"cmd", "setTransposeWithKey"}, {"on", true}});  // the same value: a no-op
+    applyOk(store, {{"cmd", "setKeyHintSeen"}, {"on", true}});
+    applyOk(store, {{"cmd", "setTransposeWithKey"}, {"on", false}});
+    CHECK(snapshot(store).at("transposeWithKey") == false);
+    CHECK(snapshot(store).at("keyHintSeen") == true);
+    REQUIRE(store.undo());  // the three appendChords are the only history
+    REQUIRE(store.undo());
+    REQUIRE(store.undo());
+    CHECK_FALSE(store.undo());
+    CHECK(store.doc().keyHintSeen == true);
+}
+
+TEST_CASE("transposeFromKey: moves every chord from the given tonic to the project tonic in one undo step") {
+    DocumentStore store = threeChords();
+    store.setProjectKey(key('D', 0, Mode::Ionian));  // switch off: chords stay
+    applyOk(store, {{"cmd", "transposeFromKey"}, {"fromTonicPc", 0}});
+    json snap = snapshot(store);
+    CHECK(snap.at("events")[0].at("root") == 2);
+    CHECK(snap.at("events")[1].at("root") == 7);
+    CHECK(snap.at("events")[2].at("root") == 9);
+    CHECK(snap.at("events")[0].at("symbol") == "D");
+    CHECK(snap.at("events")[1].at("symbol") == "G");
+    CHECK(snap.at("events")[2].at("symbol") == "A7");
+    CHECK(snap.at("projectKeyName") == "D Ionian");
+    REQUIRE(store.undo());
+    CHECK(snapshot(store).at("events")[0].at("root") == 0);
+    CHECK(snapshot(store).at("projectKeyName") == "D Ionian");
+
+    applyOk(store, {{"cmd", "transposeFromKey"}, {"fromTonicPc", 2}});  // same tonic: a no-op, no history
+    CHECK(snapshot(store).at("events")[0].at("root") == 0);
+    CHECK(store.undo());  // undoes the setProjectKey, not a phantom step
+    CHECK(store.doc().projectKey == key('C', 0, Mode::Ionian));
+}
+
+TEST_CASE("transposeProgression: moves every chord by the signed interval in one undo step") {
+    DocumentStore store = threeChords();
+    applyOk(store, {{"cmd", "transposeProgression"}, {"semitones", 1}});
+    json snap = snapshot(store);
+    CHECK(snap.at("events")[0].at("root") == 1);
+    CHECK(snap.at("events")[1].at("root") == 6);
+    CHECK(snap.at("events")[2].at("root") == 8);
+    CHECK(snap.at("projectKeyName") == "C Ionian");
+    applyOk(store, {{"cmd", "transposeProgression"}, {"semitones", -11}});
+    CHECK(snapshot(store).at("events")[0].at("root") == 2);
+    REQUIRE(store.undo());
+    CHECK(snapshot(store).at("events")[0].at("root") == 1);
+    REQUIRE(store.undo());
+    CHECK(snapshot(store).at("events")[0].at("root") == 0);
+
+    applyOk(store, {{"cmd", "transposeProgression"}, {"semitones", 0}});  // a no-op: no history
+    applyOk(store, {{"cmd", "transposeProgression"}, {"semitones", 3}});
+    REQUIRE(store.undo());
+    CHECK(snapshot(store).at("events")[0].at("root") == 0);
+    DocumentStore empty;
+    applyOk(empty, {{"cmd", "transposeProgression"}, {"semitones", 5}});
+    CHECK_FALSE(empty.undo());
+}
+
+TEST_CASE("setKey with transposeWithKey on: event roots and symbols move, in one undo step") {
+    DocumentStore store = threeChords();  // C F G7 in C
+    applyOk(store, {{"cmd", "setTransposeWithKey"}, {"on", true}});
+    const json before = snapshot(store);
+    applyOk(store, {{"cmd", "setKey"}, {"letter", "G"}, {"alter", 0}, {"mode", "Ionian"}});
+    json snap = snapshot(store);
+    CHECK(snap.at("projectKeyName") == "G Ionian");
+    CHECK(snap.at("events")[0].at("root") == 7);   // C -> G (down a fourth)
+    CHECK(snap.at("events")[1].at("root") == 0);   // F -> C
+    CHECK(snap.at("events")[2].at("root") == 2);   // G7 -> D7
+    CHECK(snap.at("events")[0].at("symbol") == "G");
+    CHECK(snap.at("events")[1].at("symbol") == "C");
+    CHECK(snap.at("events")[2].at("symbol") == "D7");
+    CHECK(snap.at("transposeWithKey") == true);
+    REQUIRE(store.undo());
+    json undone = snapshot(store);
+    CHECK(undone.at("projectKeyName") == "C Ionian");
+    CHECK(undone.at("events") == before.at("events"));
+    CHECK(undone.at("transposeWithKey") == true);  // live state survives
+}
+
+TEST_CASE("rejection: transpose commands with missing, mistyped or out-of-range fields are refused whole") {
+    DocumentStore store = threeChords();
+    checkRejected(store, {{"cmd", "setTransposeWithKey"}});
+    checkRejected(store, {{"cmd", "setTransposeWithKey"}, {"on", 1}});
+    checkRejected(store, {{"cmd", "setTransposeWithKey"}, {"on", "true"}});
+    checkRejected(store, {{"cmd", "setKeyHintSeen"}});
+    checkRejected(store, {{"cmd", "setKeyHintSeen"}, {"on", 0}});
+    checkRejected(store, {{"cmd", "setKeyHintSeen"}, {"on", nullptr}});
+    checkRejected(store, {{"cmd", "transposeFromKey"}});
+    checkRejected(store, {{"cmd", "transposeFromKey"}, {"fromTonicPc", "0"}});
+    checkRejected(store, {{"cmd", "transposeFromKey"}, {"fromTonicPc", 1.5}});
+    checkRejected(store, {{"cmd", "transposeFromKey"}, {"fromTonicPc", -1}});
+    checkRejected(store, {{"cmd", "transposeFromKey"}, {"fromTonicPc", 12}});
+    checkRejected(store, {{"cmd", "transposeProgression"}});
+    checkRejected(store, {{"cmd", "transposeProgression"}, {"semitones", "1"}});
+    checkRejected(store, {{"cmd", "transposeProgression"}, {"semitones", 0.5}});
+    checkRejected(store, {{"cmd", "transposeProgression"}, {"semitones", 12}});
+    checkRejected(store, {{"cmd", "transposeProgression"}, {"semitones", -12}});
+
+    std::string error;
+    CHECK_FALSE(apply(store, {{"cmd", "transposeFromKey"}, {"fromTonicPc", 12}}, error));
+    CHECK(error.find("fromTonicPc") != std::string::npos);
+    CHECK(error.find("in 0..11") != std::string::npos);
+    CHECK_FALSE(apply(store, {{"cmd", "transposeProgression"}, {"semitones", 12}}, error));
+    CHECK(error.find("semitones") != std::string::npos);
+    CHECK(error.find("in -11..11") != std::string::npos);
+}
+
+TEST_CASE("snapshot: twenty-three top-level keys, with the transpose flags") {
+    DocumentStore store = threeChords();
+    CHECK(snapshot(store).size() == 23);
+}
+
 // --- Editing ---------------------------------------------------------------------------
 
 TEST_CASE("edit commands: move, length, velocity, remove") {
@@ -1510,6 +1633,8 @@ TEST_CASE("state: shape") {
     CHECK(state.at("sections")[1] == json({{"id", 2}, {"name", "B"}, {"colourIndex", 3}, {"firstEventIndex", 1}}));
     CHECK(state.at("nextSectionId") == 3);
     CHECK(state.at("relationMode") == "voiceLeading");
+    CHECK(state.at("transposeWithKey") == false);
+    CHECK(state.at("keyHintSeen") == false);
 
     const json defaults = json::parse(stateJson(store));
     CHECK(defaults.at("editor") == json({{"width", 900}, {"height", 620}}));
@@ -1519,6 +1644,32 @@ TEST_CASE("state: shape") {
     CHECK(empty.at("sections") == json::array());
     CHECK(empty.at("nextSectionId") == 1);
     CHECK(empty.at("relationMode") == "blend");
+    CHECK(empty.at("transposeWithKey") == false);
+    CHECK(empty.at("keyHintSeen") == false);
+}
+
+TEST_CASE("state: transposeWithKey and keyHintSeen round-trip and a legacy state loads them false") {
+    DocumentStore original = richStore();
+    original.setTransposeWithKey(true);
+    original.setKeyHintSeen(true);
+    json j = json::parse(stateJson(original));
+    CHECK(j.at("transposeWithKey") == true);
+    CHECK(j.at("keyHintSeen") == true);
+
+    DocumentStore loaded;
+    std::string error;
+    REQUIRE_MESSAGE(loadStateJson(loaded, j.dump(), error), error);
+    CHECK(loaded.doc() == original.doc());
+    CHECK(loaded.doc().transposeWithKey == true);
+    CHECK(loaded.doc().keyHintSeen == true);
+
+    j.erase("transposeWithKey");
+    j.erase("keyHintSeen");
+    loaded.setTransposeWithKey(true);
+    loaded.setKeyHintSeen(true);
+    REQUIRE_MESSAGE(loadStateJson(loaded, j.dump(), error), error);
+    CHECK(loaded.doc().transposeWithKey == false);
+    CHECK(loaded.doc().keyHintSeen == false);
 }
 
 TEST_CASE("state: loadStateJson(stateJson(doc)) round-trips the document, the ids, the id counter and the editor size") {
@@ -1661,6 +1812,8 @@ TEST_CASE("state: bad Phase 2 fields reject the whole state, sections checked be
     rejects("octave not an integer", [](json& s) { s["events"][1]["octave"] = "down"; });
     rejects("manualVoicing not a bool", [](json& s) { s["events"][1]["manualVoicing"] = 1; });
     rejects("autoVoiceLead not a bool", [](json& s) { s["autoVoiceLead"] = "yes"; });
+    rejects("transposeWithKey not a bool", [](json& s) { s["transposeWithKey"] = "yes"; });
+    rejects("keyHintSeen not a bool", [](json& s) { s["keyHintSeen"] = 1; });
     rejects("sections not an array", [](json& s) { s["sections"] = 1; });
     rejects("section not an object", [](json& s) { s["sections"][0] = 1; });
     rejects("section id missing", [](json& s) { s["sections"][0].erase("id"); });
@@ -2018,7 +2171,7 @@ DocumentStore worstCaseStore() {
 /// `stateJson` of `worstCaseStore()` at the default editor size, measured; pinned so that a change to the
 /// state's shape shows up here against `kMaxJsonBytes` (1 MiB) before it shows up as a state that will
 /// not load.
-constexpr std::size_t kWorstCaseStateBytes = 76800;
+constexpr std::size_t kWorstCaseStateBytes = 76845;
 
 }  // namespace
 
