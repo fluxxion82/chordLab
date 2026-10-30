@@ -704,3 +704,28 @@ TEST_CASE("setProjectKey: 256 events transposed in one commit, capacity unchange
     CHECK(store.doc().projectKey == key('G', 0, Mode::Ionian));
     CHECK(heard(store) == after);
 }
+
+TEST_CASE("resetVoicing: a non-manual chord a transpose left at octave -1 returns to octave 0 in one undo step") {
+    DocumentStore store = cAmFG7();
+    store.setTransposeWithKey(true);
+    store.setProjectKey(key('G', 0, Mode::Ionian));
+    const ChordEvent& first = store.doc().events[0];
+    REQUIRE(first.octave == -1);
+    REQUIRE_FALSE(first.manualVoicing);
+    CHECK(notesOf(first) == Notes{55, 59, 62});  // G major, an octave below the default register
+    const int depth = undoDepth(store);
+
+    store.resetVoicing(1);
+
+    const ChordEvent& reset = store.doc().events[0];
+    CHECK(reset.octave == 0);
+    CHECK(reset.inversion == 0);
+    CHECK_FALSE(reset.manualVoicing);
+    CHECK(notesOf(reset) == Notes{67, 71, 74});  // the default register
+    CHECK(undoDepth(store) == depth + 1);
+
+    REQUIRE(store.undo());
+    CHECK(store.doc().events[0].octave == -1);
+    CHECK(notesOf(store.doc().events[0]) == Notes{55, 59, 62});
+    CHECK_FALSE(store.doc().events[0].manualVoicing);
+}
