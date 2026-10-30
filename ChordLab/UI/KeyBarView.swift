@@ -124,9 +124,7 @@ struct KeyBarView: View {
         .toggleStyle(.switch)
         .fixedSize()
         .padding(.leading, 8)
-        .help("When on, changing the key's tonic transposes every chord in the sequence by the same interval "
-              + "and keeps each chord's type: C – Am – F – G in C becomes D – Bm – G – A in D. Changing only the "
-              + "mode relabels the chords. To hear the same chords as the relative minor, turn this off first.")
+        .help(TransposeWithKeyHelp.text)
         .accessibilityLabel("Transpose with key")
     }
   }
@@ -212,4 +210,14 @@ struct KeyBarView_Previews: PreviewProvider {
     KeyBarView().environmentObject(ChordLabState(numParams: kNumParams))
       .padding().background(Color(red: 0.04, green: 0.07, blue: 0.25)).frame(width: 900)
   }
+}
+
+/// The tooltip for the Transpose with key switch, shared by every view that shows the switch.
+enum TransposeWithKeyHelp {
+  static let text = "When on, changing the key's tonic transposes every chord in the sequence by the same "
+    + "interval and keeps each chord's type: C – Am – F – G in C becomes D – Bm – G – A in D. With Auto "
+    + "voice-lead off every chord moves by exactly that interval (one already an octave up or down can land "
+    + "an octave off); with it on, the first chord and chords you voiced yourself move exactly and the others "
+    + "are re-voiced as usual, so they may change inversion. Changing only the mode relabels the chords. To hear the same chords as the relative "
+    + "minor, turn this off first."
 }

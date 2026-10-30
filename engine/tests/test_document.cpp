@@ -1287,6 +1287,8 @@ TEST_CASE("DocumentStore: 200 random operations undo to the initial document and
             CHECK(e.inversion < inversionCount(e.chord));
             CHECK(e.octave >= kMinVoicingOctave);
             CHECK(e.octave <= kMaxVoicingOctave);
+            // Non-manual implies the default voicing only because this walk never transposes (a transpose
+            // moves the stored octave of non-manual chords).
             if (!e.manualVoicing) {  // what the store's own operations maintain
                 CHECK(e.inversion == 0);
                 CHECK(e.octave == 0);
@@ -2048,6 +2050,8 @@ TEST_CASE("DocumentStore: 200 random chord and section operations keep the secti
         CHECK(e.inversion < inversionCount(e.chord));
         CHECK(e.octave >= kMinVoicingOctave);
         CHECK(e.octave <= kMaxVoicingOctave);
+        // Non-manual implies the default voicing only because this walk never transposes (a transpose
+        // moves the stored octave of non-manual chords).
         if (!e.manualVoicing) {
             CHECK(e.inversion == 0);
             CHECK(e.octave == 0);

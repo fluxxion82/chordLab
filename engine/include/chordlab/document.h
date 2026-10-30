@@ -62,9 +62,9 @@ static_assert(static_cast<std::size_t>(kMaxChords) * 8 * 2 <= kMaxSnapshotEvents
 /// `resetVoicing` clears all three, so an event the store was never asked to voice is at 0, 0, not manual
 /// until a transpose (`transposeEvents`, transpose.h) moves its `octave` along with its root, flag clear,
 /// so that with auto voice-leading off its notes move by exactly the interval.
-/// With `Document::autoVoiceLead` on, `compile` chooses the voicing of every chord whose flag is clear and
-/// keeps the stored values of every chord whose flag is set; with it off every chord keeps its stored
-/// values, flag or not (see compiler.h).
+/// With `Document::autoVoiceLead` on, `compile` chooses the voicing of every chord whose flag is clear
+/// except the first chord of the progression, which keeps its stored values like every chord whose flag is
+/// set; with it off every chord keeps its stored values, flag or not (see compiler.h).
 struct ChordEvent {
     int id;
     Chord chord;
