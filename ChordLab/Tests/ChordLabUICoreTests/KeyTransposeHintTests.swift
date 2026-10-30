@@ -21,18 +21,21 @@ final class KeyTransposeHintTests: XCTestCase {
 
   // MARK: - stillValid
 
-  /// A snapshot of `phase2` (C Ionian, G7 then C) with the given tonic letter, events and switch.
+  /// A snapshot of `phase2` (C Ionian, G7 then C) with the given tonic letter, events and switch; the browsed
+  /// key is the project key unless `browsedTonic` / `browsedMode` say otherwise.
   private func snapshot(tonic: String = "C", events: [(id: Int, root: Int, type: String, length: Double, velocity: Int)] =
-    [(1, 7, "7", 4, 100), (2, 0, "maj", 4, 100)], selected: Int? = nil, switchOn: Bool? = nil) throws -> Snapshot {
+    [(1, 7, "7", 4, 100), (2, 0, "maj", 4, 100)], selected: Int? = nil, switchOn: Bool? = nil,
+    browsedTonic: String? = nil, browsedMode: String = "Ionian") throws -> Snapshot {
     let list = events.map { e in
       "{\"id\":\(e.id),\"root\":\(e.root),\"type\":\"\(e.type)\",\"symbol\":\"X\",\"roman\":\"I\",\"startBeat\":0.0,"
         + "\"lengthBeats\":\(e.length),\"velocity\":\(e.velocity),\"voicing\":[60,64,67]}"
     }.joined(separator: ",")
     let key = "{\"tonic\":{\"letter\":\"\(tonic)\",\"alter\":0},\"mode\":\"Ionian\"}"
+    let browsed = "{\"tonic\":{\"letter\":\"\(browsedTonic ?? tonic)\",\"alter\":0},\"mode\":\"\(browsedMode)\"}"
     let flag = switchOn.map { "\"transposeWithKey\":\($0)," } ?? ""
     let sel = selected.map { "\"selectedEventId\":\($0)," } ?? ""
     let json = """
-      {"schema":1,"projectKey":\(key),"browsedKey":\(key),"projectKeyName":"x","browsedKeyName":"x",
+      {"schema":1,"projectKey":\(key),"browsedKey":\(browsed),"projectKeyName":"x","browsedKeyName":"x",
        "progressionLoop":true,"followHost":true,"endBeat":8.0,\(flag)\(sel)"events":[\(list)],
        "palette":{"tiers":1,"cells":[]}}
       """
@@ -71,5 +74,25 @@ final class KeyTransposeHintTests: XCTestCase {
       basis, in: try snapshot(events: [(1, 7, "maj", 4, 100), (2, 0, "maj", 4, 100)])), "changed type")
     XCTAssertFalse(KeyTransposeHint.stillValid(basis, in: try snapshot(tonic: "D")), "tonic change")
     XCTAssertFalse(KeyTransposeHint.stillValid(basis, in: try snapshot(switchOn: true)), "switch on")
+  }
+
+  // MARK: - isHome
+
+  func testIsHomeWhenTheBrowsedKeyIsTheProjectKey() throws {
+    XCTAssertTrue(KeyTransposeHint.isHome(try snapshot()))
+    XCTAssertTrue(KeyTransposeHint.isHome(try snapshot(tonic: "D")))
+  }
+
+  func testIsNotHomeWhenTheBrowsedTonicOrModeDiffers() throws {
+    XCTAssertFalse(KeyTransposeHint.isHome(try snapshot(browsedTonic: "G")), "tonic differs")
+    XCTAssertFalse(KeyTransposeHint.isHome(try snapshot(browsedMode: "Dorian")), "mode differs")
+    XCTAssertFalse(KeyTransposeHint.isHome(try snapshot(browsedTonic: "G", browsedMode: "Aeolian")), "both differ")
+  }
+
+  func testStillValidFailsWhenAnotherKeyIsBrowsed() throws {
+    let basis = KeyTransposeHint.basis(of: try snapshot())
+    XCTAssertFalse(KeyTransposeHint.stillValid(basis, in: try snapshot(browsedTonic: "G")), "browsed a fifth up")
+    XCTAssertFalse(KeyTransposeHint.stillValid(basis, in: try snapshot(browsedMode: "Aeolian")), "browsed mode")
+    XCTAssertTrue(KeyTransposeHint.stillValid(basis, in: try snapshot(browsedTonic: "C")), "browsed home again")
   }
 }

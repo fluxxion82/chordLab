@@ -23,9 +23,15 @@ enum KeyTransposeHint {
     fromPc != toPc && !transposeWithKey && eventCount > 0 && !hintSeen
   }
 
-  /// The hint survives a snapshot only if the sequence and tonic are as it was shown for and the switch
-  /// is still off.
+  /// Whether the project key is the one browsed (`KeyJSON` equality: tonic letter and alter, and mode).
+  /// The key row belongs to the moment of the key change: browsing away closes it.
+  static func isHome(_ snapshot: Snapshot) -> Bool {
+    snapshot.browsedKey == snapshot.projectKey
+  }
+
+  /// The hint survives a snapshot only if the sequence and tonic are as it was shown for, the switch is
+  /// still off and the project key is still the one browsed.
   static func stillValid(_ basis: Basis, in snapshot: Snapshot) -> Bool {
-    !(snapshot.transposeWithKey ?? false) && self.basis(of: snapshot) == basis
+    !(snapshot.transposeWithKey ?? false) && isHome(snapshot) && self.basis(of: snapshot) == basis
   }
 }
