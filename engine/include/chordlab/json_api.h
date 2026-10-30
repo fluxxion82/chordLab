@@ -306,11 +306,10 @@ bool applyCommandJson(DocumentStore& store, std::string_view json, std::string& 
 /// `editorWidth` / `editorHeight` are the editor window size to remember; they are stored verbatim. The
 /// selection (`DocumentStore::selectedEventId`) is live state and is not written.
 /// `autoVoiceLead`, the events' `inversion`, `octave` and `manualVoicing`, `sections` and
-/// `nextSectionId` were added under schema 1 (Phase 2), `transposeWithKey` and `keyHintSeen` (live state like
-/// `relationMode`) later, and `relationMode` (`relationModeName` of
-/// `Document::relationMode`, live state that is nonetheless saved with the set, R5) after them: a reader
-/// that predates them ignores them, and `loadStateJson` defaults them when they are missing, so states
-/// cross both ways.
+/// `nextSectionId` were added under schema 1 (Phase 2), `relationMode` (`relationModeName` of
+/// `Document::relationMode`, live state that is nonetheless saved with the set, R5) later, and
+/// `transposeWithKey` and `keyHintSeen` (also live state) after it: a reader that predates them ignores
+/// them, and `loadStateJson` defaults them when they are missing, so states cross both ways.
 /// Size: the largest state the store can hold (`kMaxChords` chords, a section on each, every name at
 /// `kMaxSectionNameBytes` bytes of characters that escape to two) is pinned by test_json_api.cpp at
 /// well under a tenth of `kMaxJsonBytes`, so a saved state always loads.
@@ -330,8 +329,9 @@ std::string stateJson(const DocumentStore& store, int editorWidth = kDefaultEdit
 /// Lengths, velocities, inversions, octaves and section colours are clamped to the store's ranges
 /// rather than rejected (a mistyped value is still rejected). Optional, with their defaults: `editor`
 /// (`kDefaultEditorWidth` x `kDefaultEditorHeight`), the events' `inversion` (0), `octave` (0) and
-/// `manualVoicing` (false), `autoVoiceLead` (false), `transposeWithKey` and `keyHintSeen` (false; when given, booleans), `relationMode` ("blend"; when given, one of the five
-/// `relationModeName` strings, anything else rejecting the state), `sections` (none) and `nextSectionId`
+/// `manualVoicing` (false), `autoVoiceLead` (false), `transposeWithKey` and `keyHintSeen` (false; when
+/// given, booleans), `relationMode` ("blend"; when given, one of the five `relationModeName` strings,
+/// anything else rejecting the state), `sections` (none) and `nextSectionId`
 /// (derived, one past the largest section id, 1 without sections; when given it must be at least that and
 /// is kept, like `nextId`). Every other field is required.
 bool loadStateJson(DocumentStore& store, std::string_view json, std::string& error, int* editorWidth = nullptr,
