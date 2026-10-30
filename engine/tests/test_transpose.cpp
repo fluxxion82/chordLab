@@ -4,11 +4,14 @@
 #include "chordlab/compiler.h"
 #include "chordlab/document.h"
 #include "chordlab/pitch.h"
+#include "chordlab/publication.h"
 #include "chordlab/scale.h"
 #include "chordlab/transpose.h"
 #include "chordlab/voicing.h"
 
 #include <cstddef>
+#include <cstdint>
+#include <memory>
 #include <string_view>
 #include <vector>
 
@@ -680,6 +683,12 @@ TEST_CASE("setProjectKey: 256 events transposed in one commit, capacity unchange
     const std::vector<ChordEvent> eventsBefore = store.doc().events;
     REQUIRE(chooseKeyTranspose(eventsBefore, 7) == -5);
 
+    auto slot = std::make_unique<SnapshotSlot>();
+    Publication last;
+    REQUIRE(fillSlot(store.doc(), *slot, last));
+    const std::vector<NoteEvent> published0(slot->events.begin(), slot->events.begin() + static_cast<std::ptrdiff_t>(slot->count));
+    const std::uint32_t generation0 = last.generation;
+
     store.setProjectKey(key('G', 0, Mode::Ionian));
 
     REQUIRE(store.doc().events.size() == 256);
@@ -694,6 +703,23 @@ TEST_CASE("setProjectKey: 256 events transposed in one commit, capacity unchange
     }
     CHECK(store.appendChord(chord(0, "maj")) == kNoEventId);  // still full
     CHECK(compile(store.doc()).endBeat == 256 * 4.0);
+
+    // Published: the slot carries all 256 chords' events, transposed, under a new generation.
+    REQUIRE(fillSlot(store.doc(), *slot, last));
+    CHECK(last.generation == generation0 + 1);
+    CHECK(slot->endBeat == 256 * 4.0);
+    const Compiled compiled = compile(store.doc());
+    REQUIRE(slot->count == compiled.events.size());
+    CHECK(slot->count == published0.size());
+    CHECK(slot->count > 256);
+    for (std::size_t i = 0; i < slot->count; ++i) {
+        CHECK(slot->events[i] == compiled.events[i]);
+    }
+    // The first chord (C major) sounds five semitones lower than before the key change.
+    REQUIRE(published0[0].on);
+    CHECK(slot->events[0].on);
+    CHECK(slot->events[0].beat == published0[0].beat);
+    CHECK(slot->events[0].pitch == published0[0].pitch - 5);
 
     // One commit: a single undo (256 appends already filled the history, so its depth cannot show it)
     // brings every chord and the key back.

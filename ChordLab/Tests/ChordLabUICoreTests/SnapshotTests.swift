@@ -577,6 +577,13 @@ final class SnapshotTests: XCTestCase {
     let on = try Self.decode(StateFixture.self, inline)
     XCTAssertEqual(on.transposeWithKey, true)
     XCTAssertEqual(on.keyHintSeen, true)
+    let absent = """
+      {"schema":1,"projectKey":{"tonic":{"letter":"C","alter":0},"mode":"Ionian"},
+       "browsedKey":{"tonic":{"letter":"C","alter":0},"mode":"Ionian"},"events":[]}
+      """
+    let none = try Self.decode(StateFixture.self, absent)
+    XCTAssertNil(none.transposeWithKey)
+    XCTAssertNil(none.keyHintSeen)
   }
 
   func testEveryStateFixtureIsASchemaOneDocument() throws {
