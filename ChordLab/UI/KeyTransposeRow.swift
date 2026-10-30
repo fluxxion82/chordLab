@@ -7,6 +7,10 @@ import SwiftUI
 struct KeyTransposeRow: View {
   @EnvironmentObject var state: ChordLabState
   let row: ChordLabState.KeyRow
+  /// In a window shorter than `ContentView.compactHeight`: callout text, small buttons, a small icon and less
+  /// vertical padding, so the hint fits on one line at the 700-pt minimum width and the row is at most 24 pt
+  /// tall in either state (the palette keeps 44 pt or more at 700 x 480).
+  var compact = false
 
   static let hintText = "Chords in the sequence kept their notes."
 
@@ -18,8 +22,8 @@ struct KeyTransposeRow: View {
     Group {
       switch row {
       case .hint:
-        // One row: the text on one line where it fits (900 pt), else wrapped beside the buttons (the 700-pt
-        // minimum, where height is short); the buttons below the text only when even that does not fit.
+        // One row: the text on one line where it fits (900 pt; compact, also the 700-pt minimum), else wrapped
+        // beside the buttons; the buttons below the text only when even that does not fit.
         ViewThatFits(in: .horizontal) {
           HStack(spacing: 12) {
             hintLabel(wrapped: false)
@@ -49,9 +53,11 @@ struct KeyTransposeRow: View {
         .allowsHitTesting(false)
       }
     }
-    .font(.body)
+    .font(compact ? .callout : .body)
+    .controlSize(compact ? .small : .regular)
+    .imageScale(compact ? .small : .medium)
     .padding(.horizontal, 10)
-    .padding(.vertical, 6)
+    .padding(.vertical, compact ? 2 : 6)
     .background(RoundedRectangle(cornerRadius: 6).fill(Color.white.opacity(0.07)))
   }
 

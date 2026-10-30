@@ -4,11 +4,12 @@ import SwiftUI
 /// suggestions strip, palette grid and (only while another key is browsed) the home-key compare row, with a
 /// temporary status line and the MIDI drag-out control along the bottom.
 ///
-/// The window's measured size decides two things once, here: where the Transpose with key switch is (the key
-/// bar from `keyBarSwitchMinWidth` up, else the transport row; exactly one of them shows it), and whether the
+/// The window's measured size decides three things once, here: where the Transpose with key switch is (the
+/// key bar from `keyBarSwitchMinWidth` up, else the transport row; exactly one of them shows it), whether the
 /// Diatonic / Applied switch keeps its row above the palette (not while the key transpose row shows in a
-/// window shorter than `compactHeight`). The palette viewport is the row that gives up height; the status
-/// and export row along the bottom never does.
+/// window shorter than `compactHeight`), and whether the key transpose row draws compact (in a window shorter
+/// than `compactHeight`). The palette viewport is the row that gives up height; the status and export row
+/// along the bottom never does.
 struct ContentView: View {
   @EnvironmentObject var state: ChordLabState
 
@@ -18,7 +19,8 @@ struct ContentView: View {
   /// Minor (the widest tonic menu) and at 875 pt for C Major; 3 pt added for margin. Below it the switch moves
   /// to the transport row and the key bar keeps its two rows.
   static let keyBarSwitchMinWidth: CGFloat = 880
-  /// Below this window height the key transpose row takes the Diatonic / Applied switch's row while it shows.
+  /// Below this window height the key transpose row draws compact and takes the Diatonic / Applied switch's
+  /// row while it shows.
   static let compactHeight: CGFloat = 700
 
   /// The window's size, as last measured (900 × 620, the default window, until the first measurement).
@@ -34,7 +36,7 @@ struct ContentView: View {
         // The transpose hint or the moved note, in a row of its own: the rows below move down while it
         // shows, so nothing (Follow Live, Loop, Panic) is covered.
         if let row = state.keyRow {
-          KeyTransposeRow(row: row)
+          KeyTransposeRow(row: row, compact: size.height < Self.compactHeight)
         }
 
         TransportBarView(showsTransposeSwitch: !switchInKeyBar)
