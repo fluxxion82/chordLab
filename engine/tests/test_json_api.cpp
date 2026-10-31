@@ -186,6 +186,67 @@ TEST_CASE("snapshot: appendChord yields one event spelled and numbered in the pr
     CHECK(e.at("voicing") == json({60, 64, 67}));
 }
 
+TEST_CASE("appendChord without a length appends one bar of the meter") {
+    struct Case { int num; int den; double beats; };
+    for (const Case& c : {Case{4, 4, 4.0}, Case{3, 4, 3.0}, Case{6, 8, 3.0}, Case{7, 8, 3.5}, Case{2, 4, 2.0},
+                          Case{5, 4, 5.0}, Case{12, 8, 6.0}}) {
+        CAPTURE(c.num);
+        CAPTURE(c.den);
+        DocumentStore store;
+        applyOk(store, {{"cmd", "setMeter"}, {"num", c.num}, {"den", c.den}});
+        applyOk(store, {{"cmd", "appendChord"}, {"root", 0}, {"type", "maj"}});
+        const json snap = snapshot(store);
+        REQUIRE(snap.at("events").size() == 1);
+        CHECK(snap.at("events")[0].at("lengthBeats").get<double>() == c.beats);
+    }
+}
+
+TEST_CASE("appendChord: an explicit length wins in any meter, and setMeter leaves lengths unchanged") {
+    DocumentStore store;
+    applyOk(store, {{"cmd", "appendChord"}, {"root", 0}, {"type", "maj"}});
+    applyOk(store, {{"cmd", "appendChord"}, {"root", 7}, {"type", "maj"}, {"lengthBeats", 2.5}});
+    applyOk(store, {{"cmd", "setMeter"}, {"num", 7}, {"den", 8}});
+    json snap = snapshot(store);
+    CHECK(snap.at("events")[0].at("lengthBeats").get<double>() == 4.0);
+    CHECK(snap.at("events")[1].at("lengthBeats").get<double>() == 2.5);
+    applyOk(store, {{"cmd", "appendChord"}, {"root", 2}, {"type", "min"}, {"lengthBeats", 1.0}});
+    applyOk(store, {{"cmd", "appendChord"}, {"root", 4}, {"type", "min"}});
+    snap = snapshot(store);
+    CHECK(snap.at("events")[2].at("lengthBeats").get<double>() == 1.0);
+    CHECK(snap.at("events")[3].at("lengthBeats").get<double>() == 3.5);
+    applyOk(store, {{"cmd", "setMeter"}, {"num", 3}, {"den", 4}});
+    snap = snapshot(store);
+    CHECK(snap.at("events")[0].at("lengthBeats").get<double>() == 4.0);
+    CHECK(snap.at("events")[1].at("lengthBeats").get<double>() == 2.5);
+    CHECK(snap.at("events")[2].at("lengthBeats").get<double>() == 1.0);
+    CHECK(snap.at("events")[3].at("lengthBeats").get<double>() == 3.5);
+    CHECK(snap.at("endBeat").get<double>() == 11.0);
+}
+
+TEST_CASE("loadPreset: one-bar steps follow the meter, in append and replace, and leave meter and feel alone") {
+    struct Case { int num; int den; double beats; };
+    for (const Case& c : {Case{4, 4, 4.0}, Case{3, 4, 3.0}, Case{7, 8, 3.5}, Case{6, 8, 3.0}}) {
+        CAPTURE(c.num);
+        CAPTURE(c.den);
+        for (const char* mode : {"append", "replace"}) {
+            CAPTURE(mode);
+            DocumentStore store;
+            applyOk(store, {{"cmd", "setMeter"}, {"num", c.num}, {"den", c.den}});
+            applyOk(store, {{"cmd", "setFeel"}, {"rhythm", "pulse"}, {"strum", "down"},
+                            {"strumSpeed", "tight"}, {"humanise", "medium"}});
+            applyOk(store, {{"cmd", "loadPreset"}, {"id", "axis"}, {"mode", mode}});
+            const json snap = snapshot(store);
+            REQUIRE(snap.at("events").size() == 4);
+            for (const json& e : snap.at("events")) {
+                CHECK(e.at("lengthBeats").get<double>() == c.beats);
+            }
+            CHECK(snap.at("endBeat").get<double>() == 4 * c.beats);
+            CHECK(snap.at("meter") == json({{"num", c.num}, {"den", c.den}}));
+            CHECK(snap.at("feel").at("rhythm") == "pulse");
+        }
+    }
+}
+
 TEST_CASE("snapshot: start beats accumulate and symbols follow the project key, not the browsed key") {
     DocumentStore store;
     applyOk(store, {{"cmd", "setKey"}, {"letter", "F"}, {"alter", 0}, {"mode", "Ionian"}});

@@ -747,7 +747,8 @@ struct Command {
     int steps = 0;             // BrowseSteps
     Mode mode = Mode::Ionian;  // BrowseMode
     Chord chord{0, nullptr};   // AppendChord
-    double lengthBeats = 4.0;  // AppendChord (optional, store default), SetLength
+    double lengthBeats = 4.0;  // AppendChord (optional), SetLength
+    bool hasLength = false;    // AppendChord: `lengthBeats` was given; otherwise one bar of the meter
     int velocity = 100;        // AppendChord (optional, store default), SetVelocity
     int id = 0;                // MoveChord, SetLength, SetVelocity, RemoveChord, the voicing, section and selection commands
     int index = 0;             // MoveChord, AddSection, MoveSectionStart
@@ -806,8 +807,11 @@ bool parseAppendChord(Fields& fields, Command& out) {
     if (type == nullptr) {
         return fields.fail("type", "\"" + typeId + "\" is not a chord type");
     }
-    if (fields.has("lengthBeats") && !fields.getNumber("lengthBeats", out.lengthBeats)) {
-        return false;
+    if (fields.has("lengthBeats")) {
+        if (!fields.getNumber("lengthBeats", out.lengthBeats)) {
+            return false;
+        }
+        out.hasLength = true;
     }
     if (fields.has("velocity") && !fields.getInt("velocity", out.velocity)) {
         return false;
@@ -1075,7 +1079,7 @@ enum class Refusal {
 /// whole next document and commits it once; a refusal is the store's own reason
 /// (`progressionRefusal`), asked before the call so that nothing has changed.
 Refusal applyLoadPreset(DocumentStore& store, const Preset& preset, ProgressionLoad load) {
-    const std::vector<std::pair<Chord, double>> steps = resolvePreset(preset, store.doc().projectKey);
+    const std::vector<std::pair<Chord, double>> steps = resolvePreset(preset, store.doc().projectKey, store.doc().meter);
     switch (store.progressionRefusal(steps, load)) {
         case ProgressionRefusal::None:
             break;
@@ -1132,7 +1136,11 @@ Refusal applyCommand(DocumentStore& store, const Command& command, std::string& 
             if (doc.events.size() >= static_cast<std::size_t>(kMaxChords)) {
                 return Refusal::DocumentFull;
             }
-            return store.appendChord(command.chord, command.lengthBeats, command.velocity) != kNoEventId
+            // No length: one bar of the document's meter (barTicks / 960 beats; 4 in 4/4).
+            return store.appendChord(command.chord,
+                                     command.hasLength ? command.lengthBeats
+                                                       : barTicks(doc.meter) / static_cast<double>(kFeelTicksPerBeat),
+                                     command.velocity) != kNoEventId
                        ? Refusal::None
                        : Refusal::IdsExhausted;
         case Command::Kind::MoveChord:

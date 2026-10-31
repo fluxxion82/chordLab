@@ -241,8 +241,8 @@ std::string keyName(const Key& key);
 /// - `browseKey` with exactly one of `{"steps":n}` (`fifthsNeighbour` of the current browsed key),
 ///   `{"mode":"<Mode>"}` (the parallel mode on the same tonic pitch class, canonically spelled) or
 ///   `{"home":true}` (browsed key = project key).
-/// - `appendChord {root,type,lengthBeats?,velocity?}`: `appendChord`, with the store's defaults
-///   (4 beats, velocity 100) for the optional fields. Refused (false, an error naming the reason, no
+/// - `appendChord {root,type,lengthBeats?,velocity?}`: `appendChord`, with velocity 100 and, without `lengthBeats`, one bar of the document meter
+///   (barTicks(meter) / 960 beats: 4 in 4/4, 3.5 in 7/8). Refused (false, an error naming the reason, no
 ///   change) when the document already holds `kMaxChords` chords or the id counter is exhausted.
 /// - `moveChord {id,index}`, `setLength {id,lengthBeats}`, `setVelocity {id,velocity}`,
 ///   `removeChord {id}`: the matching store call.

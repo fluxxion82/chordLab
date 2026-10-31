@@ -1,6 +1,7 @@
 #pragma once
 
 #include "chordlab/chord.h"
+#include "chordlab/meter.h"
 #include "chordlab/pitch.h"
 
 #include <string>
@@ -64,6 +65,11 @@ bool presetFits(const Preset& preset, const Key& key);
 /// `bVII` is Bb in C Ionian and in C Aeolian, G in A Aeolian. `key` must satisfy the `Key`
 /// preconditions of pitch.h. Allocates; not for the audio thread.
 std::vector<std::pair<Chord, double>> resolvePreset(const Preset& preset, const Key& key);
+
+/// As above, with each step's beats scaled by `barBeats / 4`, `barBeats = barTicks(meter) / 960.0`: a
+/// preset's one-bar chords stay one bar in `meter` (3 beats in 3/4, 3.5 in 7/8). Each length is then
+/// clamped to the store's [kMinLengthBeats, kMaxLengthBeats]. `meter` must be valid (`validMeter`).
+std::vector<std::pair<Chord, double>> resolvePreset(const Preset& preset, const Key& key, Meter meter);
 
 /// The display numerals of `preset` (P6): `romanNumeral` (symbol.h, Standard style) of each step
 /// resolved in C Ionian (a Major or Any preset) or A Aeolian (a Minor one), joined with " – " (an en

@@ -2,6 +2,7 @@
 
 #include "chordlab/chord.h"
 #include "chordlab/document.h"
+#include "chordlab/meter.h"
 #include "chordlab/pitch.h"
 #include "chordlab/presets.h"
 #include "chordlab/scale.h"
@@ -526,4 +527,35 @@ TEST_CASE("loading a resolved preset: every preset appends and replaces as one s
         REQUIRE(store.undo());
         CHECK(store.doc() == before);
     }
+}
+
+TEST_CASE("resolvePreset with a meter: each step's beats scale by barBeats / 4") {
+    const Preset& axis = preset("axis");  // four one-bar chords
+    const struct { Meter m; double beats; } cases[] = {{{4, 4}, 4.0}, {{3, 4}, 3.0}, {{6, 8}, 3.0},
+                                                       {{7, 8}, 3.5}, {{2, 4}, 2.0}, {{12, 8}, 6.0}};
+    for (const auto& c : cases) {
+        CAPTURE(c.m.num);
+        CAPTURE(c.m.den);
+        const Steps steps = resolvePreset(axis, kCIonian, c.m);
+        REQUIRE(steps.size() == 4);
+        for (const auto& s : steps) {
+            CHECK(s.second == c.beats);
+        }
+    }
+    // the same chords as the meterless overload
+    CHECK(resolvePreset(axis, kCIonian, Meter{3, 4}).front().first == resolvePreset(axis, kCIonian).front().first);
+}
+
+TEST_CASE("resolvePreset with a meter: scaled lengths stay within the store's limits") {
+    for (const Preset& p : allPresets()) {
+        for (const Meter m : {Meter{1, 8}, Meter{16, 2}, Meter{16, 4}}) {
+            for (const auto& s : resolvePreset(p, kCIonian, m)) {
+                CHECK(std::isfinite(s.second));
+                CHECK(s.second >= kMinLengthBeats);
+                CHECK(s.second <= kMaxLengthBeats);
+            }
+        }
+    }
+    CHECK(resolvePreset(preset("axis"), kCIonian, Meter{1, 8}).front().second == 0.5);   // 4 * 0.5 / 4
+    CHECK(resolvePreset(preset("axis"), kCIonian, Meter{16, 2}).front().second == 32.0);
 }
