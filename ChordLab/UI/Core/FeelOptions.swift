@@ -97,4 +97,39 @@ enum FeelOptions {
     guard let feel else { return true }
     return feel.rhythm == "block" && feel.strum == "off" && feel.humanise == "off"
   }
+
+  /// The engine's default feel (`Feel{}`): block, strum off at medium speed, humanise off.
+  static let defaultFeel = FeelJSON(rhythm: "block", strum: "off", strumSpeed: "medium", humanise: "off")
+
+  /// `feel` (the default when the snapshot has none) with the given fields replaced: what one control of
+  /// the popover sends, all four fields as `setFeel` requires.
+  static func changed(_ feel: FeelJSON?, rhythm: String? = nil, strum: String? = nil, strumSpeed: String? = nil,
+                      humanise: String? = nil) -> FeelJSON {
+    let base = feel ?? defaultFeel
+    return FeelJSON(rhythm: rhythm ?? base.rhythm, strum: strum ?? base.strum,
+                    strumSpeed: strumSpeed ?? base.strumSpeed, humanise: humanise ?? base.humanise)
+  }
+
+  /// Whether the strum is heard: arpeggios play one note per hit and ignore it (D8).
+  static func strumApplies(_ feel: FeelJSON?) -> Bool {
+    let rhythm = (feel ?? defaultFeel).rhythm
+    return rhythm != "arpUp" && rhythm != "arpUpDown"
+  }
+
+  /// Whether the strum speed is heard: only while a strum plays (not off, not under an arpeggio).
+  static func speedApplies(_ feel: FeelJSON?) -> Bool {
+    strumApplies(feel) && (feel ?? defaultFeel).strum != "off"
+  }
+
+  /// The snapshot's meter as a menu entry; 4/4 when the snapshot has none (an older plug-in build).
+  static func currentMeter(_ meter: MeterJSON?) -> MeterOption {
+    meter.map { MeterOption(num: $0.num, den: $0.den) } ?? MeterOption(num: 4, den: 4)
+  }
+
+  /// The meter menu: the fixed list, plus the current meter at the end when the list lacks it (a valid
+  /// meter the engine accepts but the menu does not offer, such as 3/8), so the menu always shows it.
+  static func meterMenu(current: MeterJSON?) -> [MeterOption] {
+    let option = currentMeter(current)
+    return meters.contains(option) ? meters : meters + [option]
+  }
 }

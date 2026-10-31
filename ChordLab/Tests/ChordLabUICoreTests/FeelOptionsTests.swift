@@ -114,4 +114,68 @@ final class FeelOptionsTests: XCTestCase {
   func testNilFeelIsDefault() {
     XCTAssertTrue(FeelOptions.isDefault(nil))
   }
+
+  // MARK: - the popover's edits
+
+  func testDefaultFeelIsTheEnginesDefault() {
+    XCTAssertEqual(FeelOptions.defaultFeel, feel("block", "off", "medium", "off"))
+  }
+
+  func testChangingOneFieldKeepsTheOtherThree() {
+    let current = feel("pulse", "down", "loose", "light")
+    XCTAssertEqual(FeelOptions.changed(current, rhythm: "arpUp"), feel("arpUp", "down", "loose", "light"))
+    XCTAssertEqual(FeelOptions.changed(current, strum: "up"), feel("pulse", "up", "loose", "light"))
+    XCTAssertEqual(FeelOptions.changed(current, strumSpeed: "tight"), feel("pulse", "down", "tight", "light"))
+    XCTAssertEqual(FeelOptions.changed(current, humanise: "heavy"), feel("pulse", "down", "loose", "heavy"))
+  }
+
+  func testChangingAMissingFeelStartsFromTheDefault() {
+    XCTAssertEqual(FeelOptions.changed(nil, strum: "downUp"), feel("block", "downUp", "medium", "off"))
+  }
+
+  func testAChangedFeelSerialisesToTheEnginesSetFeel() throws {
+    let c = FeelOptions.command(FeelOptions.changed(feel("subdivided", "off", "medium", "medium"), humanise: "off"))
+    let data = try JSONSerialization.data(withJSONObject: c, options: [.sortedKeys])
+    XCTAssertEqual(String(data: data, encoding: .utf8),
+                   #"{"cmd":"setFeel","humanise":"off","rhythm":"subdivided","strum":"off","strumSpeed":"medium"}"#)
+  }
+
+  // MARK: - which controls apply
+
+  func testArpeggiosIgnoreTheStrum() {
+    XCTAssertTrue(FeelOptions.strumApplies(feel("block")))
+    XCTAssertTrue(FeelOptions.strumApplies(feel("pulse")))
+    XCTAssertTrue(FeelOptions.strumApplies(feel("subdivided")))
+    XCTAssertTrue(FeelOptions.strumApplies(feel("offbeats")))
+    XCTAssertTrue(FeelOptions.strumApplies(feel("lowThenUpper")))
+    XCTAssertFalse(FeelOptions.strumApplies(feel("arpUp")))
+    XCTAssertFalse(FeelOptions.strumApplies(feel("arpUpDown")))
+    XCTAssertTrue(FeelOptions.strumApplies(nil))
+  }
+
+  func testTheSpeedAppliesOnlyToAStrumThatPlays() {
+    XCTAssertFalse(FeelOptions.speedApplies(feel("block", "off")))
+    XCTAssertTrue(FeelOptions.speedApplies(feel("block", "down")))
+    XCTAssertTrue(FeelOptions.speedApplies(feel("pulse", "downUp")))
+    XCTAssertFalse(FeelOptions.speedApplies(feel("arpUp", "down")))
+    XCTAssertFalse(FeelOptions.speedApplies(feel("arpUpDown", "up")))
+    XCTAssertFalse(FeelOptions.speedApplies(nil))
+  }
+
+  // MARK: - the meter menu
+
+  func testTheMeterMenuIsTheFixedListForAMenuMeter() {
+    XCTAssertEqual(FeelOptions.meterMenu(current: MeterJSON(num: 7, den: 8)), FeelOptions.meters)
+    XCTAssertEqual(FeelOptions.meterMenu(current: nil), FeelOptions.meters)
+  }
+
+  func testTheMeterMenuAddsAMeterTheMenuDoesNotOffer() {
+    let menu = FeelOptions.meterMenu(current: MeterJSON(num: 3, den: 8))
+    XCTAssertEqual(menu.map(\.title), ["2/4", "3/4", "4/4", "5/4", "6/8", "7/8", "9/8", "12/8", "3/8"])
+  }
+
+  func testTheCurrentMeterDefaultsToFourFour() {
+    XCTAssertEqual(FeelOptions.currentMeter(nil), MeterOption(num: 4, den: 4))
+    XCTAssertEqual(FeelOptions.currentMeter(MeterJSON(num: 6, den: 8)), MeterOption(num: 6, den: 8))
+  }
 }

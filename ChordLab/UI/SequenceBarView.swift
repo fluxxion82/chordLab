@@ -65,7 +65,6 @@ struct SequenceBarView: View {
   static let handleHitWidth: CGFloat = 14
   /// How far a press on a block must travel before it becomes a move.
   static let moveThreshold: CGFloat = 8
-  static let beatsPerBar = 4
   static let snapBeats = 0.25
   static let lengthRange = 0.25...64.0   // kMinLengthBeats...kMaxLengthBeats
   static let cornerRadius: CGFloat = 6
@@ -105,6 +104,8 @@ struct SequenceBarView: View {
 
   private var events: [EventJSON] { state.snapshot?.events ?? [] }
   private var sections: [SectionJSON] { state.snapshot?.sections ?? [] }
+  /// The document's meter (nil from an older plug-in build: 4/4).
+  private var meter: MeterJSON? { state.snapshot?.meter }
 
   /// The store's live selection, as the last snapshot reported it (nil before Phase 2 plug-in builds).
   private var selectedEventId: Int? { state.snapshot?.selectedEventId }
@@ -124,13 +125,14 @@ struct SequenceBarView: View {
       // The layout of what is drawn: the snapshot's lengths, except for a block being resized, which
       // follows the mouse. The ruler's end marker and the content width follow it too.
       let layout = SequenceGeometry.layout(lengths: events.map(displayedLength), pxPerBeat: Self.pxPerBeat)
-      // Room for the progression plus a bar of slack to drop into; never narrower than the strip. While a
+      // Room for the progression plus a bar of the meter to drop into; never narrower than the strip. While a
       // handle is dragged the content also keeps its width from before the drag (trailing space for what
       // the shortened block gave up): content that shrank under a strip scrolled to its right end would
       // make the scroll view clamp its offset and slide the strip, so the handle would leave the mouse.
       // The space goes with the gesture state when the drag ends or is cancelled.
       let keptEndX = max(layout.endX, resize?.startEndX ?? 0)
-      let contentWidth = max(geometry.size.width, keptEndX + CGFloat(Self.beatsPerBar) * Self.pxPerBeat)
+      let contentWidth = SequenceGeometry.contentWidth(visible: geometry.size.width, endX: keptEndX,
+                                                       slackBeats: RulerMarks.barBeats(meter), pxPerBeat: Self.pxPerBeat)
       ScrollView(.horizontal) {
         ZStack(alignment: .topLeading) {
           VStack(alignment: .leading, spacing: Self.rowSpacing) {
@@ -489,20 +491,20 @@ struct SequenceBarView: View {
 
   // MARK: - Ruler
 
-  /// A tick per beat (taller on bar lines) with the bar number at every bar, and a line where the
-  /// progression ends (`endX`, from the same layout as the blocks).
+  /// A tick per pulse of the meter (`RulerMarks`: beats in 4/4 and 3/4, dotted quarters in 6/8, eighths in
+  /// 7/8), taller on bar lines with the bar number beside them, and a line where the progression ends
+  /// (`endX`, from the same layout as the blocks).
   private func ruler(width: CGFloat, endX: CGFloat) -> some View {
-    Canvas { context, size in
-      let beats = Int(size.width / Self.pxPerBeat)
-      for beat in 0...beats {
-        let x = SequenceGeometry.x(ofBeat: Double(beat), pxPerBeat: Self.pxPerBeat) + 0.5
-        let bar = beat % Self.beatsPerBar == 0
+    let shown = FeelOptions.currentMeter(meter)
+    return Canvas { context, size in
+      for mark in RulerMarks.marks(num: shown.num, den: shown.den, totalBeats: Double(size.width / Self.pxPerBeat)) {
+        let x = SequenceGeometry.x(ofBeat: mark.beat, pxPerBeat: Self.pxPerBeat) + 0.5
         var tick = Path()
         tick.move(to: CGPoint(x: x, y: 0))
-        tick.addLine(to: CGPoint(x: x, y: bar ? 9 : 4))
-        context.stroke(tick, with: .color(.white.opacity(bar ? 0.6 : 0.3)), lineWidth: 1)
-        if bar {
-          context.draw(Text("\(beat / Self.beatsPerBar + 1)").font(.system(size: 9)).foregroundStyle(.white.opacity(0.6)),
+        tick.addLine(to: CGPoint(x: x, y: mark.isBarStart ? 9 : 4))
+        context.stroke(tick, with: .color(.white.opacity(mark.isBarStart ? 0.6 : 0.3)), lineWidth: 1)
+        if let bar = mark.bar {
+          context.draw(Text("\(bar)").font(.system(size: 9)).foregroundStyle(.white.opacity(0.6)),
                        at: CGPoint(x: x + 3, y: 10), anchor: .topLeading)
         }
       }

@@ -2,7 +2,10 @@ import SwiftUI
 
 /// Key bar, the key transpose row (only while it has something to say), transport row, sequence bar,
 /// suggestions strip, palette grid and (only while another key is browsed) the home-key compare row, with a
-/// temporary status line and the MIDI drag-out control along the bottom.
+/// temporary status line and the MIDI drag-out control along the bottom. When the engine could not play the
+/// feel (`feelLimited`, plan D11), the bottom row says so beside the drag-out control, since the clip falls
+/// back to block chords too (in place of the counts line, which would leave the sentence too little room at
+/// 700 pt).
 ///
 /// The window's measured size decides three things once, here: where the Transpose with key switch is (the
 /// key bar from `keyBarSwitchMinWidth` up, else the transport row; exactly one of them shows it), whether the
@@ -50,7 +53,11 @@ struct ContentView: View {
         HomeRowView()
 
         HStack(spacing: 16) {
-          if let snapshot = state.snapshot {
+          if state.snapshot?.feelLimited == true {
+            // In place of the counts line, so the whole sentence fits in two lines at the 700-pt minimum.
+            Text("This feel is too dense for the progression, so playback and export use block chords. Try a simpler rhythm.")
+              .foregroundStyle(.orange).font(.callout).lineLimit(2)
+          } else if let snapshot = state.snapshot {
             Text("\(snapshot.palette.cells.count) cells · \(snapshot.events.count) events · ends at beat \(snapshot.endBeat, specifier: "%.2f") · follow \(snapshot.followHost ? "on" : "off") · loop \(snapshot.progressionLoop ? "on" : "off")")
               .foregroundStyle(.gray).font(.callout.monospacedDigit())
           } else {

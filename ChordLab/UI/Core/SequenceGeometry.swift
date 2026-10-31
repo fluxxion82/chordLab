@@ -132,4 +132,10 @@ enum SequenceGeometry {
     let snapped = (beats / snap).rounded() * snap
     return min(range.upperBound, max(range.lowerBound, snapped))
   }
+
+  /// The strip's content width: the progression (`endX`) plus `slackBeats` of room to drop into (one bar
+  /// of the meter), never narrower than the `visible` strip.
+  static func contentWidth(visible: CGFloat, endX: CGFloat, slackBeats: Double, pxPerBeat: CGFloat) -> CGFloat {
+    max(visible, endX + CGFloat(slackBeats) * pxPerBeat)
+  }
 }

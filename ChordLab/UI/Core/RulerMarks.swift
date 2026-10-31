@@ -36,4 +36,17 @@ enum RulerMarks {
     }
     return result
   }
+
+  /// One bar of the meter in quarter-note beats, `num * 4 / den` (the engine's `barTicks / 960`, D14): 4 in
+  /// 4/4, 3 in 3/4 and 6/8, 3.5 in 7/8, 6 in 12/8. A non-positive num or den gives 4/4's 4.
+  static func barBeats(num: Int, den: Int) -> Double {
+    guard num > 0, den > 0 else { return 4 }
+    return Double(num * 3840 / den) / 960
+  }
+
+  /// One bar of the snapshot's meter; a snapshot without one (an older plug-in build) is 4/4.
+  static func barBeats(_ meter: MeterJSON?) -> Double {
+    guard let meter else { return 4 }
+    return barBeats(num: meter.num, den: meter.den)
+  }
 }

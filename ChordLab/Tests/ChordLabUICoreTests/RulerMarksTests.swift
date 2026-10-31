@@ -64,4 +64,25 @@ final class RulerMarksTests: XCTestCase {
     XCTAssertTrue(RulerMarks.marks(num: 0, den: 4, totalBeats: 8).isEmpty)
     XCTAssertTrue(RulerMarks.marks(num: 4, den: 0, totalBeats: 8).isEmpty)
   }
+
+  // MARK: - bar length (the strip's slack, the drag preview, new chords' default)
+
+  func testBarBeatsPerMeter() {
+    XCTAssertEqual(RulerMarks.barBeats(num: 4, den: 4), 4)
+    XCTAssertEqual(RulerMarks.barBeats(num: 3, den: 4), 3)
+    XCTAssertEqual(RulerMarks.barBeats(num: 2, den: 4), 2)
+    XCTAssertEqual(RulerMarks.barBeats(num: 5, den: 4), 5)
+    XCTAssertEqual(RulerMarks.barBeats(num: 6, den: 8), 3)
+    XCTAssertEqual(RulerMarks.barBeats(num: 7, den: 8), 3.5)
+    XCTAssertEqual(RulerMarks.barBeats(num: 9, den: 8), 4.5)
+    XCTAssertEqual(RulerMarks.barBeats(num: 12, den: 8), 6)
+    XCTAssertEqual(RulerMarks.barBeats(num: 3, den: 2), 6)
+  }
+
+  func testBarBeatsOfAMissingOrInvalidMeterIsFourFour() {
+    XCTAssertEqual(RulerMarks.barBeats(nil), 4)
+    XCTAssertEqual(RulerMarks.barBeats(MeterJSON(num: 7, den: 8)), 3.5)
+    XCTAssertEqual(RulerMarks.barBeats(num: 0, den: 4), 4)
+    XCTAssertEqual(RulerMarks.barBeats(num: 4, den: 0), 4)
+  }
 }
