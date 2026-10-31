@@ -368,6 +368,18 @@ TEST_CASE("feel hash: literal splitmix64 vectors from an independent implementat
     CHECK(feelLateOffset(5, 4) == 0);
 }
 
+TEST_CASE("feel hash: offsets at the documented maximum amount, m = 2^30, need 64-bit arithmetic") {
+    // span = 2^31 + 1. 2^31 % span = 2^31, which does not fit an int; minus 2^30 is 2^30.
+    CHECK(feelOffset(2147483648ull, 1 << 30) == 1073741824);
+    CHECK(feelOffset(0, 1 << 30) == -1073741824);
+    // span itself is 0 mod span, so the remainder wraps to 0 again.
+    CHECK(feelOffset(2147483649ull, 1 << 30) == -1073741824);
+    CHECK(feelOffset(2147483647ull, 1 << 30) == 1073741823);
+    // key % (m + 1) <= 2^30 fits an int, so feelLateOffset needs no widening.
+    CHECK(feelLateOffset(1073741824ull, 1 << 30) == 1073741824);
+    CHECK(feelLateOffset(1073741825ull, 1 << 30) == 0);
+}
+
 TEST_CASE("feel hash: offsets stay in [-m, m] and reach every value") {
     for (int m : {1, 2, 4, 5, 8, 10, 12, 20}) {
         CAPTURE(m);

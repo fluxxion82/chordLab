@@ -125,7 +125,9 @@ std::uint64_t feelKey(int id, int hit, int note, int salt) {
 int feelOffset(std::uint64_t key, int m) {
     assert(m >= 0 && m <= (1 << 30));
     const std::uint64_t span = 2 * static_cast<std::uint64_t>(m) + 1;
-    return static_cast<int>(key % span) - m;
+    // The remainder reaches 2m (up to 2^31), which an int cannot hold: subtract in 64 bits, then narrow the
+    // result, which lies in [-m, m].
+    return static_cast<int>(static_cast<std::int64_t>(key % span) - m);
 }
 
 int feelLateOffset(std::uint64_t key, int m) {
