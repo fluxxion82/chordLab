@@ -71,7 +71,7 @@ Chord chordOf(PitchClass root, const char* typeId) {
     return Chord{root, &chordType(typeId)};
 }
 
-/// Every top-level member of a snapshot, as documented in json_api.h (23 of them). A contract change updates
+/// Every top-level member of a snapshot, as documented in json_api.h (26 of them). A contract change updates
 /// this list and the fixtures together: the snapshot's key set must equal it, so an undocumented key and a
 /// missing documented one both fail.
 const std::set<std::string> kSnapshotKeys = {
@@ -79,7 +79,8 @@ const std::set<std::string> kSnapshotKeys = {
     "progressionLoop", "followHost",    "autoVoiceLead", "endBeat",       "selectedEventId",
     "modes",          "tonics",         "events",       "sections",       "suggestions",
     "palette",        "homeTriads",     "relationMode", "relationReference", "presets",
-    "applied",        "transposeWithKey", "keyHintSeen"};
+    "applied",        "transposeWithKey", "keyHintSeen",    "feel",           "meter",
+    "feelLimited"};
 
 void checkSnapshotShape(const std::string& text) {
     const json j = json::parse(text);
@@ -148,6 +149,23 @@ std::string stateProgression() {
     return stateJson(progressionStore(nullptr), 900, 600);
 }
 
+/// The progression fixture with a non-default feel (arpeggio up and down, down-up strum, tight, light
+/// humanise) in 6/8.
+DocumentStore feelStore() {
+    DocumentStore store = progressionStore(nullptr);
+    store.setFeel(Feel{Rhythm::ArpUpDown, Strum::DownUp, StrumSpeed::Tight, Humanise::Light});
+    store.setMeter(Meter{6, 8});
+    return store;
+}
+
+std::string stateFeel() {
+    return stateJson(feelStore(), 900, 600);
+}
+
+std::string snapshotFeel() {
+    return snapshotOf(feelStore());
+}
+
 }  // namespace
 
 TEST_CASE("golden fixtures: snapshots and state match the committed files byte for byte") {
@@ -155,15 +173,19 @@ TEST_CASE("golden fixtures: snapshots and state match the committed files byte f
     const std::string home = homeProgression();
     const std::string browsing = browsingProgression();
     const std::string state = stateProgression();
+    const std::string stateWithFeel = stateFeel();
+    const std::string snapshotWithFeel = snapshotFeel();
 
     checkGolden("snapshot-home-empty.json", empty);
     checkGolden("snapshot-home-progression.json", home);
     checkGolden("snapshot-browsing-progression.json", browsing);
     checkGolden("state-progression.json", state);
+    checkGolden("state-feel.json", stateWithFeel);
+    checkGolden("snapshot-feel.json", snapshotWithFeel);
 }
 
 TEST_CASE("golden fixtures: generated snapshots carry the documented top-level keys") {
-    for (const std::string& text : {homeEmpty(), homeProgression(), browsingProgression()}) {
+    for (const std::string& text : {homeEmpty(), homeProgression(), browsingProgression(), snapshotFeel()}) {
         checkSnapshotShape(text);
     }
     const json empty = json::parse(homeEmpty());
@@ -200,6 +222,29 @@ TEST_CASE("golden fixtures: generated snapshots carry the documented top-level k
         CHECK(triad.at("relation").is_number_integer());
         CHECK(triad.at("relationText").is_string());
     }
+}
+
+TEST_CASE("golden fixtures: the feel and meter fixtures carry non-default values") {
+    const json snap = json::parse(snapshotFeel());
+    CHECK(snap.at("feel") ==
+          json({{"rhythm", "arpUpDown"}, {"strum", "downUp"}, {"strumSpeed", "tight"}, {"humanise", "light"}}));
+    CHECK(snap.at("meter") == json({{"num", 6}, {"den", 8}}));
+    CHECK(snap.at("feelLimited") == false);
+    const json state = json::parse(stateFeel());
+    CHECK(state.at("feel") == snap.at("feel"));
+    CHECK(state.at("meter") == snap.at("meter"));
+
+    const json home = json::parse(homeProgression());
+    CHECK(home.at("feel") ==
+          json({{"rhythm", "block"}, {"strum", "off"}, {"strumSpeed", "medium"}, {"humanise", "off"}}));
+    CHECK(home.at("meter") == json({{"num", 4}, {"den", 4}}));
+    CHECK(home.at("feelLimited") == false);
+
+    DocumentStore loaded;
+    std::string error;
+    REQUIRE_MESSAGE(loadStateJson(loaded, stateFeel(), error), error);
+    CHECK(loaded.doc() == feelStore().doc());
+    CHECK(stateJson(loaded, 900, 600) == stateFeel());
 }
 
 TEST_CASE("golden fixtures: the state fixture round-trips") {

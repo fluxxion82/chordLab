@@ -4,8 +4,10 @@
 #include "chordlab/chord.h"
 #include "chordlab/compiler.h"
 #include "chordlab/document.h"
+#include "chordlab/feel.h"
 #include "chordlab/function.h"
 #include "chordlab/harmony.h"
+#include "chordlab/meter.h"
 #include "chordlab/palette.h"
 #include "chordlab/pitch.h"
 #include "chordlab/presets.h"
@@ -606,6 +608,84 @@ bool parseProgressionLoadField(Fields& fields, ProgressionLoad& out) {
     return true;
 }
 
+// --- Feel and meter wire names ---------------------------------------------------------
+
+/// Wire names of the feel enums, each in enum order (`feel.h`).
+constexpr const char* kRhythmNames[] = {"block", "pulse", "subdivided", "offbeats", "lowThenUpper", "arpUp", "arpUpDown"};
+constexpr const char* kStrumNames[] = {"off", "down", "up", "downUp"};
+constexpr const char* kStrumSpeedNames[] = {"tight", "medium", "loose"};
+constexpr const char* kHumaniseNames[] = {"off", "light", "medium", "heavy"};
+
+template <std::size_t N>
+std::string optionList(const char* const (&names)[N]) {
+    std::string list = "must be one of ";
+    for (std::size_t i = 0; i < N; ++i) {
+        list += std::string(i == 0 ? "" : ", ") + "\"" + names[i] + "\"";
+    }
+    return list;
+}
+
+/// Reads `fields[name]` as one of `names` and writes its index (the enum value) into `out`. Missing, mistyped and
+/// unknown values alike get a message that lists the options.
+template <std::size_t N, typename Enum>
+bool parseNameField(Fields& fields, const char* name, const char* const (&names)[N], Enum& out) {
+    const std::string expected = optionList(names);
+    const json* v = fields.find(name);
+    if (v == nullptr) {
+        return fields.fail(name, "is missing; it " + expected);
+    }
+    if (!v->is_string()) {
+        return fields.fail(name, expected);
+    }
+    const std::string text = v->get<std::string>();
+    for (std::size_t i = 0; i < N; ++i) {
+        if (text == names[i]) {
+            out = static_cast<Enum>(i);
+            return true;
+        }
+    }
+    return fields.fail(name, expected + " (got \"" + text + "\")");
+}
+
+/// The four string fields of a feel, in `fields` (a `setFeel` message or a state's `feel` object); all required.
+/// Parsed into a local first, so a failure leaves `out` as it was.
+bool parseFeelFields(Fields& fields, Feel& out) {
+    Feel feel;
+    if (!parseNameField(fields, "rhythm", kRhythmNames, feel.rhythm) ||
+        !parseNameField(fields, "strum", kStrumNames, feel.strum) ||
+        !parseNameField(fields, "strumSpeed", kStrumSpeedNames, feel.speed) ||
+        !parseNameField(fields, "humanise", kHumaniseNames, feel.humanise)) {
+        return false;
+    }
+    out = feel;
+    return true;
+}
+
+/// `num` and `den` of a meter, in `fields` (a `setMeter` message or a state's `meter` object): JSON integers (like every
+/// integer field: 3.0 and "3" are rejected) forming a `validMeter`.
+bool parseMeterFields(Fields& fields, Meter& out) {
+    Meter meter;
+    if (!fields.getIntIn("num", 1, 16, meter.num) || !fields.getInt("den", meter.den)) {
+        return false;
+    }
+    if (!validMeter(meter)) {
+        return fields.fail("den", "must be 2, 4 or 8");
+    }
+    out = meter;
+    return true;
+}
+
+json feelToJson(const Feel& feel) {
+    return {{"rhythm", kRhythmNames[static_cast<int>(feel.rhythm)]},
+            {"strum", kStrumNames[static_cast<int>(feel.strum)]},
+            {"strumSpeed", kStrumSpeedNames[static_cast<int>(feel.speed)]},
+            {"humanise", kHumaniseNames[static_cast<int>(feel.humanise)]}};
+}
+
+json meterToJson(const Meter& meter) {
+    return {{"num", meter.num}, {"den", meter.den}};
+}
+
 /// Reads the key object at `fields[name]`: `{"tonic":{"letter","alter"},"mode"}`.
 bool parseKeyField(Fields& fields, const char* name, Key& out, std::string& error) {
     const json* keyObject = fields.getObject(name);
@@ -647,6 +727,8 @@ struct Command {
         SetAutoVoiceLead,
         SetTransposeWithKey,
         SetKeyHintSeen,
+        SetFeel,
+        SetMeter,
         TransposeFromKey,
         TransposeProgression,
         AddSection,
@@ -670,6 +752,8 @@ struct Command {
     int id = 0;                // MoveChord, SetLength, SetVelocity, RemoveChord, the voicing, section and selection commands
     int index = 0;             // MoveChord, AddSection, MoveSectionStart
     bool on = false;           // SetProgressionLoop, SetFollowHost, SetAutoVoiceLead, SetTransposeWithKey, SetKeyHintSeen
+    Feel feel{};               // SetFeel
+    Meter meter{};             // SetMeter
     int semitones = 0;         // TransposeFromKey (the pitch class moved from, 0..11), TransposeProgression (-11..11)
     int inversion = 0;         // SetInversion
     int octave = 0;            // SetOctave
@@ -756,6 +840,18 @@ bool parseRemoveChord(Fields& fields, Command& out) {
 bool parseToggle(Fields& fields, Command::Kind kind, Command& out) {
     out.kind = kind;
     return fields.getBool("on", out.on);
+}
+
+/// `setFeel {rhythm, strum, strumSpeed, humanise}`.
+bool parseSetFeel(Fields& fields, Command& out) {
+    out.kind = Command::Kind::SetFeel;
+    return parseFeelFields(fields, out.feel);
+}
+
+/// `setMeter {num, den}`.
+bool parseSetMeter(Fields& fields, Command& out) {
+    out.kind = Command::Kind::SetMeter;
+    return parseMeterFields(fields, out.meter);
 }
 
 /// `transposeFromKey {fromTonicPc}`.
@@ -914,6 +1010,12 @@ bool parseCommand(std::string_view text, Command& out, std::string& name, std::s
     if (cmd == "setKeyHintSeen") {
         return parseToggle(fields, Command::Kind::SetKeyHintSeen, out);
     }
+    if (cmd == "setFeel") {
+        return parseSetFeel(fields, out);
+    }
+    if (cmd == "setMeter") {
+        return parseSetMeter(fields, out);
+    }
     if (cmd == "transposeFromKey") {
         return parseTransposeFromKey(fields, out);
     }
@@ -1069,6 +1171,12 @@ Refusal applyCommand(DocumentStore& store, const Command& command, std::string& 
         case Command::Kind::SetKeyHintSeen:
             store.setKeyHintSeen(command.on);
             return Refusal::None;
+        case Command::Kind::SetFeel:
+            store.setFeel(command.feel);
+            return Refusal::None;
+        case Command::Kind::SetMeter:
+            store.setMeter(command.meter);
+            return Refusal::None;
         case Command::Kind::TransposeFromKey:
             store.transposeFromKey(static_cast<PitchClass>(command.semitones));
             return Refusal::None;  // a move of nothing is a valid no-op
@@ -1174,6 +1282,28 @@ bool parseState(std::string_view text, Document& doc, int& nextId, int& nextSect
     }
     if (fields.has("keyHintSeen") && !fields.getBool("keyHintSeen", doc.keyHintSeen)) {
         return false;
+    }
+    // Optional (states saved before the feel have neither): block chords in 4/4. Present means valid, or the
+    // whole state is rejected.
+    if (fields.has("feel")) {
+        const json* feelObject = fields.getObject("feel");
+        if (feelObject == nullptr) {
+            return false;
+        }
+        Fields feelFields(*feelObject, fields.label("feel"), error);
+        if (!parseFeelFields(feelFields, doc.feel)) {
+            return false;
+        }
+    }
+    if (fields.has("meter")) {
+        const json* meterObject = fields.getObject("meter");
+        if (meterObject == nullptr) {
+            return false;
+        }
+        Fields meterFields(*meterObject, fields.label("meter"), error);
+        if (!parseMeterFields(meterFields, doc.meter)) {
+            return false;
+        }
     }
     // Optional (states saved before the relation modes have none): the default, blend.
     if (fields.has("relationMode") && !parseRelationModeField(fields, "relationMode", doc.relationMode)) {
@@ -1362,6 +1492,9 @@ std::string snapshotJson(const Document& doc, const Palette& palette, int select
     }
 
     const json snapshot = {{"schema", kJsonSchema},
+                           {"feel", feelToJson(doc.feel)},
+                           {"meter", meterToJson(doc.meter)},
+                           {"feelLimited", performDocument(doc).feelLimited},
                            {"projectKey", keyToJson(doc.projectKey)},
                            {"browsedKey", keyToJson(doc.browsedKey)},
                            {"projectKeyName", keyName(doc.projectKey)},
@@ -1409,6 +1542,8 @@ std::string stateJson(const DocumentStore& store, int editorWidth, int editorHei
                         {"autoVoiceLead", doc.autoVoiceLead},
                         {"transposeWithKey", doc.transposeWithKey},
                         {"keyHintSeen", doc.keyHintSeen},
+                        {"feel", feelToJson(doc.feel)},
+                        {"meter", meterToJson(doc.meter)},
                         {"relationMode", relationModeName(doc.relationMode)},
                         {"events", std::move(events)},
                         {"sections", sectionsJson(doc)},

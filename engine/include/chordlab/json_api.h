@@ -66,6 +66,8 @@ constexpr int kMaxJsonDepth = 64;
 ///  "projectKey":<key>, "browsedKey":<key>, "projectKeyName":"C Ionian", "browsedKeyName":"G Ionian",
 ///  "progressionLoop":true, "followHost":true, "autoVoiceLead":false,
 ///  "transposeWithKey":false, "keyHintSeen":false, "endBeat":4.0,
+///  "feel":{"rhythm":"block","strum":"off","strumSpeed":"medium","humanise":"off"},
+///  "meter":{"num":4,"den":4}, "feelLimited":false,
 ///  "selectedEventId":2|null,
 ///  "modes":["Ionian","Dorian","Phrygian","Lydian","Mixolydian","Aeolian","Locrian","HarmonicMinor",
 ///           "MelodicMinor"],
@@ -148,6 +150,11 @@ constexpr int kMaxJsonDepth = 64;
 /// - `autoVoiceLead`: `Document::autoVoiceLead`.
 /// - `transposeWithKey`, `keyHintSeen`: `Document::transposeWithKey` (a tonic change transposes the
 ///   sequence) and `Document::keyHintSeen` (the one-time hint has shown); live state, false by default.
+/// - `feel`, `meter`: `Document::feel` as four wire-name strings (`rhythm` block|pulse|subdivided|offbeats|
+///   lowThenUpper|arpUp|arpUpDown, `strum` off|down|up|downUp, `strumSpeed` tight|medium|loose, `humanise`
+///   off|light|medium|heavy) and `Document::meter` as `{num, den}`; 4/4 and block chords by default.
+/// - `feelLimited`: `performDocument(doc).feelLimited`: the feel performs but is over budget, so playback and
+///   export use block chords instead (false for a feel that does not perform).
 /// - `sections`: `Document::sections` in order, each `{id, name, colourIndex, firstEventIndex}`; empty
 ///   when the document has none.
 /// - `selectedEventId`: `selectedEventId` when an event has that id, else null (so `kNoEventId`, the
@@ -245,6 +252,9 @@ std::string keyName(const Key& key);
 /// - `setAutoVoiceLead {on}`: `setAutoVoiceLead`, undoable.
 /// - `setTransposeWithKey {on}`, `setKeyHintSeen {on}`: the matching live-state setter (never history, kept
 ///   across undo and redo, persisted by `stateJson`).
+/// - `setFeel {rhythm,strum,strumSpeed,humanise}`: all four required strings (names as in the snapshot);
+///   `setMeter {num,den}`: JSON integers (3.0 and "3" are rejected like any integer field), `num` 1..16, `den`
+///   2, 4 or 8. Both are undoable (`DocumentStore::setFeel` / `setMeter`); an equal value pushes no history.
 /// - `transposeFromKey {fromTonicPc}` (0..11): `transposeFromKey`, every chord moved from that tonic to the
 ///   project tonic, one undo step; `transposeProgression {semitones}` (-11..11): `transposeProgression`,
 ///   every chord moved by the signed interval, one undo step. Neither changes the key. A move of nothing
@@ -296,6 +306,7 @@ bool applyCommandJson(DocumentStore& store, std::string_view json, std::string& 
 /// ```
 /// {"schema":1, "projectKey":<key>, "browsedKey":<key>, "progressionLoop":true, "followHost":true,
 ///  "autoVoiceLead":false, "transposeWithKey":false, "keyHintSeen":false, "relationMode":"blend",
+///  "feel":{"rhythm":"block","strum":"off","strumSpeed":"medium","humanise":"off"}, "meter":{"num":4,"den":4},
 ///  "events":[{"id":1,"root":0,"type":"maj","lengthBeats":4.0,"velocity":100,
 ///             "inversion":0,"octave":0,"manualVoicing":false}, ...],
 ///  "sections":[{"id":1,"name":"Verse","colourIndex":0,"firstEventIndex":0}, ...],
@@ -329,7 +340,8 @@ std::string stateJson(const DocumentStore& store, int editorWidth = kDefaultEdit
 /// Lengths, velocities, inversions, octaves and section colours are clamped to the store's ranges
 /// rather than rejected (a mistyped value is still rejected). Optional, with their defaults: `editor`
 /// (`kDefaultEditorWidth` x `kDefaultEditorHeight`), the events' `inversion` (0), `octave` (0) and
-/// `manualVoicing` (false), `autoVoiceLead` (false), `transposeWithKey` and `keyHintSeen` (false; when
+/// `manualVoicing` (false), `feel` (block chords) and `meter` (4/4; when given, valid as in `setFeel` /
+/// `setMeter`, else the whole state is rejected), `autoVoiceLead` (false), `transposeWithKey` and `keyHintSeen` (false; when
 /// given, booleans), `relationMode` ("blend"; when given, one of the five `relationModeName` strings,
 /// anything else rejecting the state), `sections` (none) and `nextSectionId`
 /// (derived, one past the largest section id, 1 without sections; when given it must be at least that and
