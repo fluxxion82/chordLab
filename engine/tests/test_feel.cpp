@@ -429,6 +429,23 @@ TEST_CASE("performDocument: chord ticks round the cumulative beats, so neighbour
     CHECK(performDocument(doc).chordTicks == Ints{0, 288, 576, 1248});
 }
 
+TEST_CASE("performDocument: 0.2506-beat chords round cumulatively, not one length at a time") {
+    // Cumulative beats 0.2506, 0.5012, 0.7518 -> lround(240.576) = 241, lround(481.152) = 481,
+    // lround(721.728) = 722. Rounding each length alone (241 each) would give 241, 482, 723.
+    const Chord c = chordOf(0, "maj");
+    const Document doc = docOf({chordEvent(1, c, 0.2506), chordEvent(2, c, 0.2506), chordEvent(3, c, 0.2506)},
+                               Feel{Rhythm::Block, Strum::Down, StrumSpeed::Medium});
+    const Performance p = performDocument(doc);
+    CHECK(p.chordTicks == Ints{0, 241, 481, 722});
+    CHECK(p.endTick() == 722);
+    CHECK(compile(doc).endBeat == 722 / 960.0);
+    // Neighbours share the boundary: each chord's offs sit exactly where the next chord's strum begins.
+    expectEvents(p, {on(0, 60, 100), on(20, 64, 100), on(40, 67, 100), off(241, 60), off(241, 64), off(241, 67),
+                     on(241, 60, 100), on(261, 64, 100), on(281, 67, 100), off(481, 60), off(481, 64),
+                     off(481, 67), on(481, 60, 100), on(501, 64, 100), on(521, 67, 100), off(722, 60),
+                     off(722, 64), off(722, 67)});
+}
+
 TEST_CASE("performDocument: pulse without strum or humanise is the rhythm's hits, notes from the voicing") {
     const Document doc = docOf({chordEvent(1, chordOf(0, "maj"), 4.0)}, kPulse);
     const Performance p = performDocument(doc);
