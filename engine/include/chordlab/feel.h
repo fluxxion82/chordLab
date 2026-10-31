@@ -1,5 +1,9 @@
 #pragma once
 
+#include "chordlab/meter.h"
+
+#include <vector>
+
 namespace chordlab {
 
 /// How a chord's notes are spread over its span (see the feel plan, D4-D7).
@@ -27,5 +31,22 @@ inline bool operator==(const Feel& a, const Feel& b) {
 }
 
 inline bool operator!=(const Feel& a, const Feel& b) { return !(a == b); }
+
+/// Shortest gated note, in ticks (D6).
+constexpr int kMinNoteTicks = 5;
+
+/// One hit: tick span after the gate, the voicing indices it plays (ascending pitch order), its velocity
+/// before humanise, and whether it is on a pulse or the chord's start (for the down-up strum).
+struct Hit {
+    int start;
+    int end;
+    std::vector<int> notes;
+    int velocity;
+    bool strong;
+};
+
+/// The hits of a chord spanning ticks [s, e) of the whole progression (D4-D7). Bars count from tick 0 of the
+/// progression. Empty when the span or `noteCount` is empty.
+std::vector<Hit> rhythmHits(Rhythm rhythm, Meter meter, int s, int e, int noteCount, int velocity);
 
 }  // namespace chordlab
