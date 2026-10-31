@@ -307,3 +307,48 @@ TEST_CASE("publication: an over-budget feel publishes block chords") {
     CHECK(eventsOf(*slot) == block);
     CHECK(compile(store.doc()).feelLimited);
 }
+
+TEST_CASE("publication: a performed non-tick-aligned document publishes the compiled period as endBeat") {
+    // Three chords of 0.2506 beat: boundaries 241, 481 and 722 ticks, so the period is 722 / 960 beat, while
+    // the authored sum is 0.7518 (721.7 ticks).
+    DocumentStore store;
+    for (int i = 0; i < 3; ++i) store.appendChord(chord(0, "maj"), 0.2506, 100);
+    Publication last;
+    auto slot = newSlot();
+    REQUIRE(fillSlot(store.doc(), *slot, last));
+    CHECK(slot->endBeat == store.doc().endBeat());  // block chords: the authored sum
+    CHECK(last.generation == 1);
+
+    store.setFeel(Feel{Rhythm::Pulse});
+    REQUIRE(fillSlot(store.doc(), *slot, last));
+    CHECK(last.generation == 2);
+    CHECK(slot->endBeat == 722.0 / 960.0);
+    CHECK(slot->endBeat != store.doc().endBeat());
+    CHECK(slot->endBeat == compile(store.doc()).endBeat);
+    // Pulse: one hit per chord, gated to 9/10 of its length: ons at 0, 241 and 481, offs at 216, 457 and 697.
+    CHECK(slot->count == 18);
+    CHECK(slot->events[0] == NoteEvent{0.0, true, 60, 100});
+    CHECK(slot->events[3] == NoteEvent{216.0 / 960.0, false, 60, 0});
+    CHECK(slot->events[6] == NoteEvent{241.0 / 960.0, true, 60, 100});
+    CHECK(slot->events[17] == NoteEvent{697.0 / 960.0, false, 67, 0});
+    CHECK(slot->events[17].beat < slot->endBeat);
+
+    // Back to block chords: the authored sum again, published as a change.
+    store.setFeel(Feel{});
+    REQUIRE(fillSlot(store.doc(), *slot, last));
+    CHECK(slot->endBeat == store.doc().endBeat());
+}
+
+TEST_CASE("publication: an over-budget non-tick-aligned document publishes the authored sum as endBeat") {
+    DocumentStore store;
+    for (int i = 0; i < 64; ++i) store.appendChord(chord(0, "9"), 4.0, 100);
+    store.appendChord(chord(0, "9"), 4.0004, 100);
+    store.setFeel(Feel{Rhythm::Subdivided});
+    REQUIRE(compile(store.doc()).feelLimited);
+    Publication last;
+    auto slot = newSlot();
+    REQUIRE(fillSlot(store.doc(), *slot, last));
+    CHECK(slot->endBeat == store.doc().endBeat());
+    CHECK(slot->endBeat != 260.0);
+    CHECK(slot->count == 650);
+}

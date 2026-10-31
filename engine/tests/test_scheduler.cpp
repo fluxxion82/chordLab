@@ -1991,6 +1991,83 @@ TEST_CASE("feel scheduler: a strummed block wraps with its final offs at endBeat
                                   on(13000, 67)});
 }
 
+TEST_CASE("feel scheduler: a non-tick-aligned progression wraps at the compiled period, 722 ticks") {
+    // Three C chords of 0.2506 beat, strummed down: boundaries lround(0.2506 * 960) = 241, 481 and 722 ticks
+    // (the authored sum, 0.7518 beat, is 721.7 ticks). Ons 20 ticks apart at 25 samples a tick (24000 per beat).
+    DocumentStore store;
+    for (int i = 0; i < 3; ++i) store.appendChord(chord(0, "maj"), 0.2506, 100);
+    store.setFeel(Feel{Rhythm::Block, Strum::Down, StrumSpeed::Medium, Humanise::Off});
+    const Compiled compiled = compile(store.doc());
+    REQUIRE_FALSE(compiled.feelLimited);
+    REQUIRE(compiled.endBeat == 722.0 / 960.0);
+    REQUIRE(compiled.endBeat != store.doc().endBeat());
+    REQUIRE(compiled.events.size() == 18);
+    for (const NoteEvent& e : compiled.events) {
+        CHECK((e.on ? e.beat < compiled.endBeat : e.beat <= compiled.endBeat));
+    }
+    CHECK(compiled.events.back() == NoteEvent{722.0 / 960.0, false, 67, 0});  // the final offs sit on the period
+
+    Host host;
+    host.adopt(snapshotOf(compiled));
+    // [0, 1) beat: the period is 18050 samples, so the block holds the whole first pass, its final offs on the
+    // wrap at 18050 and the start of the second pass.
+    const std::vector<Ev> first = host.run(0.0, 24000, true);
+    CAPTURE(describe(first));
+    CHECK(host.lastOk);
+    CHECK(first == std::vector<Ev>{on(0, 60), on(500, 64), on(1000, 67),
+                                   off(6025, 60), off(6025, 64), off(6025, 67),
+                                   on(6025, 60), on(6525, 64), on(7025, 67),
+                                   off(12025, 60), off(12025, 64), off(12025, 67),
+                                   on(12025, 60), on(12525, 64), on(13025, 67),
+                                   off(18050, 60), off(18050, 64), off(18050, 67),
+                                   on(18050, 60), on(18550, 64), on(19050, 67)});
+
+    // Several loops in odd blocks: every note released, nothing dropped, and five full passes at least.
+    Host looping;
+    looping.adopt(snapshotOf(compiled));
+    Model model;
+    long position = 0;
+    const int sizes[] = {37, 512, 1999, 64, 4096, 3};
+    for (int block = 0; position < 5 * 18050 + 7000; ++block) {
+        const int n = sizes[block % 6];
+        model.take(looping, looping.run(static_cast<double>(position) / kSamplesPerBeat, n, true), n);
+        REQUIRE(looping.lastOk);
+        position += n;
+    }
+    // Stop: whatever sounds is released at once.
+    model.take(looping, looping.run(static_cast<double>(position) / kSamplesPerBeat, 512, false), 512);
+    CHECK(model.silent());
+    CHECK(model.ons == model.offs);
+    CHECK(model.ons >= 9 * 5);  // five full passes at least, 9 ons each
+}
+
+TEST_CASE("feel scheduler: an over-budget progression wraps at the authored sum, not a tick-rounded period") {
+    // 64 one-bar C9 and a 4.0004-beat one: 5200+ Subdivided events, so block chords play (the fallback) and
+    // the period is the authored sum, 260.0004 beats, not the 260 beats (249600 ticks) a performance would round to.
+    DocumentStore store;
+    for (int i = 0; i < 64; ++i) store.appendChord(chord(0, "9"), 4.0, 100);
+    store.appendChord(chord(0, "9"), 4.0004, 100);
+    store.setFeel(Feel{Rhythm::Subdivided});
+    double authored = 0.0;
+    for (const ChordEvent& e : store.doc().events) authored += e.lengthBeats;
+    const Compiled compiled = compile(store.doc());
+    REQUIRE(compiled.feelLimited);
+    REQUIRE(compiled.endBeat == authored);
+    REQUIRE(authored != 260.0);
+    REQUIRE(compiled.events.size() == 650);
+
+    Host host;
+    host.adopt(snapshotOf(compiled));
+    // [259.5, 260.5) starts inside the last chord (it began at beat 256), so it is chased at once; its five
+    // offs and the first chord's five ons share the wrap, 0.5004 beat in: 12009.6 samples, placed at 12010.
+    const std::vector<Ev> wrap = host.run(259.5, 24000, true);
+    CAPTURE(describe(wrap));
+    CHECK(host.lastOk);
+    CHECK(wrap == std::vector<Ev>{on(0, 60), on(0, 64), on(0, 67), on(0, 70), on(0, 74),
+                                  off(12010, 60), off(12010, 64), off(12010, 67), off(12010, 70), off(12010, 74),
+                                  on(12010, 60), on(12010, 64), on(12010, 67), on(12010, 70), on(12010, 74)});
+}
+
 TEST_CASE("feel scheduler: a seek into a pulse hit chases it; a seek into the gate's gap chases nothing") {
     const Compiled compiled = performedC(Feel{Rhythm::Pulse});
     Host host;

@@ -95,6 +95,11 @@ constexpr int kMaxJsonDepth = 64;
 ///              "voicing":[69,73,76,79],"outOfKey":[1],
 ///              "relation":59,"relationText":"1 common tone (A) · up a third · cost 4"}, ...]}
 /// ```
+/// `endBeat` is the playback period, `compile(doc).endBeat` (compiler.h): the loop length the scheduler wraps at,
+/// which the UI wraps its playhead at. With a performing feel it is the last chord's end tick / 960, so it is
+/// tick-rounded (three 0.2506-beat chords give 722 / 960, not 0.7518); with block chords, and in the
+/// over-budget fallback (`feelLimited`), it is the authored sum, `Document::endBeat`. Events keep their
+/// authored `startBeat` and `lengthBeats` either way. `feelLimited` is `compile(doc).feelLimited`.
 /// Events are in playback order with `startBeat` accumulated as `Document::startBeatOf` does; `symbol` is
 /// the Klimper-style symbol spelled in the project key, `roman` the Standard-style numeral relative to the
 /// project key, `family` the type's family ("Major", "Minor" or "Other", the sequence bar's colour;

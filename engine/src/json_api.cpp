@@ -1434,6 +1434,10 @@ std::string snapshotJson(const Document& doc, const Palette& palette, int select
     }
 
     const std::vector<std::vector<int>> compiledVoicings = voicings(doc);
+    // The playback period and the budget verdict come from the one compile playback itself runs: with a
+    // performing feel the period is the last chord's end tick / 960 (tick-rounded), otherwise, and in the
+    // over-budget fallback, the authored sum. Event positions below stay authored.
+    const Compiled compiled = compile(doc);
     json events = json::array();
     double beat = 0.0;  // accumulated left to right, exactly as Document::startBeatOf does
     for (std::size_t i = 0; i < doc.events.size(); ++i) {
@@ -1502,7 +1506,7 @@ std::string snapshotJson(const Document& doc, const Palette& palette, int select
     const json snapshot = {{"schema", kJsonSchema},
                            {"feel", feelToJson(doc.feel)},
                            {"meter", meterToJson(doc.meter)},
-                           {"feelLimited", performDocument(doc).feelLimited},
+                           {"feelLimited", compiled.feelLimited},
                            {"projectKey", keyToJson(doc.projectKey)},
                            {"browsedKey", keyToJson(doc.browsedKey)},
                            {"projectKeyName", keyName(doc.projectKey)},
@@ -1512,7 +1516,7 @@ std::string snapshotJson(const Document& doc, const Palette& palette, int select
                            {"autoVoiceLead", doc.autoVoiceLead},
                            {"transposeWithKey", doc.transposeWithKey},
                            {"keyHintSeen", doc.keyHintSeen},
-                           {"endBeat", beat},
+                           {"endBeat", compiled.endBeat},
                            {"selectedEventId", selectedIndex >= 0 ? json(selectedEventId) : json()},
                            {"modes", modesJson()},
                            {"tonics", tonicsJson()},

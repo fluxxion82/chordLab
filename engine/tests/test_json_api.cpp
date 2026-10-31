@@ -4,6 +4,7 @@
 #include "chordlab/chord.h"
 #include "chordlab/compiler.h"
 #include "chordlab/document.h"
+#include "chordlab/feel.h"
 #include "chordlab/function.h"
 #include "chordlab/harmony.h"
 #include "chordlab/json_api.h"
@@ -1387,6 +1388,88 @@ TEST_CASE("snapshot: feelLimited is true only when the feel performs and is over
     DocumentStore small = threeChords();
     applyOk(small, feelCmd("arpUpDown", "downUp", "loose", "heavy"));
     CHECK(snapshot(small).at("feelLimited") == false);
+}
+
+TEST_CASE("snapshot: endBeat is the compiled playback period, event lengths stay authored") {
+    // Three chords of 0.2506 beat: not tick-aligned. Chord boundaries are lround(0.2506 * 960) = 241,
+    // lround(0.5012 * 960) = 481 and lround(0.7518 * 960) = 722 ticks, so a performing feel plays a period of
+    // 722 / 960 beat, while the authored lengths sum to a little more than that.
+    DocumentStore store;
+    for (int i = 0; i < 3; ++i) {
+        applyOk(store, {{"cmd", "appendChord"}, {"root", 0}, {"type", "maj"}, {"lengthBeats", 0.2506}});
+    }
+    const double authored = (0.2506 + 0.2506) + 0.2506;  // left to right, as Document::endBeat accumulates
+    REQUIRE(store.doc().endBeat() == authored);
+    REQUIRE(authored != 722.0 / 960.0);
+
+    // Block chords: the old path, the authored sum.
+    const json block = snapshot(store);
+    CHECK(block.at("endBeat").get<double>() == authored);
+    CHECK(block.at("endBeat").get<double>() == compile(store.doc()).endBeat);
+
+    // A rhythm, and a strum on block chords: the performed period, 722 ticks.
+    for (const json& cmd : {feelCmd("pulse", "off", "medium", "off"), feelCmd("block", "down", "medium", "off")}) {
+        CAPTURE(cmd.dump());
+        applyOk(store, cmd);
+        const json performed = snapshot(store);
+        CHECK(performed.at("feelLimited") == false);
+        CHECK(performed.at("endBeat").get<double>() == 722.0 / 960.0);
+        CHECK(performed.at("endBeat").get<double>() == 0.7520833333333333);
+        CHECK(performed.at("endBeat").get<double>() == compile(store.doc()).endBeat);
+        // The events keep their authored positions and lengths.
+        const json& events = performed.at("events");
+        REQUIRE(events.size() == 3);
+        CHECK(events[0].at("startBeat").get<double>() == 0.0);
+        CHECK(events[1].at("startBeat").get<double>() == 0.2506);
+        CHECK(events[2].at("startBeat").get<double>() == 0.2506 + 0.2506);
+        for (const json& e : events) {
+            CHECK(e.at("lengthBeats").get<double>() == 0.2506);
+        }
+    }
+
+    // Back to block chords: the authored sum again.
+    applyOk(store, kBlockFeelCmd);
+    CHECK(snapshot(store).at("endBeat").get<double>() == authored);
+}
+
+TEST_CASE("snapshot: an over-budget feel publishes the authored sum as endBeat") {
+    // 64 one-bar ninths and one 4.0004-beat chord: 5200+ Subdivided events, over budget, so block chords play
+    // and the period is the authored sum; the performed period would be 260 beats (249600 ticks).
+    DocumentStore store;
+    for (int i = 0; i < 64; ++i) {
+        applyOk(store, {{"cmd", "appendChord"}, {"root", 0}, {"type", "9"}, {"lengthBeats", 4.0}});
+    }
+    applyOk(store, {{"cmd", "appendChord"}, {"root", 0}, {"type", "9"}, {"lengthBeats", 4.0004}});
+    double authored = 0.0;
+    for (const ChordEvent& e : store.doc().events) {
+        authored += e.lengthBeats;
+    }
+    REQUIRE(store.doc().endBeat() == authored);
+    REQUIRE(authored != 260.0);
+    CHECK(snapshot(store).at("endBeat").get<double>() == authored);  // block feel
+
+    applyOk(store, feelCmd("subdivided", "off", "medium", "off"));
+    const json limited = snapshot(store);
+    CHECK(limited.at("feelLimited") == true);
+    CHECK(limited.at("endBeat").get<double>() == authored);
+    CHECK(limited.at("endBeat").get<double>() == compile(store.doc()).endBeat);
+    for (const json& e : limited.at("events")) {
+        CHECK(e.at("lengthBeats").get<double>() >= 4.0);
+    }
+}
+
+TEST_CASE("snapshot: a block document never reads as feelLimited, with the most chords of the shortest length") {
+    // kMaxChords quarter-beat ninths (five notes each, ten events per chord): still within the snapshot budget, so
+    // compile's verdict (false without a performing feel) agrees with performDocument's.
+    DocumentStore store;
+    for (int i = 0; i < kMaxChords; ++i) {
+        applyOk(store, {{"cmd", "appendChord"}, {"root", 0}, {"type", "9"}, {"lengthBeats", kMinLengthBeats}});
+    }
+    REQUIRE(store.doc().events.size() == static_cast<std::size_t>(kMaxChords));
+    CHECK_FALSE(performDocument(store.doc()).feelLimited);
+    const json snap = snapshot(store);
+    CHECK(snap.at("feelLimited") == false);
+    CHECK(snap.at("endBeat").get<double>() == store.doc().endBeat());
 }
 
 TEST_CASE("state: feel and meter are saved and restored, non-default values included") {
