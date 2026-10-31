@@ -64,6 +64,7 @@
 #include "bridge/export_request.h"
 #include "bridge/preview_request.h"
 
+#include "chordlab/export.h"
 #include "chordlab/json_api.h"
 #include "chordlab/smf.h"
 #include <nlohmann/json.hpp>
@@ -457,20 +458,29 @@ void ChordLab::HandlePreview(std::string_view text)
   }
 }
 
+// The tempo of an export: the host's as ProcessBlock last saw it, 120 before the first block.
+double ChordLab::ExportBpm() const
+{
+  const double bpm = mHostBpm.load(std::memory_order_relaxed);
+  return (std::isfinite(bpm) && bpm > 0.0) ? bpm : 120.0;
+}
+
 void ChordLab::HandleExport()
 {
   // Main thread, never real-time: compile and the SMF writer allocate. The export is exactly the playback
   // content, so a dropped clip is as long as the progression, trailing silence included (D10).
   @autoreleasepool
   {
-  chordlab::Compiled compiled;
+  const double bpm = ExportBpm();
+  std::vector<uint8_t> bytes;
   std::string label;
   {
+    // The document and its meter are read together under the lock, so the clip's time signature is the one it was compiled with.
     std::lock_guard<std::mutex> lock(mModelMutex);
-    compiled = chordlab::compile(mStore.doc());
+    bytes = chordlab::exportMidi(mStore.doc(), -1, bpm);
     label = chordlab::keyName(mStore.doc().projectKey);
   }
-  WriteExport(compiled, label);
+  WriteExport(bytes, label);
   }
 }
 
@@ -491,7 +501,8 @@ void ChordLab::HandleExportSection(std::string_view text)
     return;
   }
   const int id = request->sectionId;
-  chordlab::Compiled compiled;
+  const double bpm = ExportBpm();
+  std::vector<uint8_t> bytes;
   std::string label;
   bool found = false;
   {
@@ -500,7 +511,7 @@ void ChordLab::HandleExportSection(std::string_view text)
     if (index >= 0)
     {
       const chordlab::Document& doc = mStore.doc();
-      compiled = chordlab::compileSection(doc, index);
+      bytes = chordlab::exportMidi(doc, index, bpm);
       label = chordlab::keyName(doc.projectKey) + "-" + doc.sections[(size_t) index].name;
       found = true;
     }
@@ -510,21 +521,15 @@ void ChordLab::HandleExportSection(std::string_view text)
     PushError("no such section");                                // outside the lock, like every call into the UI
     return;
   }
-  WriteExport(compiled, label);
+  WriteExport(bytes, label);
   }
 }
 
-void ChordLab::WriteExport(const chordlab::Compiled& compiled, const std::string& label)
+void ChordLab::WriteExport(const std::vector<uint8_t>& bytes, const std::string& label)
 {
-  // Main thread, never real-time. The tempo is the host's as ProcessBlock last saw it (120 before the
-  // first block).
+  // Main thread, never real-time. `bytes` come from chordlab::exportMidi (empty when there is nothing to write).
   @autoreleasepool
   {
-  double bpm = mHostBpm.load(std::memory_order_relaxed);
-  if (!std::isfinite(bpm) || bpm <= 0.0)
-    bpm = 120.0;
-  const std::vector<uint8_t> bytes = compiled.events.empty() ? std::vector<uint8_t>{}
-                                                             : chordlab::writeSmf0(compiled, bpm, 4, 4, 480);
   if (bytes.empty())
   {
     PushError("nothing to export");                              // no chords, or the writer refused (a tempo it cannot encode)
