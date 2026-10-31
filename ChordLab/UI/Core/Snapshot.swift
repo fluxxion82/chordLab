@@ -177,6 +177,21 @@ struct PresetJSON: Codable, Equatable, Identifiable {
   let fits: Bool
 }
 
+/// The snapshot's `feel`: the engine's four feel settings by their JSON names (`rhythm`, `strum`,
+/// `strumSpeed`, `humanise`); see `FeelOptions` for the accepted values.
+struct FeelJSON: Codable, Equatable {
+  let rhythm: String
+  let strum: String
+  let strumSpeed: String
+  let humanise: String
+}
+
+/// The snapshot's `meter`: the document's time signature, `num` 1..16 over `den` 2, 4 or 8.
+struct MeterJSON: Codable, Equatable {
+  let num: Int
+  let den: Int
+}
+
 /// The whole document as the UI shows it, plus the palette of the browsed key.
 struct Snapshot: Codable, Equatable {
   let schema: Int
@@ -202,6 +217,13 @@ struct Snapshot: Codable, Equatable {
   /// Whether the one-time "chords kept their notes" hint has been shown in this project; absent from older
   /// plug-in builds.
   let keyHintSeen: Bool?
+  /// The document's feel (rhythm, strum, humanise); absent from older plug-in builds (read as the default).
+  let feel: FeelJSON?
+  /// The document's meter; absent from older plug-in builds (read as 4/4).
+  let meter: MeterJSON?
+  /// True when the feel was too dense to play, so playback and export use block chords; absent from older
+  /// plug-in builds (read as false).
+  let feelLimited: Bool?
   /// The selected event (the store's live selection), nil (JSON null, or absent) for none. The sequence
   /// bar's selection ring and the suggestions follow it.
   let selectedEventId: Int?
