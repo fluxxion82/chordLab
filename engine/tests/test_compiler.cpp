@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <climits>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -752,4 +753,303 @@ TEST_CASE("compileRange: with auto voice-leading off a range still compiles as a
     only.setOctave(only.doc().events[0].id, -1);
     only.appendChord(kG, 1.0, 100);
     CHECK(compileRange(store.doc(), 1, 2).events == compile(only.doc()).events);
+}
+
+// --- Feel (Task 4) ------------------------------------------------------------------------------------------
+
+namespace {
+
+/// `compileRange` exactly as it was before feels existed (commit 50dac2e), copied verbatim apart from the
+/// name: the reference that the block path must keep matching bit for bit.
+Compiled preFeelCompileRange(const Document& doc, int firstEvent, int count) {
+    const std::vector<std::vector<int>> chosen = voicings(doc);
+    Compiled compiled;
+    double beat = 0.0;
+    const std::size_t first = static_cast<std::size_t>(firstEvent);
+    const std::size_t last = first + static_cast<std::size_t>(count);
+    for (std::size_t i = first; i < last; ++i) {
+        const ChordEvent& event = doc.events[i];
+        const double start = beat;
+        beat += event.lengthBeats;
+        const double end = beat;
+        for (const int pitch : chosen[i]) {
+            compiled.events.push_back(NoteEvent{start, true, pitch, event.velocity});
+            compiled.events.push_back(NoteEvent{end, false, pitch, 0});
+        }
+    }
+    std::sort(compiled.events.begin(), compiled.events.end(), [](const NoteEvent& a, const NoteEvent& b) {
+        return std::make_tuple(a.beat, a.on ? 1 : 0, a.pitch) < std::make_tuple(b.beat, b.on ? 1 : 0, b.pitch);
+    });
+    compiled.endBeat = beat;
+    return compiled;
+}
+
+/// Bitwise equality of two compiled results (beats compared by bit pattern).
+void checkIdentical(const Compiled& a, const Compiled& b) {
+    REQUIRE(a.events.size() == b.events.size());
+    for (std::size_t i = 0; i < a.events.size(); ++i) {
+        CAPTURE(i);
+        CHECK(bitsOf(a.events[i].beat) == bitsOf(b.events[i].beat));
+        CHECK(a.events[i].on == b.events[i].on);
+        CHECK(a.events[i].pitch == b.events[i].pitch);
+        CHECK(a.events[i].velocity == b.events[i].velocity);
+    }
+    CHECK(bitsOf(a.endBeat) == bitsOf(b.endBeat));
+}
+
+const Chord kF7 = chord(5, "maj");
+const Chord kG7 = chord(7, "7");
+
+/// A compiled event in feel ticks (every performed beat is tick / 960 exactly).
+struct TickEv {
+    int tick;
+    bool on;
+    int pitch;
+    int velocity;
+};
+
+bool operator==(const TickEv& a, const TickEv& b) {
+    return a.tick == b.tick && a.on == b.on && a.pitch == b.pitch && a.velocity == b.velocity;
+}
+
+std::vector<TickEv> ticksOf(const Compiled& compiled) {
+    std::vector<TickEv> out;
+    for (const NoteEvent& e : compiled.events) {
+        const int tick = static_cast<int>(std::lround(e.beat * kFeelTicksPerBeat));
+        REQUIRE(e.beat == tick / 960.0);  // exactly on the grid
+        out.push_back(TickEv{tick, e.on, e.pitch, e.velocity});
+    }
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE("feel: with Feel{} compile is the pre-feel compiler bit for bit on random documents and sections") {
+    std::mt19937 rng(20261030u);
+    auto randInt = [&rng](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rng); };
+    auto randReal = [&rng](double lo, double hi) { return std::uniform_real_distribution<double>(lo, hi)(rng); };
+    const auto& types = allChordTypes();
+    for (int round = 0; round < 200; ++round) {
+        CAPTURE(round);
+        DocumentStore store;
+        const int count = randInt(0, 20);
+        for (int i = 0; i < count; ++i) {
+            const bool quarters = randInt(0, 1) == 1;
+            const int id = store.appendChord(
+                Chord{randInt(0, 11), &types[static_cast<std::size_t>(randInt(0, static_cast<int>(types.size()) - 1))]},
+                quarters ? 0.25 * randInt(1, 32) : randReal(0.25, 8.0), randInt(1, 127));
+            if (randInt(0, 3) == 0) store.setInversion(id, randInt(0, 2));
+        }
+        store.setAutoVoiceLead(randInt(0, 1) == 1);
+        // The strum speed alone is not a feel: it too keeps the block path.
+        if (randInt(0, 1) == 1) store.setFeel(Feel{Rhythm::Block, Strum::Off, StrumSpeed::Loose, Humanise::Off});
+        if (count > 2) store.addSection(randInt(1, count - 1), "S");
+        const Document& doc = store.doc();
+        const Compiled compiled = compile(doc);
+        checkIdentical(compiled, preFeelCompileRange(doc, 0, count));
+        CHECK_FALSE(compiled.feelLimited);
+        const int sections = doc.sections.empty() ? 1 : static_cast<int>(doc.sections.size());
+        for (int s = 0; s < sections && count > 0; ++s) {
+            const int first = doc.sections.empty() ? 0 : doc.sections[static_cast<std::size_t>(s)].firstEventIndex;
+            const int end = doc.sections.empty() || s + 1 == sections
+                                ? count
+                                : doc.sections[static_cast<std::size_t>(s) + 1].firstEventIndex;
+            checkIdentical(compileSection(doc, s), preFeelCompileRange(doc, first, end - first));
+        }
+    }
+}
+
+TEST_CASE("feel: Feel{} C-Am-F-G7 with auto voice-leading off and on is the pre-feel compile") {
+    for (bool autoOn : {false, true}) {
+        CAPTURE(autoOn);
+        DocumentStore store;
+        store.appendChord(kC, 4.0, 100);
+        store.appendChord(kAm, 4.0, 100);
+        store.appendChord(kF7, 4.0, 100);
+        store.appendChord(kG7, 4.0, 100);
+        store.setAutoVoiceLead(autoOn);
+        checkIdentical(compile(store.doc()), preFeelCompileRange(store.doc(), 0, 4));
+    }
+    DocumentStore store;
+    store.appendChord(kC, 4.0, 100);
+    store.appendChord(kAm, 4.0, 100);
+    store.appendChord(kF7, 4.0, 100);
+    store.appendChord(kG7, 4.0, 100);
+    const Events expected{
+        {0.0, true, 60, 100},   {0.0, true, 64, 100},   {0.0, true, 67, 100},   {4.0, false, 60, 0},
+        {4.0, false, 64, 0},    {4.0, false, 67, 0},    {4.0, true, 69, 100},   {4.0, true, 72, 100},
+        {4.0, true, 76, 100},   {8.0, false, 69, 0},    {8.0, false, 72, 0},    {8.0, false, 76, 0},
+        {8.0, true, 65, 100},   {8.0, true, 69, 100},   {8.0, true, 72, 100},   {12.0, false, 65, 0},
+        {12.0, false, 69, 0},   {12.0, false, 72, 0},   {12.0, true, 67, 100},  {12.0, true, 71, 100},
+        {12.0, true, 74, 100},  {12.0, true, 77, 100},  {16.0, false, 67, 0},   {16.0, false, 71, 0},
+        {16.0, false, 74, 0},   {16.0, false, 77, 0},
+    };
+    CHECK(compile(store.doc()).events == expected);
+}
+
+TEST_CASE("feel: compile plays the performance at tick / 960 with endBeat from the last chord's end tick") {
+    DocumentStore store;
+    store.appendChord(kC, 4.0, 100);
+    store.setFeel(Feel{Rhythm::Pulse});
+    const Compiled compiled = compile(store.doc());
+    CHECK_FALSE(compiled.feelLimited);
+    CHECK(compiled.endBeat == 4.0);
+    const std::vector<TickEv> expected{
+        {0, true, 60, 100},   {0, true, 64, 100},   {0, true, 67, 100},   {864, false, 60, 0},  {864, false, 64, 0},
+        {864, false, 67, 0},  {960, true, 60, 90},  {960, true, 64, 90},  {960, true, 67, 90},  {1824, false, 60, 0},
+        {1824, false, 64, 0}, {1824, false, 67, 0}, {1920, true, 60, 90}, {1920, true, 64, 90}, {1920, true, 67, 90},
+        {2784, false, 60, 0}, {2784, false, 64, 0}, {2784, false, 67, 0}, {2880, true, 60, 90}, {2880, true, 64, 90},
+        {2880, true, 67, 90}, {3744, false, 60, 0}, {3744, false, 64, 0}, {3744, false, 67, 0},
+    };
+    CHECK(ticksOf(compiled) == expected);
+    CHECK(compiled.events[3].beat == 0.9);  // 864 / 960
+
+    // Off-grid lengths: endBeat is the end tick over 960 (0.3 + 0.3 + 0.7 = 1248 ticks = 1.3 beats).
+    DocumentStore odd;
+    odd.appendChord(kC, 0.3, 100);
+    odd.appendChord(kAm, 0.3, 100);
+    odd.appendChord(kC, 0.7, 100);
+    odd.setFeel(Feel{Rhythm::Pulse});
+    CHECK(compile(odd.doc()).endBeat == 1248 / 960.0);
+    CHECK(compileRange(odd.doc(), 1, 2).endBeat == 960 / 960.0);  // [288, 1248)
+    CHECK(compileRange(odd.doc(), 1, 0).events.empty());
+    CHECK(compileRange(odd.doc(), 1, 0).endBeat == 0.0);
+
+    // An empty document with a feel compiles to nothing.
+    Document empty;
+    empty.feel = Feel{Rhythm::Subdivided, Strum::Up, StrumSpeed::Loose, Humanise::Heavy};
+    CHECK(compile(empty).events.empty());
+    CHECK(compile(empty).endBeat == 0.0);
+}
+
+TEST_CASE("feel: three sections slice the whole performance, humanise and strum at both boundaries") {
+    // C | Am F | G, one bar each, ids 1..4, velocity 100, Block, strum up (highest first, 20 apart), humanise
+    // medium (first hit late by 0..10, velocity +-8). From the hash reference (test_feel.cpp):
+    //   late(key(id,0,0,1), 10) = 5, 7, 10, 7 for ids 1, 2, 3, 4
+    //   off(key(id,0,n,3), 8) for voicing index n = 0, 1, 2: id 1: -3, 5, -8; id 2: -6, 6, -8; id 3: -3, 6, -8;
+    //   id 4: -7, 7, 0
+    // Whole: C 67@5 v92, 64@25 v105, 60@45 v97, offs 3840 (3845 cut to the chord's end); Am 76@3847 v92,
+    // 72@3867 v106, 69@3887 v94, offs 7680; F 72@7690 v92, 69@7710 v106, 65@7730 v97, offs 11520; G 74@11527
+    // v100, 71@11547 v107, 67@11567 v93, offs 15360.
+    DocumentStore store;
+    store.appendChord(kC, 4.0, 100);
+    store.appendChord(kAm, 4.0, 100);
+    store.appendChord(kF7, 4.0, 100);
+    store.appendChord(chord(7, "maj"), 4.0, 100);
+    store.addSection(0, "A");
+    store.addSection(1, "B");
+    store.addSection(3, "C");
+    store.setFeel(Feel{Rhythm::Block, Strum::Up, StrumSpeed::Medium, Humanise::Medium});
+    const Document& doc = store.doc();
+    REQUIRE(doc.events[3].id == 4);
+
+    const std::vector<TickEv> whole{
+        {5, true, 67, 92},       {25, true, 64, 105},     {45, true, 60, 97},      {3840, false, 60, 0},
+        {3840, false, 64, 0},    {3840, false, 67, 0},    {3847, true, 76, 92},    {3867, true, 72, 106},
+        {3887, true, 69, 94},    {7680, false, 69, 0},    {7680, false, 72, 0},    {7680, false, 76, 0},
+        {7690, true, 72, 92},    {7710, true, 69, 106},   {7730, true, 65, 97},    {11520, false, 65, 0},
+        {11520, false, 69, 0},   {11520, false, 72, 0},   {11527, true, 74, 100},  {11547, true, 71, 107},
+        {11567, true, 67, 93},   {15360, false, 67, 0},   {15360, false, 71, 0},   {15360, false, 74, 0},
+    };
+    CHECK(ticksOf(compile(doc)) == whole);
+    CHECK(compile(doc).endBeat == 16.0);
+
+    const std::vector<TickEv> a{
+        {5, true, 67, 92}, {25, true, 64, 105}, {45, true, 60, 97}, {3840, false, 60, 0}, {3840, false, 64, 0},
+        {3840, false, 67, 0},
+    };
+    const std::vector<TickEv> b{
+        {7, true, 76, 92},     {27, true, 72, 106},   {47, true, 69, 94},    {3840, false, 69, 0},
+        {3840, false, 72, 0},  {3840, false, 76, 0},  {3850, true, 72, 92},  {3870, true, 69, 106},
+        {3890, true, 65, 97},  {7680, false, 65, 0},  {7680, false, 69, 0},  {7680, false, 72, 0},
+    };
+    const std::vector<TickEv> c{
+        {7, true, 74, 100}, {27, true, 71, 107}, {47, true, 67, 93}, {3840, false, 67, 0}, {3840, false, 71, 0},
+        {3840, false, 74, 0},
+    };
+    CHECK(ticksOf(compileSection(doc, 0)) == a);
+    CHECK(compileSection(doc, 0).endBeat == 4.0);
+    CHECK(ticksOf(compileSection(doc, 1)) == b);
+    CHECK(compileSection(doc, 1).endBeat == 8.0);
+    CHECK(ticksOf(compileSection(doc, 2)) == c);
+    CHECK(compileSection(doc, 2).endBeat == 4.0);
+}
+
+TEST_CASE("feel: every range is the whole performance's events of its chords, rebased") {
+    std::mt19937 rng(77);
+    const char* types[] = {"maj", "min", "7", "m9", "sus4"};
+    for (int round = 0; round < 60; ++round) {
+        CAPTURE(round);
+        DocumentStore store;
+        const int count = 1 + static_cast<int>(rng() % 8);
+        for (int i = 0; i < count; ++i) {
+            store.appendChord(chord(static_cast<int>(rng() % 12), types[rng() % 5]),
+                              rng() % 2 ? 0.25 * (1 + rng() % 16) : 0.25 + static_cast<double>(rng() % 50) / 13.0,
+                              1 + static_cast<int>(rng() % 127));
+        }
+        store.setAutoVoiceLead(rng() % 2 == 0);
+        store.setFeel(Feel{static_cast<Rhythm>(rng() % 7), static_cast<Strum>(rng() % 4),
+                           static_cast<StrumSpeed>(rng() % 3), static_cast<Humanise>(rng() % 4)});
+        const Meter meters[] = {{4, 4}, {3, 4}, {6, 8}, {7, 8}};
+        store.setMeter(meters[rng() % 4]);
+        const Document& doc = store.doc();
+        if (!feelPerforms(doc.feel)) continue;
+        const Performance p = performDocument(doc);
+        REQUIRE_FALSE(p.feelLimited);
+        for (int first = 0; first <= count; ++first) {
+            for (int n = 0; first + n <= count; ++n) {
+                const int base = p.chordTicks[static_cast<std::size_t>(first)];
+                std::vector<TickEv> expected;
+                for (const PerformedEvent& e : p.events) {
+                    if (e.chord >= first && e.chord < first + n) {
+                        expected.push_back(TickEv{e.tick - base, e.on, e.pitch, e.velocity});
+                    }
+                }
+                const Compiled range = compileRange(doc, first, n);
+                CHECK(ticksOf(range) == expected);
+                CHECK(range.endBeat == (p.chordTicks[static_cast<std::size_t>(first + n)] - base) / 960.0);
+            }
+        }
+    }
+}
+
+TEST_CASE("feel: an over-budget document compiles as block chords everywhere, sections included") {
+    // 64 one-bar ninths with Subdivided: 5120 performed events, over 4096. A one-chord section at the end would
+    // fit alone (80 events) but exports block chords too, because the decision is the whole document's.
+    DocumentStore store;
+    for (int i = 0; i < 64; ++i) store.appendChord(chord(0, "9"), 4.0, 100);
+    store.appendChord(kC, 4.0, 100);
+    store.addSection(0, "Dense");
+    store.addSection(64, "Light");
+    store.setFeel(Feel{Rhythm::Subdivided, Strum::Down, StrumSpeed::Medium, Humanise::Light});
+    const Document& doc = store.doc();
+    REQUIRE(performDocument(doc).feelLimited);
+
+    Document block = doc;
+    block.feel = Feel{};
+    const Compiled compiled = compile(doc);
+    CHECK(compiled.feelLimited);
+    checkIdentical(compiled, compile(block));
+    const Compiled light = compileSection(doc, 1);
+    CHECK(light.feelLimited);
+    checkIdentical(light, compileSection(block, 1));
+    CHECK(light.events.size() == 6);
+    CHECK(compileRange(doc, 64, 1).feelLimited);
+    CHECK_FALSE(compile(block).feelLimited);
+
+    // A beat too dense (eight-note chords every 120 ticks in 7/8) falls back the same way.
+    static const ChordType cluster{"cluster8", "cl8", {0, 1, 2, 3, 4, 5, 6, 7}, Family::Other};
+    DocumentStore dense;
+    dense.appendChord(Chord{0, &cluster}, 0.375, 100);
+    for (int i = 0; i < 15; ++i) dense.appendChord(Chord{0, &cluster}, 0.25, 100);
+    dense.appendChord(kC, 4.0, 100);
+    dense.addSection(16, "Tail");
+    dense.setMeter(Meter{7, 8});
+    dense.setFeel(Feel{Rhythm::Subdivided});
+    Document denseBlock = dense.doc();
+    denseBlock.feel = Feel{};
+    CHECK(compile(dense.doc()).feelLimited);
+    checkIdentical(compile(dense.doc()), compile(denseBlock));
+    CHECK(compileSection(dense.doc(), 1).feelLimited);
+    checkIdentical(compileSection(dense.doc(), 1), compileSection(denseBlock, 1));
 }

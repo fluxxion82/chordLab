@@ -1953,3 +1953,208 @@ TEST_CASE("regression: a slot released by acquire may be rewritten before adopt 
     REQUIRE(!clean.first.empty());
     CHECK(clean.first[0] == std::vector<Ev>{off(0, 60), on(0, 62)});
 }
+
+// --- Performed events (feel plan, Task 4) ------------------------------------------------------------
+
+namespace {
+
+/// One bar of C major with `feel`.
+Compiled performedC(const Feel& feel) {
+    DocumentStore store;
+    store.appendChord(chord(0, "maj"), 4.0, 100);
+    store.setFeel(feel);
+    return compile(store.doc());
+}
+
+/// A test-only eight-note chord type (the voice count the snapshot budget leaves room for), so that a
+/// document can sit exactly at the per-beat cap.
+const ChordType kCluster8{"cluster8", "cl8", {0, 1, 2, 3, 4, 5, 6, 7}, Family::Other};
+
+}  // namespace
+
+TEST_CASE("feel scheduler: a strummed block wraps with its final offs at endBeat and its ons inside") {
+    const Compiled compiled = performedC(Feel{Rhythm::Block, Strum::Down, StrumSpeed::Medium, Humanise::Off});
+    REQUIRE(compiled.endBeat == 4.0);
+    for (const NoteEvent& e : compiled.events) {
+        CHECK((e.on ? e.beat < compiled.endBeat : e.beat <= compiled.endBeat));
+    }
+    Host host;
+    host.adopt(snapshotOf(compiled));
+    // Ons 20 and 40 ticks apart: 20 / 960 beat = 500 samples at 24000 per beat.
+    const std::vector<Ev> first = host.run(0.0, 84000, true);  // [0, 3.5)
+    CAPTURE(describe(first));
+    CHECK(first == std::vector<Ev>{on(0, 60), on(500, 64), on(1000, 67)});
+    const std::vector<Ev> wrap = host.run(3.5, 24000, true);  // [3.5, 4.5)
+    CAPTURE(describe(wrap));
+    CHECK(host.lastOk);
+    CHECK(wrap == std::vector<Ev>{off(12000, 60), off(12000, 64), off(12000, 67), on(12000, 60), on(12500, 64),
+                                  on(13000, 67)});
+}
+
+TEST_CASE("feel scheduler: a seek into a pulse hit chases it; a seek into the gate's gap chases nothing") {
+    const Compiled compiled = performedC(Feel{Rhythm::Pulse});
+    Host host;
+    host.adopt(snapshotOf(compiled));
+    CHECK(host.run(0.0, 4800, true) == std::vector<Ev>{on(0, 60), on(0, 64), on(0, 67)});
+    // 1.5 is inside the hit [1.0, 1.9): release, then chase that hit at its own velocity (90).
+    const std::vector<Ev> chased = host.run(1.5, 4800, true);
+    CAPTURE(describe(chased));
+    CHECK(chased == std::vector<Ev>{off(0, 60), off(0, 64), off(0, 67), on(0, 60, 90), on(0, 64, 90), on(0, 67, 90)});
+    // 1.95 is in the gap [1.9, 2.0): release, chase nothing, then the hit at 2.0 (1200 samples in).
+    const std::vector<Ev> gap = host.run(1.95, 4800, true);
+    CAPTURE(describe(gap));
+    CHECK(gap == std::vector<Ev>{off(0, 60), off(0, 64), off(0, 67), on(1200, 60, 90), on(1200, 64, 90),
+                                 on(1200, 67, 90)});
+}
+
+TEST_CASE("feel scheduler: a preview overlapping a performed pitch survives the gate and the retrigger") {
+    const Compiled compiled = performedC(Feel{Rhythm::Pulse});
+    Host host;
+    host.adopt(snapshotOf(compiled));
+    Model model;
+    model.take(host, host.run(0.0, 4800, true), 4800);
+    CHECK(host.scheduler.pushPreview(previewStart(1, {64, 71})));
+    const std::vector<Ev> started = host.run(0.2, 4800, true);
+    model.take(host, started, 4800);
+    CHECK(started == std::vector<Ev>{on(0, 71, 90)});
+    CHECK(host.owners(64) == (kOwnerProgression | kOwnerPreview));
+    // [0.4, 1.4): the gate's offs at 0.9 leave 64 to the preview; the hit at 1.0 retriggers it.
+    const std::vector<Ev> gated = host.run(0.4, 24000, true);
+    CAPTURE(describe(gated));
+    model.take(host, gated, 24000);
+    CHECK(gated == std::vector<Ev>{off(12000, 60), off(12000, 67), on(14400, 60, 90), off(14400, 64),
+                                   on(14400, 64, 90), on(14400, 67, 90)});
+    CHECK(host.scheduler.pushPreview(previewStop(1)));
+    const std::vector<Ev> stopped = host.run(1.4, 4800, true);
+    model.take(host, stopped, 4800);
+    CHECK(stopped == std::vector<Ev>{off(0, 71)});
+    CHECK(host.owners(64) == kOwnerProgression);
+    const std::vector<Ev> next = host.run(1.6, 24000, true);  // [1.6, 2.6): offs at 1.9, ons at 2.0
+    CAPTURE(describe(next));
+    model.take(host, next, 24000);
+    CHECK(next == std::vector<Ev>{off(7200, 60), off(7200, 64), off(7200, 67), on(9600, 60, 90), on(9600, 64, 90),
+                                  on(9600, 67, 90)});
+    model.take(host, host.run(2.6, 512, false), 512);
+    CHECK(model.silent());
+    CHECK(model.ons == model.offs);
+}
+
+TEST_CASE("feel scheduler: a humanised, strummed performance is block-size invariant and drops no pair") {
+    DocumentStore store;
+    store.appendChord(chord(0, "maj7"), 4.0, 100);
+    store.appendChord(chord(9, "m9"), 2.0, 90);
+    store.appendChord(chord(5, "maj"), 1.5, 110);
+    store.setFeel(Feel{Rhythm::Subdivided, Strum::DownUp, StrumSpeed::Loose, Humanise::Heavy});
+    const Compiled compiled = compile(store.doc());
+    REQUIRE_FALSE(compiled.feelLimited);
+    REQUIRE(compiled.endBeat == 7.5);
+    checkPartitionInvariance(snapshotOf(compiled), 16L * kSamplesPerBeat);
+
+    // Odd block sizes with every block complete, every pair closed, nothing left sounding after a stop.
+    Host host;
+    host.adopt(snapshotOf(compiled));
+    Model model;
+    long position = 0;
+    const int sizes[] = {37, 512, 1999, 64, 4096, 3};
+    for (int block = 0; block < 400; ++block) {
+        const int n = sizes[block % 6];
+        model.take(host, host.run(static_cast<double>(position) / kSamplesPerBeat, n, true), n);
+        REQUIRE(host.lastOk);
+        position += n;
+    }
+    model.take(host, host.run(static_cast<double>(position) / kSamplesPerBeat, 512, false), 512);
+    CHECK(model.silent());
+    CHECK(model.ons == model.offs);
+    CHECK(model.ons > 100);
+}
+
+TEST_CASE("feel scheduler: throughput at the density cap, 300 bpm, 44.1 kHz, 4096-frame blocks, shell buffer") {
+    // Eight-note chords of half a beat from tick 600 in 7/8, Subdivided: hits at 0, 120 and 360 of every 480
+    // ticks, so every beat holds exactly 96 events (the cap). 300 bpm at 44.1 kHz is 8820 samples per beat; a
+    // 4096-frame block spans 0.464 beat, the supported maximum (D11). A palette preview of eight pitches (80..87,
+    // apart from the progression's 60..67) starts every fifth block and stops two blocks later, so the
+    // shell-sized output (256, ChordLab.h kMidiOutCapacity) also carries preview ons and releases. A second
+    // pass with one-beat blocks (8820 frames, beyond the supported range) shows the cap holds per beat too.
+    struct Pass {
+        int frames;
+        int blocks;
+    };
+    for (const Feel feel : {Feel{Rhythm::Subdivided}, Feel{Rhythm::Subdivided, Strum::DownUp, StrumSpeed::Loose}}) {
+        for (const Pass pass : {Pass{4096, 2000}, Pass{8820, 900}}) {
+            CAPTURE(static_cast<int>(feel.strum));
+            CAPTURE(pass.frames);
+            DocumentStore store;
+            store.appendChord(Chord{0, &kCluster8}, 0.625, 100);
+            for (int i = 0; i < 31; ++i) store.appendChord(Chord{0, &kCluster8}, 0.5, 100);
+            store.setMeter(Meter{7, 8});
+            store.setFeel(feel);
+            const Performance performance = performDocument(store.doc());
+            REQUIRE_FALSE(performance.feelLimited);
+            REQUIRE(densestBeat(performance.events, performance.endTick()) == kMaxFeelEventsPerBeat);
+            const Compiled compiled = compile(store.doc());
+            REQUIRE(compiled.endBeat == 16.125);
+
+            constexpr double kRate = 44100.0;
+            constexpr double kTempo = 300.0;
+            const double samplesPerBeat = kRate * 60.0 / kTempo;  // 8820
+            Scheduler scheduler;
+            scheduler.reset(kRate);
+            scheduler.adopt(snapshotOf(compiled));
+            std::array<MidiOut, 256> out{};  // ChordLab.h: kMidiOutCapacity
+            bool sounding[128] = {};
+            long progressionOns = 0;
+            std::size_t maxProgression = 0;
+            std::size_t maxWritten = 0;
+            int incomplete = 0;
+            int previewId = 0;
+            for (int block = 0; block < pass.blocks; ++block) {
+                if (block % 5 == 0) {
+                    REQUIRE(scheduler.pushPreview(previewStart(++previewId, {80, 81, 82, 83, 84, 85, 86, 87})));
+                } else if (block % 5 == 2) {
+                    REQUIRE(scheduler.pushPreview(previewStop(previewId)));
+                }
+                const double ppq = static_cast<double>(block) * pass.frames / samplesPerBeat;
+                std::size_t written = 0;
+                const bool ok = scheduler.process(BlockInfo{ppq, pass.frames, kRate, kTempo, true}, out.data(),
+                                                  out.size(), written);
+                incomplete += ok ? 0 : 1;
+                REQUIRE(written <= out.size());
+                maxWritten = std::max(maxWritten, written);
+                std::size_t progression = 0;
+                for (std::size_t i = 0; i < written; ++i) {
+                    const bool isOn = out[i].status == 0x90;
+                    REQUIRE(sounding[out[i].data1] != isOn);  // no double on, no orphan off
+                    sounding[out[i].data1] = isOn;
+                    if (out[i].data1 < 80) {
+                        ++progression;
+                        progressionOns += isOn ? 1 : 0;
+                    }
+                }
+                maxProgression = std::max(maxProgression, progression);
+            }
+            // Every progression on whose sample falls before the last block's end was played, once.
+            const long total = static_cast<long>(pass.blocks) * pass.frames;
+            long expectedOns = 0;
+            for (long k = 0;; ++k) {
+                bool any = false;
+                for (const NoteEvent& e : compiled.events) {
+                    const double beat = k * compiled.endBeat + e.beat;
+                    if (e.on && std::floor(beat * samplesPerBeat + 0.5) < static_cast<double>(total)) {
+                        ++expectedOns;
+                        any = true;
+                    }
+                }
+                if (!any) break;
+            }
+            MESSAGE("throughput, strum " << static_cast<int>(feel.strum) << ", " << pass.frames
+                                         << "-frame blocks: worst block " << maxProgression
+                                         << " progression events, " << maxWritten << " events in all (of 256), "
+                                         << progressionOns << " progression ons");
+            CHECK(incomplete == 0);  // nothing dropped, carried over or skipped
+            CHECK(maxProgression <= static_cast<std::size_t>(kMaxFeelEventsPerBeat));
+            CHECK(maxWritten <= out.size());
+            CHECK(progressionOns == expectedOns);
+            CHECK(previewId > 100);
+        }
+    }
+}

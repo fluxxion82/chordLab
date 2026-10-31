@@ -12,6 +12,8 @@ namespace chordlab {
 struct Compiled {
     std::vector<NoteEvent> events;  // sorted by (beat, off before on, pitch)
     double endBeat = 0.0;
+    /// The document's feel was over budget (`performDocument`, D11), so these are block chords.
+    bool feelLimited = false;
 };
 
 /// The voicing `compile` gives each chord of `doc`, in playback order: `voicing(chord, inversion, octave)`
@@ -23,7 +25,14 @@ struct Compiled {
 /// Same preconditions as `compile`.
 std::vector<std::vector<int>> voicings(const Document& doc);
 
-/// Compiles `doc` for playback and export. This is the one duration policy shared by live playback and
+/// Compiles `doc` for playback and export.
+///
+/// With a feel (`feelPerforms(doc.feel)`), the events are those of `performDocument(doc)`, each at beat
+/// `tick / 960.0`, and `endBeat` is the last chord's end tick / 960; when that performance is over budget
+/// (`feelLimited`), the document compiles as block chords exactly as below and `Compiled::feelLimited` is
+/// set. Without one, the block path below runs, unchanged from before feels existed:
+///
+/// This is the one duration policy shared by live playback and
 /// the MIDI file (D10): each chord is voiced as `voicings` says, its ons sit at the chord's start beat
 /// and its offs sit exactly at start + length, with no gap. A chord that repeats the previous chord's
 /// pitch therefore has that pitch's off and on at the same beat, and the sort puts the off first so the
@@ -47,7 +56,10 @@ Compiled compile(const Document& doc);
 /// accumulated from 0 (not the whole document's beats shifted, which could differ in the last bit), so
 /// the range starts at 0 and `endBeat` is its length. `compile(doc)` is `compileRange(doc, 0,
 /// events.size())`, and with auto voice-leading off a range compiles exactly as a document holding only
-/// its chords would. `firstEvent` must be in 0..events.size() and `count` in 0..events.size()-firstEvent
+/// its chords would. With a feel, the range is a slice of the whole performance (D12): the events of its
+/// chords, `chordTicks[firstEvent]` subtracted from every tick, `endBeat` its tick length / 960; because every
+/// performed note lies inside its own chord, that is exactly what those chords play inside the progression.
+/// An over-budget feel falls back to block chords for every range, as for the whole. `firstEvent` must be in 0..events.size() and `count` in 0..events.size()-firstEvent
 /// (preconditions, asserted); the same document invariants as `compile`.
 Compiled compileRange(const Document& doc, int firstEvent, int count);
 
