@@ -12,6 +12,7 @@
 #include "chordlab/document.h"
 #include "chordlab/limits.h"
 #include "chordlab/note_event.h"
+#include "chordlab/publication.h"
 #include "chordlab/scheduler.h"
 #include "chordlab/triple_buffer.h"
 
@@ -284,4 +285,67 @@ TEST_CASE("rt alloc: the triple buffer allocates nothing on the producer or the 
     CHECK(unexpectedFresh == 0);
     CHECK(wrongCurrent == 0);
     CHECK(wrongGeneration == 0);
+}
+
+TEST_CASE("rt alloc: handing over full 4096-event performed snapshots allocates nothing on the audio thread") {
+    // 64 one-bar four-note chords, Subdivided: 64 x 8 hits x 4 notes x 2 = 4096 performed events, the most a
+    // snapshot holds. Two such progressions (G7 and Dm7, strummed and humanised differently) are published in
+    // turn through the plug-in's slot type; everything that allocates (the store, compile inside fillSlot)
+    // happens outside the measured scopes.
+    const auto buffer = std::make_unique<TripleBuffer<SnapshotSlot>>();
+    Publication publication;
+    const auto publishDoc = [&](const Chord& c, const Feel& feel) {
+        DocumentStore store;
+        for (int i = 0; i < 64; ++i) {
+            store.appendChord(c, 4.0, 100);
+        }
+        store.setFeel(feel);
+        SnapshotSlot& back = buffer->beginWrite();
+        const bool filled = fillSlot(store.doc(), back, publication);
+        buffer->publish(publication.generation);
+        return filled ? back.count : 0;
+    };
+    std::array<MidiOut, 256> out{};
+    Scheduler scheduler;
+    scheduler.reset(kSr);
+    int incomplete = 0;
+    int missing = 0;
+    std::size_t emitted = 0;
+    const auto play = [&](double& ppq) {
+        const SnapshotSlot* slot = buffer->acquire();
+        if (slot == nullptr) {
+            ++missing;
+            return;
+        }
+        scheduler.adopt(Snapshot{slot->events.data(), slot->count, slot->endBeat, slot->loop,
+                                 buffer->currentGeneration()});
+        for (int block = 0; block < 2000; ++block) {
+            std::size_t written = 0;
+            const BlockInfo info{ppq, 512, kSr, 120.0, true};
+            incomplete += scheduler.process(info, out.data(), out.size(), written) ? 0 : 1;
+            emitted += written;
+            ppq += 512.0 / 24000.0;
+        }
+    };
+
+    const std::size_t firstCount =
+        publishDoc(chord(7, "7"), Feel{Rhythm::Subdivided, Strum::DownUp, StrumSpeed::Medium, Humanise::Heavy});
+    double ppq = 0.0;
+    AllocationProbe first;
+    play(ppq);
+    const std::size_t firstAllocations = first.count();
+
+    const std::size_t secondCount =
+        publishDoc(chord(2, "m7"), Feel{Rhythm::Subdivided, Strum::Up, StrumSpeed::Loose, Humanise::Light});
+    AllocationProbe second;
+    play(ppq);
+    const std::size_t secondAllocations = second.count();
+
+    CHECK(firstCount == kMaxSnapshotEvents);
+    CHECK(secondCount == kMaxSnapshotEvents);
+    CHECK(firstAllocations == 0);
+    CHECK(secondAllocations == 0);
+    CHECK(missing == 0);
+    CHECK(emitted > 1000);
+    CHECK(incomplete == 0);  // 512-frame blocks at 120 bpm: the density never outruns a block
 }

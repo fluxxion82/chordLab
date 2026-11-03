@@ -132,7 +132,7 @@ struct PaletteCellControl: View {
       .pressAction(onPress: { state.pressCell(cell) },
                    onRelease: { state.releaseCell(cell) })
       .draggable(ChordRef(root: cell.root, type: cell.type)) {
-        ChordDragPreview(cell: cell, labelMode: labelMode)
+        ChordDragPreview(cell: cell, labelMode: labelMode, beats: RulerMarks.barBeats(state.snapshot?.meter))
       }
   }
 }
@@ -225,11 +225,14 @@ struct PaletteCellView: View {
   }
 }
 
-/// What travels under the mouse while a cell is dragged to the sequence bar: a compact block in the
-/// cell's colour with the label the cell shows.
+/// What travels under the mouse while a cell is dragged to the sequence bar: a block in the cell's colour
+/// with the label the cell shows, as wide as the chord it appends (one bar of the meter, plan D14: 4 beats
+/// in 4/4, 3 in 3/4 and 6/8, 3.5 in 7/8).
 struct ChordDragPreview: View {
   let cell: CellJSON
   let labelMode: LabelMode
+  /// The block's length in beats (one bar of the snapshot's meter).
+  var beats: Double = 4
 
   var body: some View {
     let color = PaletteCellView.color(family: cell.family)
@@ -251,7 +254,7 @@ struct ChordDragPreview: View {
       }
       .foregroundStyle(.white)
     }
-    .frame(width: 4 * SequenceBarView.pxPerBeat, height: SequenceBarView.blockHeight)   // a 4-beat block
+    .frame(width: CGFloat(beats) * SequenceBarView.pxPerBeat, height: SequenceBarView.blockHeight)
   }
 }
 

@@ -9,18 +9,22 @@ import SwiftUI
 /// the document (and stay put if a command is rejected). "+ Section" starts a section (P2-D6) on the
 /// selected block, else the last one (`addSection {index, name: ""}`; the engine names it). "Presets"
 /// opens `PresetsPopoverView` (plan P7); it is hidden when the snapshot has no `presets` (an older
-/// plug-in build).
+/// plug-in build). "Feel" opens `FeelPopoverView` (rhythm, strum, humanise and the meter, plan D1, D2); a
+/// dot beside its title says the progression plays with a feel (`FeelOptions.isDefault` is false). Like
+/// Presets, it is hidden when the snapshot has no `feel` (an older plug-in build, which would refuse
+/// `setFeel`).
 ///
 /// Below the width the key bar needs to keep it beside the Key pickers (`ContentView.keyBarSwitchMinWidth`),
 /// the Transpose with key switch (`TransposeWithKeyToggle`) is here instead, right after Auto voice-lead
 /// (`showsTransposeSwitch`).
 ///
 /// One row when it fits (the 900-pt default); at the 700-pt minimum the playback controls (Follow Live,
-/// Loop, Panic) and the editing ones (Auto voice-lead, Transpose with key, + Section, Presets) take a row
-/// each.
+/// Loop, Panic) and the editing ones (Auto voice-lead, Transpose with key, + Section, Presets, Feel) take a
+/// row each.
 struct TransportBarView: View {
   @EnvironmentObject var state: ChordLabState
   @State private var showingPresets = false
+  @State private var showingFeel = false
   /// Whether the Transpose with key switch sits here, after Auto voice-lead (ContentView's width rule).
   var showsTransposeSwitch = false
 
@@ -108,6 +112,30 @@ struct TransportBarView: View {
             PresetsPopoverView { showingPresets = false }
           }
       }
+      if state.snapshot?.feel != nil {
+        feelButton
+      }
+    }
+  }
+
+  /// "Feel", with a dot while the progression plays with one; opens the feel popover.
+  private var feelButton: some View {
+    let isDefault = FeelOptions.isDefault(state.snapshot?.feel)
+    return Button { showingFeel.toggle() } label: {
+      HStack(spacing: 5) {
+        Text("Feel")
+        if !isDefault {
+          Circle().fill(Color.accentColor).frame(width: 6, height: 6).accessibilityHidden(true)
+        }
+      }
+    }
+    .help("Rhythm, strum, humanise and the meter, for playback and the dragged-out clip")
+    .accessibilityLabel("Feel")
+    .accessibilityValue(isDefault ? "Block chords" : "On")
+    // Beside the button, to its left: the button ends the row, and a popover below it would run past the
+    // window's right edge at 700 pt (FeelPopoverView).
+    .popover(isPresented: $showingFeel, arrowEdge: .leading) {
+      FeelPopoverView()
     }
   }
 }

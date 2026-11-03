@@ -275,6 +275,20 @@ final class SequenceGeometryTests: XCTestCase {
     let points = SequenceGeometry.tensionPoints(tensions: [0, 100], in: fourBars.prefix(2), height: 10, inset: 8)
     XCTAssertEqual(points?.map(\.y), [5, 5])
   }
+
+  // MARK: - content width (a bar of slack after the progression)
+
+  func testContentWidthIsTheProgressionPlusOneBarOfSlack() {
+    // endX 384 (16 beats) + 3.5 beats (7/8) × 24 = 384 + 84 = 468 in a 400-pt strip.
+    XCTAssertEqual(SequenceGeometry.contentWidth(visible: 400, endX: 384, slackBeats: 3.5, pxPerBeat: px), 468)
+    XCTAssertEqual(SequenceGeometry.contentWidth(visible: 400, endX: 384, slackBeats: 3, pxPerBeat: px), 456)
+    XCTAssertEqual(SequenceGeometry.contentWidth(visible: 400, endX: 384, slackBeats: 4, pxPerBeat: px), 480)
+  }
+
+  func testContentWidthIsNeverNarrowerThanTheStrip() {
+    XCTAssertEqual(SequenceGeometry.contentWidth(visible: 876, endX: 384, slackBeats: 4, pxPerBeat: px), 876)
+    XCTAssertEqual(SequenceGeometry.contentWidth(visible: 876, endX: 0, slackBeats: 6, pxPerBeat: px), 876)
+  }
 }
 
 private extension SequenceGeometry.Layout {

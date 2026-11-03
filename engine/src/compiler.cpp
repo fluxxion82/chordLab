@@ -1,5 +1,6 @@
 #include "chordlab/compiler.h"
 
+#include "chordlab/feel.h"
 #include "chordlab/voicing.h"
 
 #include <algorithm>
@@ -73,9 +74,11 @@ std::vector<std::vector<int>> voicings(const Document& doc) {
     return result;
 }
 
-Compiled compileRange(const Document& doc, int firstEvent, int count) {
-    assert(firstEvent >= 0 && count >= 0);
-    assert(static_cast<std::size_t>(firstEvent) + static_cast<std::size_t>(count) <= doc.events.size());
+namespace {
+
+/// The block path: every chord's voicing on at its start beat and off at its end, accumulated from 0 over
+/// the range. Exactly `compileRange` as it was before feels existed.
+Compiled blockRange(const Document& doc, int firstEvent, int count) {
     // The voicings are those of the whole progression, sliced: under auto voice-leading a chord follows
     // the chord before it, section boundary or not, so a range sounds as it does in the whole (header).
     const std::vector<std::vector<int>> chosen = voicings(doc);
@@ -103,10 +106,45 @@ Compiled compileRange(const Document& doc, int firstEvent, int count) {
     return compiled;
 }
 
+/// The chords [firstEvent, firstEvent + count) of a performance within budget, rebased to tick 0 (D12).
+Compiled sliceRange(const Performance& performance, int firstEvent, int count) {
+    const std::size_t first = static_cast<std::size_t>(firstEvent);
+    const int base = performance.chordTicks[first];
+    const int end = performance.chordTicks[first + static_cast<std::size_t>(count)];
+    Compiled compiled;
+    for (const PerformedEvent& e : performance.events) {
+        if (e.chord >= firstEvent && e.chord < firstEvent + count) {
+            compiled.events.push_back(
+                NoteEvent{static_cast<double>(e.tick - base) / kFeelTicksPerBeat, e.on, e.pitch, e.velocity});
+        }
+    }
+    compiled.endBeat = static_cast<double>(end - base) / kFeelTicksPerBeat;
+    return compiled;
+}
+
+}  // namespace
+
+Compiled compileRange(const Document& doc, int firstEvent, int count) {
+    assert(firstEvent >= 0 && count >= 0);
+    assert(static_cast<std::size_t>(firstEvent) + static_cast<std::size_t>(count) <= doc.events.size());
+    if (!feelPerforms(doc.feel)) {
+        return blockRange(doc, firstEvent, count);
+    }
+    // The fallback is the whole document's (D11): a range never plays a feel the progression cannot.
+    const Performance performance = performDocument(doc);
+    if (performance.feelLimited) {
+        Compiled compiled = blockRange(doc, firstEvent, count);
+        compiled.feelLimited = true;
+        return compiled;
+    }
+    return sliceRange(performance, firstEvent, count);
+}
+
 Compiled compile(const Document& doc) {
     Compiled compiled = compileRange(doc, 0, static_cast<int>(doc.events.size()));
-    // The accumulated value is bit-identical to `doc.endBeat()`, which performs the same additions.
-    assert(compiled.endBeat == doc.endBeat());
+    // On the block path the accumulated value is bit-identical to `doc.endBeat()`, which performs the same
+    // additions; a performance ends on the last chord's end tick instead.
+    assert(compiled.endBeat == doc.endBeat() || (feelPerforms(doc.feel) && !compiled.feelLimited));
     return compiled;
 }
 

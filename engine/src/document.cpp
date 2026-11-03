@@ -192,8 +192,8 @@ Section makeSection(int id, std::string name, int firstEventIndex) {
 }
 
 /// Copies the live (non-undoable) fields of `current` into `target`, so that restoring a snapshot keeps
-/// the browsed key, the transport toggles and the relation mode as they are now. `autoVoiceLead` is deliberately absent: it
-/// changes the notes `compile` produces, so it is restored with the progression (see `Document`).
+/// the browsed key, the transport toggles and the relation mode as they are now. `autoVoiceLead`, `feel` and
+/// `meter` are deliberately absent: they change the notes `compile` produces, so they are restored with the progression (see `Document`).
 void keepLiveState(Document& target, const Document& current) {
     target.browsedKey = current.browsedKey;
     target.progressionLoop = current.progressionLoop;
@@ -527,6 +527,19 @@ void DocumentStore::setAutoVoiceLead(bool on) {
     Document next = doc_;
     next.autoVoiceLead = on;
     commit(std::move(next));  // undoable: it changes the compiled progression
+}
+
+void DocumentStore::setFeel(Feel feel) {
+    Document next = doc_;
+    next.feel = feel;
+    commit(std::move(next));  // undoable; commit ignores an unchanged document
+}
+
+void DocumentStore::setMeter(Meter meter) {
+    assert(validMeter(meter));
+    Document next = doc_;
+    next.meter = meter;
+    commit(std::move(next));
 }
 
 void DocumentStore::setBrowsedKey(Key key) {

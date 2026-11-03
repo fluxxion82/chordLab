@@ -1,8 +1,10 @@
 #include "chordlab/presets.h"
 
+#include "chordlab/document.h"
 #include "chordlab/scale.h"
 #include "chordlab/symbol.h"
 
+#include <algorithm>
 #include <array>
 #include <cassert>
 #include <cstddef>
@@ -139,6 +141,16 @@ std::vector<std::pair<Chord, double>> resolvePreset(const Preset& preset, const 
         assert(s.alter >= -1 && s.alter <= 1);
         const PitchClass root = pitchClassOf(tonic + major[static_cast<std::size_t>(s.degree - 1)] + s.alter);
         out.emplace_back(Chord{root, &chordType(s.typeId)}, s.beats);
+    }
+    return out;
+}
+
+std::vector<std::pair<Chord, double>> resolvePreset(const Preset& preset, const Key& key, Meter meter) {
+    assert(validMeter(meter));
+    const double scale = barTicks(meter) / static_cast<double>(kFeelTicksPerBeat) / 4.0;
+    std::vector<std::pair<Chord, double>> out = resolvePreset(preset, key);
+    for (auto& step : out) {
+        step.second = std::clamp(step.second * scale, kMinLengthBeats, kMaxLengthBeats);
     }
     return out;
 }

@@ -454,6 +454,7 @@ final class SnapshotTests: XCTestCase {
     "snapshot-home-progression.json",
     "snapshot-browsing-progression.json",
     "snapshot-legacy-phase1.json",
+    "snapshot-feel.json",
     "state-progression.json",
   ]
 
@@ -509,6 +510,40 @@ final class SnapshotTests: XCTestCase {
     try FileManager.default.contentsOfDirectory(at: Self.fixturesDirectory(), includingPropertiesForKeys: nil)
       .filter { $0.lastPathComponent.hasPrefix(prefix) && $0.pathExtension == "json" }
       .sorted { $0.lastPathComponent < $1.lastPathComponent }
+  }
+
+  func testFeelFixtureDecodesTheFeelFields() throws {
+    let snapshot = try snapshotFixture("snapshot-feel.json")
+    XCTAssertEqual(snapshot.feel, FeelJSON(rhythm: "arpUpDown", strum: "downUp", strumSpeed: "tight", humanise: "light"))
+    XCTAssertEqual(snapshot.meter, MeterJSON(num: 6, den: 8))
+    XCTAssertEqual(snapshot.feelLimited, false)
+  }
+
+  func testHomeFixtureDecodesTheDefaultFeel() throws {
+    let snapshot = try snapshotFixture("snapshot-home-progression.json")
+    XCTAssertEqual(snapshot.feel, FeelJSON(rhythm: "block", strum: "off", strumSpeed: "medium", humanise: "off"))
+    XCTAssertEqual(snapshot.meter, MeterJSON(num: 4, den: 4))
+    XCTAssertEqual(snapshot.feelLimited, false)
+  }
+
+  func testFeelFieldsDecodeFromLiteralJSON() throws {
+    let json = Self.phase2.replacingOccurrences(of: "\"followHost\":true,", with:
+      "\"followHost\":true,\"feel\":{\"rhythm\":\"pulse\",\"strum\":\"up\",\"strumSpeed\":\"loose\",\"humanise\":\"heavy\"},"
+      + "\"meter\":{\"num\":7,\"den\":8},\"feelLimited\":true,")
+    let snapshot = try Self.decode(Snapshot.self, json)
+    XCTAssertEqual(snapshot.feel, FeelJSON(rhythm: "pulse", strum: "up", strumSpeed: "loose", humanise: "heavy"))
+    XCTAssertEqual(snapshot.meter, MeterJSON(num: 7, den: 8))
+    XCTAssertEqual(snapshot.feelLimited, true)
+  }
+
+  func testSnapshotsWithoutFeelFieldsStillDecode() throws {
+    for json in [Self.phase1, Self.phase2] {
+      let snapshot = try Self.decode(Snapshot.self, json)
+      XCTAssertNil(snapshot.feel)
+      XCTAssertNil(snapshot.meter)
+      XCTAssertNil(snapshot.feelLimited)
+    }
+    XCTAssertNil(try snapshotFixture("snapshot-legacy-phase1.json").feel)
   }
 
   func testRequiredFixturesArePresent() throws {

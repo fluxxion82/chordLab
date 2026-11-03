@@ -4,6 +4,7 @@
 #include "chordlab/chord.h"
 #include "chordlab/compiler.h"
 #include "chordlab/document.h"
+#include "chordlab/feel.h"
 #include "chordlab/function.h"
 #include "chordlab/harmony.h"
 #include "chordlab/json_api.h"
@@ -184,6 +185,67 @@ TEST_CASE("snapshot: appendChord yields one event spelled and numbered in the pr
     CHECK(e.at("lengthBeats").get<double>() == 4.0);
     CHECK(e.at("velocity") == 100);
     CHECK(e.at("voicing") == json({60, 64, 67}));
+}
+
+TEST_CASE("appendChord without a length appends one bar of the meter") {
+    struct Case { int num; int den; double beats; };
+    for (const Case& c : {Case{4, 4, 4.0}, Case{3, 4, 3.0}, Case{6, 8, 3.0}, Case{7, 8, 3.5}, Case{2, 4, 2.0},
+                          Case{5, 4, 5.0}, Case{12, 8, 6.0}}) {
+        CAPTURE(c.num);
+        CAPTURE(c.den);
+        DocumentStore store;
+        applyOk(store, {{"cmd", "setMeter"}, {"num", c.num}, {"den", c.den}});
+        applyOk(store, {{"cmd", "appendChord"}, {"root", 0}, {"type", "maj"}});
+        const json snap = snapshot(store);
+        REQUIRE(snap.at("events").size() == 1);
+        CHECK(snap.at("events")[0].at("lengthBeats").get<double>() == c.beats);
+    }
+}
+
+TEST_CASE("appendChord: an explicit length wins in any meter, and setMeter leaves lengths unchanged") {
+    DocumentStore store;
+    applyOk(store, {{"cmd", "appendChord"}, {"root", 0}, {"type", "maj"}});
+    applyOk(store, {{"cmd", "appendChord"}, {"root", 7}, {"type", "maj"}, {"lengthBeats", 2.5}});
+    applyOk(store, {{"cmd", "setMeter"}, {"num", 7}, {"den", 8}});
+    json snap = snapshot(store);
+    CHECK(snap.at("events")[0].at("lengthBeats").get<double>() == 4.0);
+    CHECK(snap.at("events")[1].at("lengthBeats").get<double>() == 2.5);
+    applyOk(store, {{"cmd", "appendChord"}, {"root", 2}, {"type", "min"}, {"lengthBeats", 1.0}});
+    applyOk(store, {{"cmd", "appendChord"}, {"root", 4}, {"type", "min"}});
+    snap = snapshot(store);
+    CHECK(snap.at("events")[2].at("lengthBeats").get<double>() == 1.0);
+    CHECK(snap.at("events")[3].at("lengthBeats").get<double>() == 3.5);
+    applyOk(store, {{"cmd", "setMeter"}, {"num", 3}, {"den", 4}});
+    snap = snapshot(store);
+    CHECK(snap.at("events")[0].at("lengthBeats").get<double>() == 4.0);
+    CHECK(snap.at("events")[1].at("lengthBeats").get<double>() == 2.5);
+    CHECK(snap.at("events")[2].at("lengthBeats").get<double>() == 1.0);
+    CHECK(snap.at("events")[3].at("lengthBeats").get<double>() == 3.5);
+    CHECK(snap.at("endBeat").get<double>() == 11.0);
+}
+
+TEST_CASE("loadPreset: one-bar steps follow the meter, in append and replace, and leave meter and feel alone") {
+    struct Case { int num; int den; double beats; };
+    for (const Case& c : {Case{4, 4, 4.0}, Case{3, 4, 3.0}, Case{7, 8, 3.5}, Case{6, 8, 3.0}}) {
+        CAPTURE(c.num);
+        CAPTURE(c.den);
+        for (const char* mode : {"append", "replace"}) {
+            CAPTURE(mode);
+            DocumentStore store;
+            applyOk(store, {{"cmd", "setMeter"}, {"num", c.num}, {"den", c.den}});
+            applyOk(store, {{"cmd", "setFeel"}, {"rhythm", "pulse"}, {"strum", "down"},
+                            {"strumSpeed", "tight"}, {"humanise", "medium"}});
+            applyOk(store, {{"cmd", "loadPreset"}, {"id", "axis"}, {"mode", mode}});
+            const json snap = snapshot(store);
+            REQUIRE(snap.at("events").size() == 4);
+            for (const json& e : snap.at("events")) {
+                CHECK(e.at("lengthBeats").get<double>() == c.beats);
+            }
+            CHECK(snap.at("endBeat").get<double>() == 4 * c.beats);
+            CHECK(snap.at("meter") == json({{"num", c.num}, {"den", c.den}}));
+            CHECK(snap.at("feel").at("rhythm") == "pulse");
+        }
+    }
 }
 
 TEST_CASE("snapshot: start beats accumulate and symbols follow the project key, not the browsed key") {
@@ -1083,9 +1145,438 @@ TEST_CASE("rejection: transpose commands with missing, mistyped or out-of-range 
     CHECK(error.find("in -11..11") != std::string::npos);
 }
 
-TEST_CASE("snapshot: twenty-three top-level keys, with the transpose flags") {
+TEST_CASE("snapshot: twenty-six top-level keys, with the transpose flags and the feel") {
     DocumentStore store = threeChords();
-    CHECK(snapshot(store).size() == 23);
+    CHECK(snapshot(store).size() == 26);
+}
+
+// --- Feel and meter --------------------------------------------------------------------------
+
+namespace {
+
+/// How many undo and how many redo steps `store` has, counted on a copy.
+std::pair<int, int> historyDepth(const DocumentStore& store) {
+    DocumentStore redoCopy = store;
+    int redos = 0;
+    while (redoCopy.redo()) {
+        ++redos;
+    }
+    DocumentStore undoCopy = store;
+    int undos = 0;
+    while (undoCopy.undo()) {
+        ++undos;
+    }
+    return {undos, redos};
+}
+
+/// Checks that `cmd` is rejected and that neither the document nor the undo/redo history changed.
+void checkRejectedKeepsHistory(DocumentStore& store, const json& cmd) {
+    CAPTURE(cmd.dump());
+    const Document before = store.doc();
+    const std::pair<int, int> depth = historyDepth(store);
+    std::string error;
+    CHECK_FALSE(apply(store, cmd, error));
+    CHECK_FALSE(error.empty());
+    CHECK(store.doc() == before);
+    CHECK(historyDepth(store) == depth);
+}
+
+json feelCmd(json rhythm, json strum, json speed, json humanise) {
+    return json{{"cmd", "setFeel"}, {"rhythm", rhythm}, {"strum", strum}, {"strumSpeed", speed}, {"humanise", humanise}};
+}
+
+const json kBlockFeelCmd = feelCmd("block", "off", "medium", "off");
+
+}  // namespace
+
+TEST_CASE("setFeel: every option of every field is accepted and lands in the document") {
+    const std::pair<const char*, Rhythm> rhythms[] = {{"block", Rhythm::Block},
+                                                      {"pulse", Rhythm::Pulse},
+                                                      {"subdivided", Rhythm::Subdivided},
+                                                      {"offbeats", Rhythm::Offbeats},
+                                                      {"lowThenUpper", Rhythm::LowThenUpper},
+                                                      {"arpUp", Rhythm::ArpUp},
+                                                      {"arpUpDown", Rhythm::ArpUpDown}};
+    const std::pair<const char*, Strum> strums[] = {
+        {"off", Strum::Off}, {"down", Strum::Down}, {"up", Strum::Up}, {"downUp", Strum::DownUp}};
+    const std::pair<const char*, StrumSpeed> speeds[] = {
+        {"tight", StrumSpeed::Tight}, {"medium", StrumSpeed::Medium}, {"loose", StrumSpeed::Loose}};
+    const std::pair<const char*, Humanise> humanises[] = {
+        {"off", Humanise::Off}, {"light", Humanise::Light}, {"medium", Humanise::Medium}, {"heavy", Humanise::Heavy}};
+    // Each field in turn at every option, the others at a non-default value so that a mix-up between fields shows.
+    for (const auto& r : rhythms) {
+        DocumentStore store = threeChords();
+        applyOk(store, feelCmd(r.first, "up", "loose", "heavy"));
+        CHECK(store.doc().feel == Feel{r.second, Strum::Up, StrumSpeed::Loose, Humanise::Heavy});
+    }
+    for (const auto& st : strums) {
+        DocumentStore store = threeChords();
+        applyOk(store, feelCmd("arpUp", st.first, "loose", "heavy"));
+        CHECK(store.doc().feel == Feel{Rhythm::ArpUp, st.second, StrumSpeed::Loose, Humanise::Heavy});
+    }
+    for (const auto& sp : speeds) {
+        DocumentStore store = threeChords();
+        applyOk(store, feelCmd("arpUp", "up", sp.first, "heavy"));
+        CHECK(store.doc().feel == Feel{Rhythm::ArpUp, Strum::Up, sp.second, Humanise::Heavy});
+    }
+    for (const auto& h : humanises) {
+        DocumentStore store = threeChords();
+        applyOk(store, feelCmd("arpUp", "up", "loose", h.first));
+        CHECK(store.doc().feel == Feel{Rhythm::ArpUp, Strum::Up, StrumSpeed::Loose, h.second});
+    }
+}
+
+TEST_CASE("setFeel: reads back in the snapshot as four strings") {
+    DocumentStore store = threeChords();
+    CHECK(snapshot(store).at("feel") == json({{"rhythm", "block"}, {"strum", "off"}, {"strumSpeed", "medium"}, {"humanise", "off"}}));
+    applyOk(store, feelCmd("lowThenUpper", "downUp", "tight", "light"));
+    CHECK(snapshot(store).at("feel") ==
+          json({{"rhythm", "lowThenUpper"}, {"strum", "downUp"}, {"strumSpeed", "tight"}, {"humanise", "light"}}));
+    applyOk(store, feelCmd("arpUpDown", "up", "loose", "medium"));
+    CHECK(snapshot(store).at("feel") ==
+          json({{"rhythm", "arpUpDown"}, {"strum", "up"}, {"strumSpeed", "loose"}, {"humanise", "medium"}}));
+}
+
+TEST_CASE("setFeel: rejected messages leave the document and the undo history untouched") {
+    DocumentStore store = threeChords();
+    store.setVelocity(1, 64);
+    store.setVelocity(2, 65);
+    store.undo();  // one redo step, and the undo steps of the three chords and the first velocity
+    REQUIRE(historyDepth(store).second == 1);
+    const json ok = feelCmd("pulse", "down", "tight", "light");
+
+    std::vector<json> bad;
+    bad.push_back(feelCmd("waltz", "off", "medium", "off"));      // unknown names
+    bad.push_back(feelCmd("block", "sideways", "medium", "off"));
+    bad.push_back(feelCmd("block", "off", "fast", "off"));
+    bad.push_back(feelCmd("block", "off", "medium", "extreme"));
+    bad.push_back(feelCmd("Block", "off", "medium", "off"));      // case matters
+    bad.push_back(feelCmd("", "off", "medium", "off"));
+    for (const char* field : {"rhythm", "strum", "strumSpeed", "humanise"}) {
+        json missing = ok;
+        missing.erase(field);
+        bad.push_back(missing);
+        for (const json& wrong : {json(nullptr), json(3), json(true), json::object(), json::array(),
+                                  json({"pulse"}), json({{"v", "pulse"}}), json(1.5)}) {
+            json c = ok;
+            c[field] = wrong;
+            bad.push_back(c);
+        }
+    }
+    for (const json& c : bad) {
+        checkRejectedKeepsHistory(store, c);
+    }
+
+    std::string error;
+    CHECK_FALSE(apply(store, feelCmd("waltz", "off", "medium", "off"), error));
+    CHECK(error.find("rhythm") != std::string::npos);
+    CHECK_FALSE(apply(store, feelCmd("block", "off", "medium", nullptr), error));
+    CHECK(error.find("humanise") != std::string::npos);
+}
+
+TEST_CASE("setFeel: undo and redo, and an equal feel pushes no history") {
+    DocumentStore store = threeChords();
+    const std::pair<int, int> start = historyDepth(store);
+    applyOk(store, kBlockFeelCmd);  // already the feel
+    CHECK(historyDepth(store) == start);
+
+    applyOk(store, feelCmd("subdivided", "down", "loose", "heavy"));
+    CHECK(store.doc().feel == Feel{Rhythm::Subdivided, Strum::Down, StrumSpeed::Loose, Humanise::Heavy});
+    applyOk(store, feelCmd("pulse", "off", "medium", "off"));
+    applyOk(store, {{"cmd", "undo"}});
+    CHECK(store.doc().feel == Feel{Rhythm::Subdivided, Strum::Down, StrumSpeed::Loose, Humanise::Heavy});
+    applyOk(store, {{"cmd", "undo"}});
+    CHECK(store.doc().feel == Feel{});
+    applyOk(store, {{"cmd", "redo"}});
+    CHECK(store.doc().feel == Feel{Rhythm::Subdivided, Strum::Down, StrumSpeed::Loose, Humanise::Heavy});
+    applyOk(store, {{"cmd", "redo"}});
+    CHECK(store.doc().feel == Feel{Rhythm::Pulse, Strum::Off, StrumSpeed::Medium, Humanise::Off});
+}
+
+TEST_CASE("setMeter: valid meters are accepted, undone and redone, and shown in the snapshot") {
+    DocumentStore store = threeChords();
+    const int startDepth = historyDepth(store).first;
+    CHECK(snapshot(store).at("meter") == json({{"num", 4}, {"den", 4}}));
+    const std::pair<int, int> meters[] = {{3, 4}, {6, 8}, {7, 8}, {2, 4}, {16, 8}, {1, 2}, {12, 8}, {5, 4}};
+    for (const auto& m : meters) {
+        applyOk(store, {{"cmd", "setMeter"}, {"num", m.first}, {"den", m.second}});
+        CHECK(store.doc().meter.num == m.first);
+        CHECK(store.doc().meter.den == m.second);
+        CHECK(snapshot(store).at("meter") == json({{"num", m.first}, {"den", m.second}}));
+    }
+    // Eight distinct changes from 4/4 gave eight undo steps.
+    CHECK(historyDepth(store).first == startDepth + 8);
+    applyOk(store, {{"cmd", "undo"}});
+    CHECK(store.doc().meter.num == 12);
+    CHECK(store.doc().meter.den == 8);
+    applyOk(store, {{"cmd", "redo"}});
+    CHECK(store.doc().meter.num == 5);
+    CHECK(store.doc().meter.den == 4);
+
+    const std::pair<int, int> depth = historyDepth(store);
+    applyOk(store, {{"cmd", "setMeter"}, {"num", 5}, {"den", 4}});  // equal: no history
+    CHECK(historyDepth(store) == depth);
+}
+
+TEST_CASE("setMeter: rejected messages leave the document and the undo history untouched") {
+    DocumentStore store = threeChords();
+    store.setVelocity(1, 64);
+    applyOk(store, {{"cmd", "setMeter"}, {"num", 3}, {"den", 4}});
+    store.undo();
+    REQUIRE(historyDepth(store).second == 1);
+
+    std::vector<json> bad = {
+        {{"cmd", "setMeter"}, {"num", 0}, {"den", 4}},       // out of range
+        {{"cmd", "setMeter"}, {"num", 17}, {"den", 4}},
+        {{"cmd", "setMeter"}, {"num", -3}, {"den", 4}},
+        {{"cmd", "setMeter"}, {"num", 4}, {"den", 3}},       // den not 2, 4 or 8
+        {{"cmd", "setMeter"}, {"num", 4}, {"den", 0}},
+        {{"cmd", "setMeter"}, {"num", 4}, {"den", 16}},
+        {{"cmd", "setMeter"}, {"num", 4}, {"den", 1}},
+        {{"cmd", "setMeter"}, {"num", 4}},                   // missing
+        {{"cmd", "setMeter"}, {"den", 4}},
+        {{"cmd", "setMeter"}},
+        {{"cmd", "setMeter"}, {"num", 3.5}, {"den", 4}},     // not integers
+        {{"cmd", "setMeter"}, {"num", 3.0}, {"den", 4}},
+        {{"cmd", "setMeter"}, {"num", 3}, {"den", 4.0}},
+        {{"cmd", "setMeter"}, {"num", 3}, {"den", 4.5}},
+        {{"cmd", "setMeter"}, {"num", "3"}, {"den", 4}},     // strings, nulls, nested values
+        {{"cmd", "setMeter"}, {"num", 3}, {"den", "4"}},
+        {{"cmd", "setMeter"}, {"num", nullptr}, {"den", 4}},
+        {{"cmd", "setMeter"}, {"num", 3}, {"den", nullptr}},
+        {{"cmd", "setMeter"}, {"num", true}, {"den", 4}},
+        {{"cmd", "setMeter"}, {"num", json::object()}, {"den", 4}},
+        {{"cmd", "setMeter"}, {"num", json::array({3})}, {"den", 4}},
+        {{"cmd", "setMeter"}, {"num", 3}, {"den", json({{"v", 4}})}},
+        {{"cmd", "setMeter"}, {"num", 3}, {"den", json::array()}},
+        {{"cmd", "setMeter"}, {"num", 4294967299ull}, {"den", 4}},  // 2^32 + 3 must not wrap to 3
+        {{"cmd", "setMeter"}, {"num", 3}, {"den", 4294967300ull}},
+    };
+    for (const json& c : bad) {
+        checkRejectedKeepsHistory(store, c);
+    }
+    std::string error;
+    CHECK_FALSE(apply(store, {{"cmd", "setMeter"}, {"num", 4}, {"den", 3}}, error));
+    CHECK(error.find("den") != std::string::npos);
+    CHECK_FALSE(apply(store, {{"cmd", "setMeter"}, {"num", 0}, {"den", 4}}, error));
+    CHECK(error.find("num") != std::string::npos);
+}
+
+TEST_CASE("snapshot: feelLimited is true only when the feel performs and is over budget") {
+    // 64 one-bar ninths come to 5120 events under Subdivided: more than kMaxSnapshotEvents (test_feel.cpp).
+    DocumentStore store;
+    for (int i = 0; i < 64; ++i) {
+        applyOk(store, {{"cmd", "appendChord"}, {"root", 0}, {"type", "9"}, {"lengthBeats", 4.0}});
+    }
+    REQUIRE(store.doc().events.size() == 64);
+    CHECK(snapshot(store).at("feelLimited") == false);  // block feel
+
+    applyOk(store, feelCmd("subdivided", "off", "medium", "off"));
+    const json limited = snapshot(store);
+    CHECK(limited.at("feelLimited") == true);
+    CHECK(compile(store.doc()).feelLimited);  // the same answer as the playback path
+
+    applyOk(store, feelCmd("pulse", "off", "medium", "off"));  // 64 x 4 pulses x 5 notes x 2 = 2560: fits
+    CHECK(snapshot(store).at("feelLimited") == false);
+
+    applyOk(store, feelCmd("subdivided", "off", "medium", "off"));
+    applyOk(store, {{"cmd", "undo"}});  // back to pulse
+    CHECK(snapshot(store).at("feelLimited") == false);
+    applyOk(store, {{"cmd", "redo"}});
+    CHECK(snapshot(store).at("feelLimited") == true);
+
+    DocumentStore small = threeChords();
+    applyOk(small, feelCmd("arpUpDown", "downUp", "loose", "heavy"));
+    CHECK(snapshot(small).at("feelLimited") == false);
+}
+
+TEST_CASE("snapshot: endBeat is the compiled playback period, event lengths stay authored") {
+    // Three chords of 0.2506 beat: not tick-aligned. Chord boundaries are lround(0.2506 * 960) = 241,
+    // lround(0.5012 * 960) = 481 and lround(0.7518 * 960) = 722 ticks, so a performing feel plays a period of
+    // 722 / 960 beat, while the authored lengths sum to a little more than that.
+    DocumentStore store;
+    for (int i = 0; i < 3; ++i) {
+        applyOk(store, {{"cmd", "appendChord"}, {"root", 0}, {"type", "maj"}, {"lengthBeats", 0.2506}});
+    }
+    const double authored = (0.2506 + 0.2506) + 0.2506;  // left to right, as Document::endBeat accumulates
+    REQUIRE(store.doc().endBeat() == authored);
+    REQUIRE(authored != 722.0 / 960.0);
+
+    // Block chords: the old path, the authored sum.
+    const json block = snapshot(store);
+    CHECK(block.at("endBeat").get<double>() == authored);
+    CHECK(block.at("endBeat").get<double>() == compile(store.doc()).endBeat);
+
+    // A rhythm, and a strum on block chords: the performed period, 722 ticks.
+    for (const json& cmd : {feelCmd("pulse", "off", "medium", "off"), feelCmd("block", "down", "medium", "off")}) {
+        CAPTURE(cmd.dump());
+        applyOk(store, cmd);
+        const json performed = snapshot(store);
+        CHECK(performed.at("feelLimited") == false);
+        CHECK(performed.at("endBeat").get<double>() == 722.0 / 960.0);
+        CHECK(performed.at("endBeat").get<double>() == 0.7520833333333333);
+        CHECK(performed.at("endBeat").get<double>() == compile(store.doc()).endBeat);
+        // The events keep their authored positions and lengths.
+        const json& events = performed.at("events");
+        REQUIRE(events.size() == 3);
+        CHECK(events[0].at("startBeat").get<double>() == 0.0);
+        CHECK(events[1].at("startBeat").get<double>() == 0.2506);
+        CHECK(events[2].at("startBeat").get<double>() == 0.2506 + 0.2506);
+        for (const json& e : events) {
+            CHECK(e.at("lengthBeats").get<double>() == 0.2506);
+        }
+    }
+
+    // Back to block chords: the authored sum again.
+    applyOk(store, kBlockFeelCmd);
+    CHECK(snapshot(store).at("endBeat").get<double>() == authored);
+}
+
+TEST_CASE("snapshot: an over-budget feel publishes the authored sum as endBeat") {
+    // 64 one-bar ninths and one 4.0004-beat chord: 5200+ Subdivided events, over budget, so block chords play
+    // and the period is the authored sum; the performed period would be 260 beats (249600 ticks).
+    DocumentStore store;
+    for (int i = 0; i < 64; ++i) {
+        applyOk(store, {{"cmd", "appendChord"}, {"root", 0}, {"type", "9"}, {"lengthBeats", 4.0}});
+    }
+    applyOk(store, {{"cmd", "appendChord"}, {"root", 0}, {"type", "9"}, {"lengthBeats", 4.0004}});
+    double authored = 0.0;
+    for (const ChordEvent& e : store.doc().events) {
+        authored += e.lengthBeats;
+    }
+    REQUIRE(store.doc().endBeat() == authored);
+    REQUIRE(authored != 260.0);
+    CHECK(snapshot(store).at("endBeat").get<double>() == authored);  // block feel
+
+    applyOk(store, feelCmd("subdivided", "off", "medium", "off"));
+    const json limited = snapshot(store);
+    CHECK(limited.at("feelLimited") == true);
+    CHECK(limited.at("endBeat").get<double>() == authored);
+    CHECK(limited.at("endBeat").get<double>() == compile(store.doc()).endBeat);
+    for (const json& e : limited.at("events")) {
+        CHECK(e.at("lengthBeats").get<double>() >= 4.0);
+    }
+}
+
+TEST_CASE("snapshot: a block document never reads as feelLimited, with the most chords of the shortest length") {
+    // kMaxChords quarter-beat ninths (five notes each, ten events per chord): still within the snapshot budget, so
+    // compile's verdict (false without a performing feel) agrees with performDocument's.
+    DocumentStore store;
+    for (int i = 0; i < kMaxChords; ++i) {
+        applyOk(store, {{"cmd", "appendChord"}, {"root", 0}, {"type", "9"}, {"lengthBeats", kMinLengthBeats}});
+    }
+    REQUIRE(store.doc().events.size() == static_cast<std::size_t>(kMaxChords));
+    CHECK_FALSE(performDocument(store.doc()).feelLimited);
+    const json snap = snapshot(store);
+    CHECK(snap.at("feelLimited") == false);
+    CHECK(snap.at("endBeat").get<double>() == store.doc().endBeat());
+}
+
+TEST_CASE("state: feel and meter are saved and restored, non-default values included") {
+    DocumentStore store = threeChords();
+    applyOk(store, feelCmd("offbeats", "downUp", "tight", "medium"));
+    applyOk(store, {{"cmd", "setMeter"}, {"num", 7}, {"den", 8}});
+
+    const json saved = json::parse(stateJson(store));
+    CHECK(saved.at("feel") ==
+          json({{"rhythm", "offbeats"}, {"strum", "downUp"}, {"strumSpeed", "tight"}, {"humanise", "medium"}}));
+    CHECK(saved.at("meter") == json({{"num", 7}, {"den", 8}}));
+
+    DocumentStore loaded;
+    std::string error;
+    REQUIRE_MESSAGE(loadStateJson(loaded, stateJson(store), error), error);
+    CHECK(loaded.doc() == store.doc());
+    CHECK(loaded.doc().feel == Feel{Rhythm::Offbeats, Strum::DownUp, StrumSpeed::Tight, Humanise::Medium});
+    CHECK(loaded.doc().meter.num == 7);
+    CHECK(loaded.doc().meter.den == 8);
+    CHECK(stateJson(loaded) == stateJson(store));
+
+    // The default state writes the default feel and meter.
+    const json def = json::parse(stateJson(threeChords()));
+    CHECK(def.at("feel") == json({{"rhythm", "block"}, {"strum", "off"}, {"strumSpeed", "medium"}, {"humanise", "off"}}));
+    CHECK(def.at("meter") == json({{"num", 4}, {"den", 4}}));
+}
+
+TEST_CASE("state: a state without feel and meter loads block chords in 4/4") {
+    DocumentStore source = threeChords();
+    json legacy = json::parse(stateJson(source));
+    legacy.erase("feel");
+    legacy.erase("meter");
+
+    DocumentStore store = threeChords();
+    applyOk(store, feelCmd("pulse", "down", "tight", "light"));
+    applyOk(store, {{"cmd", "setMeter"}, {"num", 3}, {"den", 4}});
+    std::string error;
+    REQUIRE_MESSAGE(loadStateJson(store, legacy.dump(), error), error);
+    CHECK(store.doc().feel == Feel{});
+    CHECK(store.doc().meter.num == 4);
+    CHECK(store.doc().meter.den == 4);
+
+    // Either one alone may be absent.
+    json onlyFeel = json::parse(stateJson(source));
+    onlyFeel["feel"] = {{"rhythm", "arpUp"}, {"strum", "off"}, {"strumSpeed", "medium"}, {"humanise", "off"}};
+    onlyFeel.erase("meter");
+    REQUIRE_MESSAGE(loadStateJson(store, onlyFeel.dump(), error), error);
+    CHECK(store.doc().feel.rhythm == Rhythm::ArpUp);
+    CHECK(store.doc().meter.num == 4);
+    json onlyMeter = json::parse(stateJson(source));
+    onlyMeter["meter"] = {{"num", 6}, {"den", 8}};
+    onlyMeter.erase("feel");
+    REQUIRE_MESSAGE(loadStateJson(store, onlyMeter.dump(), error), error);
+    CHECK(store.doc().feel == Feel{});
+    CHECK(store.doc().meter.num == 6);
+    CHECK(store.doc().meter.den == 8);
+}
+
+TEST_CASE("state: a present but invalid feel or meter rejects the whole state, history intact") {
+    DocumentStore store = threeChords();
+    store.setVelocity(1, 70);
+    store.setVelocity(2, 71);
+    store.undo();
+    const Document before = store.doc();
+    const std::pair<int, int> depth = historyDepth(store);
+    const json good = json::parse(stateJson(threeChords()));
+
+    std::vector<json> badFeel = {
+        nullptr, 3, "block", json::array(), json::object(),
+        json({{"rhythm", "block"}, {"strum", "off"}, {"strumSpeed", "medium"}}),                         // missing humanise
+        json({{"rhythm", "waltz"}, {"strum", "off"}, {"strumSpeed", "medium"}, {"humanise", "off"}}),    // unknown name
+        json({{"rhythm", nullptr}, {"strum", "off"}, {"strumSpeed", "medium"}, {"humanise", "off"}}),
+        json({{"rhythm", json::object()}, {"strum", "off"}, {"strumSpeed", "medium"}, {"humanise", "off"}}),
+        json({{"rhythm", "block"}, {"strum", json::array({"off"})}, {"strumSpeed", "medium"}, {"humanise", "off"}}),
+        json({{"rhythm", "block"}, {"strum", "off"}, {"strumSpeed", 1}, {"humanise", "off"}}),
+    };
+    for (const json& f : badFeel) {
+        json state = good;
+        state["feel"] = f;
+        std::string error;
+        CHECK_FALSE(loadStateJson(store, state.dump(), error));
+        CHECK(error.find("feel") != std::string::npos);
+        CHECK(store.doc() == before);
+        CHECK(historyDepth(store) == depth);
+    }
+    std::vector<json> badMeter = {
+        nullptr, 4, "4/4", json::array({4, 4}), json::object(),
+        json({{"num", 4}}),
+        json({{"den", 4}}),
+        json({{"num", 0}, {"den", 4}}),
+        json({{"num", 4}, {"den", 3}}),
+        json({{"num", 17}, {"den", 4}}),
+        json({{"num", 3.5}, {"den", 4}}),
+        json({{"num", 3.0}, {"den", 4}}),
+        json({{"num", "3"}, {"den", 4}}),
+        json({{"num", nullptr}, {"den", 4}}),
+        json({{"num", json::object()}, {"den", 4}}),
+    };
+    for (const json& m : badMeter) {
+        json state = good;
+        state["meter"] = m;
+        std::string error;
+        CHECK_FALSE(loadStateJson(store, state.dump(), error));
+        CHECK(error.find("meter") != std::string::npos);
+        CHECK(store.doc() == before);
+        CHECK(historyDepth(store) == depth);
+    }
 }
 
 // --- Editing ---------------------------------------------------------------------------
@@ -2171,7 +2662,7 @@ DocumentStore worstCaseStore() {
 /// `stateJson` of `worstCaseStore()` at the default editor size, measured; pinned so that a change to the
 /// state's shape shows up here against `kMaxJsonBytes` (1 MiB) before it shows up as a state that will
 /// not load.
-constexpr std::size_t kWorstCaseStateBytes = 76845;
+constexpr std::size_t kWorstCaseStateBytes = 76950;
 
 }  // namespace
 

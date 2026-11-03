@@ -2,7 +2,9 @@
 
 #include "chordlab/chord.h"
 #include "chordlab/document.h"
+#include "chordlab/feel.h"
 #include "chordlab/limits.h"
+#include "chordlab/meter.h"
 #include "chordlab/pitch.h"
 #include "chordlab/relatedness.h"
 #include "chordlab/scale.h"
@@ -685,6 +687,96 @@ TEST_CASE("undo / redo: autoVoiceLead is restored with the progression, unlike t
     REQUIRE(store.redo());
     CHECK(idsOf(store) == std::vector<int>{1, 2});
     CHECK(store.doc().followHost == false);
+}
+
+// --- Feel and meter (undoable document fields) ------------------------------------------------
+
+TEST_CASE("Document: feel and meter default to block, off, medium, off and 4/4") {
+    Document doc;
+    CHECK(doc.feel.rhythm == Rhythm::Block);
+    CHECK(doc.feel.strum == Strum::Off);
+    CHECK(doc.feel.speed == StrumSpeed::Medium);
+    CHECK(doc.feel.humanise == Humanise::Off);
+    CHECK(doc.meter.num == 4);
+    CHECK(doc.meter.den == 4);
+}
+
+TEST_CASE("Document ==: each feel and meter field makes documents unequal") {
+    Document a;
+    Document b;
+    CHECK(a == b);
+    b.feel.rhythm = Rhythm::ArpUpDown;
+    CHECK(a != b);
+    b = a;
+    b.feel.strum = Strum::DownUp;
+    CHECK(a != b);
+    b = a;
+    b.feel.speed = StrumSpeed::Loose;
+    CHECK(a != b);
+    b = a;
+    b.feel.humanise = Humanise::Heavy;
+    CHECK(a != b);
+    b = a;
+    b.meter.num = 3;
+    CHECK(a != b);
+    b = a;
+    b.meter.den = 8;
+    CHECK(a != b);
+}
+
+TEST_CASE("setFeel: one undo step, undo and redo restore, an equal value pushes nothing") {
+    DocumentStore store;
+    store.setFeel(Feel{});  // already the default
+    CHECK_FALSE(store.undo());
+    Feel feel;
+    feel.rhythm = Rhythm::Pulse;
+    feel.strum = Strum::Down;
+    feel.speed = StrumSpeed::Tight;
+    feel.humanise = Humanise::Light;
+    store.setFeel(feel);
+    CHECK(store.doc().feel == feel);
+    store.setFeel(feel);  // equal: nothing
+    REQUIRE(store.undo());
+    CHECK(store.doc().feel == Feel{});
+    CHECK_FALSE(store.undo());
+    REQUIRE(store.redo());
+    CHECK(store.doc().feel == feel);
+    CHECK_FALSE(store.redo());
+}
+
+TEST_CASE("setMeter: one undo step, undo and redo restore, an equal value pushes nothing") {
+    DocumentStore store;
+    store.setMeter(Meter{4, 4});  // already the default
+    CHECK_FALSE(store.undo());
+    store.setMeter(Meter{7, 8});
+    CHECK(store.doc().meter == Meter{7, 8});
+    store.setMeter(Meter{7, 8});  // equal: nothing
+    REQUIRE(store.undo());
+    CHECK(store.doc().meter == Meter{4, 4});
+    CHECK_FALSE(store.undo());
+    REQUIRE(store.redo());
+    CHECK(store.doc().meter == Meter{7, 8});
+    CHECK_FALSE(store.redo());
+}
+
+TEST_CASE("undo: feel and meter are restored with the progression, not kept like live state") {
+    DocumentStore store;
+    store.appendChord(kC);
+    Feel feel;
+    feel.rhythm = Rhythm::Offbeats;
+    store.setFeel(feel);
+    store.setMeter(Meter{6, 8});
+    store.setFollowHost(false);
+    REQUIRE(store.undo());  // the meter
+    CHECK(store.doc().meter == Meter{4, 4});
+    CHECK(store.doc().feel == feel);
+    CHECK(store.doc().followHost == false);  // live: kept
+    REQUIRE(store.undo());  // the feel
+    CHECK(store.doc().feel == Feel{});
+    REQUIRE(store.redo());
+    REQUIRE(store.redo());
+    CHECK(store.doc().feel == feel);
+    CHECK(store.doc().meter == Meter{6, 8});
 }
 
 // --- moveChord -------------------------------------------------------------------------

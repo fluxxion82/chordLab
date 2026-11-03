@@ -9,8 +9,11 @@
 #include "doctest.h"
 
 #include "chordlab/chord.h"
+#include "chordlab/compiler.h"
 #include "chordlab/document.h"
+#include "chordlab/feel.h"
 #include "chordlab/json_api.h"
+#include "chordlab/meter.h"
 #include "chordlab/palette.h"
 #include "chordlab/pitch.h"
 #include "chordlab/scale.h"
@@ -198,6 +201,14 @@ std::string invariantProblem(const DocumentStore& store, bool snapshot = true) {
     if (store.nextId() < 1 || store.nextSectionId() < 1) {
         return "nextId or nextSectionId below 1";
     }
+    if (!validMeter(d.meter)) {
+        return "invalid meter " + std::to_string(d.meter.num) + "/" + std::to_string(d.meter.den);
+    }
+    if (static_cast<int>(d.feel.rhythm) < 0 || d.feel.rhythm > Rhythm::ArpUpDown || static_cast<int>(d.feel.strum) < 0 ||
+        d.feel.strum > Strum::DownUp || static_cast<int>(d.feel.speed) < 0 || d.feel.speed > StrumSpeed::Loose ||
+        static_cast<int>(d.feel.humanise) < 0 || d.feel.humanise > Humanise::Heavy) {
+        return "feel enum out of range";
+    }
     std::set<int> ids;
     for (const ChordEvent& e : d.events) {
         if (!ids.insert(e.id).second) {
@@ -235,6 +246,13 @@ std::string invariantProblem(const DocumentStore& store, bool snapshot = true) {
         const json j = json::parse(snap);
         if (!j.is_object() || j.value("schema", 0) != kJsonSchema) {
             return "snapshot is not a schema-1 object";
+        }
+        if (j.at("meter") != json({{"num", d.meter.num}, {"den", d.meter.den}})) {
+            return "snapshot meter disagrees with the document";
+        }
+        if (!j.at("feel").is_object() || j.at("feel").size() != 4 || !j.at("feelLimited").is_boolean() ||
+            j.at("feelLimited").get<bool>() != compile(d).feelLimited) {
+            return "snapshot feel or feelLimited disagrees with the document";
         }
         const json sId = j.at("selectedEventId");
         if (sel == kNoEventId ? !sId.is_null() : sId != sel) {
@@ -311,8 +329,8 @@ std::string readFixture(const char* name) {
     return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
 }
 
-/// One valid message for every command name of json_api.h (three for browseKey, two each for selectEvent and
-/// loadPreset), against ids 1..4 and section ids 1..2 of `prefilledStore`.
+/// One valid message for every command name of json_api.h (three for browseKey, two each for selectEvent,
+/// loadPreset, setFeel and setMeter), against ids 1..4 and section ids 1..2 of `prefilledStore`.
 std::vector<std::string> commandCorpus() {
     const std::vector<json> bodies = {
         {{"cmd", "setKey"}, {"letter", "D"}, {"alter", -1}, {"mode", "Dorian"}},
@@ -344,6 +362,10 @@ std::vector<std::string> commandCorpus() {
         {{"cmd", "setRelationMode"}, {"mode", "voiceLeading"}},
         {{"cmd", "loadPreset"}, {"id", "andalusian"}, {"mode", "append"}},
         {{"cmd", "loadPreset"}, {"id", "blues-12"}, {"mode", "replace"}},
+        {{"cmd", "setFeel"}, {"rhythm", "lowThenUpper"}, {"strum", "downUp"}, {"strumSpeed", "loose"}, {"humanise", "heavy"}},
+        {{"cmd", "setFeel"}, {"rhythm", "block"}, {"strum", "off"}, {"strumSpeed", "medium"}, {"humanise", "off"}},
+        {{"cmd", "setMeter"}, {"num", 6}, {"den", 8}},
+        {{"cmd", "setMeter"}, {"num", 4}, {"den", 4}},
         {{"cmd", "undo"}},
         {{"cmd", "redo"}},
     };
@@ -445,6 +467,7 @@ TEST_CASE("json robustness: seeded mutation fuzz of both readers keeps every inv
     const std::size_t commandCount = corpus.size();
     corpus.push_back(readFixture("state-progression.json"));
     corpus.push_back(readFixture("state-legacy-phase1.json"));
+    corpus.push_back(readFixture("state-feel.json"));
     for (std::size_t i = commandCount; i < corpus.size(); ++i) {
         REQUIRE_MESSAGE(!corpus[i].empty(), "state fixture missing");
     }
@@ -502,6 +525,82 @@ TEST_CASE("json robustness: seeded mutation fuzz of both readers keeps every inv
     // both sides.
     CHECK(accepted > 50);
     CHECK(accepted < kIterations);
+}
+
+// ---- feel and meter payloads ----
+
+TEST_CASE("json robustness: mutated setFeel and setMeter payloads apply or reject atomically") {
+    const std::vector<std::string> corpus = {
+        json({{"schema", kJsonSchema}, {"cmd", "setFeel"}, {"rhythm", "arpUpDown"}, {"strum", "downUp"},
+              {"strumSpeed", "loose"}, {"humanise", "heavy"}}).dump(),
+        json({{"schema", kJsonSchema}, {"cmd", "setFeel"}, {"rhythm", "block"}, {"strum", "off"},
+              {"strumSpeed", "medium"}, {"humanise", "off"}}).dump(),
+        json({{"schema", kJsonSchema}, {"cmd", "setMeter"}, {"num", 7}, {"den", 8}}).dump(),
+        json({{"schema", kJsonSchema}, {"cmd", "setMeter"}, {"num", 4}, {"den", 4}}).dump(),
+    };
+    Rng rng{0xD1B54A32D192ED03ull};
+    DocumentStore cmdStore = prefilledStore(true);
+    DocumentStore stateStore = prefilledStore(true);
+    int accepted = 0;
+    constexpr int kFeelIterations = 1000;
+    for (int i = 0; i < kFeelIterations; ++i) {
+        if (i % 25 == 0) {
+            cmdStore = prefilledStore((i / 25) % 2 == 0);
+            stateStore = prefilledStore((i / 25) % 2 == 0);
+        }
+        std::string m = corpus[rng.below(corpus.size())];
+        const std::size_t mutations = rng.below(2) == 0 ? 1 : 1 + rng.below(3);
+        for (std::size_t k = 0; k < mutations; ++k) {
+            mutateOnce(m, rng);
+        }
+        bool commandAccepted = false;
+        const std::string problem = feed(cmdStore, stateStore, m, &commandAccepted);
+        if (!problem.empty()) {
+            FAIL_CHECK(problem << " [iteration " << i << ", input=" << escaped(m) << "]");
+            break;
+        }
+        accepted += commandAccepted ? 1 : 0;
+    }
+    CHECK(accepted > 10);
+    CHECK(accepted < kFeelIterations);
+}
+
+TEST_CASE("json robustness: every valid feel and meter keeps the invariants and survives a save") {
+    const char* const rhythms[] = {"block", "pulse", "subdivided", "offbeats", "lowThenUpper", "arpUp", "arpUpDown"};
+    const char* const strums[] = {"off", "down", "up", "downUp"};
+    const char* const speeds[] = {"tight", "medium", "loose"};
+    const char* const humanises[] = {"off", "light", "medium", "heavy"};
+    DocumentStore cmdStore = prefilledStore();
+    DocumentStore stateStore = prefilledStore();
+    int n = 0;
+    for (const char* r : rhythms) {
+        for (const char* st : strums) {
+            for (const char* sp : speeds) {
+                for (const char* h : humanises) {
+                    // One meter per feel, cycled, so that every meter meets several feels.
+                    static const int kMeters[][2] = {{4, 4}, {3, 4}, {6, 8}, {7, 8}, {2, 4}, {16, 8}, {1, 2}, {5, 4}};
+                    const int* meter = kMeters[n++ % 8];
+                    const std::string feelMsg =
+                        json({{"schema", kJsonSchema}, {"cmd", "setFeel"}, {"rhythm", r}, {"strum", st},
+                              {"strumSpeed", sp}, {"humanise", h}}).dump();
+                    const std::string meterMsg =
+                        json({{"schema", kJsonSchema}, {"cmd", "setMeter"}, {"num", meter[0]}, {"den", meter[1]}}).dump();
+                    for (const std::string& m : {feelMsg, meterMsg}) {
+                        bool accepted = false;
+                        const std::string problem = feed(cmdStore, stateStore, m, &accepted);
+                        REQUIRE_MESSAGE(problem.empty(), problem << " input=" << m);
+                        CHECK(accepted);
+                    }
+                    // The save carries both and loads back to the same document.
+                    DocumentStore again;
+                    std::string error;
+                    REQUIRE_MESSAGE(loadStateJson(again, stateJson(cmdStore), error), error);
+                    CHECK(again.doc() == cmdStore.doc());
+                }
+            }
+        }
+    }
+    CHECK(n == 7 * 4 * 3 * 4);
 }
 
 // ---- explicit worst cases ----

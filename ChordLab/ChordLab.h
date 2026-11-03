@@ -73,7 +73,7 @@ private:
   void PushStatus(uint32_t incompleteBlocks);
   // Main thread: pushes {"schema":1,"ppq":ppq,"playing":playing} (the playhead) to the editor.
   void PushTransport(double ppq, bool playing);
-  // Main thread: compiles the document, writes it as a format 0 MIDI file under a unique, never-reused
+  // Main thread: exports the document (chordlab::exportMidi under mModelMutex, with its meter), writes it as a format 0 MIDI file under a unique, never-reused
   // name in the temporary directory at the host's tempo and pushes kMsgTagExportReady with the path, or
   // kMsgTagError. Nothing is rewritten or deleted here except exports older than ten minutes (see the
   // cleanup note in ChordLab.mm).
@@ -82,9 +82,11 @@ private:
   // with compileSection (re-based to beat 0) and named after the key and the section; an unknown id or a
   // malformed message is a kMsgTagError.
   void HandleExportSection(std::string_view json);
-  // Main thread: the shared tail of the two exports: writes `compiled` under a unique name carrying
+  // The export tempo: the host's last seen bpm, 120 before the first block or when unusable.
+  double ExportBpm() const;
+  // Main thread: the shared tail of the two exports: writes `bytes` (chordlab::exportMidi) under a unique name carrying
   // `label` ("C Ionian", "C Ionian-Verse"; sanitised), purges stale exports and pushes the path or an error.
-  void WriteExport(const chordlab::Compiled& compiled, const std::string& label);
+  void WriteExport(const std::vector<uint8_t>& bytes, const std::string& label);
   // Main thread: pushes {"schema":1,"path":path} to the editor.
   void PushExportReady(const std::string& path);
 

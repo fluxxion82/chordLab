@@ -3,6 +3,7 @@
 #include "chordlab/chord.h"
 #include "chordlab/compiler.h"
 #include "chordlab/document.h"
+#include "chordlab/export.h"
 #include "chordlab/smf.h"
 
 #include <algorithm>
@@ -687,4 +688,147 @@ TEST_CASE("writeFile: refuses to write nothing") {
     const TempFile file("empty");
     CHECK_FALSE(writeFile(file.string(), Bytes{}));
     CHECK_FALSE(std::filesystem::exists(file.path));
+}
+
+// --- exportMidi (feel plan, Task 4) ---------------------------------------------------------------------------
+
+namespace {
+
+/// A channel event as (tick, status, pitch, velocity), for literal comparison.
+struct Note {
+    std::uint32_t tick;
+    int status;
+    int pitch;
+    int velocity;
+};
+
+bool operator==(const Note& a, const Note& b) {
+    return a.tick == b.tick && a.status == b.status && a.pitch == b.pitch && a.velocity == b.velocity;
+}
+
+std::vector<Note> notesOf(const Parsed& parsed) {
+    std::vector<Note> out;
+    for (const ParsedEvent& e : channelEvents(parsed)) {
+        REQUIRE(e.data.size() == 2);
+        out.push_back(Note{e.tick, e.status, e.data[0], e.data[1]});
+    }
+    return out;
+}
+
+std::string describe(const std::vector<Note>& notes) {
+    std::ostringstream os;
+    for (const Note& n : notes) os << " " << std::hex << n.status << std::dec << ":" << n.pitch << "@" << n.tick;
+    return os.str();
+}
+
+}  // namespace
+
+TEST_CASE("exportMidi: Feel{} in 4/4 is today's export, the golden one-bar file included") {
+    CHECK(exportMidi(cMajorBars(1), -1, 120.0) == kGolden);
+    // C Am F G7, one bar each, auto voice-leading off, 120 bpm: the bytes writeSmf0 wrote before feels existed.
+    DocumentStore store;
+    store.appendChord(kC, 4.0, 100);
+    store.appendChord(Chord{9, &chordType("min")}, 4.0, 100);
+    store.appendChord(Chord{5, &chordType("maj")}, 4.0, 100);
+    store.appendChord(Chord{7, &chordType("7")}, 4.0, 100);
+    const Bytes expected = {
+        'M', 'T', 'h', 'd', 0, 0, 0, 6, 0, 0, 0, 1, 0x01, 0xE0,
+        'M', 'T', 'r', 'k', 0, 0, 0, 0x7F,                                                       // 127 bytes
+        0x00, 0xFF, 0x51, 0x03, 0x07, 0xA1, 0x20,                                                // 500000 us
+        0x00, 0xFF, 0x58, 0x04, 0x04, 0x02, 0x18, 0x08,                                          // 4/4
+        0x00, 0x90, 0x3C, 0x64, 0x00, 0x90, 0x40, 0x64, 0x00, 0x90, 0x43, 0x64,                  // C on at 0
+        0x8F, 0x00, 0x80, 0x3C, 0x00, 0x00, 0x80, 0x40, 0x00, 0x00, 0x80, 0x43, 0x00,            // C off at 1920
+        0x00, 0x90, 0x45, 0x64, 0x00, 0x90, 0x48, 0x64, 0x00, 0x90, 0x4C, 0x64,                  // Am on
+        0x8F, 0x00, 0x80, 0x45, 0x00, 0x00, 0x80, 0x48, 0x00, 0x00, 0x80, 0x4C, 0x00,            // Am off at 3840
+        0x00, 0x90, 0x41, 0x64, 0x00, 0x90, 0x45, 0x64, 0x00, 0x90, 0x48, 0x64,                  // F on
+        0x8F, 0x00, 0x80, 0x41, 0x00, 0x00, 0x80, 0x45, 0x00, 0x00, 0x80, 0x48, 0x00,            // F off at 5760
+        0x00, 0x90, 0x43, 0x64, 0x00, 0x90, 0x47, 0x64, 0x00, 0x90, 0x4A, 0x64, 0x00, 0x90, 0x4D, 0x64,  // G7 on
+        0x8F, 0x00, 0x80, 0x43, 0x00, 0x00, 0x80, 0x47, 0x00, 0x00, 0x80, 0x4A, 0x00, 0x00, 0x80, 0x4D, 0x00,  // 7680
+        0x00, 0xFF, 0x2F, 0x00,
+    };
+    const Bytes actual = exportMidi(store.doc(), -1, 120.0);
+    INFO("actual:   " << hex(actual));
+    CHECK(actual == expected);
+    CHECK(actual == writeSmf0(compile(store.doc()), 120.0, 4, 4, 480));
+    // Auto voice-leading on: still exactly writeSmf0 of the block compile.
+    store.setAutoVoiceLead(true);
+    CHECK(exportMidi(store.doc(), -1, 120.0) == writeSmf0(compile(store.doc()), 120.0, 4, 4, 480));
+}
+
+TEST_CASE("exportMidi: a one-bar C major pulse at 120 bpm round-trips to literal ticks") {
+    DocumentStore store;
+    store.appendChord(kC, 4.0, 100);
+    store.setFeel(Feel{Rhythm::Pulse});
+    const Parsed parsed = requireWellFormed(exportMidi(store.doc(), -1, 120.0));
+    CHECK(parsed.events[1].data == Bytes{0x04, 0x02, 0x18, 0x08});
+    const std::vector<Note> notes = notesOf(parsed);
+    const std::vector<Note> expected{
+        {0, 0x90, 60, 100},    {0, 0x90, 64, 100},    {0, 0x90, 67, 100},    {432, 0x80, 60, 0},
+        {432, 0x80, 64, 0},    {432, 0x80, 67, 0},    {480, 0x90, 60, 90},   {480, 0x90, 64, 90},
+        {480, 0x90, 67, 90},   {912, 0x80, 60, 0},    {912, 0x80, 64, 0},    {912, 0x80, 67, 0},
+        {960, 0x90, 60, 90},   {960, 0x90, 64, 90},   {960, 0x90, 67, 90},   {1392, 0x80, 60, 0},
+        {1392, 0x80, 64, 0},   {1392, 0x80, 67, 0},   {1440, 0x90, 60, 90},  {1440, 0x90, 64, 90},
+        {1440, 0x90, 67, 90},  {1872, 0x80, 60, 0},   {1872, 0x80, 64, 0},   {1872, 0x80, 67, 0},
+    };
+    INFO(describe(notes));
+    CHECK(notes == expected);
+    CHECK(parsed.events.back().tick == 1920);  // end of track at the bar's end: the trailing gap survives
+}
+
+TEST_CASE("exportMidi: a strummed pulse round-trips to literal ticks at 480 tpqn") {
+    // Pulse + strum down, medium (20 ticks of 960 = 10 of 480): each hit's notes 10 apart, offs together.
+    DocumentStore store;
+    store.appendChord(kC, 4.0, 100);
+    store.setFeel(Feel{Rhythm::Pulse, Strum::Down, StrumSpeed::Medium, Humanise::Off});
+    const std::vector<Note> notes = notesOf(requireWellFormed(exportMidi(store.doc(), -1, 120.0)));
+    const std::vector<Note> expected{
+        {0, 0x90, 60, 100},    {10, 0x90, 64, 100},   {20, 0x90, 67, 100},   {432, 0x80, 60, 0},
+        {432, 0x80, 64, 0},    {432, 0x80, 67, 0},    {480, 0x90, 60, 90},   {490, 0x90, 64, 90},
+        {500, 0x90, 67, 90},   {912, 0x80, 60, 0},    {912, 0x80, 64, 0},    {912, 0x80, 67, 0},
+        {960, 0x90, 60, 90},   {970, 0x90, 64, 90},   {980, 0x90, 67, 90},   {1392, 0x80, 60, 0},
+        {1392, 0x80, 64, 0},   {1392, 0x80, 67, 0},   {1440, 0x90, 60, 90},  {1450, 0x90, 64, 90},
+        {1460, 0x90, 67, 90},  {1872, 0x80, 60, 0},   {1872, 0x80, 64, 0},   {1872, 0x80, 67, 0},
+    };
+    INFO(describe(notes));
+    CHECK(notes == expected);
+}
+
+TEST_CASE("exportMidi: the document's meter goes into the time signature") {
+    Document doc = cMajorBars(1);
+    doc.meter = Meter{6, 8};
+    CHECK(requireWellFormed(exportMidi(doc, -1, 120.0)).events[1].data == Bytes{0x06, 0x03, 0x18, 0x08});
+    doc.feel = Feel{Rhythm::Subdivided};
+    CHECK(requireWellFormed(exportMidi(doc, -1, 120.0)).events[1].data == Bytes{0x06, 0x03, 0x18, 0x08});
+    doc.meter = Meter{7, 8};
+    CHECK(requireWellFormed(exportMidi(doc, -1, 120.0)).events[1].data == Bytes{0x07, 0x03, 0x18, 0x08});
+    doc.meter = Meter{3, 4};
+    CHECK(requireWellFormed(exportMidi(doc, -1, 120.0)).events[1].data == Bytes{0x03, 0x02, 0x18, 0x08});
+}
+
+TEST_CASE("exportMidi: a section exports its own chords, rebased; nothing to write gives no bytes") {
+    DocumentStore store;
+    store.appendChord(kC, 4.0, 100);
+    store.appendChord(Chord{9, &chordType("min")}, 2.0, 80);
+    store.addSection(1, "B");  // sections at 0 and 1
+    store.setFeel(Feel{Rhythm::Pulse});
+    const Document& doc = store.doc();
+    // Am over [3840, 5760): hits at 3840 (bar start, 80) and 4800 (pulse, round(80 * 0.9) = 72), gated 864.
+    const std::vector<Note> notes = notesOf(requireWellFormed(exportMidi(doc, 1, 120.0)));
+    const std::vector<Note> expected{
+        {0, 0x90, 69, 80},   {0, 0x90, 72, 80},   {0, 0x90, 76, 80},   {432, 0x80, 69, 0},  {432, 0x80, 72, 0},
+        {432, 0x80, 76, 0},  {480, 0x90, 69, 72}, {480, 0x90, 72, 72}, {480, 0x90, 76, 72}, {912, 0x80, 69, 0},
+        {912, 0x80, 72, 0},  {912, 0x80, 76, 0},
+    };
+    INFO(describe(notes));
+    CHECK(notes == expected);
+    CHECK(exportMidi(doc, 1, 120.0) == writeSmf0(compileSection(doc, 1), 120.0, 4, 4, 480));
+    CHECK(exportMidi(doc, 0, 120.0) == writeSmf0(compileSection(doc, 0), 120.0, 4, 4, 480));
+
+    CHECK(exportMidi(doc, 2, 120.0).empty());          // no such section
+    CHECK(exportMidi(Document{}, -1, 120.0).empty());  // nothing to write
+    CHECK(exportMidi(Document{}, 0, 120.0).empty());
+    CHECK(exportMidi(cMajorBars(1), 1, 120.0).empty());  // no sections: only index 0
+    CHECK(exportMidi(cMajorBars(1), 0, 120.0) == kGolden);
+    CHECK(exportMidi(doc, -1, 0.0).empty());           // a tempo the writer refuses
+    CHECK(exportMidi(doc, -1, std::numeric_limits<double>::quiet_NaN()).empty());
 }

@@ -1,7 +1,9 @@
 #pragma once
 
 #include "chordlab/chord.h"
+#include "chordlab/feel.h"
 #include "chordlab/limits.h"
+#include "chordlab/meter.h"
 #include "chordlab/pitch.h"
 #include "chordlab/relatedness.h"
 #include "chordlab/scale.h"
@@ -43,7 +45,8 @@ constexpr int kMaxSectionNameBytes = 64;
 /// rejects a state with more, and `replace` asserts. The bound exists so that a compiled document always
 /// fits one scheduler snapshot: kMaxChords chords x at most 8 voices (headroom; `voicing` has one note per
 /// chord tone, at most 5 today, the ninths) x 2 events (on and off) = 4096 = `kMaxSnapshotEvents`. With
-/// today's voicings a full document compiles to 2560 events.
+/// today's voicings a full document compiles to 2560 events. A feel (feel.h) that would perform more than
+/// `kMaxSnapshotEvents` falls back to these block chords, so the bound holds for every feel.
 constexpr int kMaxChords = 256;
 static_assert(static_cast<std::size_t>(kMaxChords) * 8 * 2 <= kMaxSnapshotEvents,
               "a full document of eight-note chords must fit one scheduler snapshot");
@@ -113,7 +116,7 @@ inline bool operator!=(const Section& a, const Section& b) noexcept {
 /// the transport toggles, the palette's relation mode and the key-transpose switch and hint flag. Plain data
 /// so that `DocumentStore` can snapshot it for undo; mutate it through the store, not directly.
 ///
-/// Undo scope: `events`, `sections`, `projectKey` and `autoVoiceLead` are undoable (they are what the user
+/// Undo scope: `events`, `sections`, `projectKey`, `autoVoiceLead`, `feel` and `meter` are undoable (they are what the user
 /// composes: the flag changes which notes `compile` produces, so toggling it is an edit of the progression,
 /// not a view of it). `browsedKey`, `progressionLoop`, `followHost`, `relationMode`, `transposeWithKey` and
 /// `keyHintSeen` are live session state: changing them never creates history, and undo/redo leave their
@@ -124,6 +127,8 @@ struct Document {
     std::vector<ChordEvent> events;  // playback order; chords abut, no gaps
     std::vector<Section> sections;   // sorted by firstEventIndex, strictly increasing from 0, each < events.size()
     bool autoVoiceLead = false;      // compile picks each non-manual chord's inversion and octave (compiler.h)
+    Feel feel;                       // how the chords are played (feel.h); undoable
+    Meter meter;                     // time signature, 4/4 by default; undoable
     bool progressionLoop = true;
     bool followHost = true;
     RelationMode relationMode = RelationMode::Blend;  // what sizes the palette cells (relatedness.h, R5)
@@ -147,6 +152,7 @@ struct Document {
 inline bool operator==(const Document& a, const Document& b) noexcept {
     return a.projectKey == b.projectKey && a.browsedKey == b.browsedKey && a.events == b.events &&
            a.sections == b.sections && a.autoVoiceLead == b.autoVoiceLead &&
+           a.feel == b.feel && a.meter == b.meter &&
            a.progressionLoop == b.progressionLoop && a.followHost == b.followHost &&
            a.relationMode == b.relationMode && a.transposeWithKey == b.transposeWithKey &&
            a.keyHintSeen == b.keyHintSeen;
@@ -316,6 +322,12 @@ public:
 
     /// Undoable: the flag changes what `compile` produces (see `Document`).
     void setAutoVoiceLead(bool on);
+
+    /// Undoable: the feel changes how the progression is played. An equal value pushes no history.
+    void setFeel(Feel feel);
+
+    /// Undoable. `meter` must satisfy `validMeter`. An equal value pushes no history.
+    void setMeter(Meter meter);
 
     /// Live state, never recorded in the history. Same preconditions as `setProjectKey`.
     void setBrowsedKey(Key key);

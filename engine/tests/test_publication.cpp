@@ -232,3 +232,123 @@ TEST_CASE("publication: the manual flag alone publishes only when it changes the
     CHECK(eventsOf(*slot) == chosen);
     CHECK_FALSE(fillSlot(store.doc(), *slot, last));
 }
+
+// --- Feel (feel plan, Task 4) --------------------------------------------------------------------------------
+
+TEST_CASE("publication: fillSlot publishes the performed events") {
+    DocumentStore store;
+    store.appendChord(chord(0, "maj"), 4.0, 100);
+    store.setFeel(Feel{Rhythm::Pulse});
+    Publication last;
+    auto slot = newSlot();
+    REQUIRE(fillSlot(store.doc(), *slot, last));
+    CHECK(slot->count == 24);  // four hits of three notes, ons and offs
+    CHECK(eventsOf(*slot) == compile(store.doc()).events);
+    CHECK(slot->events[3] == NoteEvent{0.9, false, 60, 0});  // the first gated off, 864 / 960
+    CHECK(slot->events[6] == NoteEvent{1.0, true, 60, 90});
+    CHECK(slot->endBeat == 4.0);
+}
+
+TEST_CASE("publication: a feel change bumps the generation only when it changes the events") {
+    DocumentStore store;
+    store.appendChord(chord(0, "maj"), 4.0, 100);
+    store.appendChord(chord(9, "min"), 2.0, 90);
+    Publication last;
+    auto slot = newSlot();
+    REQUIRE(fillSlot(store.doc(), *slot, last));
+    CHECK(last.generation == 1);
+
+    // The strum speed alone, with the strum off, is no feel: same block events, nothing published.
+    store.setFeel(Feel{Rhythm::Block, Strum::Off, StrumSpeed::Loose, Humanise::Off});
+    CHECK_FALSE(fillSlot(store.doc(), *slot, last));
+    CHECK(last.generation == 1);
+
+    store.setFeel(Feel{Rhythm::ArpUp, Strum::Down, StrumSpeed::Medium, Humanise::Off});
+    REQUIRE(fillSlot(store.doc(), *slot, last));
+    CHECK(last.generation == 2);
+    const std::vector<NoteEvent> arp = eventsOf(*slot);
+
+    // Arpeggios ignore the strum: neither its speed nor its direction changes an event.
+    store.setFeel(Feel{Rhythm::ArpUp, Strum::Down, StrumSpeed::Loose, Humanise::Off});
+    CHECK_FALSE(fillSlot(store.doc(), *slot, last));
+    store.setFeel(Feel{Rhythm::ArpUp, Strum::Up, StrumSpeed::Tight, Humanise::Off});
+    CHECK_FALSE(fillSlot(store.doc(), *slot, last));
+    CHECK(last.generation == 2);
+    CHECK(eventsOf(*slot) == arp);
+
+    // Recompiling the same document publishes nothing.
+    CHECK_FALSE(fillSlot(store.doc(), *slot, last));
+
+    // A rhythm or a humanise that moves notes is content.
+    store.setFeel(Feel{Rhythm::ArpUpDown, Strum::Up, StrumSpeed::Tight, Humanise::Off});
+    REQUIRE(fillSlot(store.doc(), *slot, last));
+    CHECK(last.generation == 3);
+    store.setFeel(Feel{Rhythm::ArpUpDown, Strum::Up, StrumSpeed::Tight, Humanise::Light});
+    REQUIRE(fillSlot(store.doc(), *slot, last));
+    CHECK(last.generation == 4);
+    CHECK(eventsOf(*slot) == compile(store.doc()).events);
+
+    // Back to block chords: today's events again.
+    store.setFeel(Feel{});
+    REQUIRE(fillSlot(store.doc(), *slot, last));
+    CHECK(last.generation == 5);
+    CHECK(slot->count == 12);
+}
+
+TEST_CASE("publication: an over-budget feel publishes block chords") {
+    DocumentStore store;
+    for (int i = 0; i < 64; ++i) store.appendChord(chord(0, "9"), 4.0, 100);
+    Publication last;
+    auto slot = newSlot();
+    REQUIRE(fillSlot(store.doc(), *slot, last));
+    const std::vector<NoteEvent> block = eventsOf(*slot);
+    store.setFeel(Feel{Rhythm::Subdivided});  // 5120 performed events: over 4096
+    CHECK_FALSE(fillSlot(store.doc(), *slot, last));  // the same block events: nothing to publish
+    CHECK(eventsOf(*slot) == block);
+    CHECK(compile(store.doc()).feelLimited);
+}
+
+TEST_CASE("publication: a performed non-tick-aligned document publishes the compiled period as endBeat") {
+    // Three chords of 0.2506 beat: boundaries 241, 481 and 722 ticks, so the period is 722 / 960 beat, while
+    // the authored sum is 0.7518 (721.7 ticks).
+    DocumentStore store;
+    for (int i = 0; i < 3; ++i) store.appendChord(chord(0, "maj"), 0.2506, 100);
+    Publication last;
+    auto slot = newSlot();
+    REQUIRE(fillSlot(store.doc(), *slot, last));
+    CHECK(slot->endBeat == store.doc().endBeat());  // block chords: the authored sum
+    CHECK(last.generation == 1);
+
+    store.setFeel(Feel{Rhythm::Pulse});
+    REQUIRE(fillSlot(store.doc(), *slot, last));
+    CHECK(last.generation == 2);
+    CHECK(slot->endBeat == 722.0 / 960.0);
+    CHECK(slot->endBeat != store.doc().endBeat());
+    CHECK(slot->endBeat == compile(store.doc()).endBeat);
+    // Pulse: one hit per chord, gated to 9/10 of its length: ons at 0, 241 and 481, offs at 216, 457 and 697.
+    CHECK(slot->count == 18);
+    CHECK(slot->events[0] == NoteEvent{0.0, true, 60, 100});
+    CHECK(slot->events[3] == NoteEvent{216.0 / 960.0, false, 60, 0});
+    CHECK(slot->events[6] == NoteEvent{241.0 / 960.0, true, 60, 100});
+    CHECK(slot->events[17] == NoteEvent{697.0 / 960.0, false, 67, 0});
+    CHECK(slot->events[17].beat < slot->endBeat);
+
+    // Back to block chords: the authored sum again, published as a change.
+    store.setFeel(Feel{});
+    REQUIRE(fillSlot(store.doc(), *slot, last));
+    CHECK(slot->endBeat == store.doc().endBeat());
+}
+
+TEST_CASE("publication: an over-budget non-tick-aligned document publishes the authored sum as endBeat") {
+    DocumentStore store;
+    for (int i = 0; i < 64; ++i) store.appendChord(chord(0, "9"), 4.0, 100);
+    store.appendChord(chord(0, "9"), 4.0004, 100);
+    store.setFeel(Feel{Rhythm::Subdivided});
+    REQUIRE(compile(store.doc()).feelLimited);
+    Publication last;
+    auto slot = newSlot();
+    REQUIRE(fillSlot(store.doc(), *slot, last));
+    CHECK(slot->endBeat == store.doc().endBeat());
+    CHECK(slot->endBeat != 260.0);
+    CHECK(slot->count == 650);
+}
