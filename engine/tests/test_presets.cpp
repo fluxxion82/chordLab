@@ -347,6 +347,25 @@ TEST_CASE("appendProgression: onto an unsectioned progression, a leading default
     CHECK(store.doc().events.size() == 1);
 }
 
+TEST_CASE("appendProgression: the leading default section is named by count, not by id, after sections came and went") {
+    DocumentStore store;
+    REQUIRE(store.appendChord(chord(0, "maj")) == 1);
+    REQUIRE(store.appendChord(chord(9, "min")) == 2);
+    REQUIRE(store.addSection(0, "") == 1);
+    REQUIRE(store.addSection(1, "") == 2);
+    store.removeSection(2);
+    store.removeSection(1);
+    REQUIRE(store.doc().sections.empty());
+    REQUIRE(store.appendProgression(kFourSteps, "Axis"));
+    REQUIRE(store.doc().sections.size() == 2);
+    CHECK(store.doc().sections[0] == Section{3, "Section 1", 2, 0});  // not "Section 3"
+    CHECK(store.doc().sections[1] == Section{4, "Axis", 3, 2});
+    // An empty preset name takes the next default: the third section is "Section 3".
+    REQUIRE(store.appendProgression(kFourSteps, ""));
+    REQUIRE(store.doc().sections.size() == 3);
+    CHECK(store.doc().sections[2] == Section{5, "Section 3", 4, 6});
+}
+
 TEST_CASE("appendProgression: onto a sectioned progression, one new section at the join") {
     DocumentStore store = twoChordStore();
     REQUIRE(store.addSection(0, "Verse") == 1);

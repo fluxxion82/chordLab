@@ -41,14 +41,48 @@ enum HarmonyText {
     return chips
   }
 
-  /// A voicing as note names with octaves, middle C (MIDI 60) being C4: "C4  E4  G4".
-  static func voicingText(_ voicing: [Int]) -> String {
-    voicing.map(ChordSymbol.noteName(midi:)).joined(separator: "  ")
+  /// A voicing as note names with octaves, middle C (MIDI 60) being C4: "C4  E4  G4". With the engine's
+  /// `names` (`voicingNames`: one per note, spelled as the chord is, ASCII accidentals) those are shown, as
+  /// glyphs: "E4  G♯4  B4  D5" for E7, "F4  A♭4  C5" for Fm. Without them, or with a list of another
+  /// length (which cannot be trusted to line up), the sharp-spelled MIDI names.
+  static func voicingText(_ voicing: [Int], names: [String]? = nil) -> String {
+    noteNames(voicing, names: names).joined(separator: "  ")
   }
 
-  /// "Inversion 1 · bass E4" (the bass is the voicing's lowest note, what sounds).
-  static func inversionLabel(_ inversion: Int, bass: Int?) -> String {
-    "Inversion \(inversion)" + (bass.map { " · bass " + ChordSymbol.noteName(midi: $0) } ?? "")
+  /// `voicing`'s note names: the engine's `names` as glyphs when they match it one to one, else
+  /// `ChordSymbol.noteName` of each note.
+  static func noteNames(_ voicing: [Int], names: [String]?) -> [String] {
+    if let names = names, names.count == voicing.count {
+      return names.map(ChordSymbol.glyphs)
+    }
+    return voicing.map(ChordSymbol.noteName(midi:))
+  }
+
+  /// A tip's verdict on the project key: "In key" while `outOfKey` is empty, else "Out of key: " and the
+  /// borrowed notes, named by the engine's `names` (`outOfKeyNames`, as the chord spells them: "G♯" in
+  /// E7, "A♭" in Fm) when they match one to one, else by their sharp-spelled pitch-class names.
+  static func outOfKeyText(_ outOfKey: [Int], names: [String]?) -> String {
+    if outOfKey.isEmpty {
+      return "In key"
+    }
+    let list = names.flatMap { $0.count == outOfKey.count ? $0.map(ChordSymbol.glyphs) : nil }
+      ?? outOfKey.map(ChordSymbol.pitchClassName)
+    return "Out of key: " + list.joined(separator: ", ")
+  }
+
+  /// The bass note's name: the engine's spelled `name` as glyphs when there is one, else the MIDI note's
+  /// sharp-spelled name; nil without either.
+  private static func bassText(_ bass: Int?, _ name: String?) -> String? {
+    if let name = name {
+      return ChordSymbol.glyphs(name)
+    }
+    return bass.map(ChordSymbol.noteName(midi:))
+  }
+
+  /// "Inversion 1 · bass E4" (the bass is the voicing's lowest note, what sounds; `bassName` its spelled
+  /// name from the engine, the first of `voicingNames`, when there is one).
+  static func inversionLabel(_ inversion: Int, bass: Int?, bassName: String? = nil) -> String {
+    "Inversion \(inversion)" + (bassText(bass, bassName).map { " · bass " + $0 } ?? "")
   }
 
   /// "Octave +1", "Octave 0", "Octave −1".
@@ -68,12 +102,13 @@ enum HarmonyText {
   /// "Manual voicing · Inversion 1 · bass E4 · Octave 0", "Default voicing · Inversion 0 · bass C4 ·
   /// Octave 0" (auto off), or "Automatic voicing · bass E4" (auto on, not manual: the notes say the
   /// rest, the stored inversion and octave are not what sounds).
-  static func voicingStatus(inversion: Int, octave: Int, manual: Bool, autoVoiceLead: Bool, bass: Int?) -> String {
+  static func voicingStatus(inversion: Int, octave: Int, manual: Bool, autoVoiceLead: Bool, bass: Int?,
+                            bassName: String? = nil) -> String {
     if storedVoicingSounds(manual: manual, autoVoiceLead: autoVoiceLead) {
-      return (manual ? "Manual voicing" : "Default voicing") + " · " + inversionLabel(inversion, bass: bass) +
-             " · " + octaveLabel(octave)
+      return (manual ? "Manual voicing" : "Default voicing") + " · " +
+             inversionLabel(inversion, bass: bass, bassName: bassName) + " · " + octaveLabel(octave)
     }
-    return "Automatic voicing" + (bass.map { " · bass " + ChordSymbol.noteName(midi: $0) } ?? "")
+    return "Automatic voicing" + (bassText(bass, bassName).map { " · bass " + $0 } ?? "")
   }
 
   /// A suggestion's reasons as one hover line: the `reasonTexts` joined with " · ".

@@ -13,7 +13,7 @@ import SwiftUI
 ///
 /// Short on purpose (four rows and a line of notes, the arpeggio note beside the speed): it opens beside the Feel button, to its left (the
 /// button ends the transport row, so a popover below it would run past the window's right edge at 700 pt),
-/// and stays inside the 700 × 480 minimum window.
+/// and stays inside the 700 × 540 minimum window.
 struct FeelPopoverView: View {
   @EnvironmentObject var state: ChordLabState
 

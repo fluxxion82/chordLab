@@ -6,6 +6,7 @@
 #include "chordlab/symbol.h"
 
 #include <array>
+#include <cstdlib>
 #include <string>
 #include <string_view>
 
@@ -384,6 +385,75 @@ TEST_CASE("romanNumeral: every root in every key gets at most one accidental, re
                         CHECK(isNumeralLetter(numeral[0]));
                         CHECK(inScale(root, k.tonicPc(), Mode::Ionian));
                     }
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("chordToneSpelling: tones are spelled from the root's letter, not as the key spells the pitch class") {
+    // E7 in C major: G# is the third (the key alone would say Ab); its seventh is D.
+    CHECK(chordToneSpelling(chord(E, "7"), Ab, kCIonian).text() == "G#");
+    CHECK(chordToneSpelling(chord(E, "7"), D, kCIonian).text() == "D");
+    CHECK(chordToneSpelling(chord(E, "7"), E, kCIonian).text() == "E");
+    // Fm and Ab in C major keep the key's Ab: it is their third and their root.
+    CHECK(chordToneSpelling(chord(F, "min"), Ab, kCIonian).text() == "Ab");
+    CHECK(chordToneSpelling(chord(Ab, "maj"), Ab, kCIonian).text() == "Ab");
+    CHECK(chordToneSpelling(chord(Ab, "maj"), Eb, kCIonian).text() == "Eb");
+    // The fold keeps every tone within one accidental: C#'s third E# reads F, Db's third Fb reads E.
+    CHECK(chordToneSpelling(chord(Db, "maj"), F, kCIonian).text() == "F");
+    CHECK(chordToneSpelling(chord(Db, "min"), E, kCIonian).text() == "E");
+    CHECK(chordToneSpelling(chord(Db, "dim7"), Bb, kCIonian).text() == "Bb");  // Cbb
+    // Unless the key itself writes the tone on that letter: E# is the seventh of F# major.
+    CHECK(chordToneSpelling(chord(Db, "7"), F, key('F', 1, Mode::Ionian)).text() == "E#");
+    CHECK(chordToneSpelling(chord(Db, "7"), F, key('G', -1, Mode::Ionian)).text() == "F");
+}
+
+TEST_CASE("chordToneSpelling: diminished fifths, augmented fifths and diminished sevenths by the chord's structure") {
+    CHECK(chordToneSpelling(chord(B, "dim"), F, kCIonian).text() == "F");     // a fifth, not E#
+    CHECK(chordToneSpelling(chord(A, "m7b5"), Eb, kCIonian).text() == "Eb");  // not D#
+    CHECK(chordToneSpelling(chord(A, "dim7"), Eb, kCIonian).text() == "Eb");
+    CHECK(chordToneSpelling(chord(B, "dim7"), Ab, kCIonian).text() == "Ab");  // a diminished seventh, not G#
+    CHECK(chordToneSpelling(chord(C, "aug"), Ab, kCIonian).text() == "G#");   // an augmented fifth, not Ab
+    CHECK(chordToneSpelling(chord(C, "augMaj7"), Ab, kCIonian).text() == "G#");
+    CHECK(chordToneSpelling(chord(C, "7#11"), Fs, kCIonian).text() == "F#");  // a sharp eleventh: the fifth is there
+    CHECK(chordToneSpelling(chord(C, "maj7#11"), Fs, kCIonian).text() == "F#");
+    CHECK(chordToneSpelling(chord(C, "6"), A, kCIonian).text() == "A");       // a sixth: the fifth is there
+    CHECK(chordToneSpelling(chord(C, "m6"), A, kCIonian).text() == "A");
+    CHECK(chordToneSpelling(chord(C, "add9"), D, kCIonian).text() == "D");
+    CHECK(chordToneSpelling(chord(G, "7sus4"), C, kCIonian).text() == "C");
+    // A tone the chord does not hold is read by the same rule: pc 8 above C is a flat sixth.
+    CHECK(chordToneSpelling(chord(C, "maj"), Ab, kCIonian).text() == "Ab");
+    CHECK(chordToneSpelling(chord(C, "maj"), Fs, kCIonian).text() == "F#");
+}
+
+TEST_CASE("chordToneSpelling: every tone of every chord in every canonical key names its pitch class with one accidental at most") {
+    for (const Mode mode : kAllModes) {
+        for (PitchClass tonic = 0; tonic < 12; ++tonic) {
+            const Key k{canonicalTonic(tonic, mode), mode};
+            for (const ChordType& type : allChordTypes()) {
+                for (PitchClass root = 0; root < 12; ++root) {
+                    const Chord c{root, &type};
+                    for (const int interval : type.intervals) {
+                        const PitchClass pc = pitchClassOf(root + interval);
+                        CAPTURE(k.tonic.letter);
+                        CAPTURE(k.tonic.alter);
+                        CAPTURE(static_cast<int>(mode));
+                        CAPTURE(type.id);
+                        CAPTURE(root);
+                        CAPTURE(pc);
+                        const Spelling s = chordToneSpelling(c, pc, k);
+                        CHECK(s.pitchClass() == pc);
+                        CHECK(s.letter >= 'A');
+                        CHECK(s.letter <= 'G');
+                        // A key's own degree may carry a double accidental (Cx, the seventh of D# harmonic
+                        // minor); every other tone folds to one at most.
+                        if (!inScale(pc, k.tonicPc(), mode)) {
+                            CHECK(std::abs(s.alter) <= 1);
+                        }
+                    }
+                    // The root reads as the symbol spells it.
+                    CHECK(chordToneSpelling(c, root, k) == spell(root, k));
                 }
             }
         }

@@ -224,7 +224,8 @@ public:
     /// Appends `chord` to the end of the progression and returns its new id. `chord.type` must be
     /// non-null and `chord.root` in 0..11. `lengthBeats` is clamped to [kMinLengthBeats, kMaxLengthBeats]
     /// and `velocity` to [kMinVelocity, kMaxVelocity]. The sections are untouched: the new chord joins the
-    /// last section, if any.
+    /// last section, if any. The new chord becomes the selection (`selectedEventId`, live state: an undo
+    /// of the append clears it, like any removal), so the suggestions and relations read from it.
     /// Returns `kNoEventId` and changes nothing (no event, no history, no id consumed) when `lengthBeats`
     /// is NaN or infinite, when the document already holds `kMaxChords` chords, or when the id counter
     /// has reached INT_MAX. The counter advances only once the append is committed.
@@ -234,7 +235,7 @@ public:
     /// starts a section named `sectionName` on its first chord (the preset load of P4/P5, json_api.h's
     /// `loadPreset`). Each chord gets a fresh id, in order, velocity 100, inversion 0, octave 0 and no
     /// manual flag (so auto voice-leading applies), and its length clamped as `appendChord` clamps it.
-    /// The new section is made as `addSection` makes one (an empty name takes the default "Section <id>",
+    /// The new section is made as `addSection` makes one (an empty name takes the default "Section <n>",
     /// a long one is cut to `kMaxSectionNameBytes`, the colour is the id's turn in the cycle). Since the
     /// first section must start at 0, appending onto a non-empty progression that has no sections first
     /// gives the chords already there a section of their own (default name and colour, the lower of the
@@ -363,7 +364,9 @@ public:
     void setSelectedEvent(int id);
 
     /// Starts a section on the chord at `firstEventIndex` and returns its new id; the list stays sorted.
-    /// An empty `name` takes the default "Section <id>"; a name longer than `kMaxSectionNameBytes` bytes
+    /// An empty `name` takes the default "Section <n>", n the number of sections there are once it is added,
+    /// moved up past a name a section already has (so a document whose sections came and went shows no gap
+    /// and no repeat); a name longer than `kMaxSectionNameBytes` bytes
     /// is cut down to the bound at a UTF-8 character boundary (a character straddling it is dropped
     /// whole); the colour is the id's turn in the cycle of
     /// `kNumSectionColours` (id 1 gets colour 0). The first section always starts at 0: when the document

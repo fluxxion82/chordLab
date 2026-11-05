@@ -70,7 +70,7 @@ struct Suggestion {
     /// Borrowed / Chromatic, AppliedDominant, then the function. Never empty.
     std::vector<Reason> reasons;
     /// One sentence per entry of `reasons`, for the UI: "resolves (D→T)", "cadence (V7→I)",
-    /// "prepares (PD→D)", "2 common tones (C, E)" (spelled in the project key), "smooth voice leading
+    /// "prepares (PD→D)", "2 common tones (C, E)" (spelled as tones of the candidate, `commonTonesText`), "smooth voice leading
     /// (cost 2)", "diatonic", "borrowed from C Aeolian", "outside the key — colour chord", "secondary
     /// dominant of ii (V7/ii)" or "leading-tone chord of V (vii°7/V)", "tonic" / "predominant" /
     /// "dominant". The arrows and the dash are literal UTF-8 characters.

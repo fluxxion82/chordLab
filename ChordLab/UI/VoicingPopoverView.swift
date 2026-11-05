@@ -39,7 +39,7 @@ struct VoicingPopoverView: View {
           Text(Self.status(manual: manual, autoVoiceLead: autoVoiceLead))
             .font(.callout).foregroundStyle(.secondary)
         }
-        Text(HarmonyText.voicingText(event.voicing)).font(.body.monospacedDigit())
+        Text(HarmonyText.voicingText(event.voicing, names: event.voicingNames)).font(.body.monospacedDigit())
         if !storedSounds {
           Text("Auto voice-leading chose these notes; changing a setting below makes the chord manual.")
             .font(.caption).foregroundStyle(.secondary)
@@ -47,7 +47,8 @@ struct VoicingPopoverView: View {
         }
         let maxInversion = max(0, event.voicing.count - 1)
         Stepper(value: inversion, in: 0...maxInversion) {
-          Text(storedSounds ? HarmonyText.inversionLabel(event.inversion ?? 0, bass: event.voicing.first)
+          Text(storedSounds ? HarmonyText.inversionLabel(event.inversion ?? 0, bass: event.voicing.first,
+                                                         bassName: event.voicingNames?.first)
                             : "Manual inversion \(event.inversion ?? 0)")
             .font(.body.monospacedDigit())
         }

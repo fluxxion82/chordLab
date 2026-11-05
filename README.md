@@ -26,7 +26,7 @@ Phase 1, the basics:
   Panic button.
 - MIDI drag-out of the progression as a `.mid` clip at the host tempo.
 - The document (progression, sections, voicings, keys, follow, loop, relation mode) and the editor
-  window size (900 × 800 for a new instance, resizable down to 700 × 480) are saved with the host project.
+  window size (900 × 800 for a new instance, resizable down to 700 × 540) are saved with the host project.
 
 Phase 2, explainable harmony:
 

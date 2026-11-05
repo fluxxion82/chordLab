@@ -6,8 +6,9 @@ import Foundation
 /// `function`, `tension`, the voicing fields, `why`, `sections`, `suggestions`, `autoVoiceLead`,
 /// `selectedEventId`, P2-M3's `homeTriads`, and the chord relations' `relationMode`, `relationReference`
 /// and per-cell `relation` / `relationText`, the progression presets' `presets`, and the applied chords'
-/// `applied` with its cells' `label` / `target`) are optional so that a UI built against this file still
-/// decodes a snapshot from an older plug-in build.
+/// `applied` with its cells' `label` / `target`, and the spelled note names `voicingNames` /
+/// `outOfKeyNames`) are optional so that a UI built against this file still decodes a snapshot from an
+/// older plug-in build.
 
 /// `{"letter":"C","alter":0}`: a spelled tonic, `alter` -1 flat, 0 natural, 1 sharp.
 struct TonicJSON: Codable, Equatable {
@@ -31,8 +32,9 @@ struct KeyJSON: Codable, Equatable {
 
 /// An event's `why`: how its chord relates to the one before it (P2-D2), as data plus the engine's one
 /// sentence (`text`, "G7 → C: down a fifth, resolves (D→T), 1 common tone (G), smooth voice leading
-/// (cost 4)"). `commonNames` spells `commonPcs` in the project key; `borrowedFrom` / `borrowedFromName`
-/// are nil for a chord in the key or in no parallel mode.
+/// (cost 4)"). `commonNames` spells `commonPcs` as tones of this chord, its root in the project key (E7's
+/// G# reads G#, not the key's Ab); `borrowedFrom` / `borrowedFromName` are nil for a chord in the key or
+/// in no parallel mode.
 struct WhyJSON: Codable, Equatable {
   let commonTones: Int
   let commonPcs: [Int]
@@ -48,9 +50,11 @@ struct WhyJSON: Codable, Equatable {
 /// `family` is the type's "Major", "Minor" or "Other" (the sequence bar's colour); `voicing` is what
 /// `compile` gives the chord (the auto voice-leading's choice, or the stored inversion and octave) as MIDI
 /// note numbers; `outOfKey` the chord's pitch classes outside the project key's scale (ascending, no
-/// repeats). `function` is "T", "PD", "D" or "O", `tension` 0..100; `inversion`, `octave` and
-/// `manualVoicing` the stored voicing fields; `why` the relation to the previous event, nil on the first.
-/// Everything after `voicing` is absent from older plug-in builds.
+/// repeats). `voicingNames` and `outOfKeyNames` name those notes as the chord spells them (E7's third is
+/// "G#", Fm's "Ab"; ASCII accidentals like `symbol`, octaves on the voicing: "G#4"), one per entry of
+/// `voicing` / `outOfKey`. `function` is "T", "PD", "D" or "O", `tension` 0..100; `inversion`, `octave`
+/// and `manualVoicing` the stored voicing fields; `why` the relation to the previous event, nil on the
+/// first. Everything after `voicing` is absent from older plug-in builds.
 struct EventJSON: Codable, Equatable, Identifiable {
   let id: Int
   let root: Int
@@ -62,7 +66,9 @@ struct EventJSON: Codable, Equatable, Identifiable {
   let lengthBeats: Double
   let velocity: Int
   let voicing: [Int]
+  let voicingNames: [String]?
   let outOfKey: [Int]?
+  let outOfKeyNames: [String]?
   let function: String?
   let tension: Int?
   let inversion: Int?
@@ -73,8 +79,10 @@ struct EventJSON: Codable, Equatable, Identifiable {
 
 /// One palette cell: the chord on scale degree `degree` (0..6) of the browsed key in row `tier`.
 /// `filled` is false for a borrowed chord (a note outside the project key); `family` is "Major", "Minor"
-/// or "Other"; `outOfKey` lists the borrowed pitch classes (empty exactly when `filled`); `function` and
-/// `tension` as on events. `outOfKey`, `function` and `tension` are absent from older plug-in builds.
+/// or "Other"; `outOfKey` lists the borrowed pitch classes (empty exactly when `filled`); `voicingNames`
+/// and `outOfKeyNames` name the voicing and the borrowed notes as the symbol spells them; `function` and
+/// `tension` as on events. `outOfKey`, `function`, `tension` and the names are absent from older plug-in
+/// builds.
 /// `relation` (0...100) and `relationText` are the cell's relatedness to the snapshot's
 /// `relationReference` under its `relationMode` (plan R6): present only when there is a reference chord
 /// and the mode is not off, and absent from older plug-in builds.
@@ -94,7 +102,9 @@ struct CellJSON: Codable, Equatable, Identifiable {
   let family: String
   let filled: Bool
   let voicing: [Int]
+  let voicingNames: [String]?
   let outOfKey: [Int]?
+  let outOfKeyNames: [String]?
   let function: String?
   let tension: Int?
   /// The wire `id`: nil on palette cells, "home-<degree>" on `homeTriads` entries, "applied-<degree>-<tier>"
@@ -116,7 +126,8 @@ struct CellJSON: Codable, Equatable, Identifiable {
   var id: String { engineId ?? "\(tier)/\(degree)" }
 
   enum CodingKeys: String, CodingKey {
-    case degree, tier, root, type, symbol, roman, family, filled, voicing, outOfKey, function, tension
+    case degree, tier, root, type, symbol, roman, family, filled, voicing, voicingNames, outOfKey, outOfKeyNames
+    case function, tension
     case relation, relationText, label, target
     case engineId = "id"
   }

@@ -62,6 +62,9 @@ struct Spelling {
 
     /// ASCII rendering: "C", "F#", "Bb", "Fx", "Bbb". The UI maps these to glyphs.
     std::string text() const;
+
+    /// The pitch class the spelling names: the letter's natural pitch class moved by `alter`, modulo 12.
+    PitchClass pitchClass() const;
 };
 
 constexpr bool operator==(const Spelling& a, const Spelling& b) noexcept {
@@ -93,5 +96,12 @@ int majorDegreeOfInterval(int semitones);
 /// name; a double accidental on a black key (Ex in B# major) falls back to the single accidental of
 /// the same sign (F#). Chromatic tones therefore never carry more than one accidental.
 Spelling spell(PitchClass pc, const Key& key);
+
+/// Spelling of `pc` on `letter`, which must lie within two semitones of it: the accidental that reaches
+/// `pc` from the letter's natural pitch class, folded as `spell` folds a chromatic tone, so that a white
+/// key with an accidental (Cb, Fb, E#, B#, or a double accidental such as Fx) takes its natural name and a
+/// double accidental on a black key the single accidental of the same sign. The letter-true spelling of a
+/// chord tone (`chordToneSpelling`, symbol.h) is read this way, from the letter its interval lands on.
+Spelling spellOnLetter(char letter, PitchClass pc);
 
 }  // namespace chordlab

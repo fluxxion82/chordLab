@@ -89,6 +89,30 @@ bool hasInterval(const ChordType& type, int semitones) {
     return std::find(type.intervals.begin(), type.intervals.end(), semitones) != type.intervals.end();
 }
 
+/// Whether the type holds `semitones` above the root in any octave (a #11 is 18, a ninth 14).
+bool hasIntervalClass(const ChordType& type, int semitones) {
+    return std::any_of(type.intervals.begin(), type.intervals.end(),
+                       [semitones](int i) { return pitchClassOf(i) == pitchClassOf(semitones); });
+}
+
+/// Letter steps above the root of the tone `semitones` above it: the interval's major degree, except
+/// the diminished fifth, augmented fifth and diminished seventh the chord's structure says it holds
+/// (see `chordToneSpelling`).
+int chordToneDegree(const ChordType& type, int semitones) {
+    const int interval = pitchClassOf(semitones);
+    const bool perfectFifth = hasIntervalClass(type, 7);
+    if (interval == 6 && !perfectFifth) {
+        return 4;  // the diminished fifth of dim, dim7 and m7b5
+    }
+    if (interval == 8 && !perfectFifth) {
+        return 4;  // the augmented fifth of aug and augMaj7
+    }
+    if (interval == 9 && !perfectFifth && hasIntervalClass(type, 6)) {
+        return 6;  // the diminished seventh of dim7
+    }
+    return majorDegreeOfInterval(interval);
+}
+
 /// Lowercase numerals carry a minor third; anything else (major third, no third) is uppercase.
 bool isMinorQuality(const ChordType& type) {
     return hasInterval(type, 3) && !hasInterval(type, 4);
@@ -112,6 +136,28 @@ std::string chordSymbol(const Chord& chord, const Key& spellingKey, SymbolStyle 
     std::string out = spell(chord.root, spellingKey).text();
     out += symbolSuffix(*chord.type, style);
     return out;
+}
+
+Spelling chordToneSpelling(const Chord& chord, PitchClass pc, const Key& spellingKey) {
+    assertValidChord(chord);
+    const PitchClass target = pitchClassOf(pc);
+    const Spelling root = spell(chord.root, spellingKey);
+    const int degree = chordToneDegree(*chord.type, target - chord.root);
+    const char letter = static_cast<char>('A' + (root.letter - 'A' + degree) % 7);
+    // A scale member the key writes on that letter keeps the key's spelling: E# in F# major, where
+    // `spellOnLetter` would fold it to F.
+    const int keyDegree = degreeOf(target, spellingKey.tonicPc(), spellingKey.mode);
+    if (keyDegree >= 0) {
+        const Spelling inKey = spellDegree(spellingKey, keyDegree);
+        if (inKey.letter == letter) {
+            return inKey;
+        }
+    }
+    const int distance = signedSemitones(Spelling{letter, 0}.pitchClass(), target);
+    if (distance < -2 || distance > 2) {
+        return spell(target, spellingKey);  // no letter-true spelling within a double accidental (B#+)
+    }
+    return spellOnLetter(letter, target);
 }
 
 NumeralDegree numeralDegree(const Chord& chord, const Key& projectKey) {

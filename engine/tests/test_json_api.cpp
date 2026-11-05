@@ -579,7 +579,7 @@ TEST_CASE("snapshot: the why sentence follows the documented rules clause by cla
     CHECK(textOf(kC, chord(9, "min")) == "C → Am: down a third, 2 common tones (C, E), smooth voice leading (cost 2)");
     // A repeated chord keeps all its tones and costs nothing.
     CHECK(textOf(kC, kC) == "C → C: same root, 3 common tones (C, E, G), smooth voice leading (cost 0)");
-    // A borrowed chord names its source after everything else; common tones are spelled in the project key.
+    // A borrowed chord names its source after everything else; common tones are spelled as the new chord spells them.
     CHECK(textOf(kC, chord(8, "maj")) ==
           "C → Ab: down a third, 1 common tone (C), smooth voice leading (cost 2), borrowed from C Aeolian");
     // Nothing in common, nothing smooth (cost 5 over three voices), in no parallel mode: the root motion
@@ -828,6 +828,14 @@ std::vector<Relatedness> expectedRelations(const json& snap, const Document& doc
     return relatedness(reference, chords, doc.projectKey, doc.browsedKey, doc.relationMode);
 }
 
+/// The text the snapshot shows for sized cell `i` of `expectedRelations`: a palette cell spells its common
+/// tones in the browsed key, a home triad in the project key, as each cell's own symbol is spelled.
+std::string expectedText(const json& snap, const Document& doc, const std::vector<Relatedness>& expected,
+                         std::size_t i) {
+    const bool palette = i < snap.at("palette").at("cells").size();
+    return relationText(expected[i].relation, palette ? doc.browsedKey : doc.projectKey);
+}
+
 }  // namespace
 
 TEST_CASE("snapshot: relationMode is always there; no chords means no reference and no cell relations") {
@@ -864,7 +872,7 @@ TEST_CASE("snapshot: the reference is the selected event, else the last; every s
     REQUIRE(cells.size() == expected.size());
     for (std::size_t i = 0; i < cells.size(); ++i) {
         CHECK(cells[i].at("relation") == expected[i].score);
-        CHECK(cells[i].at("relationText") == expected[i].text);
+        CHECK(cells[i].at("relationText") == expectedText(snap, store.doc(), expected, i));
     }
     // After G7, C is the best cell (D -> T with a cadence): 100.
     CHECK(cellAt(snap, 0, 1).at("relation") == 100);
@@ -917,7 +925,7 @@ TEST_CASE("snapshot: blend is normalised over the palette and the home row toget
     int hi = 0;
     for (std::size_t i = 0; i < cells.size(); ++i) {
         CHECK(cells[i].at("relation") == expected[i].score);
-        CHECK(cells[i].at("relationText") == expected[i].text);
+        CHECK(cells[i].at("relationText") == expectedText(snap, store.doc(), expected, i));
         lo = std::min(lo, cells[i].at("relation").get<int>());
         hi = std::max(hi, cells[i].at("relation").get<int>());
     }
@@ -927,7 +935,7 @@ TEST_CASE("snapshot: blend is normalised over the palette and the home row toget
     const json& home = snap.at("homeTriads");
     CHECK(home[3].at("relation") == 100);  // F itself
     CHECK(home[4].at("relation") == 100);  // G: the best chord after F, D after PD, the top of the population
-    // The relation text is spelled in the project key, borrowings and all.
+    // The relation text: common tones as the cell's chord spells them, the borrowing in the project key.
     CHECK(home[0].at("relationText") == "1 common tone (C) · up a fifth · cost 3");
 }
 
@@ -2914,8 +2922,9 @@ std::vector<T> appliedField(const json& snap, const char* member) {
 }
 
 /// The members every palette cell carries without relations.
-const std::vector<std::string> kCellMembers{"degree", "tier",   "root",    "type",    "symbol",  "roman",
-                                            "family", "function", "tension", "filled", "voicing", "outOfKey"};
+const std::vector<std::string> kCellMembers{"degree",  "tier",     "root",    "type",         "symbol",
+                                            "roman",   "family",   "function", "tension",     "filled",
+                                            "voicing", "voicingNames", "outOfKey", "outOfKeyNames"};
 
 /// Checks what every `applied` entry carries beyond the expectations of each test: the members of a
 /// palette cell plus `id`, `label`, `target`; each one the cell `cellJson` writes for the chord against the
@@ -2943,6 +2952,12 @@ void checkAppliedEntries(const json& snap, const Document& doc) {
         CHECK(e.at("root") == a.chord.root);
         CHECK(e.at("type") == a.chord.type->id);
         CHECK(e.at("symbol") == chordSymbol(a.chord, a.spellingKey));
+        // The out-of-key names are spelled as the symbol is: C#dim7 in C major lists C# and Bb, not Db.
+        json names = json::array();
+        for (const int pc : e.at("outOfKey").get<std::vector<int>>()) {
+            names.push_back(chordToneSpelling(a.chord, pc, a.spellingKey).text());
+        }
+        CHECK(e.at("outOfKeyNames") == names);
         CHECK(e.at("roman") == romanNumeral(a.chord, doc.projectKey));
         CHECK(e.at("function") == functionShortName(functionOf(a.chord, doc.projectKey)));
         CHECK(e.at("tension") == tension(a.chord, doc.projectKey));
@@ -2989,7 +3004,9 @@ TEST_CASE("snapshot applied: C Ionian has V7 and vii°7 of ii, iii, IV, V and vi
                                         {"tension", tension(chord(9, "7"), store.doc().projectKey)},
                                         {"filled", false},
                                         {"voicing", closeVoicing(chord(9, "7"))},
-                                        {"outOfKey", {1}}}));
+                                        {"voicingNames", {"A4", "C#5", "E5", "G5"}},
+                                        {"outOfKey", {1}},
+                                        {"outOfKeyNames", {"C#"}}}));
     CHECK(snap.at("schema") == 1);  // additive
 }
 
@@ -3149,16 +3166,17 @@ TEST_CASE("snapshot applied: sized on the palette and home row's scale, which th
                 REQUIRE(cells.size() == population.size());
                 for (std::size_t i = 0; i < cells.size(); ++i) {
                     CHECK(cells[i].at("relation") == population[i].score);
-                    CHECK(cells[i].at("relationText") == population[i].text);
+                    CHECK(cells[i].at("relationText") == expectedText(snap, doc, population, i));
                 }
 
-                // Applied chords: the extras of the same call.
+                // Applied chords: the extras of the same call, their texts spelled in their own keys.
                 std::vector<Chord> sized;
                 for (const json& c : cells) {
                     sized.push_back(chord(c.at("root").get<int>(), c.at("type").get<std::string>()));
                 }
+                const std::vector<AppliedChord> appliedList = appliedChords(doc.browsedKey);
                 std::vector<Chord> extras;
-                for (const AppliedChord& a : appliedChords(doc.browsedKey)) {
+                for (const AppliedChord& a : appliedList) {
                     extras.push_back(a.chord);
                 }
                 const std::vector<Relatedness> all =
@@ -3168,7 +3186,7 @@ TEST_CASE("snapshot applied: sized on the palette and home row's scale, which th
                 for (std::size_t i = 0; i < extras.size(); ++i) {
                     const json& e = applied[i];
                     CHECK(e.at("relation") == all[sized.size() + i].score);
-                    CHECK(e.at("relationText") == all[sized.size() + i].text);
+                    CHECK(e.at("relationText") == relationText(all[sized.size() + i].relation, appliedList[i].spellingKey));
                     CHECK(e.at("relation").get<int>() >= 0);
                     CHECK(e.at("relation").get<int>() <= 100);
                 }
@@ -3205,4 +3223,118 @@ TEST_CASE("snapshot applied: blend scores are clamped to 0..100 against the popu
             }
         }
     }
+}
+
+TEST_CASE("snapshot: voicingNames and outOfKeyNames spell notes as the chord does, so a tip's lines agree") {
+    DocumentStore store;
+    applyOk(store, {{"cmd", "appendChord"}, {"root", 4}, {"type", "7"}});    // E7: E G# B D
+    applyOk(store, {{"cmd", "appendChord"}, {"root", 5}, {"type", "min"}});  // Fm: F Ab C
+    json snap = snapshot(store);
+    const json e7 = snap.at("events")[0];
+    CHECK(e7.at("voicing") == json({64, 68, 71, 74}));
+    CHECK(e7.at("voicingNames") == json({"E4", "G#4", "B4", "D5"}));
+    CHECK(e7.at("outOfKey") == json({8}));
+    CHECK(e7.at("outOfKeyNames") == json({"G#"}));  // the Live run's tip said "Out of key: G♯" and "Ab"
+    const json fm = snap.at("events")[1];
+    CHECK(fm.at("outOfKeyNames") == json({"Ab"}));  // the same pitch class, read as Fm's third
+    CHECK(fm.at("voicingNames") == json({"F4", "Ab4", "C5"}));
+
+    // Palette cells are spelled in the browsed key and read against the project key.
+    applyOk(store, {{"cmd", "browseKey"}, {"steps", 1}});  // G major
+    snap = snapshot(store);
+    const json fSharpDim = cellAt(snap, 6, 1);
+    CHECK(fSharpDim.at("symbol") == "F#mb5");
+    CHECK(fSharpDim.at("outOfKeyNames") == json({"F#"}));
+    CHECK(fSharpDim.at("voicingNames") == json({"F#4", "A4", "C5"}));
+    for (const json& cell : snap.at("palette").at("cells")) {
+        CAPTURE(cell.dump());
+        CHECK(cell.at("voicingNames").size() == cell.at("voicing").size());
+        CHECK(cell.at("outOfKeyNames").size() == cell.at("outOfKey").size());
+    }
+    // Home triads: the project key's own spelling.
+    REQUIRE(snap.at("homeTriads").size() == 7);
+    CHECK(snap.at("homeTriads")[6].at("voicingNames") == json({"B4", "D5", "F5"}));
+    CHECK(snap.at("homeTriads")[6].at("outOfKeyNames") == json::array());
+}
+
+TEST_CASE("why.commonNames and every common-tone text spell shared tones as the chord does: E7's G#") {
+    DocumentStore store;
+    applyOk(store, {{"cmd", "appendChord"}, {"root", 4}, {"type", "7"}});
+    applyOk(store, {{"cmd", "appendChord"}, {"root", 4}, {"type", "7"}});
+    applyOk(store, {{"cmd", "setRelationMode"}, {"mode", "commonTones"}});
+    const json snap = snapshotSelecting(store, 2);
+    const json why = snap.at("events")[1].at("why");
+    CHECK(why.at("commonPcs") == json({2, 4, 8, 11}));
+    CHECK(why.at("commonNames") == json({"D", "E", "G#", "B"}));
+    CHECK(why.at("text") == "E7 → E7: same root, 4 common tones (D, E, G#, B), smooth voice leading (cost 0)");
+    // The applied V7/vi cell is E7 too: its relation to the selected E7 (the Live run's tip) says G#.
+    bool found = false;
+    for (const json& entry : snap.at("applied")) {
+        if (entry.at("label") == "V7/vi") {
+            found = true;
+            CHECK(entry.at("symbol") == "E7");
+            CHECK(entry.at("relationText") == "4 common tones (D, E, G#, B) · same root · cost 0");
+            CHECK(entry.at("outOfKeyNames") == json({"G#"}));
+        }
+    }
+    CHECK(found);
+}
+
+TEST_CASE("appendChord: the new chord is selected, so the snapshot's selection and reference follow it") {
+    DocumentStore store = cG7Am();
+    CHECK(store.selectedEventId() == 3);  // the last append
+    applyOk(store, {{"cmd", "setRelationMode"}, {"mode", "blend"}});
+    applyOk(store, {{"cmd", "selectEvent"}, {"id", 1}});
+    applyOk(store, {{"cmd", "appendChord"}, {"root", 5}, {"type", "maj"}});  // F, id 4
+    CHECK(store.selectedEventId() == 4);
+    const json snap = snapshotSelecting(store, store.selectedEventId());
+    CHECK(snap.at("selectedEventId") == 4);
+    CHECK(snap.at("relationReference") == json({{"eventId", 4}, {"symbol", "F"}}));
+    applyOk(store, {{"cmd", "undo"}});
+    CHECK(store.selectedEventId() == kNoEventId);
+}
+
+TEST_CASE("loadPreset append: the leading default section is named by count after sections came and went") {
+    DocumentStore store = cG7Am();
+    applyOk(store, {{"cmd", "addSection"}, {"index", 0}});
+    applyOk(store, {{"cmd", "addSection"}, {"index", 2}});
+    applyOk(store, {{"cmd", "removeSection"}, {"id", 2}});
+    applyOk(store, {{"cmd", "removeSection"}, {"id", 1}});
+    REQUIRE(store.doc().sections.empty());
+    applyOk(store, {{"cmd", "loadPreset"}, {"id", "axis"}, {"mode", "append"}});
+    const json sections = snapshot(store).at("sections");
+    REQUIRE(sections.size() == 2);
+    CHECK(sections[0] == json({{"id", 3}, {"name", "Section 1"}, {"colourIndex", 2}, {"firstEventIndex", 0}}));
+    CHECK(sections[1].at("name") == "Axis");
+}
+
+TEST_CASE("snapshot: a cell's relationText spells its common tones as the cell's own symbol is spelled") {
+    // Project C major, Bb selected, browsing Db major: the Gb cell shares Bb with the reference. The project
+    // key would write the chord F# and the tone A#; the cell reads Gb, so its text and names say Bb.
+    DocumentStore store;
+    store.appendChord(chord(10, "maj"));
+    store.setBrowsedKey(key('D', -1, Mode::Ionian));
+    applyOk(store, {{"cmd", "setRelationMode"}, {"mode", "commonTones"}});
+    json snap = selectedSnapshot(store);
+    const json gb = cellAt(snap, 3, 1);
+    REQUIRE(gb.at("symbol") == "Gb");
+    CHECK(gb.at("relationText") == "1 common tone (Bb) · down a third · cost 2 · borrowed from C Locrian");
+    CHECK(gb.at("voicingNames").is_array());
+    // The home row (project key) and the Bb reference's own cell are unaffected.
+    REQUIRE(snap.at("homeTriads").size() == 7);
+    CHECK(snap.at("homeTriads")[0].at("relationText") == "no common tones · up a step · cost 6");
+
+    // An applied cell spells in its own key: browsing G major, vii°7/iii is A#dim7 (spelled in B major), and
+    // its tone shared with Bb reads A#, where the project key would say Bb.
+    store.setBrowsedKey(key('G', 0, Mode::Ionian));
+    snap = selectedSnapshot(store);
+    bool found = false;
+    for (const json& entry : snap.at("applied")) {
+        if (entry.at("label") == "vii°7/iii") {
+            found = true;
+            CHECK(entry.at("symbol") == "A#dim7");
+            CHECK(entry.at("relationText") == "1 common tone (A#) · same root · cost 5");
+        }
+    }
+    CHECK(found);
 }

@@ -124,7 +124,7 @@ json tonicsJson() {
 
 /// The pitch classes of `chord` outside the scale of `key`, ascending and without repeats: empty exactly
 /// when `fullyInKey(chord, key)`.
-json outOfKeyJson(const Chord& chord, const Key& key) {
+std::vector<PitchClass> outOfKeyPcs(const Chord& chord, const Key& key) {
     std::vector<PitchClass> out;
     for (const PitchClass pc : pitchClasses(chord)) {
         if (!inScale(pc, key.tonicPc(), key.mode)) {
@@ -133,13 +133,45 @@ json outOfKeyJson(const Chord& chord, const Key& key) {
     }
     std::sort(out.begin(), out.end());
     out.erase(std::unique(out.begin(), out.end()), out.end());
-    return json(out);
+    return out;
+}
+
+json outOfKeyJson(const Chord& chord, const Key& key) {
+    return json(outOfKeyPcs(chord, key));
+}
+
+/// `outOfKeyPcs` spelled as tones of `chord` (`chordToneSpelling`, the root as `spellingKey` spells it):
+/// the names the UI shows beside the symbol, "G#" for E7's third where the key would say Ab.
+json outOfKeyNamesJson(const Chord& chord, const Key& key, const Key& spellingKey) {
+    json out = json::array();
+    for (const PitchClass pc : outOfKeyPcs(chord, key)) {
+        out.push_back(chordToneSpelling(chord, pc, spellingKey).text());
+    }
+    return out;
+}
+
+/// `voicing`'s MIDI notes as names with octaves, each spelled as a tone of `chord`: "G#3" for note 56 in
+/// E7. Middle C (60) is C4, and the octave is the letter's (B#3 and Cb4 are notes 60 and 59), as in
+/// scientific pitch notation.
+json voicingNamesJson(const Chord& chord, const std::vector<int>& voicing, const Key& spellingKey) {
+    json out = json::array();
+    for (const int note : voicing) {
+        const Spelling spelling = chordToneSpelling(chord, pitchClassOf(note), spellingKey);
+        const int natural = note - spelling.alter;  // the letter's own note
+        const int octave = (natural >= 0 ? natural : natural - 11) / 12 - 1;
+        out.push_back(spelling.text() + std::to_string(octave));
+    }
+    return out;
 }
 
 /// One palette cell as the snapshot writes it (`palette.cells` and `homeTriads` alike): the cell's own
-/// position, chord, symbol, numeral and `filled`, plus what is read against `projectKey`, plus `relation`
-/// and `relationText` from `relation` when it is non-null (absent otherwise: no reference, or mode off).
-json cellJson(const PaletteCell& c, const Key& projectKey, const Relatedness* relation) {
+/// position, chord, symbol, numeral and `filled`, plus what is read against `projectKey`, the names of
+/// its voicing and out-of-key tones spelled as the symbol is (`spellingKey`: the browsed key for a
+/// palette cell, the project key for a home triad, its own for an applied chord), plus `relation` and
+/// `relationText` (its common tones spelled in `spellingKey` too) from `relation` when it is non-null
+/// (absent otherwise: no reference, or mode off).
+json cellJson(const PaletteCell& c, const Key& projectKey, const Key& spellingKey, const Relatedness* relation) {
+    const std::vector<int> voicing = closeVoicing(c.chord);
     json cell = {{"degree", c.degree},
             {"tier", c.tier},
             {"root", c.chord.root},
@@ -150,11 +182,13 @@ json cellJson(const PaletteCell& c, const Key& projectKey, const Relatedness* re
             {"function", functionShortName(functionOf(c.chord, projectKey))},
             {"tension", tension(c.chord, projectKey)},
             {"filled", c.filled},
-            {"voicing", closeVoicing(c.chord)},
-            {"outOfKey", outOfKeyJson(c.chord, projectKey)}};
+            {"voicing", voicing},
+            {"voicingNames", voicingNamesJson(c.chord, voicing, spellingKey)},
+            {"outOfKey", outOfKeyJson(c.chord, projectKey)},
+            {"outOfKeyNames", outOfKeyNamesJson(c.chord, projectKey, spellingKey)}};
     if (relation != nullptr) {
         cell["relation"] = relation->score;
-        cell["relationText"] = relation->text;
+        cell["relationText"] = relationText(relation->relation, spellingKey);
     }
     return cell;
 }
@@ -180,7 +214,7 @@ std::vector<PaletteCell> homeTriadCells(const Document& doc) {
 json homeTriadsJson(const std::vector<PaletteCell>& home, const Key& projectKey, const Relatedness* relations) {
     json out = json::array();
     for (std::size_t i = 0; i < home.size(); ++i) {
-        json entry = cellJson(home[i], projectKey, relations != nullptr ? &relations[i] : nullptr);
+        json entry = cellJson(home[i], projectKey, projectKey, relations != nullptr ? &relations[i] : nullptr);
         entry["id"] = "home-" + std::to_string(home[i].degree);
         out.push_back(std::move(entry));
     }
@@ -213,7 +247,7 @@ json appliedJson(const Document& doc, const std::vector<AppliedChord>& applied, 
                  const Relatedness* relations) {
     json out = json::array();
     for (std::size_t i = 0; i < cells.size(); ++i) {
-        json entry = cellJson(cells[i], doc.projectKey, relations != nullptr ? &relations[i] : nullptr);
+        json entry = cellJson(cells[i], doc.projectKey, applied[i].spellingKey, relations != nullptr ? &relations[i] : nullptr);
         entry["id"] = "applied-" + std::to_string(cells[i].degree) + "-" + std::to_string(cells[i].tier);
         entry["label"] = applied[i].label;
         entry["target"] = chordSymbol(diatonicTriad(doc.browsedKey, applied[i].targetDegree), doc.browsedKey);
@@ -229,8 +263,8 @@ json whyJson(const Chord& from, const Chord& to, const Key& projectKey) {
     const Relation relation = relate(from, to, projectKey);
 
     json commonNames = json::array();
-    for (const PitchClass pc : relation.commonPcs) {
-        commonNames.push_back(spell(pc, projectKey).text());
+    for (const Spelling& spelling : commonToneSpellings(relation, projectKey)) {
+        commonNames.push_back(spelling.text());
     }
 
     std::string text = chordSymbol(from, projectKey) + " → " + chordSymbol(to, projectKey) + ": " +
@@ -1457,7 +1491,9 @@ std::string snapshotJson(const Document& doc, const Palette& palette, int select
                       {"octave", e.octave},
                       {"manualVoicing", e.manualVoicing},
                       {"voicing", compiledVoicings[i]},
+                      {"voicingNames", voicingNamesJson(e.chord, compiledVoicings[i], doc.projectKey)},
                       {"outOfKey", outOfKeyJson(e.chord, doc.projectKey)},
+                      {"outOfKeyNames", outOfKeyNamesJson(e.chord, doc.projectKey, doc.projectKey)},
                       {"why", i == 0 ? json() : whyJson(doc.events[i - 1].chord, e.chord, doc.projectKey)}};
         events.push_back(std::move(event));
         beat += e.lengthBeats;
@@ -1500,7 +1536,8 @@ std::string snapshotJson(const Document& doc, const Palette& palette, int select
 
     json cells = json::array();
     for (std::size_t i = 0; i < palette.cells.size(); ++i) {
-        cells.push_back(cellJson(palette.cells[i], doc.projectKey, cellRelations != nullptr ? &cellRelations[i] : nullptr));
+        cells.push_back(cellJson(palette.cells[i], doc.projectKey, doc.browsedKey,
+                                 cellRelations != nullptr ? &cellRelations[i] : nullptr));
     }
 
     const json snapshot = {{"schema", kJsonSchema},

@@ -545,10 +545,11 @@ struct BlockDetailView: View {
           Text(word).font(.callout).foregroundStyle(.secondary)
         }
       }
-      Text(HarmonyText.voicingText(event.voicing)).font(.body.monospacedDigit())
+      Text(HarmonyText.voicingText(event.voicing, names: event.voicingNames)).font(.body.monospacedDigit())
       if let inversion = event.inversion, let octave = event.octave {
         Text(HarmonyText.voicingStatus(inversion: inversion, octave: octave, manual: event.manualVoicing ?? false,
-                                       autoVoiceLead: autoVoiceLead, bass: event.voicing.first))
+                                       autoVoiceLead: autoVoiceLead, bass: event.voicing.first,
+                                       bassName: event.voicingNames?.first))
           .font(.caption).foregroundStyle(.secondary)
       }
       if let tension = event.tension {
