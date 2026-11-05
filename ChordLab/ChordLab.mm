@@ -744,6 +744,8 @@ int ChordLab::UnserializeState(const IByteChunk& chunk, int startPos)
       loaded = chordlab::loadStateJson(mStore, json, error, &width, &height);   // atomic: a failure changes nothing
       if (loaded)
       {
+        ConstrainEditorResize(width, height);                    // the state stores the size verbatim: a set saved under
+                                                                 // an older, smaller minimum (700x480) opens at today's
         RebuildPaletteLocked();
         PublishSnapshotLocked();                                 // the audio thread plays the loaded set, editor or not
         editorOpen = mEditorOpen.load();
