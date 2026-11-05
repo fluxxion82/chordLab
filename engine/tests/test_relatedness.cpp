@@ -149,13 +149,13 @@ TEST_CASE("relatedness: the text is relationText of relate, whatever the mode") 
         const std::vector<Relatedness> r = relatedness(kC, candidates, kCIonian, kCIonian, mode);
         REQUIRE(r.size() == candidates.size());
         for (std::size_t i = 0; i < r.size(); ++i) {
-            CHECK(r[i].text == relationText(relate(kC, candidates[i], kCIonian)));
+            CHECK(relationText(r[i].relation, kCIonian) == relationText(relate(kC, candidates[i], kCIonian), kCIonian));
             CHECK(r[i].score >= 0);
             CHECK(r[i].score <= 100);
         }
-        CHECK(r[0].text == "2 common tones (C, E) · down a third · cost 2");
-        CHECK(r[2].text == "1 common tone (C) · down a third · cost 2 · borrowed from C Aeolian");
-        CHECK(r[3].text == "3 common tones (C, E, G) · same root · cost 0");
+        CHECK(relationText(r[0].relation, kCIonian) == "2 common tones (C, E) · down a third · cost 2");
+        CHECK(relationText(r[2].relation, kCIonian) == "1 common tone (C) · down a third · cost 2 · borrowed from C Aeolian");
+        CHECK(relationText(r[3].relation, kCIonian) == "3 common tones (C, E, G) · same root · cost 0");
     }
 }
 
@@ -174,8 +174,8 @@ TEST_CASE("relatedness: a minor key reads functions and borrowings against it") 
     CHECK(common[0].score == 33);
     CHECK(common[1].score == 33);
     CHECK(common[2].score == 67);
-    CHECK(fn[0].text == "1 common tone (E) · up a fifth · cost 2 · borrowed from A harmonic minor");
-    CHECK(fn[2].text == "2 common tones (C, E) · up a third · cost 2");
+    CHECK(relationText(fn[0].relation, kAAeolian) == "1 common tone (E) · up a fifth · cost 2 · borrowed from A harmonic minor");
+    CHECK(relationText(fn[2].relation, kAAeolian) == "2 common tones (C, E) · up a third · cost 2");
     // Blend after Am in A minor: the iv and the V outrank the III's tonic-to-tonic step... as suggestNext says.
     const auto blend = relatedness(am, candidates, kAAeolian, kAAeolian, RelationMode::Blend);
     const std::vector<int> h = suggestionHundredths(&am, candidates, kAAeolian, kAAeolian);
@@ -361,14 +361,14 @@ TEST_CASE("relatedness with extras: the population scores exactly as it does wit
                 REQUIRE(with.size() == population.size() + extras.size());
                 for (std::size_t i = 0; i < population.size(); ++i) {
                     CHECK(with[i].score == alone[i].score);
-                    CHECK(with[i].text == alone[i].text);
+                    CHECK(relationText(with[i].relation, c.project) == relationText(alone[i].relation, c.project));
                 }
                 // An empty list of extras is the call without them.
                 const auto none = relatedness(reference, population, {}, c.project, c.browsed, mode);
                 REQUIRE(none.size() == alone.size());
                 for (std::size_t i = 0; i < alone.size(); ++i) {
                     CHECK(none[i].score == alone[i].score);
-                    CHECK(none[i].text == alone[i].text);
+                    CHECK(relationText(none[i].relation, c.project) == relationText(alone[i].relation, c.project));
                 }
             }
         }
@@ -387,7 +387,7 @@ TEST_CASE("relatedness with extras: the per-candidate modes score an extra as if
             for (std::size_t i = 0; i < extras.size(); ++i) {
                 const auto alone = relatedness(reference, {extras[i]}, kCIonian, gIonian, mode);
                 CHECK(with[population.size() + i].score == alone[0].score);
-                CHECK(with[population.size() + i].text == alone[0].text);
+                CHECK(relationText(with[population.size() + i].relation, kCIonian) == relationText(alone[0].relation, kCIonian));
             }
         }
     }
@@ -426,7 +426,7 @@ TEST_CASE("relatedness with extras: blend normalises extras with the population'
                 const int expected =
                     extras[i] == reference ? 100 : expectedExtraBlend(rawExtras[i], lo, hi, hi <= lo);
                 CHECK(r.score == expected);
-                CHECK(r.text == relationText(relate(reference, extras[i], c.project)));
+                CHECK(relationText(r.relation, c.project) == relationText(relate(reference, extras[i], c.project), c.project));
             }
         }
     }

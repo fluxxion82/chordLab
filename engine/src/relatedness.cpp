@@ -96,7 +96,7 @@ std::vector<Relatedness> relatedness(const Chord& reference, const std::vector<C
         for (std::size_t i = 0; i < candidates.size(); ++i) {
             const bool full = candidates[i] == reference || hi == lo;
             const int score = full ? kFull : roundedRatio(kFull * (raw[i] - lo), hi - lo);
-            out.push_back(Relatedness{score, relationText(relate(reference, candidates[i], projectKey))});
+            out.push_back(Relatedness{score, relate(reference, candidates[i], projectKey)});
         }
         // Extras are placed on the population's scale without widening it: clamped at both ends, and with
         // no range to place them on (a tie, one chord, none) at or above it is 100 and below it 0.
@@ -111,7 +111,7 @@ std::vector<Relatedness> relatedness(const Chord& reference, const std::vector<C
             } else {
                 score = roundedRatio(kFull * (r - lo), hi - lo);
             }
-            out.push_back(Relatedness{score, relationText(relate(reference, extras[i], projectKey))});
+            out.push_back(Relatedness{score, relate(reference, extras[i], projectKey)});
         }
         return out;
     }
@@ -120,12 +120,12 @@ std::vector<Relatedness> relatedness(const Chord& reference, const std::vector<C
     const Function referenceFunction = functionOf(reference, projectKey);
     for (const std::vector<Chord>* list : {&candidates, &extras}) {
         for (const Chord& candidate : *list) {
-            const Relation relation = relate(reference, candidate, projectKey);
+            Relation relation = relate(reference, candidate, projectKey);
             const bool same = candidate == reference && mode != RelationMode::Function;
             const int score = same ? kFull
                                    : singleScore(candidate, relation, referencePcs, referenceFunction, projectKey,
                                                  mode, style);
-            out.push_back(Relatedness{score, relationText(relation)});
+            out.push_back(Relatedness{score, std::move(relation)});
         }
     }
     return out;

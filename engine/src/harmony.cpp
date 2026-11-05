@@ -159,13 +159,10 @@ Relation relate(const Chord& from, const Chord& to, const Key& projectKey) {
     std::sort(fromSorted.begin(), fromSorted.end());
     std::sort(toSorted.begin(), toSorted.end());
     Relation relation;
+    relation.to = to;
     std::set_intersection(fromSorted.begin(), fromSorted.end(), toSorted.begin(), toSorted.end(),
                           std::back_inserter(relation.commonPcs));
     relation.commonTones = static_cast<int>(relation.commonPcs.size());
-    relation.commonSpellings.reserve(relation.commonPcs.size());
-    for (const PitchClass pc : relation.commonPcs) {
-        relation.commonSpellings.push_back(chordToneSpelling(to, pc, projectKey));
-    }
     relation.motion = rootMotion(from.root, to.root);
     relation.voiceLeadingCost = pcVoiceLeadingCost(fromPcs, toPcs);  // root first: the root is doubled first
     relation.borrowedFrom = borrowedFrom(to, projectKey);
@@ -176,25 +173,33 @@ std::string keyProse(const Key& key) {
     return Spelling{key.tonic.letter, key.tonic.alter}.text() + " " + kModeProse[static_cast<std::size_t>(key.mode)];
 }
 
-std::string commonTonesText(const Relation& relation) {
-    assert(relation.commonSpellings.size() == relation.commonPcs.size());
-    if (relation.commonSpellings.empty()) {
+std::vector<Spelling> commonToneSpellings(const Relation& relation, const Key& spellingKey) {
+    std::vector<Spelling> out;
+    out.reserve(relation.commonPcs.size());
+    for (const PitchClass pc : relation.commonPcs) {
+        out.push_back(chordToneSpelling(relation.to, pc, spellingKey));
+    }
+    return out;
+}
+
+std::string commonTonesText(const Relation& relation, const Key& spellingKey) {
+    if (relation.commonPcs.empty()) {
         return "no common tones";
     }
-    std::string text = std::to_string(relation.commonSpellings.size()) +
-                       (relation.commonSpellings.size() == 1 ? " common tone (" : " common tones (");
-    for (std::size_t i = 0; i < relation.commonSpellings.size(); ++i) {
+    const std::vector<Spelling> spellings = commonToneSpellings(relation, spellingKey);
+    std::string text = std::to_string(spellings.size()) + (spellings.size() == 1 ? " common tone (" : " common tones (");
+    for (std::size_t i = 0; i < spellings.size(); ++i) {
         if (i > 0) {
             text += ", ";
         }
-        text += relation.commonSpellings[i].text();
+        text += spellings[i].text();
     }
     return text + ")";
 }
 
-std::string relationText(const Relation& relation) {
+std::string relationText(const Relation& relation, const Key& spellingKey) {
     constexpr const char* kSeparator = " · ";
-    std::string text = commonTonesText(relation) + kSeparator + rootMotionName(relation.motion) + kSeparator +
+    std::string text = commonTonesText(relation, spellingKey) + kSeparator + rootMotionName(relation.motion) + kSeparator +
                        "cost " + std::to_string(relation.voiceLeadingCost);
     if (relation.borrowedFrom) {
         text += kSeparator;

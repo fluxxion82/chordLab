@@ -168,7 +168,8 @@ json voicingNamesJson(const Chord& chord, const std::vector<int>& voicing, const
 /// position, chord, symbol, numeral and `filled`, plus what is read against `projectKey`, the names of
 /// its voicing and out-of-key tones spelled as the symbol is (`spellingKey`: the browsed key for a
 /// palette cell, the project key for a home triad, its own for an applied chord), plus `relation` and
-/// `relationText` from `relation` when it is non-null (absent otherwise: no reference, or mode off).
+/// `relationText` (its common tones spelled in `spellingKey` too) from `relation` when it is non-null
+/// (absent otherwise: no reference, or mode off).
 json cellJson(const PaletteCell& c, const Key& projectKey, const Key& spellingKey, const Relatedness* relation) {
     const std::vector<int> voicing = closeVoicing(c.chord);
     json cell = {{"degree", c.degree},
@@ -187,7 +188,7 @@ json cellJson(const PaletteCell& c, const Key& projectKey, const Key& spellingKe
             {"outOfKeyNames", outOfKeyNamesJson(c.chord, projectKey, spellingKey)}};
     if (relation != nullptr) {
         cell["relation"] = relation->score;
-        cell["relationText"] = relation->text;
+        cell["relationText"] = relationText(relation->relation, spellingKey);
     }
     return cell;
 }
@@ -262,7 +263,7 @@ json whyJson(const Chord& from, const Chord& to, const Key& projectKey) {
     const Relation relation = relate(from, to, projectKey);
 
     json commonNames = json::array();
-    for (const Spelling& spelling : relation.commonSpellings) {
+    for (const Spelling& spelling : commonToneSpellings(relation, projectKey)) {
         commonNames.push_back(spelling.text());
     }
 
@@ -272,7 +273,7 @@ json whyJson(const Chord& from, const Chord& to, const Key& projectKey) {
         text += ", resolves (D→T)";
     }
     if (relation.commonTones >= 1) {
-        text += ", " + commonTonesText(relation);
+        text += ", " + commonTonesText(relation, projectKey);
     }
     // The cost sums over one voice per pitch class of the larger chord (the smaller is padded up to it).
     const int voices = static_cast<int>(std::max(pitchClasses(from).size(), pitchClasses(to).size()));

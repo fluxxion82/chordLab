@@ -559,34 +559,50 @@ TEST_CASE("keyProse: the spelled tonic and the mode, the altered minors in words
 }
 
 TEST_CASE("commonTonesText: count, singular or plural, names as the second chord spells them; none in words") {
-    CHECK(commonTonesText(relate(chord(0, "maj"), chord(7, "7"), kCIonian)) == "1 common tone (G)");
-    CHECK(commonTonesText(relate(chord(0, "maj"), chord(9, "min"), kCIonian)) == "2 common tones (C, E)");
-    CHECK(commonTonesText(relate(chord(0, "maj"), chord(2, "min"), kCIonian)) == "no common tones");
-    CHECK(commonTonesText(relate(chord(0, "maj"), chord(0, "maj"), kCIonian)) == "3 common tones (C, E, G)");
+    CHECK(commonTonesText(relate(chord(0, "maj"), chord(7, "7"), kCIonian), kCIonian) == "1 common tone (G)");
+    CHECK(commonTonesText(relate(chord(0, "maj"), chord(9, "min"), kCIonian), kCIonian) == "2 common tones (C, E)");
+    CHECK(commonTonesText(relate(chord(0, "maj"), chord(2, "min"), kCIonian), kCIonian) == "no common tones");
+    CHECK(commonTonesText(relate(chord(0, "maj"), chord(0, "maj"), kCIonian), kCIonian) == "3 common tones (C, E, G)");
     // Diatonic tones read as the key spells them: Eb in C Aeolian, D# in E major.
-    CHECK(commonTonesText(relate(chord(3, "maj"), chord(0, "min"), kCAeolian)) == "2 common tones (Eb, G)");
-    CHECK(commonTonesText(relate(chord(11, "maj"), chord(3, "min"), key('E', 0, Mode::Ionian))) ==
-          "2 common tones (D#, F#)");
+    CHECK(commonTonesText(relate(chord(3, "maj"), chord(0, "min"), kCAeolian), kCAeolian) == "2 common tones (Eb, G)");
+    const Key eIonian = key('E', 0, Mode::Ionian);
+    CHECK(commonTonesText(relate(chord(11, "maj"), chord(3, "min"), eIonian), eIonian) == "2 common tones (D#, F#)");
     // A chromatic tone is spelled as a tone of the second chord, not as the key spells its pitch class:
     // E7's third is G# (the Live run's "Ab"), and the shared pc 8 of Ab and E7 reads G# after E7 but Ab
     // after Ab.
-    CHECK(commonTonesText(relate(chord(4, "7"), chord(4, "7"), kCIonian)) == "4 common tones (D, E, G#, B)");
-    CHECK(commonTonesText(relate(chord(8, "maj"), chord(4, "7"), kCIonian)) == "1 common tone (G#)");
-    CHECK(commonTonesText(relate(chord(4, "7"), chord(8, "maj"), kCIonian)) == "1 common tone (Ab)");
-    CHECK(commonTonesText(relate(chord(5, "min"), chord(5, "min"), kCIonian)) == "3 common tones (C, F, Ab)");
+    CHECK(commonTonesText(relate(chord(4, "7"), chord(4, "7"), kCIonian), kCIonian) == "4 common tones (D, E, G#, B)");
+    CHECK(commonTonesText(relate(chord(8, "maj"), chord(4, "7"), kCIonian), kCIonian) == "1 common tone (G#)");
+    CHECK(commonTonesText(relate(chord(4, "7"), chord(8, "maj"), kCIonian), kCIonian) == "1 common tone (Ab)");
+    CHECK(commonTonesText(relate(chord(5, "min"), chord(5, "min"), kCIonian), kCIonian) == "3 common tones (C, F, Ab)");
+}
+
+TEST_CASE("commonTonesText: the spelling key is the one the second chord's symbol is spelled in, not the project key") {
+    // Project C major, Bb then the Gb triad a palette browsing Db major shows: the chord is Gb there and its
+    // common tone with Bb reads Bb; spelled in the project key the same chord is F# and the tone A#. The
+    // relation itself (motion, cost, borrowing) is the project key's either way.
+    const Relation relation = relate(chord(10, "maj"), chord(6, "maj"), kCIonian);
+    CHECK(relation.to == chord(6, "maj"));
+    CHECK(relation.commonPcs == std::vector<PitchClass>{10});
+    const Key dbIonian = key('D', -1, Mode::Ionian);
+    CHECK(commonTonesText(relation, dbIonian) == "1 common tone (Bb)");
+    CHECK(commonTonesText(relation, kCIonian) == "1 common tone (A#)");
+    CHECK(commonToneSpellings(relation, dbIonian) == std::vector<Spelling>{Spelling{'B', -1}});
+    CHECK(relationText(relation, dbIonian) == "1 common tone (Bb) · down a third · cost 2 · borrowed from C Locrian");
+    CHECK(relationText(relation, kCIonian) == "1 common tone (A#) · down a third · cost 2 · borrowed from C Locrian");
+    CHECK(commonToneSpellings(relate(chord(0, "maj"), chord(2, "min"), kCIonian), kCIonian).empty());
 }
 
 TEST_CASE("relationText: common tones · motion · cost [· borrowed from]") {
-    CHECK(relationText(relate(chord(0, "maj"), chord(9, "min"), kCIonian)) ==
+    CHECK(relationText(relate(chord(0, "maj"), chord(9, "min"), kCIonian), kCIonian) ==
           "2 common tones (C, E) · down a third · cost 2");
-    CHECK(relationText(relate(chord(0, "maj"), chord(5, "maj"), kCIonian)) ==
+    CHECK(relationText(relate(chord(0, "maj"), chord(5, "maj"), kCIonian), kCIonian) ==
           "1 common tone (C) · down a fifth · cost 3");
-    CHECK(relationText(relate(chord(0, "maj"), chord(2, "min"), kCIonian)) ==
+    CHECK(relationText(relate(chord(0, "maj"), chord(2, "min"), kCIonian), kCIonian) ==
           "no common tones · up a step · cost 5");
-    CHECK(relationText(relate(chord(0, "maj"), chord(8, "maj"), kCIonian)) ==
+    CHECK(relationText(relate(chord(0, "maj"), chord(8, "maj"), kCIonian), kCIonian) ==
           "1 common tone (C) · down a third · cost 2 · borrowed from C Aeolian");
-    CHECK(relationText(relate(chord(9, "min"), chord(4, "maj"), kAAeolian)) ==
+    CHECK(relationText(relate(chord(9, "min"), chord(4, "maj"), kAAeolian), kAAeolian) ==
           "1 common tone (E) · up a fifth · cost 2 · borrowed from A harmonic minor");
-    CHECK(relationText(relate(chord(0, "maj"), chord(0, "maj"), kCIonian)) ==
+    CHECK(relationText(relate(chord(0, "maj"), chord(0, "maj"), kCIonian), kCIonian) ==
           "3 common tones (C, E, G) · same root · cost 0");
 }

@@ -21,7 +21,8 @@ std::string chordSymbol(const Chord& chord, const Key& spellingKey, SymbolStyle 
 /// The spelling of pitch class `pc` as a tone of `chord`, whose root is spelled in `spellingKey` as
 /// `chordSymbol` spells it: the letter the tone's interval above the root lands on (a third on the third
 /// letter from the root, a seventh on the seventh, a ninth on the second), with the accidental that
-/// reaches the tone from that letter (`spellOnLetter`, pitch.h, so never more than one). The letter is
+/// reaches the tone from that letter (`spellOnLetter`, pitch.h: a single one, except where the key's own
+/// degree spelling, kept below, carries a double: Cx, the third of A#7 in D# harmonic minor). The letter is
 /// the interval's major degree (`majorDegreeOfInterval`), except where the chord's structure writes it
 /// otherwise: a tritone is a diminished fifth, not a sharp fourth, when the chord has no perfect fifth
 /// (`dim`, `dim7`, `m7b5`; `7#11` keeps its fifth and its #11), eight semitones an augmented fifth, not

@@ -828,6 +828,14 @@ std::vector<Relatedness> expectedRelations(const json& snap, const Document& doc
     return relatedness(reference, chords, doc.projectKey, doc.browsedKey, doc.relationMode);
 }
 
+/// The text the snapshot shows for sized cell `i` of `expectedRelations`: a palette cell spells its common
+/// tones in the browsed key, a home triad in the project key, as each cell's own symbol is spelled.
+std::string expectedText(const json& snap, const Document& doc, const std::vector<Relatedness>& expected,
+                         std::size_t i) {
+    const bool palette = i < snap.at("palette").at("cells").size();
+    return relationText(expected[i].relation, palette ? doc.browsedKey : doc.projectKey);
+}
+
 }  // namespace
 
 TEST_CASE("snapshot: relationMode is always there; no chords means no reference and no cell relations") {
@@ -864,7 +872,7 @@ TEST_CASE("snapshot: the reference is the selected event, else the last; every s
     REQUIRE(cells.size() == expected.size());
     for (std::size_t i = 0; i < cells.size(); ++i) {
         CHECK(cells[i].at("relation") == expected[i].score);
-        CHECK(cells[i].at("relationText") == expected[i].text);
+        CHECK(cells[i].at("relationText") == expectedText(snap, store.doc(), expected, i));
     }
     // After G7, C is the best cell (D -> T with a cadence): 100.
     CHECK(cellAt(snap, 0, 1).at("relation") == 100);
@@ -917,7 +925,7 @@ TEST_CASE("snapshot: blend is normalised over the palette and the home row toget
     int hi = 0;
     for (std::size_t i = 0; i < cells.size(); ++i) {
         CHECK(cells[i].at("relation") == expected[i].score);
-        CHECK(cells[i].at("relationText") == expected[i].text);
+        CHECK(cells[i].at("relationText") == expectedText(snap, store.doc(), expected, i));
         lo = std::min(lo, cells[i].at("relation").get<int>());
         hi = std::max(hi, cells[i].at("relation").get<int>());
     }
@@ -3158,16 +3166,17 @@ TEST_CASE("snapshot applied: sized on the palette and home row's scale, which th
                 REQUIRE(cells.size() == population.size());
                 for (std::size_t i = 0; i < cells.size(); ++i) {
                     CHECK(cells[i].at("relation") == population[i].score);
-                    CHECK(cells[i].at("relationText") == population[i].text);
+                    CHECK(cells[i].at("relationText") == expectedText(snap, doc, population, i));
                 }
 
-                // Applied chords: the extras of the same call.
+                // Applied chords: the extras of the same call, their texts spelled in their own keys.
                 std::vector<Chord> sized;
                 for (const json& c : cells) {
                     sized.push_back(chord(c.at("root").get<int>(), c.at("type").get<std::string>()));
                 }
+                const std::vector<AppliedChord> appliedList = appliedChords(doc.browsedKey);
                 std::vector<Chord> extras;
-                for (const AppliedChord& a : appliedChords(doc.browsedKey)) {
+                for (const AppliedChord& a : appliedList) {
                     extras.push_back(a.chord);
                 }
                 const std::vector<Relatedness> all =
@@ -3177,7 +3186,7 @@ TEST_CASE("snapshot applied: sized on the palette and home row's scale, which th
                 for (std::size_t i = 0; i < extras.size(); ++i) {
                     const json& e = applied[i];
                     CHECK(e.at("relation") == all[sized.size() + i].score);
-                    CHECK(e.at("relationText") == all[sized.size() + i].text);
+                    CHECK(e.at("relationText") == relationText(all[sized.size() + i].relation, appliedList[i].spellingKey));
                     CHECK(e.at("relation").get<int>() >= 0);
                     CHECK(e.at("relation").get<int>() <= 100);
                 }
@@ -3297,4 +3306,35 @@ TEST_CASE("loadPreset append: the leading default section is named by count afte
     REQUIRE(sections.size() == 2);
     CHECK(sections[0] == json({{"id", 3}, {"name", "Section 1"}, {"colourIndex", 2}, {"firstEventIndex", 0}}));
     CHECK(sections[1].at("name") == "Axis");
+}
+
+TEST_CASE("snapshot: a cell's relationText spells its common tones as the cell's own symbol is spelled") {
+    // Project C major, Bb selected, browsing Db major: the Gb cell shares Bb with the reference. The project
+    // key would write the chord F# and the tone A#; the cell reads Gb, so its text and names say Bb.
+    DocumentStore store;
+    store.appendChord(chord(10, "maj"));
+    store.setBrowsedKey(key('D', -1, Mode::Ionian));
+    applyOk(store, {{"cmd", "setRelationMode"}, {"mode", "commonTones"}});
+    json snap = selectedSnapshot(store);
+    const json gb = cellAt(snap, 3, 1);
+    REQUIRE(gb.at("symbol") == "Gb");
+    CHECK(gb.at("relationText") == "1 common tone (Bb) · down a third · cost 2 · borrowed from C Locrian");
+    CHECK(gb.at("voicingNames").is_array());
+    // The home row (project key) and the Bb reference's own cell are unaffected.
+    REQUIRE(snap.at("homeTriads").size() == 7);
+    CHECK(snap.at("homeTriads")[0].at("relationText") == "no common tones · up a step · cost 6");
+
+    // An applied cell spells in its own key: browsing G major, vii°7/iii is A#dim7 (spelled in B major), and
+    // its tone shared with Bb reads A#, where the project key would say Bb.
+    store.setBrowsedKey(key('G', 0, Mode::Ionian));
+    snap = selectedSnapshot(store);
+    bool found = false;
+    for (const json& entry : snap.at("applied")) {
+        if (entry.at("label") == "vii°7/iii") {
+            found = true;
+            CHECK(entry.at("symbol") == "A#dim7");
+            CHECK(entry.at("relationText") == "1 common tone (A#) · same root · cost 5");
+        }
+    }
+    CHECK(found);
 }

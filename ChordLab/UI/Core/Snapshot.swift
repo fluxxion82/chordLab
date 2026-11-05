@@ -32,8 +32,9 @@ struct KeyJSON: Codable, Equatable {
 
 /// An event's `why`: how its chord relates to the one before it (P2-D2), as data plus the engine's one
 /// sentence (`text`, "G7 → C: down a fifth, resolves (D→T), 1 common tone (G), smooth voice leading
-/// (cost 4)"). `commonNames` spells `commonPcs` in the project key; `borrowedFrom` / `borrowedFromName`
-/// are nil for a chord in the key or in no parallel mode.
+/// (cost 4)"). `commonNames` spells `commonPcs` as tones of this chord, its root in the project key (E7's
+/// G# reads G#, not the key's Ab); `borrowedFrom` / `borrowedFromName` are nil for a chord in the key or
+/// in no parallel mode.
 struct WhyJSON: Codable, Equatable {
   let commonTones: Int
   let commonPcs: [Int]

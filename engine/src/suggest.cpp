@@ -222,7 +222,7 @@ Scored score(const Candidate& candidate, const Previous& previous, const Key& pr
             addReason(s, Reason::Prepares, "prepares (PD→D)");
         }
         if (relation.commonTones >= kNotableCommonTones) {
-            addReason(s, Reason::CommonTones, commonTonesText(relation));
+            addReason(s, Reason::CommonTones, commonTonesText(relation, projectKey));
         }
         if (relation.voiceLeadingCost <= kSmoothCost) {
             addReason(s, Reason::Smooth, "smooth voice leading (cost " + std::to_string(relation.voiceLeadingCost) + ")");

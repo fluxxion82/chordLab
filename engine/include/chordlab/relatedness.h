@@ -1,6 +1,7 @@
 #pragma once
 
 #include "chordlab/chord.h"
+#include "chordlab/harmony.h"
 #include "chordlab/pitch.h"
 #include "chordlab/suggest.h"
 
@@ -32,10 +33,13 @@ std::optional<RelationMode> parseRelationMode(std::string_view name);
 struct Relatedness {
     /// 0..100, higher is more related (R3, R4); see `relatedness`.
     int score;
-    /// `relationText(relate(reference, candidate, projectKey))` (harmony.h): "2 common tones (C, E) · down
-    /// a third · cost 2", with " · borrowed from C Aeolian" for a borrowed candidate. The same whatever the
-    /// mode.
-    std::string text;
+    /// `relate(reference, candidate, projectKey)` (harmony.h), the same whatever the mode: the data behind
+    /// the score and what the cell's text is rendered from, `relationText(relation, spellingKey)` with the
+    /// key the candidate's own symbol is spelled in (the browsed key for a palette cell, the project key for
+    /// a home triad, an applied chord's `spellingKey`), so that a Gb triad browsed from Db major names the
+    /// tone it shares with Bb "Bb", not the project key's "A#": "2 common tones (C, E) · down a third · cost
+    /// 2", with " · borrowed from C Aeolian" for a borrowed candidate.
+    Relation relation;
 };
 
 /// The relatedness of each of `candidates` to `reference` under `mode` (decisions R3, R4), parallel to

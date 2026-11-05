@@ -70,15 +70,16 @@ int pcVoiceLeadingCost(const std::vector<PitchClass>& a, const std::vector<Pitch
 /// `chord.type` must be non-null.
 std::optional<Key> borrowedFrom(const Chord& chord, const Key& projectKey);
 
-/// The structured "why" between two consecutive chords (P2-D2), as data for the UI to render.
+/// The structured "why" between two consecutive chords (P2-D2), as data for the UI to render. Key-free
+/// but for `borrowedFrom`: how its tones are spelled is the text functions' business, given the key the
+/// second chord's own symbol is spelled in.
 struct Relation {
+    /// The second chord (`relate`'s `to`), whose tones `commonToneSpellings` and the texts spell.
+    Chord to;
     /// Number of pitch classes the two chords share (`commonPcs.size()`).
     int commonTones;
     /// The shared pitch classes, ascending.
     std::vector<PitchClass> commonPcs;
-    /// `commonPcs` as tones of the second chord (`chordToneSpelling`, symbol.h, its root spelled in the
-    /// project key), one per entry: E7's G# reads G#, where the project key C major would spell pc 8 Ab.
-    std::vector<Spelling> commonSpellings;
     /// Motion from the first root to the second.
     RootMotion motion;
     /// `pcVoiceLeadingCost` of the two chords' pitch classes (root first): how smoothly one chord moves
@@ -105,17 +106,24 @@ Relation relate(const Chord& from, const Chord& to, const Key& projectKey);
 /// "A HarmonicMinor".)
 std::string keyProse(const Key& key);
 
-/// The common-tone phrase of `relation`: the count, "tone" or "tones", and its `commonSpellings` (the
-/// shared tones as the second chord spells them), comma-separated: "1 common tone (G)", "2 common tones
-/// (C, E)", "4 common tones (D, E, G#, B)" for E7 after E7 in C major; "no common tones" when the chords
-/// share none.
-std::string commonTonesText(const Relation& relation);
+/// `relation.commonPcs` as tones of `relation.to` (`chordToneSpelling`, symbol.h), one per entry, the
+/// chord's root spelled in `spellingKey`: pass the key the chord's own symbol is spelled in (the project
+/// key for an event or a suggestion, the browsed key for a palette cell, an applied chord's
+/// `spellingKey`). E7's G# reads G# whichever key would spell pc 8 Ab; a Gb triad browsed from Db major
+/// names the tone it shares with Bb "Bb", where the project key C major would write the chord F# and the
+/// tone A#. Allocates.
+std::vector<Spelling> commonToneSpellings(const Relation& relation, const Key& spellingKey);
 
-/// The short sentence for `relation`, as a palette cell's `relationText` shows it: `commonTonesText`, the
-/// `rootMotionName`, "cost <voiceLeadingCost>" and, when `borrowedFrom` is set, "borrowed from <keyProse>",
-/// joined by " · " (a literal UTF-8 middle dot between spaces):
+/// The common-tone phrase of `relation`: the count, "tone" or "tones", and `commonToneSpellings(relation,
+/// spellingKey)`, comma-separated: "1 common tone (G)", "2 common tones (C, E)", "4 common tones (D, E,
+/// G#, B)" for E7 after E7 in C major; "no common tones" when the chords share none.
+std::string commonTonesText(const Relation& relation, const Key& spellingKey);
+
+/// The short sentence for `relation`, as a palette cell's `relationText` shows it: `commonTonesText` in
+/// `spellingKey`, the `rootMotionName`, "cost <voiceLeadingCost>" and, when `borrowedFrom` is set,
+/// "borrowed from <keyProse>", joined by " · " (a literal UTF-8 middle dot between spaces):
 /// "2 common tones (C, E) · down a third · cost 2",
 /// "1 common tone (C) · down a third · cost 2 · borrowed from C Aeolian".
-std::string relationText(const Relation& relation);
+std::string relationText(const Relation& relation, const Key& spellingKey);
 
 }  // namespace chordlab

@@ -134,8 +134,8 @@ constexpr int kMaxJsonDepth = 64;
 ///    "voiceLeadingCost":4, "borrowedFrom":<key>|null, "borrowedFromName":"C Aeolian"|null,
 ///    "text":"G7 → C: down a fifth, resolves (D→T), 1 common tone (G), smooth voice leading (cost 4)"}
 ///   ```
-///   `commonNames` spells `commonPcs` as tones of this chord (`Relation::commonSpellings`, the root in the
-///   project key); `rootMotion` is `rootMotionName`;
+///   `commonNames` spells `commonPcs` as tones of this chord (`commonToneSpellings`, harmony.h, the root in
+///   the project key); `rootMotion` is `rootMotionName`;
 ///   `voiceLeadingCost` is the octave-free `pcVoiceLeadingCost`; `borrowedFrom` is the key the chord is
 ///   borrowed from (`borrowedFrom`, harmony.h) and `borrowedFromName` its `keyName`, both null for a chord
 ///   in the key or in no parallel mode.
@@ -194,8 +194,10 @@ constexpr int kMaxJsonDepth = 64;
 /// - per cell, in `palette.cells`, `homeTriads` and `applied` alike (additive), present exactly when
 ///   `relationReference` is not null and ABSENT otherwise (absent, not null):
 ///   `relation`, the cell's `Relatedness::score` 0..100 against the reference under `relationMode`, and
-///   `relationText`, its `Relatedness::text` ("2 common tones (C, E) · down a third · cost 2", with
-///   " · borrowed from C Aeolian" for a borrowed chord). All of them come from one `relatedness` call over
+///   `relationText`, `relationText(Relatedness::relation, spellingKey)` with the cell's common tones spelled
+///   as its `symbol` is (the browsed key for a palette cell, the project key for a home triad, an applied
+///   chord's own key: "2 common tones (C, E) · down a third · cost 2", with " · borrowed from C Aeolian"
+///   for a borrowed chord). All of them come from one `relatedness` call over
 ///   the palette cells followed by the home triads, so `blend`'s min–max normalisation spans both rows
 ///   together: the best of either row is 100, the worst 0, and a cell equal to the reference is 100.
 ///   The `applied` cells are that call's extras (relatedness.h): scored on the same scale without
