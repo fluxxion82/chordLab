@@ -298,7 +298,7 @@ struct ChordDetailView: View {
       if let headline = RelationStyle.headline(reference: reference, relation: cell.relation) {
         Text(headline).font(.callout)
         if let text = cell.relationText {
-          Text(text).font(.callout).foregroundStyle(.secondary)
+          Text(HarmonyText.sentenceGlyphs(text)).font(.callout).foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
         }
       }

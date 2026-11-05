@@ -57,6 +57,42 @@ final class HarmonyTextTests: XCTestCase {
     XCTAssertEqual(HarmonyText.whyChips(borrowed), ["up a third", "cost 6", "borrowed from C Aeolian"])
   }
 
+  private let flatWhy = WhyJSON(
+    commonTones: 2, commonPcs: [10, 2], commonNames: ["Bb", "D"], rootMotion: "up a fifth",
+    voiceLeadingCost: 3, borrowedFrom: KeyJSON(tonic: TonicJSON(letter: "E", alter: -1), mode: "Aeolian"),
+    borrowedFromName: "Eb Aeolian", text: "Ebmaj7 → Bbm7: up a fifth, 2 common tones (Bb, D), borrowed from Eb Aeolian")
+
+  func testWhyHeadlineShowsAccidentalsAsGlyphs() {
+    XCTAssertEqual(HarmonyText.whyHeadline(flatWhy),
+                   "E♭maj7 → B♭m7: up a fifth, 2 common tones (B♭, D), borrowed from E♭ Aeolian")
+  }
+
+  func testWhyChipsShowAccidentalsAsGlyphs() {
+    XCTAssertEqual(HarmonyText.whyChips(flatWhy),
+                   ["common B♭", "common D", "up a fifth", "cost 3", "borrowed from E♭ Aeolian"])
+  }
+
+  // MARK: - Sentence glyphs
+
+  func testSentenceGlyphsSpellNoteNamesAndKeysInARelationText() {
+    XCTAssertEqual(HarmonyText.sentenceGlyphs("1 common tone (G#) · down a third · cost 6 · borrowed from Eb Aeolian"),
+                   "1 common tone (G♯) · down a third · cost 6 · borrowed from E♭ Aeolian")
+  }
+
+  func testSentenceGlyphsSpellChordSymbolsAndNumerals() {
+    XCTAssertEqual(HarmonyText.sentenceGlyphs("F#m7b5 → G7/B: cadence (bVII→I), leading-tone chord of bII (vii°/bII)"),
+                   "F♯m7♭5 → G7/B: cadence (♭VII→I), leading-tone chord of ♭II (vii°/♭II)")
+  }
+
+  func testSentenceGlyphsLeaveWordsAlone() {
+    for sentence in ["borrowed from C Aeolian", "borrowed from D Dorian", "borrowed from Ab harmonic minor",
+                     "resolves (D→T)", "prepares (PD→D)", "outside the key — colour chord", "no common tones",
+                     "first chord", "Bass bob", ""] {
+      XCTAssertEqual(HarmonyText.sentenceGlyphs(sentence),
+                     sentence.replacingOccurrences(of: "Ab harmonic", with: "A♭ harmonic"), sentence)
+    }
+  }
+
   func testNoWhyChipsForTheFirstBlock() {
     XCTAssertTrue(HarmonyText.whyChips(nil).isEmpty)
   }
@@ -144,6 +180,8 @@ final class HarmonyTextTests: XCTestCase {
     XCTAssertEqual(HarmonyText.reasonsLine(["resolves (D→T)", "1 common tone (G)"]),
                    "resolves (D→T) · 1 common tone (G)")
     XCTAssertEqual(HarmonyText.reasonsLine([]), "")
+    XCTAssertEqual(HarmonyText.reasonsLine(["1 common tone (G#)", "cadence (bVII→I)"]),
+                   "1 common tone (G♯) · cadence (♭VII→I)")
   }
 
   // MARK: - Section names: the engine's 64-byte bound at a character boundary

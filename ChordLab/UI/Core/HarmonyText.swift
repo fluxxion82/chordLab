@@ -22,23 +22,78 @@ enum HarmonyText {
     Double(min(100, max(0, tension ?? 0))) / 100
   }
 
-  /// The first line of a block's hover tip: the engine's sentence, or "first chord" for the first
-  /// block (its `why` is null).
+  /// The first line of a block's hover tip: the engine's sentence with its accidentals as glyphs
+  /// (`sentenceGlyphs`), or "first chord" for the first block (its `why` is null).
   static func whyHeadline(_ why: WhyJSON?) -> String {
-    why?.text ?? "first chord"
+    why.map { sentenceGlyphs($0.text) } ?? "first chord"
   }
 
-  /// The chips under the sentence: each common tone ("common G"), the root motion, the voice-leading cost
-  /// ("cost 4") and the key the chord is borrowed from, when it is. Empty for the first block.
+  /// The chips under the sentence: each common tone ("common G♯"), the root motion, the voice-leading cost
+  /// ("cost 4") and the key the chord is borrowed from ("borrowed from E♭ Aeolian"), when it is. Empty for
+  /// the first block.
   static func whyChips(_ why: WhyJSON?) -> [String] {
     guard let why = why else { return [] }
-    var chips = why.commonNames.map { "common " + $0 }
+    var chips = why.commonNames.map { "common " + ChordSymbol.glyphs($0) }
     chips.append(why.rootMotion)
     chips.append("cost \(why.voiceLeadingCost)")
     if let borrowed = why.borrowedFromName {
-      chips.append("borrowed from " + borrowed)
+      chips.append("borrowed from " + sentenceGlyphs(borrowed))
     }
     return chips
+  }
+
+  /// An engine sentence (a cell's `relationText`, a block's `why.text`, a suggestion's `reasonTexts`,
+  /// a key name) with the accidentals of its note names, chord symbols and roman numerals as glyphs,
+  /// as `ChordSymbol.glyphs` shows them elsewhere: "1 common tone (G♯) · … · borrowed from E♭ Aeolian",
+  /// "B♭m7 → F♯m7♭5: …", "cadence (♭VII→I)". The words stay as written. A token is a run of letters,
+  /// digits and symbol marks; it is converted when it is a note or chord symbol (a letter A–G, then
+  /// only accidentals, chord-suffix letters, digits, marks and slash-bass letters: "Bb", "Ebmaj7",
+  /// "G7/B", not "Aeolian" or "Dorian") or a roman numeral (an optional "b"/"#" prefix, then only
+  /// I, V, i, v and the same marks: "bVII", "V7/ii", not "borrowed"). Anything else is left alone, so a
+  /// word's "b" is never a flat.
+  static func sentenceGlyphs(_ sentence: String) -> String {
+    var out = ""
+    var token = ""
+    func flush() {
+      out += isSymbolToken(token) ? ChordSymbol.glyphs(token) : token
+      token = ""
+    }
+    for character in sentence {
+      if character.isLetter || character.isNumber || symbolMarks.contains(character) {
+        token.append(character)
+      } else {
+        flush()
+        out.append(character)
+      }
+    }
+    flush()
+    return out
+  }
+
+  /// Marks that belong to a chord symbol or numeral and are not letters or digits: the sharp, the
+  /// diminished ring, the augmented plus and the slash of a slash chord or applied numeral. (ø and Δ are
+  /// letters already.)
+  private static let symbolMarks: Set<Character> = ["#", "°", "+", "/"]
+
+  /// Characters allowed after the note letter of a chord symbol: accidentals ("b", "#", "x" for a double
+  /// sharp), the suffix letters of the engine's symbols (m, M, maj, dim, aug, sus, add), digits, the
+  /// marks, and A–G for a slash bass.
+  private static let symbolTail: Set<Character> =
+    Set("ABCDEFGabdgijmsuMx#0123456789°øΔ+/")
+
+  /// Characters of a roman numeral after its accidental prefix: the numeral letters, more accidentals,
+  /// digits and the marks ("vii°7/iii", "bVII", "V7/bII").
+  private static let numeralBody: Set<Character> = Set("IViv#b0123456789°øΔ+/")
+
+  /// Whether `token` reads as a note or chord symbol or as a roman numeral (see `sentenceGlyphs`).
+  private static func isSymbolToken(_ token: String) -> Bool {
+    guard let first = token.first else { return false }
+    if ("A"..."G").contains(first) {
+      return token.dropFirst().allSatisfy(symbolTail.contains)
+    }
+    let body = token.drop { $0 == "b" || $0 == "#" }
+    guard let lead = body.first, "IViv".contains(lead) else { return false }
+    return body.allSatisfy(numeralBody.contains)
   }
 
   /// A voicing as note names with octaves, middle C (MIDI 60) being C4: "C4  E4  G4". With the engine's
@@ -111,9 +166,10 @@ enum HarmonyText {
     return "Automatic voicing" + (bassText(bass, bassName).map { " · bass " + $0 } ?? "")
   }
 
-  /// A suggestion's reasons as one hover line: the `reasonTexts` joined with " · ".
+  /// A suggestion's reasons as one hover line: the `reasonTexts` joined with " · ", accidentals as
+  /// glyphs (`sentenceGlyphs`): "1 common tone (G♯) · cadence (♭VII→I)".
   static func reasonsLine(_ reasonTexts: [String]) -> String {
-    reasonTexts.joined(separator: " · ")
+    sentenceGlyphs(reasonTexts.joined(separator: " · "))
   }
 
   /// The engine's bound on a section name (`kMaxSectionNameBytes`, document.h): `renameSection` rejects a
