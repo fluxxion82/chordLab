@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace chordlab {
@@ -17,7 +18,9 @@ std::vector<std::uint8_t> vlq(std::uint32_t value);
 /// Serialises `compiled` as a format 0 Standard MIDI File: an `MThd` chunk (format 0, one track,
 /// `tpqn` ticks per quarter note) and one `MTrk` chunk holding, in order, a tempo meta event
 /// (`FF 51 03`, `lround(60e6 / bpm)` microseconds per quarter), a time signature meta event
-/// (`FF 58 04 num log2(den) 18 08`), every note of `compiled` as a note-on (`9n`) or note-off (`8n`) on
+/// (`FF 58 04 num log2(den) 18 08`), when `trackName` is not empty a track name meta event (`FF 03 len
+/// bytes`, the bytes of `trackName` as given, UTF-8 by convention; Live names a clip dropped from the file
+/// after it, "Track 0" without one), every note of `compiled` as a note-on (`9n`) or note-off (`8n`) on
 /// channel `channel` with an explicit status byte (no running status), and an end-of-track meta event
 /// (`FF 2F 00`).
 ///
@@ -30,12 +33,13 @@ std::vector<std::uint8_t> vlq(std::uint32_t value);
 /// Returns an empty vector, writing nothing, when the file cannot be well formed: `bpm` not finite and
 /// positive, or so slow or fast that the tempo does not fit its three bytes (about 3.6 bpm to 1.2e8
 /// bpm); `num` outside 1..255; `den` not a power of two in 1..128; `tpqn` outside 1..32767; `channel`
-/// outside 0..15; an event whose pitch or velocity is outside 0..127; a beat or `endBeat` that is
+/// outside 0..15; a `trackName` longer than 0x0FFFFFFF bytes, the largest four-byte meta length; an event
+/// whose pitch or velocity is outside 0..127; a beat or `endBeat` that is
 /// negative, NaN or infinite; a tick beyond 0x0FFFFFFF, the largest four-byte delta; or a track body
 /// longer than its four-byte chunk length can describe (4 GiB: some 600 million events, which no
 /// document reaches in practice, so this is a guard rather than a path the tests exercise).
 std::vector<std::uint8_t> writeSmf0(const Compiled& compiled, double bpm, int num = 4, int den = 4,
-                                    int tpqn = 480, int channel = 0);
+                                    int tpqn = 480, int channel = 0, std::string_view trackName = {});
 
 /// Writes `bytes` to `path`, replacing any existing file there. Returns false on any error: the file
 /// cannot be created or written, or `bytes` is empty (there is no empty MIDI file, and an empty vector

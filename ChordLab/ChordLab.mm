@@ -468,7 +468,9 @@ double ChordLab::ExportBpm() const
 void ChordLab::HandleExport()
 {
   // Main thread, never real-time: compile and the SMF writer allocate. The export is exactly the playback
-  // content, so a dropped clip is as long as the progression, trailing silence included (D10).
+  // content, so a dropped clip is as long as the progression, trailing silence included (D10). Live names
+  // the dropped clip after the file's track name, which exportMidi sets from the chords or the section
+  // (chordlab::exportClipName); the file name carries the key (WriteExport).
   @autoreleasepool
   {
   const double bpm = ExportBpm();

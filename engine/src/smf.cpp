@@ -7,6 +7,7 @@
 #include <ios>
 #include <limits>
 #include <optional>
+#include <string_view>
 #include <tuple>
 
 namespace chordlab {
@@ -20,6 +21,9 @@ constexpr long kMaxTick = 0x0FFFFFFF;
 
 /// The largest tempo: microseconds per quarter note occupy three bytes.
 constexpr long kMaxTempo = 0xFFFFFF;
+
+/// The longest meta event payload: its length is a variable-length quantity of at most four bytes.
+constexpr std::size_t kMaxMetaLength = 0x0FFFFFFF;
 
 /// Status bytes of the two channel messages written, before the channel is or'd into the low nibble.
 constexpr std::uint8_t kNoteOff = 0x80;
@@ -104,10 +108,12 @@ Bytes vlq(std::uint32_t value) {
     return bytes;
 }
 
-Bytes writeSmf0(const Compiled& compiled, double bpm, int num, int den, int tpqn, int channel) {
+Bytes writeSmf0(const Compiled& compiled, double bpm, int num, int den, int tpqn, int channel,
+                std::string_view trackName) {
     const std::optional<long> tempo = tempoOf(bpm);
     const std::optional<int> denPower = denominatorPower(den);
-    if (!tempo || !denPower || num < 1 || num > 255 || tpqn < 1 || tpqn > 32767 || channel < 0 || channel > 15) {
+    if (!tempo || !denPower || num < 1 || num > 255 || tpqn < 1 || tpqn > 32767 || channel < 0 || channel > 15 ||
+        trackName.size() > kMaxMetaLength) {
         return {};
     }
     const std::optional<long> endTick = tickOf(compiled.endBeat, tpqn);
@@ -138,6 +144,12 @@ Bytes writeSmf0(const Compiled& compiled, double bpm, int num, int den, int tpqn
     // thirty-second notes per quarter, the conventional values.
     append(track, {0x00, 0xFF, 0x58, 0x04, static_cast<std::uint8_t>(num), static_cast<std::uint8_t>(*denPower),
                    0x18, 0x08});
+    // Track name: FF 03 len bytes, the bytes as given. Live names a clip dropped from the file after it.
+    if (!trackName.empty()) {
+        append(track, {0x00, 0xFF, 0x03});
+        append(track, vlq(static_cast<std::uint32_t>(trackName.size())));
+        track.insert(track.end(), trackName.begin(), trackName.end());
+    }
 
     long previous = 0;
     for (const TickEvent& e : events) {
