@@ -224,8 +224,8 @@ class ChordLabState: NSObject, ObservableObject {
   /// shown row closes.
   /// The hint (or the moved note) is decided now, from the snapshot before the change, and shown once the
   /// change's own snapshot arrives (`applySnapshot`: the first with the new tonic that is home, i.e. the
-  /// `browseKey {home}` reply), never here: the plug-in answers each command inline, inside `send`, but this
-  /// works as well when a reply comes later.
+  /// `setKey` reply when the palette was home, else the `browseKey {home}` reply), never here: the plug-in
+  /// answers each command inline, inside `send`, but this works as well when a reply comes later.
   @MainActor func changeProjectKey(pc: Int, mode: String) {
     guard let snapshot, let tonic = snapshot.tonics(for: mode)?[pc] else { return }
     let fromPc = KeyNames.pitchClass(of: snapshot.projectKey.tonic)
@@ -274,8 +274,8 @@ class ChordLabState: NSObject, ObservableObject {
       if pending.showHint {
         keyRow = .hint(fromPc: pending.fromPc, basis: KeyTransposeHint.basis(of: snapshot))
         // Once per project, even if closed at once. On a later main-queue turn: this runs inside a
-        // command's reply (the browseKey {home} after setKey), and the plug-in would answer setKeyHintSeen
-        // inline, re-entering here.
+        // command's reply (setKey, or the browseKey {home} after it), and the plug-in would answer
+        // setKeyHintSeen inline, re-entering here.
         DispatchQueue.main.async { [weak self] in
           self?.send(command: ["cmd": "setKeyHintSeen", "on": true])
         }

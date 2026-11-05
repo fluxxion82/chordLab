@@ -429,6 +429,35 @@ TEST_CASE("writeSmf0: no track name writes no meta event; UTF-8 and long names a
     CHECK(file[at + 5] == 'n');
 }
 
+TEST_CASE("writeSmf0: the track name length is encoded exactly across the VLQ byte boundaries") {
+    const Compiled compiled = compile(cMajorBars(1));
+    struct Case {
+        std::size_t length;
+        Bytes vlqBytes;
+    };
+    const Case cases[] = {
+        {127, {0x7F}},
+        {128, {0x81, 0x00}},
+        {16383, {0xFF, 0x7F}},
+        {16384, {0x81, 0x80, 0x00}},
+    };
+    for (const Case& c : cases) {
+        CAPTURE(c.length);
+        const std::string name(c.length, 'n');
+        const Bytes file = writeSmf0(compiled, 120.0, 4, 4, 480, 0, name);
+        const Parsed parsed = requireWellFormed(file);
+        CHECK(trackNameOf(parsed) == name);
+        const std::size_t at = 14 + 8 + 7 + 8;  // 00 FF 03 <length> name...
+        REQUIRE(file.size() > at + 3 + c.vlqBytes.size() + c.length);
+        CHECK(Bytes(file.begin() + at, file.begin() + at + 3) == Bytes{0x00, 0xFF, 0x03});
+        CHECK(Bytes(file.begin() + at + 3, file.begin() + at + 3 + c.vlqBytes.size()) == c.vlqBytes);
+        CHECK(file[at + 3 + c.vlqBytes.size()] == 'n');
+        // The track length counts the meta event: the golden 44 bytes plus 3 + length bytes + name.
+        CHECK(parsed.trackLength == static_cast<std::uint32_t>(0x2C + 3 + c.vlqBytes.size() + c.length));
+        CHECK(file.size() == 14 + 8 + parsed.trackLength);
+    }
+}
+
 // --- Track contents ----------------------------------------------------------------------------
 
 TEST_CASE("writeSmf0: end-of-track sits at endBeat so trailing silence survives") {
