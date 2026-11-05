@@ -168,8 +168,8 @@ void reindexSectionsForRemove(std::vector<Section>& sections, int removed, int e
     }
 }
 
-/// A section with `id`, `name` (or the default "Section <id>" when empty) and the id's turn in the colour
-/// cycle, starting at `firstEventIndex`.
+/// A section with `id`, `name` (never empty here: the callers resolve `defaultSectionName`) and the id's
+/// turn in the colour cycle, starting at `firstEventIndex`.
 /// `name` cut down to `kMaxSectionNameBytes` bytes without splitting a UTF-8 character: the cut backs
 /// off over continuation bytes (10xxxxxx) to the start of the character that straddles the bound, which
 /// is then dropped whole. A name within the bound is returned as it is.
@@ -187,8 +187,26 @@ std::string boundedSectionName(std::string name) {
 }
 
 Section makeSection(int id, std::string name, int firstEventIndex) {
-    return Section{id, name.empty() ? "Section " + std::to_string(id) : boundedSectionName(std::move(name)),
-                   (id - 1) % kNumSectionColours, firstEventIndex};
+    assert(!name.empty());
+    return Section{id, boundedSectionName(std::move(name)), (id - 1) % kNumSectionColours, firstEventIndex};
+}
+
+/// The default name of a section about to join `sections`: "Section <n>", n counting the sections there
+/// will be once it has (the first is "Section 1"), moved up past any name a section already has, so that
+/// a progression whose sections came and went never shows a gap or a repeat (not the section id, which
+/// never repeats and so ran on to "Section 9" in a document with one section).
+std::string defaultSectionName(const std::vector<Section>& sections) {
+    int n = static_cast<int>(sections.size());  // at most kMaxChords sections: no overflow below
+    std::string name;
+    do {
+        name = "Section " + std::to_string(++n);
+    } while (std::any_of(sections.begin(), sections.end(), [&](const Section& s) { return s.name == name; }));
+    return name;
+}
+
+/// `name`, or the default when it is empty.
+std::string sectionNameOr(std::string name, const std::vector<Section>& sections) {
+    return name.empty() ? defaultSectionName(sections) : std::move(name);
 }
 
 /// Copies the live (non-undoable) fields of `current` into `target`, so that restoring a snapshot keeps
@@ -309,6 +327,7 @@ int DocumentStore::appendChord(Chord chord, double lengthBeats, int velocity) {
     [[maybe_unused]] const bool changed = commit(std::move(next));
     assert(changed);  // a fresh id always makes the sequence differ
     ++nextId_;        // only now: a throw above leaves the counter, like the rest of the store, untouched
+    selectedEventId_ = id;  // live state, after the commit: a throw above leaves the selection as it was
     return id;
 }
 
@@ -366,9 +385,9 @@ bool DocumentStore::loadProgression(const std::vector<std::pair<Chord, double>>&
     }
     int sectionId = nextSectionId_;
     if (sectionIds == 2) {
-        next.sections.push_back(makeSection(sectionId++, {}, 0));  // the chords already there, at 0
+        next.sections.push_back(makeSection(sectionId++, defaultSectionName(next.sections), 0));  // the chords already there
     }
-    next.sections.push_back(makeSection(sectionId, std::move(sectionName), join));  // after every other start
+    next.sections.push_back(makeSection(sectionId, sectionNameOr(std::move(sectionName), next.sections), join));
     assert(sectionsWellFormed(next));
     [[maybe_unused]] const bool changed = commit(std::move(next));
     assert(changed);  // fresh ids always make the sequence differ
@@ -588,10 +607,10 @@ int DocumentStore::addSection(int firstEventIndex, std::string name) {
     Document next = doc_;
     int id = nextSectionId_;
     if (leading) {
-        next.sections.push_back(makeSection(id, {}, 0));
+        next.sections.push_back(makeSection(id, defaultSectionName(next.sections), 0));
         ++id;
     }
-    Section section = makeSection(id, std::move(name), firstEventIndex);
+    Section section = makeSection(id, sectionNameOr(std::move(name), next.sections), firstEventIndex);
     next.sections.insert(std::upper_bound(next.sections.begin(), next.sections.end(), section, sectionLess),
                          std::move(section));
     [[maybe_unused]] const bool changed = commit(std::move(next));

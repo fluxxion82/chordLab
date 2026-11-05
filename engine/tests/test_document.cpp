@@ -969,7 +969,7 @@ TEST_CASE("setRelationMode: live state: every mode sticks, never pushes history,
 
 TEST_CASE("setSelectedEvent: live state: selects an event, kNoEventId clears, an unknown id is a no-op, no history") {
     DocumentStore store = threeChords();
-    CHECK(store.selectedEventId() == kNoEventId);
+    CHECK(store.selectedEventId() == 3);  // the last append selected its chord
     store.setSelectedEvent(2);
     CHECK(store.selectedEventId() == 2);
     store.setSelectedEvent(99);  // nothing to select: the selection stays
@@ -992,6 +992,26 @@ TEST_CASE("setSelectedEvent: live state: selects an event, kNoEventId clears, an
     CHECK(store.selectedEventId() == kNoEventId);  // event 1 is gone
     REQUIRE(store.redo());
     CHECK(store.selectedEventId() == kNoEventId);  // and does not come back selected
+}
+
+TEST_CASE("appendChord: the new chord becomes the selection; an undo of the append clears it") {
+    DocumentStore store;
+    CHECK(store.selectedEventId() == kNoEventId);
+    REQUIRE(store.appendChord(kC) == 1);
+    CHECK(store.selectedEventId() == 1);
+    REQUIRE(store.appendChord(kF) == 2);
+    CHECK(store.selectedEventId() == 2);
+    store.setSelectedEvent(1);
+    REQUIRE(store.appendChord(kG) == 3);  // whatever was selected before
+    CHECK(store.selectedEventId() == 3);
+    REQUIRE(store.undo());
+    CHECK(store.selectedEventId() == kNoEventId);  // event 3 is gone
+    REQUIRE(store.redo());
+    CHECK(store.selectedEventId() == kNoEventId);  // live state: a redo does not reselect it
+    // A refused append leaves the selection alone.
+    store.setSelectedEvent(2);
+    CHECK(store.appendChord(kC, kNaN) == kNoEventId);
+    CHECK(store.selectedEventId() == 2);
 }
 
 TEST_CASE("selectedEventId: kept across edits, undo and redo while the event exists; cleared the moment it goes") {
@@ -1608,6 +1628,32 @@ TEST_CASE("addSection: ids never repeat across remove, undo and redo") {
     REQUIRE(store.redo());
     CHECK(store.addSection(1) == 4);
     CHECK(sectionStartsOf(store) == SectionStarts{{3, 0}, {4, 1}});
+}
+
+TEST_CASE("addSection: the default name counts the sections and steps over a name taken; never the id") {
+    DocumentStore store = threeChords();
+    store.appendChord(kC);
+    store.appendChord(kF);  // five chords
+    REQUIRE(store.addSection(0) == 1);
+    REQUIRE(store.addSection(1) == 2);
+    REQUIRE(store.addSection(2) == 3);
+    CHECK(store.doc().sections[2].name == "Section 3");
+    store.removeSection(3);
+    store.removeSection(2);
+    store.removeSection(1);
+    REQUIRE(store.doc().sections.empty());
+    // The first section there is, not the fourth id (the Live run's "Section 9").
+    REQUIRE(store.addSection(0) == 4);
+    CHECK(store.doc().sections[0] == Section{4, "Section 1", 3, 0});  // the colour still cycles by id
+    REQUIRE(store.addSection(2, "Chorus") == 5);
+    REQUIRE(store.addSection(4) == 6);
+    CHECK(store.doc().sections[2].name == "Section 3");  // the third section, whatever the others are called
+    // A name a section already has is stepped over: with "Section 1" gone and "Section 3" kept, the new
+    // second of three is "Section 4".
+    store.removeSection(4);  // its chords join "Chorus", now at 0
+    REQUIRE(store.addSection(1) == 7);
+    CHECK(store.doc().sections[1] == Section{7, "Section 4", 6, 1});
+    CHECK(store.doc().sections[2].name == "Section 3");
 }
 
 TEST_CASE("addSection: the first section added at an inner chord gets a leading section before it, in one step") {

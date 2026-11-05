@@ -2914,8 +2914,9 @@ std::vector<T> appliedField(const json& snap, const char* member) {
 }
 
 /// The members every palette cell carries without relations.
-const std::vector<std::string> kCellMembers{"degree", "tier",   "root",    "type",    "symbol",  "roman",
-                                            "family", "function", "tension", "filled", "voicing", "outOfKey"};
+const std::vector<std::string> kCellMembers{"degree",  "tier",     "root",    "type",         "symbol",
+                                            "roman",   "family",   "function", "tension",     "filled",
+                                            "voicing", "voicingNames", "outOfKey", "outOfKeyNames"};
 
 /// Checks what every `applied` entry carries beyond the expectations of each test: the members of a
 /// palette cell plus `id`, `label`, `target`; each one the cell `cellJson` writes for the chord against the
@@ -2943,6 +2944,12 @@ void checkAppliedEntries(const json& snap, const Document& doc) {
         CHECK(e.at("root") == a.chord.root);
         CHECK(e.at("type") == a.chord.type->id);
         CHECK(e.at("symbol") == chordSymbol(a.chord, a.spellingKey));
+        // The out-of-key names are spelled as the symbol is: C#dim7 in C major lists C# and Bb, not Db.
+        json names = json::array();
+        for (const int pc : e.at("outOfKey").get<std::vector<int>>()) {
+            names.push_back(chordToneSpelling(a.chord, pc, a.spellingKey).text());
+        }
+        CHECK(e.at("outOfKeyNames") == names);
         CHECK(e.at("roman") == romanNumeral(a.chord, doc.projectKey));
         CHECK(e.at("function") == functionShortName(functionOf(a.chord, doc.projectKey)));
         CHECK(e.at("tension") == tension(a.chord, doc.projectKey));
@@ -2989,7 +2996,9 @@ TEST_CASE("snapshot applied: C Ionian has V7 and vii°7 of ii, iii, IV, V and vi
                                         {"tension", tension(chord(9, "7"), store.doc().projectKey)},
                                         {"filled", false},
                                         {"voicing", closeVoicing(chord(9, "7"))},
-                                        {"outOfKey", {1}}}));
+                                        {"voicingNames", {"A4", "C#5", "E5", "G5"}},
+                                        {"outOfKey", {1}},
+                                        {"outOfKeyNames", {"C#"}}}));
     CHECK(snap.at("schema") == 1);  // additive
 }
 
@@ -3205,4 +3214,87 @@ TEST_CASE("snapshot applied: blend scores are clamped to 0..100 against the popu
             }
         }
     }
+}
+
+TEST_CASE("snapshot: voicingNames and outOfKeyNames spell notes as the chord does, so a tip's lines agree") {
+    DocumentStore store;
+    applyOk(store, {{"cmd", "appendChord"}, {"root", 4}, {"type", "7"}});    // E7: E G# B D
+    applyOk(store, {{"cmd", "appendChord"}, {"root", 5}, {"type", "min"}});  // Fm: F Ab C
+    json snap = snapshot(store);
+    const json e7 = snap.at("events")[0];
+    CHECK(e7.at("voicing") == json({64, 68, 71, 74}));
+    CHECK(e7.at("voicingNames") == json({"E4", "G#4", "B4", "D5"}));
+    CHECK(e7.at("outOfKey") == json({8}));
+    CHECK(e7.at("outOfKeyNames") == json({"G#"}));  // the Live run's tip said "Out of key: G♯" and "Ab"
+    const json fm = snap.at("events")[1];
+    CHECK(fm.at("outOfKeyNames") == json({"Ab"}));  // the same pitch class, read as Fm's third
+    CHECK(fm.at("voicingNames") == json({"F4", "Ab4", "C5"}));
+
+    // Palette cells are spelled in the browsed key and read against the project key.
+    applyOk(store, {{"cmd", "browseKey"}, {"steps", 1}});  // G major
+    snap = snapshot(store);
+    const json fSharpDim = cellAt(snap, 6, 1);
+    CHECK(fSharpDim.at("symbol") == "F#mb5");
+    CHECK(fSharpDim.at("outOfKeyNames") == json({"F#"}));
+    CHECK(fSharpDim.at("voicingNames") == json({"F#4", "A4", "C5"}));
+    for (const json& cell : snap.at("palette").at("cells")) {
+        CAPTURE(cell.dump());
+        CHECK(cell.at("voicingNames").size() == cell.at("voicing").size());
+        CHECK(cell.at("outOfKeyNames").size() == cell.at("outOfKey").size());
+    }
+    // Home triads: the project key's own spelling.
+    REQUIRE(snap.at("homeTriads").size() == 7);
+    CHECK(snap.at("homeTriads")[6].at("voicingNames") == json({"B4", "D5", "F5"}));
+    CHECK(snap.at("homeTriads")[6].at("outOfKeyNames") == json::array());
+}
+
+TEST_CASE("why.commonNames and every common-tone text spell shared tones as the chord does: E7's G#") {
+    DocumentStore store;
+    applyOk(store, {{"cmd", "appendChord"}, {"root", 4}, {"type", "7"}});
+    applyOk(store, {{"cmd", "appendChord"}, {"root", 4}, {"type", "7"}});
+    applyOk(store, {{"cmd", "setRelationMode"}, {"mode", "commonTones"}});
+    const json snap = snapshotSelecting(store, 2);
+    const json why = snap.at("events")[1].at("why");
+    CHECK(why.at("commonPcs") == json({2, 4, 8, 11}));
+    CHECK(why.at("commonNames") == json({"D", "E", "G#", "B"}));
+    CHECK(why.at("text") == "E7 → E7: same root, 4 common tones (D, E, G#, B), smooth voice leading (cost 0)");
+    // The applied V7/vi cell is E7 too: its relation to the selected E7 (the Live run's tip) says G#.
+    bool found = false;
+    for (const json& entry : snap.at("applied")) {
+        if (entry.at("label") == "V7/vi") {
+            found = true;
+            CHECK(entry.at("symbol") == "E7");
+            CHECK(entry.at("relationText") == "4 common tones (D, E, G#, B) · same root · cost 0");
+            CHECK(entry.at("outOfKeyNames") == json({"G#"}));
+        }
+    }
+    CHECK(found);
+}
+
+TEST_CASE("appendChord: the new chord is selected, so the snapshot's selection and reference follow it") {
+    DocumentStore store = cG7Am();
+    CHECK(store.selectedEventId() == 3);  // the last append
+    applyOk(store, {{"cmd", "setRelationMode"}, {"mode", "blend"}});
+    applyOk(store, {{"cmd", "selectEvent"}, {"id", 1}});
+    applyOk(store, {{"cmd", "appendChord"}, {"root", 5}, {"type", "maj"}});  // F, id 4
+    CHECK(store.selectedEventId() == 4);
+    const json snap = snapshotSelecting(store, store.selectedEventId());
+    CHECK(snap.at("selectedEventId") == 4);
+    CHECK(snap.at("relationReference") == json({{"eventId", 4}, {"symbol", "F"}}));
+    applyOk(store, {{"cmd", "undo"}});
+    CHECK(store.selectedEventId() == kNoEventId);
+}
+
+TEST_CASE("loadPreset append: the leading default section is named by count after sections came and went") {
+    DocumentStore store = cG7Am();
+    applyOk(store, {{"cmd", "addSection"}, {"index", 0}});
+    applyOk(store, {{"cmd", "addSection"}, {"index", 2}});
+    applyOk(store, {{"cmd", "removeSection"}, {"id", 2}});
+    applyOk(store, {{"cmd", "removeSection"}, {"id", 1}});
+    REQUIRE(store.doc().sections.empty());
+    applyOk(store, {{"cmd", "loadPreset"}, {"id", "axis"}, {"mode", "append"}});
+    const json sections = snapshot(store).at("sections");
+    REQUIRE(sections.size() == 2);
+    CHECK(sections[0] == json({{"id", 3}, {"name", "Section 1"}, {"colourIndex", 2}, {"firstEventIndex", 0}}));
+    CHECK(sections[1].at("name") == "Axis");
 }

@@ -75,8 +75,8 @@ constexpr int kMaxJsonDepth = 64;
 ///            "Dorian":[...], ...},
 ///  "events":[{"id":1,"root":0,"type":"maj","symbol":"C","roman":"I","family":"Major","function":"T",
 ///             "tension":3,"startBeat":0.0,"lengthBeats":4.0,"velocity":100,
-///             "inversion":0,"octave":0,"manualVoicing":false,"voicing":[60,64,67],"outOfKey":[],
-///             "why":null}, ...],
+///             "inversion":0,"octave":0,"manualVoicing":false,"voicing":[60,64,67],
+///             "voicingNames":["C4","E4","G4"],"outOfKey":[],"outOfKeyNames":[],"why":null}, ...],
 ///  "sections":[{"id":1,"name":"Verse","colourIndex":0,"firstEventIndex":0}, ...],
 ///  "suggestions":[{"root":5,"type":"maj","symbol":"F","roman":"IV","function":"PD","score":2.35,
 ///                  "reasons":["commonTones","smooth","diatonic","predominant"],
@@ -84,7 +84,7 @@ constexpr int kMaxJsonDepth = 64;
 ///  "palette":{"tiers":5,
 ///             "cells":[{"degree":0,"tier":1,"root":0,"type":"maj","symbol":"C","roman":"I",
 ///                       "family":"Major","function":"T","tension":3,"filled":true,
-///                       "voicing":[60,64,67],"outOfKey":[],
+///                       "voicing":[60,64,67],"voicingNames":["C4","E4","G4"],"outOfKey":[],"outOfKeyNames":[],
 ///                       "relation":92,"relationText":"1 common tone (C) · up a fifth · cost 3"}, ...]},
 ///  "homeTriads":[],
 ///  "relationMode":"blend", "relationReference":{"eventId":3,"symbol":"F"}|null,
@@ -92,7 +92,7 @@ constexpr int kMaxJsonDepth = 64;
 ///              "fits":true}, ...],
 ///  "applied":[{"id":"applied-1-1","label":"V7/ii","target":"Dm","degree":1,"tier":1,"root":9,"type":"7",
 ///              "symbol":"A7","roman":"VI7","family":"Major","function":"D","tension":43,"filled":false,
-///              "voicing":[69,73,76,79],"outOfKey":[1],
+///              "voicing":[69,73,76,79],"voicingNames":["A4","C#5","E5","G5"],"outOfKey":[1],"outOfKeyNames":["C#"],
 ///              "relation":59,"relationText":"1 common tone (A) · up a third · cost 4"}, ...]}
 /// ```
 /// `endBeat` is the playback period, `compile(doc).endBeat` (compiler.h): the loop length the scheduler wraps at,
@@ -108,7 +108,11 @@ constexpr int kMaxJsonDepth = 64;
 /// order.
 /// `outOfKey`, on events and cells alike, is the chord's pitch classes that are not in the project key's
 /// scale, ascending and without repeats: what a hover popover lists as borrowed notes. It is empty
-/// exactly when a cell is `filled`.
+/// exactly when a cell is `filled`. `outOfKeyNames` (additive) spells them as tones of the chord
+/// (`chordToneSpelling`, symbol.h: E7's "G#", not the Ab the key would say for pc 8), with the root as the
+/// `symbol` spells it (the project key for events and home triads, the browsed key for palette cells, an
+/// applied chord's own spelling key); `voicingNames` (additive) names `voicing`'s notes the same way, with
+/// octaves, middle C (60) being C4 ("G#3" for 56 in E7): the tip's three lines then agree on every note.
 /// `modes` is every `Mode` name in enum order and `tonics` maps each of them to twelve entries indexed
 /// by pitch class, the `canonicalTonic` of that pitch class in that mode with its ASCII `text`
 /// ("Db", "F#"), so that the key pickers can label themselves without a copy of the theory. Both are
@@ -130,7 +134,8 @@ constexpr int kMaxJsonDepth = 64;
 ///    "voiceLeadingCost":4, "borrowedFrom":<key>|null, "borrowedFromName":"C Aeolian"|null,
 ///    "text":"G7 → C: down a fifth, resolves (D→T), 1 common tone (G), smooth voice leading (cost 4)"}
 ///   ```
-///   `commonNames` spells `commonPcs` in the project key; `rootMotion` is `rootMotionName`;
+///   `commonNames` spells `commonPcs` as tones of this chord (`Relation::commonSpellings`, the root in the
+///   project key); `rootMotion` is `rootMotionName`;
 ///   `voiceLeadingCost` is the octave-free `pcVoiceLeadingCost`; `borrowedFrom` is the key the chord is
 ///   borrowed from (`borrowedFrom`, harmony.h) and `borrowedFromName` its `keyName`, both null for a chord
 ///   in the key or in no parallel mode.
@@ -172,7 +177,8 @@ constexpr int kMaxJsonDepth = 64;
 ///   palette cell and the same meaning, plus an `id`:
 ///   ```
 ///   {"id":"home-0","degree":0,"tier":1,"root":0,"type":"maj","symbol":"C","roman":"I","family":"Major",
-///    "function":"T","tension":3,"filled":true,"voicing":[60,64,67],"outOfKey":[]}
+///    "function":"T","tension":3,"filled":true,"voicing":[60,64,67],"voicingNames":["C4","E4","G4"],
+///    "outOfKey":[],"outOfKeyNames":[]}
 ///   ```
 ///   `degree` is the degree of the project scale, `tier` always `kPaletteTriadTier` (1), `symbol` is
 ///   spelled in the project key and `roman`, `function`, `tension` are read against it, so an entry
@@ -248,8 +254,10 @@ std::string keyName(const Key& key);
 ///   `{"mode":"<Mode>"}` (the parallel mode on the same tonic pitch class, canonically spelled) or
 ///   `{"home":true}` (browsed key = project key).
 /// - `appendChord {root,type,lengthBeats?,velocity?}`: `appendChord`, with velocity 100 and, without `lengthBeats`, one bar of the document meter
-///   (barTicks(meter) / 960 beats: 4 in 4/4, 3.5 in 7/8). Refused (false, an error naming the reason, no
-///   change) when the document already holds `kMaxChords` chords or the id counter is exhausted.
+///   (barTicks(meter) / 960 beats: 4 in 4/4, 3.5 in 7/8). The new chord is selected (document.h), so the
+///   next snapshot's `selectedEventId`, `suggestions` and `relationReference` follow it. Refused (false, an
+///   error naming the reason, no change) when the document already holds `kMaxChords` chords or the id
+///   counter is exhausted.
 /// - `moveChord {id,index}`, `setLength {id,lengthBeats}`, `setVelocity {id,velocity}`,
 ///   `removeChord {id}`: the matching store call.
 /// - `setProgressionLoop {on}`, `setFollowHost {on}`: the matching live-state setter.
@@ -266,7 +274,7 @@ std::string keyName(const Key& key);
 ///   every chord moved by the signed interval, one undo step. Neither changes the key. A move of nothing
 ///   (interval 0, no chords) is a valid no-op that pushes no history. An out-of-range value is rejected.
 ///   With `transposeWithKey` on, `setKey` also transposes the chords (document.h), in the same undo step.
-/// - `addSection {index,name?}`: `addSection(index, name)`; `name` defaults to the store's "Section <id>"
+/// - `addSection {index,name?}`: `addSection(index, name)`; `name` defaults to the store's "Section <n>"
 ///   and, given, must be at most `kMaxSectionNameBytes` UTF-8 bytes (longer is rejected, not cut: the UI
 ///   limits its field and a longer name is a malformed message). An `index` that is no chord position,
 ///   or that already starts a section, is a valid no-op (the UI may name a chord an edit just moved).
@@ -288,7 +296,7 @@ std::string keyName(const Key& key);
 ///   none, is rejected with an error listing both). The preset is resolved in the project key
 ///   (`resolvePreset`) and loaded as ONE undoable step: "append" is `appendProgression` (after the last
 ///   chord, in a new section named after the preset; onto an unsectioned non-empty progression the
-///   chords already there first get a default "Section <id>" at 0), "replace" is `replaceProgression`
+///   chords already there first get a default "Section <n>" at 0), "replace" is `replaceProgression`
 ///   (every chord and section replaced, one section at 0 named after the preset, the selection cleared
 ///   because its chord is gone; keys and live state untouched, history kept). Refused (false, an error
 ///   naming the reason, no change, no id consumed) for the store's reasons (`progressionRefusal`,
