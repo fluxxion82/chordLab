@@ -219,11 +219,13 @@ class ChordLabState: NSObject, ObservableObject {
   // MARK: - Project key (the Key pickers) and the transpose row
 
   /// Picking a tonic or a mode: sets the project key, spelled as the snapshot's table spells that pitch
-  /// class in that mode, and brings the browsed key home, so the palette follows. Any shown row closes.
+  /// class in that mode, and brings the browsed key home, so the palette follows (the plug-in keeps a home
+  /// browse home by itself, document.h; the `browseKey {home}` is for a palette browsing elsewhere). Any
+  /// shown row closes.
   /// The hint (or the moved note) is decided now, from the snapshot before the change, and shown once the
   /// change's own snapshot arrives (`applySnapshot`: the first with the new tonic that is home, i.e. the
-  /// `browseKey {home}` reply), never here: the plug-in answers each command inline, inside `send`, but this
-  /// works as well when a reply comes later.
+  /// `setKey` reply when the palette was home, else the `browseKey {home}` reply), never here: the plug-in
+  /// answers each command inline, inside `send`, but this works as well when a reply comes later.
   @MainActor func changeProjectKey(pc: Int, mode: String) {
     guard let snapshot, let tonic = snapshot.tonics(for: mode)?[pc] else { return }
     let fromPc = KeyNames.pitchClass(of: snapshot.projectKey.tonic)
@@ -259,10 +261,12 @@ class ChordLabState: NSObject, ObservableObject {
 
   /// After a snapshot is decoded: resolves a pending key change by its own snapshot (the first whose
   /// project tonic is the new one and whose browsed key is the project key: the plug-in's `setKey` reply
-  /// still has the old browsed key, the `browseKey {home}` reply that follows is the first that is home, so
-  /// a row is never published only to be dropped by the next snapshot), else drops a hint the snapshot no
+  /// when the palette was home, else the `browseKey {home}` reply that follows, so a row is never published
+  /// only to be dropped by the next snapshot), else drops a hint the snapshot no
   /// longer matches. The row belongs to the moment of the key change: any snapshot browsing another key
-  /// closes it, the hint (`KeyTransposeHint.stillValid`) and the moved note alike.
+  /// closes it, the hint (`KeyTransposeHint.stillValid`) and the moved note alike, and the moved note also
+  /// closes when the project tonic is no longer the one it names (⌘Z of the key change, after which the
+  /// plug-in keeps the browse home: document.h).
   private func updateKeyRow(for snapshot: Snapshot) {
     if let pending = pendingKeyChange, KeyNames.pitchClass(of: snapshot.projectKey.tonic) == pending.toPc,
        KeyTransposeHint.isHome(snapshot) {
@@ -270,8 +274,8 @@ class ChordLabState: NSObject, ObservableObject {
       if pending.showHint {
         keyRow = .hint(fromPc: pending.fromPc, basis: KeyTransposeHint.basis(of: snapshot))
         // Once per project, even if closed at once. On a later main-queue turn: this runs inside a
-        // command's reply (the browseKey {home} after setKey), and the plug-in would answer setKeyHintSeen
-        // inline, re-entering here.
+        // command's reply (setKey, or the browseKey {home} after it), and the plug-in would answer
+        // setKeyHintSeen inline, re-entering here.
         DispatchQueue.main.async { [weak self] in
           self?.send(command: ["cmd": "setKeyHintSeen", "on": true])
         }
@@ -283,7 +287,8 @@ class ChordLabState: NSObject, ObservableObject {
     switch keyRow {
     case .hint(_, let basis)? where !KeyTransposeHint.stillValid(basis, in: snapshot):
       keyRow = nil
-    case .moved? where !KeyTransposeHint.isHome(snapshot):
+    case .moved(_, let tonic)? where !KeyTransposeHint.isHome(snapshot)
+      || KeyNames.tonicName(snapshot.projectKey.tonic) != tonic:
       keyRow = nil
     default:
       break

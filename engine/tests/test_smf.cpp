@@ -231,6 +231,17 @@ Parsed requireWellFormed(const Bytes& bytes, int tpqn = 480) {
     CHECK(parsed.events[1].status == 0xFF);
     CHECK(parsed.events[1].metaType == 0x58);
     CHECK(parsed.events[1].data.size() == 4);
+    // A track name, if there is one, comes third, at tick 0, and once.
+    int names = 0;
+    for (std::size_t i = 0; i < parsed.events.size(); ++i) {
+        const ParsedEvent& e = parsed.events[i];
+        if (e.status == 0xFF && e.metaType == 0x03) {
+            ++names;
+            CHECK(i == 2);
+            CHECK(e.tick == 0);
+        }
+    }
+    CHECK(names <= 1);
     // End of track last, exactly once.
     CHECK(parsed.events.back().status == 0xFF);
     CHECK(parsed.events.back().metaType == 0x2F);
@@ -253,6 +264,16 @@ std::vector<ParsedEvent> channelEvents(const Parsed& parsed) {
         }
     }
     return out;
+}
+
+/// The payload of the track name meta event (FF 03) as text, or "" when the file has none.
+std::string trackNameOf(const Parsed& parsed) {
+    for (const ParsedEvent& e : parsed.events) {
+        if (e.status == 0xFF && e.metaType == 0x03) {
+            return std::string(e.data.begin(), e.data.end());
+        }
+    }
+    return {};
 }
 
 Bytes readAll(const std::filesystem::path& path) {
@@ -365,6 +386,76 @@ TEST_CASE("writeSmf0: matches the committed fixture cmaj-1bar.mid") {
     CHECK(fixture == kGolden);
     CHECK(writeSmf0(compile(cMajorBars(1)), 120.0) == fixture);
     requireWellFormed(fixture);
+}
+
+TEST_CASE("writeSmf0: a track name is a FF 03 meta event after the time signature") {
+    const Compiled compiled = compile(cMajorBars(1));
+    const Bytes actual = writeSmf0(compiled, 120.0, 4, 4, 480, 0, "C Am F G7");
+    // The golden file with the 13-byte meta event spliced in after the time signature, the track 13 longer.
+    Bytes expected = kGolden;
+    expected[14 + 7] = 0x2C + 13;
+    const Bytes meta = {0x00, 0xFF, 0x03, 0x09, 'C', ' ', 'A', 'm', ' ', 'F', ' ', 'G', '7'};
+    expected.insert(expected.begin() + 14 + 8 + 7 + 8, meta.begin(), meta.end());
+    INFO("actual:   " << hex(actual));
+    INFO("expected: " << hex(expected));
+    CHECK(actual == expected);
+    const Parsed parsed = requireWellFormed(actual);
+    CHECK(trackNameOf(parsed) == "C Am F G7");
+    CHECK(channelEvents(parsed).size() == 6);
+    CHECK(parsed.events.back().tick == 1920);
+}
+
+TEST_CASE("writeSmf0: no track name writes no meta event; UTF-8 and long names are carried byte for byte") {
+    const Compiled compiled = compile(cMajorBars(1));
+    CHECK(writeSmf0(compiled, 120.0, 4, 4, 480, 0, "") == kGolden);
+    CHECK(writeSmf0(compiled, 120.0, 4, 4, 480, 0, {}) == kGolden);
+    CHECK(writeSmf0(compiled, 120.0, 4, 4, 480, 0) == kGolden);
+
+    const std::string utf8 = std::string("Bb") + "\xCE\x94" + "7 " + "\xE2\x80\xA6";  // "BbΔ7 …"
+    CHECK(trackNameOf(requireWellFormed(writeSmf0(compiled, 120.0, 4, 4, 480, 0, utf8))) == utf8);
+
+    // 200 bytes: the meta length takes two bytes, 81 48.
+    const std::string longName(200, 'n');
+    const Bytes file = writeSmf0(compiled, 120.0, 4, 4, 480, 0, longName);
+    const Parsed parsed = requireWellFormed(file);
+    CHECK(trackNameOf(parsed) == longName);
+    const std::size_t at = 14 + 8 + 7 + 8;  // 00 FF 03 81 48 n n n ...
+    REQUIRE(file.size() > at + 5);
+    CHECK(file[at] == 0x00);
+    CHECK(file[at + 1] == 0xFF);
+    CHECK(file[at + 2] == 0x03);
+    CHECK(file[at + 3] == 0x81);
+    CHECK(file[at + 4] == 0x48);
+    CHECK(file[at + 5] == 'n');
+}
+
+TEST_CASE("writeSmf0: the track name length is encoded exactly across the VLQ byte boundaries") {
+    const Compiled compiled = compile(cMajorBars(1));
+    struct Case {
+        std::size_t length;
+        Bytes vlqBytes;
+    };
+    const Case cases[] = {
+        {127, {0x7F}},
+        {128, {0x81, 0x00}},
+        {16383, {0xFF, 0x7F}},
+        {16384, {0x81, 0x80, 0x00}},
+    };
+    for (const Case& c : cases) {
+        CAPTURE(c.length);
+        const std::string name(c.length, 'n');
+        const Bytes file = writeSmf0(compiled, 120.0, 4, 4, 480, 0, name);
+        const Parsed parsed = requireWellFormed(file);
+        CHECK(trackNameOf(parsed) == name);
+        const std::size_t at = 14 + 8 + 7 + 8;  // 00 FF 03 <length> name...
+        REQUIRE(file.size() > at + 3 + c.vlqBytes.size() + c.length);
+        CHECK(Bytes(file.begin() + at, file.begin() + at + 3) == Bytes{0x00, 0xFF, 0x03});
+        CHECK(Bytes(file.begin() + at + 3, file.begin() + at + 3 + c.vlqBytes.size()) == c.vlqBytes);
+        CHECK(file[at + 3 + c.vlqBytes.size()] == 'n');
+        // The track length counts the meta event: the golden 44 bytes plus 3 + length bytes + name.
+        CHECK(parsed.trackLength == static_cast<std::uint32_t>(0x2C + 3 + c.vlqBytes.size() + c.length));
+        CHECK(file.size() == 14 + 8 + parsed.trackLength);
+    }
 }
 
 // --- Track contents ----------------------------------------------------------------------------
@@ -723,9 +814,13 @@ std::string describe(const std::vector<Note>& notes) {
 
 }  // namespace
 
-TEST_CASE("exportMidi: Feel{} in 4/4 is today's export, the golden one-bar file included") {
-    CHECK(exportMidi(cMajorBars(1), -1, 120.0) == kGolden);
-    // C Am F G7, one bar each, auto voice-leading off, 120 bpm: the bytes writeSmf0 wrote before feels existed.
+TEST_CASE("exportMidi: Feel{} in 4/4 is today's export plus the clip name; the one-bar file is the golden one named") {
+    const Bytes oneBar = exportMidi(cMajorBars(1), -1, 120.0);
+    CHECK(oneBar == writeSmf0(compile(cMajorBars(1)), 120.0, 4, 4, 480, 0, "C"));
+    CHECK(trackNameOf(requireWellFormed(oneBar)) == "C");
+    CHECK(notesOf(requireWellFormed(oneBar)) == notesOf(requireWellFormed(kGolden)));
+    // C Am F G7, one bar each, auto voice-leading off, 120 bpm: the bytes writeSmf0 wrote before feels
+    // existed, plus the track name after the time signature.
     DocumentStore store;
     store.appendChord(kC, 4.0, 100);
     store.appendChord(Chord{9, &chordType("min")}, 4.0, 100);
@@ -733,9 +828,10 @@ TEST_CASE("exportMidi: Feel{} in 4/4 is today's export, the golden one-bar file 
     store.appendChord(Chord{7, &chordType("7")}, 4.0, 100);
     const Bytes expected = {
         'M', 'T', 'h', 'd', 0, 0, 0, 6, 0, 0, 0, 1, 0x01, 0xE0,
-        'M', 'T', 'r', 'k', 0, 0, 0, 0x7F,                                                       // 127 bytes
+        'M', 'T', 'r', 'k', 0, 0, 0, 0x8C,                                                       // 140 bytes
         0x00, 0xFF, 0x51, 0x03, 0x07, 0xA1, 0x20,                                                // 500000 us
         0x00, 0xFF, 0x58, 0x04, 0x04, 0x02, 0x18, 0x08,                                          // 4/4
+        0x00, 0xFF, 0x03, 0x09, 'C', ' ', 'A', 'm', ' ', 'F', ' ', 'G', '7',                     // track name
         0x00, 0x90, 0x3C, 0x64, 0x00, 0x90, 0x40, 0x64, 0x00, 0x90, 0x43, 0x64,                  // C on at 0
         0x8F, 0x00, 0x80, 0x3C, 0x00, 0x00, 0x80, 0x40, 0x00, 0x00, 0x80, 0x43, 0x00,            // C off at 1920
         0x00, 0x90, 0x45, 0x64, 0x00, 0x90, 0x48, 0x64, 0x00, 0x90, 0x4C, 0x64,                  // Am on
@@ -749,10 +845,10 @@ TEST_CASE("exportMidi: Feel{} in 4/4 is today's export, the golden one-bar file 
     const Bytes actual = exportMidi(store.doc(), -1, 120.0);
     INFO("actual:   " << hex(actual));
     CHECK(actual == expected);
-    CHECK(actual == writeSmf0(compile(store.doc()), 120.0, 4, 4, 480));
+    CHECK(actual == writeSmf0(compile(store.doc()), 120.0, 4, 4, 480, 0, "C Am F G7"));
     // Auto voice-leading on: still exactly writeSmf0 of the block compile.
     store.setAutoVoiceLead(true);
-    CHECK(exportMidi(store.doc(), -1, 120.0) == writeSmf0(compile(store.doc()), 120.0, 4, 4, 480));
+    CHECK(exportMidi(store.doc(), -1, 120.0) == writeSmf0(compile(store.doc()), 120.0, 4, 4, 480, 0, "C Am F G7"));
 }
 
 TEST_CASE("exportMidi: a one-bar C major pulse at 120 bpm round-trips to literal ticks") {
@@ -821,14 +917,68 @@ TEST_CASE("exportMidi: a section exports its own chords, rebased; nothing to wri
     };
     INFO(describe(notes));
     CHECK(notes == expected);
-    CHECK(exportMidi(doc, 1, 120.0) == writeSmf0(compileSection(doc, 1), 120.0, 4, 4, 480));
-    CHECK(exportMidi(doc, 0, 120.0) == writeSmf0(compileSection(doc, 0), 120.0, 4, 4, 480));
+    CHECK(exportMidi(doc, 1, 120.0) == writeSmf0(compileSection(doc, 1), 120.0, 4, 4, 480, 0, "B"));
+    CHECK(exportMidi(doc, 0, 120.0) == writeSmf0(compileSection(doc, 0), 120.0, 4, 4, 480, 0, "Section 1"));
+    CHECK(trackNameOf(requireWellFormed(exportMidi(doc, 1, 120.0))) == "B");  // the section's name names the clip
 
     CHECK(exportMidi(doc, 2, 120.0).empty());          // no such section
     CHECK(exportMidi(Document{}, -1, 120.0).empty());  // nothing to write
     CHECK(exportMidi(Document{}, 0, 120.0).empty());
     CHECK(exportMidi(cMajorBars(1), 1, 120.0).empty());  // no sections: only index 0
-    CHECK(exportMidi(cMajorBars(1), 0, 120.0) == kGolden);
+    CHECK(exportMidi(cMajorBars(1), 0, 120.0) == exportMidi(cMajorBars(1), -1, 120.0));  // index 0 is the whole
     CHECK(exportMidi(doc, -1, 0.0).empty());           // a tempo the writer refuses
     CHECK(exportMidi(doc, -1, std::numeric_limits<double>::quiet_NaN()).empty());
+}
+
+// --- exportClipName -----------------------------------------------------------------------------------
+
+TEST_CASE("exportClipName: the whole progression is its chord symbols in the project key, at most kClipNameChords") {
+    DocumentStore store;
+    store.appendChord(kC, 4.0, 100);
+    store.appendChord(Chord{9, &chordType("min")}, 4.0, 100);
+    store.appendChord(Chord{5, &chordType("maj")}, 4.0, 100);
+    store.appendChord(Chord{7, &chordType("7")}, 4.0, 100);
+    CHECK(exportClipName(store.doc(), -1) == "C Am F G7");
+    CHECK(exportClipName(store.doc(), 0) == "C Am F G7");  // no sections: index 0 is the whole progression
+    CHECK(exportClipName(store.doc(), 1).empty());          // no such section
+    CHECK(exportClipName(Document{}, -1).empty());
+    CHECK(exportClipName(Document{}, 0).empty());
+
+    // Spelled in the project key, as the sequence spells its blocks: Bb in F major, A# in B major.
+    DocumentStore spelled;
+    spelled.appendChord(Chord{10, &chordType("maj")}, 4.0, 100);
+    spelled.setProjectKey(Key{Tonic{'F', 0}, Mode::Ionian});
+    CHECK(exportClipName(spelled.doc(), -1) == "Bb");
+    spelled.setProjectKey(Key{Tonic{'B', 0}, Mode::Ionian});
+    CHECK(exportClipName(spelled.doc(), -1) == "A#");
+
+    // The 12-bar blues: eight chords and an ellipsis; exactly eight chords have none.
+    DocumentStore blues;
+    const int roots[12] = {0, 5, 0, 0, 5, 5, 0, 0, 7, 5, 0, 7};
+    for (int i = 0; i < 8; ++i) {
+        blues.appendChord(Chord{roots[i], &chordType("7")}, 4.0, 100);
+    }
+    CHECK(exportClipName(blues.doc(), -1) == "C7 F7 C7 C7 F7 F7 C7 C7");
+    for (int i = 8; i < 12; ++i) {
+        blues.appendChord(Chord{roots[i], &chordType("7")}, 4.0, 100);
+    }
+    CHECK(exportClipName(blues.doc(), -1) == "C7 F7 C7 C7 F7 F7 C7 C7 ...");
+    CHECK(trackNameOf(requireWellFormed(exportMidi(blues.doc(), -1, 120.0))) == "C7 F7 C7 C7 F7 F7 C7 C7 ...");
+}
+
+TEST_CASE("exportClipName: a section is named after itself, or after its chords when its name is empty") {
+    DocumentStore store;
+    store.appendChord(kC, 4.0, 100);
+    store.appendChord(Chord{9, &chordType("min")}, 4.0, 100);
+    store.appendChord(Chord{5, &chordType("maj")}, 4.0, 100);
+    store.appendChord(Chord{7, &chordType("7")}, 4.0, 100);
+    const int chorus = store.addSection(2, "Chorus");  // the store first sections the start: "Section 1" at 0
+    REQUIRE(chorus != kNoSectionId);
+    CHECK(exportClipName(store.doc(), 0) == "Section 1");
+    CHECK(exportClipName(store.doc(), 1) == "Chorus");
+    CHECK(exportClipName(store.doc(), -1) == "C Am F G7");
+    CHECK(exportClipName(store.doc(), 2).empty());
+    store.renameSection(chorus, "");
+    CHECK(exportClipName(store.doc(), 1) == "F G7");
+    CHECK(exportClipName(store.doc(), 0) == "Section 1");
 }

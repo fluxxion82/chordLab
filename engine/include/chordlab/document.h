@@ -120,7 +120,9 @@ inline bool operator!=(const Section& a, const Section& b) noexcept {
 /// composes: the flag changes which notes `compile` produces, so toggling it is an edit of the progression,
 /// not a view of it). `browsedKey`, `progressionLoop`, `followHost`, `relationMode`, `transposeWithKey` and
 /// `keyHintSeen` are live session state: changing them never creates history, and undo/redo leave their
-/// current values alone while restoring the rest.
+/// current values alone while restoring the rest, with one exception: a `browsedKey` equal to `projectKey`
+/// (home) follows the project key wherever it changes, through `setProjectKey`, `undo` and `redo`, so the
+/// palette never stays on a key the project just left.
 struct Document {
     Key projectKey{{'C', 0}, Mode::Ionian};
     Key browsedKey{{'C', 0}, Mode::Ionian};
@@ -188,7 +190,9 @@ enum class ProgressionRefusal { None, Empty, NonFiniteLength, DocumentFull, Even
 /// and leaves the redo stack intact.
 /// `browsedKey`, `progressionLoop`, `followHost`, `relationMode`, `transposeWithKey` and `keyHintSeen` are
 /// live state: their setters never touch the history, and `undo()`/`redo()` keep their current values
-/// while restoring the undoable state. So is the selection (`selectedEventId`), which lives in the store
+/// while restoring the undoable state, except that a browsed key equal to the project key (home) follows the
+/// project key they restore, as it follows `setProjectKey`, so that a key change, undone or redone, never
+/// leaves the palette on the old key. So is the selection (`selectedEventId`), which lives in the store
 /// rather than the document: it is kept across edits, undo and redo for as long as the selected event
 /// exists and is cleared the moment no event has its id (a remove, an undo of the append, a `replace`); it
 /// is never restored by undo and never persisted (`stateJson` leaves it out).
@@ -303,8 +307,9 @@ public:
     /// declared `Mode`. When `Document::transposeWithKey` is on and the tonic's pitch class changes (a
     /// mode-only change or an enharmonic respelling does not), every chord of the sequence moves by the
     /// interval between the two tonics in the same commit, so key and chords are one undo step: the
-    /// direction is `chooseKeyTranspose`'s, the move `transposeEvents`' (transpose.h). Sections, ids,
-    /// the selection and the id counters are untouched.
+    /// direction is `chooseKeyTranspose`'s, the move `transposeEvents`' (transpose.h). A browsed key equal
+    /// to the current project key (home) becomes `key` too, so the palette follows the project; any other
+    /// browsed key is left alone. Sections, ids, the selection and the id counters are untouched.
     void setProjectKey(Key key);
 
     /// Moves every chord from `fromTonic` (a pitch class; reduced modulo 12) to the current project key's
@@ -389,12 +394,13 @@ public:
     /// section already starts there, or when `id` is the first section, which is pinned to index 0.
     void moveSectionStart(int id, int newFirstEventIndex);
 
-    /// Restores the undoable state from before the most recent change, keeping the live state. Returns
-    /// false, changing nothing, when there is nothing to undo.
+    /// Restores the undoable state from before the most recent change, keeping the live state (a browsed
+    /// key that is the project key stays so: it follows the restored key). Returns false, changing nothing,
+    /// when there is nothing to undo.
     bool undo();
 
-    /// Reapplies the most recently undone change, keeping the live state. Returns false, changing
-    /// nothing, when there is nothing to redo.
+    /// Reapplies the most recently undone change, keeping the live state (the browsed key as `undo`).
+    /// Returns false, changing nothing, when there is nothing to redo.
     bool redo();
 
     /// Replaces the whole document, live state included, and restarts the id counters: what a load does.
