@@ -253,7 +253,7 @@ TEST_CASE("snapshot: start beats accumulate and symbols follow the project key, 
     applyOk(store, {{"cmd", "setKey"}, {"letter", "F"}, {"alter", 0}, {"mode", "Ionian"}});
     applyOk(store, {{"cmd", "appendChord"}, {"root", 0}, {"type", "maj"}});
     applyOk(store, {{"cmd", "appendChord"}, {"root", 3}, {"type", "maj"}, {"lengthBeats", 2.5}, {"velocity", 80}});
-    applyOk(store, {{"cmd", "browseKey"}, {"steps", 3}});  // A major: browsing must not respell the progression
+    applyOk(store, {{"cmd", "browseKey"}, {"steps", 4}});  // A major (from F, where setKey left the home browse): browsing must not respell the progression
     REQUIRE(store.doc().browsedKey == key('A', 0, Mode::Ionian));
 
     const json snap = snapshot(store);
@@ -1002,20 +1002,20 @@ TEST_CASE("browseKey home: returns to the project key after setKey") {
     DocumentStore store;
     applyOk(store, {{"cmd", "setKey"}, {"letter", "E"}, {"alter", -1}, {"mode", "Ionian"}});
     applyOk(store, {{"cmd", "browseKey"}, {"steps", 2}});
-    CHECK(snapshot(store).at("browsedKeyName") == "D Ionian");  // browsing still starts from C: setKey left it
+    CHECK(snapshot(store).at("browsedKeyName") == "F Ionian");  // browsing starts from Eb: setKey took the home browse along
     applyOk(store, {{"cmd", "browseKey"}, {"home", true}});
     CHECK(snapshot(store).at("browsedKeyName") == "Eb Ionian");
 }
 
 // --- setKey ----------------------------------------------------------------------------
 
-TEST_CASE("setKey: sets the project key only and is undoable") {
+TEST_CASE("setKey: sets the project key, a home browse follows, and is undoable") {
     DocumentStore store;
     applyOk(store, {{"cmd", "setKey"}, {"letter", "D"}, {"alter", 0}, {"mode", "Dorian"}});
     json snap = snapshot(store);
     CHECK(snap.at("projectKeyName") == "D Dorian");
     CHECK(snap.at("projectKey") == keyJson("D", 0, "Dorian"));
-    CHECK(snap.at("browsedKeyName") == "C Ionian");
+    CHECK(snap.at("browsedKeyName") == "D Dorian");  // the browse was home (C Ionian) and stays home
 
     applyOk(store, {{"cmd", "setKey"}, {"letter", "B"}, {"alter", -1}, {"mode", "MelodicMinor"}});
     CHECK(snapshot(store).at("projectKeyName") == "Bb MelodicMinor");
@@ -1025,6 +1025,30 @@ TEST_CASE("setKey: sets the project key only and is undoable") {
     REQUIRE(store.undo());
     CHECK(store.doc().projectKey == key('C', 0, Mode::Ionian));
     CHECK_FALSE(store.undo());
+}
+
+TEST_CASE("undo / redo: a home browse follows the project key they restore, so the palette never stays on the old key") {
+    DocumentStore store;
+    applyOk(store, {{"cmd", "setKey"}, {"letter", "G"}, {"alter", 0}, {"mode", "Ionian"}});
+    applyOk(store, {{"cmd", "browseKey"}, {"home", true}});
+    CHECK(snapshot(store).at("browsedKeyName") == "G Ionian");
+
+    applyOk(store, {{"cmd", "undo"}});
+    json snap = snapshot(store);
+    CHECK(snap.at("projectKeyName") == "C Ionian");
+    CHECK(snap.at("browsedKeyName") == "C Ionian");
+    applyOk(store, {{"cmd", "redo"}});
+    snap = snapshot(store);
+    CHECK(snap.at("projectKeyName") == "G Ionian");
+    CHECK(snap.at("browsedKeyName") == "G Ionian");
+
+    // Browsing another key is kept across the undo, as every live setting is.
+    applyOk(store, {{"cmd", "browseKey"}, {"steps", 1}});
+    CHECK(snapshot(store).at("browsedKeyName") == "D Ionian");
+    applyOk(store, {{"cmd", "undo"}});
+    snap = snapshot(store);
+    CHECK(snap.at("projectKeyName") == "C Ionian");
+    CHECK(snap.at("browsedKeyName") == "D Ionian");
 }
 
 // --- Transpose commands ------------------------------------------------------------------

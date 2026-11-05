@@ -192,10 +192,14 @@ Section makeSection(int id, std::string name, int firstEventIndex) {
 }
 
 /// Copies the live (non-undoable) fields of `current` into `target`, so that restoring a snapshot keeps
-/// the browsed key, the transport toggles and the relation mode as they are now. `autoVoiceLead`, `feel` and
-/// `meter` are deliberately absent: they change the notes `compile` produces, so they are restored with the progression (see `Document`).
+/// the transport toggles, the relation mode and the key-transpose flags as they are now, and the browsed key
+/// too, with one exception: a browsed key that is the project key ("home") follows the project key `target`
+/// restores, as it follows `setProjectKey`, so that undoing or redoing a key change leaves the palette on the
+/// key the progression is in, not on the key it just left. A browse elsewhere is kept as it is.
+/// `autoVoiceLead`, `feel` and `meter` are deliberately absent: they change the notes `compile`
+/// produces, so they are restored with the progression (see `Document`).
 void keepLiveState(Document& target, const Document& current) {
-    target.browsedKey = current.browsedKey;
+    target.browsedKey = current.browsedKey == current.projectKey ? target.projectKey : current.browsedKey;
     target.progressionLoop = current.progressionLoop;
     target.followHost = current.followHost;
     target.relationMode = current.relationMode;
@@ -499,6 +503,9 @@ void DocumentStore::setProjectKey(Key key) {
     if (doc_.transposeWithKey && interval != 0 && !doc_.events.empty()) {
         // The chords move in the same commit as the key: one undo step restores both.
         transposeEvents(next.events, chooseKeyTranspose(doc_.events, interval));
+    }
+    if (doc_.browsedKey == doc_.projectKey) {
+        next.browsedKey = key;  // a home browse follows the project key, as under undo and redo (keepLiveState)
     }
     next.projectKey = key;
     commit(std::move(next));

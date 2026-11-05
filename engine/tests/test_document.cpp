@@ -875,12 +875,13 @@ TEST_CASE("removeChord: unknown id is a no-op with no undo entry") {
 
 // --- Project key (undoable) --------------------------------------------------------------
 
-TEST_CASE("setProjectKey: sets the project key only, and is undoable") {
-    DocumentStore store;
+TEST_CASE("setProjectKey: sets the project key, takes a home browse along, and is undoable") {
+    DocumentStore store;  // browsing C Ionian, the project key: home
     store.setProjectKey(key('G', 0, Mode::Mixolydian));
     CHECK(store.doc().projectKey == key('G', 0, Mode::Mixolydian));
-    CHECK(store.doc().browsedKey == key('C', 0, Mode::Ionian));
+    CHECK(store.doc().browsedKey == key('G', 0, Mode::Mixolydian));  // home follows
     store.setProjectKey(key('A', 0, Mode::Aeolian));
+    CHECK(store.doc().browsedKey == key('A', 0, Mode::Aeolian));
     REQUIRE(store.undo());
     CHECK(store.doc().projectKey == key('G', 0, Mode::Mixolydian));
     REQUIRE(store.undo());
@@ -888,6 +889,12 @@ TEST_CASE("setProjectKey: sets the project key only, and is undoable") {
     CHECK_FALSE(store.undo());
     REQUIRE(store.redo());
     CHECK(store.doc().projectKey == key('G', 0, Mode::Mixolydian));
+
+    // Browsing another key: the project key changes alone.
+    store.setBrowsedKey(key('E', -1, Mode::Aeolian));
+    store.setProjectKey(key('D', 0, Mode::Dorian));
+    CHECK(store.doc().projectKey == key('D', 0, Mode::Dorian));
+    CHECK(store.doc().browsedKey == key('E', -1, Mode::Aeolian));
 }
 
 TEST_CASE("setProjectKey: the same key pushes no undo entry") {
@@ -1085,6 +1092,37 @@ TEST_CASE("undo / redo: the project key is restored while the live state is kept
     CHECK(store.doc().projectKey == key('D', 0, Mode::Dorian));
     CHECK(store.doc().browsedKey == key('A', 0, Mode::Aeolian));
     CHECK(store.doc().progressionLoop == false);
+}
+
+TEST_CASE("undo / redo: a browsed key that is the project key follows the key they restore") {
+    DocumentStore store;  // C Ionian, browsing C Ionian: home
+    store.setProjectKey(key('G', 0, Mode::Ionian));  // home follows: G Ionian, browsing G Ionian
+    REQUIRE(store.undo());
+    CHECK(store.doc().projectKey == key('C', 0, Mode::Ionian));
+    CHECK(store.doc().browsedKey == key('C', 0, Mode::Ionian));  // still home, not left on G
+    REQUIRE(store.redo());
+    CHECK(store.doc().projectKey == key('G', 0, Mode::Ionian));
+    CHECK(store.doc().browsedKey == key('G', 0, Mode::Ionian));
+
+    // A mode-only change is a key change too.
+    store.setProjectKey(key('G', 0, Mode::Aeolian));
+    CHECK(store.doc().browsedKey == key('G', 0, Mode::Aeolian));
+    REQUIRE(store.undo());
+    CHECK(store.doc().projectKey == key('G', 0, Mode::Ionian));
+    CHECK(store.doc().browsedKey == key('G', 0, Mode::Ionian));
+
+    // Browsing elsewhere is kept as it is, whatever key the undo restores.
+    store.setBrowsedKey(key('D', 0, Mode::Dorian));
+    REQUIRE(store.undo());
+    CHECK(store.doc().projectKey == key('C', 0, Mode::Ionian));
+    CHECK(store.doc().browsedKey == key('D', 0, Mode::Dorian));
+
+    // An undo that restores the same key leaves a home browse home.
+    store.setBrowsedKey(key('C', 0, Mode::Ionian));
+    store.appendChord(kC);
+    REQUIRE(store.undo());
+    CHECK(store.doc().events.empty());
+    CHECK(store.doc().browsedKey == key('C', 0, Mode::Ionian));
 }
 
 TEST_CASE("undo / redo: the redo stack survives a browse and a toggle") {
@@ -1388,22 +1426,43 @@ TEST_CASE("DocumentStore: 200 random operations undo to the initial document and
         }
     }
 
-    // At most 200 snapshots were pushed, so the cap never truncates this history.
+    // At most 200 snapshots were pushed, so the cap never truncates this history. The live state is kept
+    // through it all, except that a browsed key equal to the project key follows the key each step restores
+    // (keepLiveState); `browsed` applies that rule from the outside.
+    Key browsed = final.browsedKey;
     int undos = 0;
-    while (store.undo()) {
+    for (;;) {
+        const Key project = store.doc().projectKey;
+        if (!store.undo()) {
+            break;
+        }
         ++undos;
+        if (browsed == project) {
+            browsed = store.doc().projectKey;
+        }
     }
     CHECK(undos > 0);
     CHECK(undos <= 200);
     CHECK(sameUndoableState(store.doc(), initial));  // progression, sections, key and auto flag unwound
-    CHECK(sameLiveState(store.doc(), final));         // browsed key and toggles are live: kept
+    Document expectedLive = final;
+    expectedLive.browsedKey = browsed;
+    CHECK(sameLiveState(store.doc(), expectedLive));  // toggles kept; the browse followed home if it was home
 
     int redos = 0;
-    while (store.redo()) {
+    for (;;) {
+        const Key project = store.doc().projectKey;
+        if (!store.redo()) {
+            break;
+        }
         ++redos;
+        if (browsed == project) {
+            browsed = store.doc().projectKey;
+        }
     }
     CHECK(redos == undos);
-    CHECK(store.doc() == final);
+    CHECK(sameUndoableState(store.doc(), final));
+    expectedLive.browsedKey = browsed;
+    CHECK(sameLiveState(store.doc(), expectedLive));
 
     // Ids keep increasing after the whole history was replayed.
     const int fresh = store.appendChord(kC);

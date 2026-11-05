@@ -242,7 +242,8 @@ std::string snapshotJson(const Document& doc, const Palette& palette, int select
 std::string keyName(const Key& key);
 
 /// Applies one UI command, `{"schema":1,"cmd":"<name>", ...fields}`, to the store:
-/// - `setKey {letter,alter,mode}`: `setProjectKey` (the browsed key is left alone).
+/// - `setKey {letter,alter,mode}`: `setProjectKey` (a browsed key equal to the project key follows it, so
+///   the palette stays home; any other browsed key is left alone).
 /// - `browseKey` with exactly one of `{"steps":n}` (`fifthsNeighbour` of the current browsed key),
 ///   `{"mode":"<Mode>"}` (the parallel mode on the same tonic pitch class, canonically spelled) or
 ///   `{"home":true}` (browsed key = project key).
@@ -293,7 +294,8 @@ std::string keyName(const Key& key);
 ///   naming the reason, no change, no id consumed) for the store's reasons (`progressionRefusal`,
 ///   document.h): the result would hold more than `kMaxChords` chords, or the event or section id
 ///   counter cannot hand out the ids the load needs.
-/// - `undo`, `redo`: no fields.
+/// - `undo`, `redo`: no fields. A browsed key that is the project key stays so when they restore another
+///   project key (document.h), so the UI never has to follow them with `browseKey {home}`.
 ///
 /// Every field is validated before anything is touched: an unknown `cmd`, a missing or mistyped field, a
 /// root outside 0..11, an unknown chord type, mode or preset, a bad letter or alter, a non-finite number or a
