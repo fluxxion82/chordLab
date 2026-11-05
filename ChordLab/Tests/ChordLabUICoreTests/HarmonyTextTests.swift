@@ -69,6 +69,38 @@ final class HarmonyTextTests: XCTestCase {
     XCTAssertEqual(HarmonyText.voicingText([]), "")
   }
 
+  func testVoicingTextPrefersTheEngineNamesAsGlyphs() {
+    XCTAssertEqual(HarmonyText.voicingText([64, 68, 71, 74], names: ["E4", "G#4", "B4", "D5"]), "E4  G♯4  B4  D5")
+    XCTAssertEqual(HarmonyText.voicingText([65, 68, 72], names: ["F4", "Ab4", "C5"]), "F4  A♭4  C5")
+    // Names of another length cannot be trusted to line up: the MIDI names are used instead.
+    XCTAssertEqual(HarmonyText.voicingText([65, 68, 72], names: ["F4"]), "F4  G♯4  C5")
+    XCTAssertEqual(HarmonyText.voicingText([65, 68, 72], names: nil), "F4  G♯4  C5")
+    XCTAssertEqual(HarmonyText.noteNames([68], names: ["Ab4"]), ["A♭4"])
+  }
+
+  func testOutOfKeyTextNamesNotesAsTheChordSpellsThem() {
+    XCTAssertEqual(HarmonyText.outOfKeyText([], names: []), "In key")
+    XCTAssertEqual(HarmonyText.outOfKeyText([], names: nil), "In key")
+    XCTAssertEqual(HarmonyText.outOfKeyText([8], names: ["G#"]), "Out of key: G♯")
+    XCTAssertEqual(HarmonyText.outOfKeyText([8], names: ["Ab"]), "Out of key: A♭")
+    XCTAssertEqual(HarmonyText.outOfKeyText([1, 10], names: ["C#", "Bb"]), "Out of key: C♯, B♭")
+    // Without names, or with a list of another length, the sharp-spelled pitch-class names.
+    XCTAssertEqual(HarmonyText.outOfKeyText([8], names: nil), "Out of key: G♯")
+    XCTAssertEqual(HarmonyText.outOfKeyText([1, 10], names: ["C#"]), "Out of key: C♯, A♯")
+  }
+
+  func testBassLabelsTakeTheEngineName() {
+    XCTAssertEqual(HarmonyText.inversionLabel(1, bass: 68, bassName: "Ab4"), "Inversion 1 · bass A♭4")
+    XCTAssertEqual(HarmonyText.inversionLabel(1, bass: 68), "Inversion 1 · bass G♯4")
+    XCTAssertEqual(HarmonyText.inversionLabel(0, bass: nil, bassName: "E4"), "Inversion 0 · bass E4")
+    XCTAssertEqual(HarmonyText.voicingStatus(inversion: 0, octave: 0, manual: false, autoVoiceLead: true, bass: 68,
+                                             bassName: "Ab4"),
+                   "Automatic voicing · bass A♭4")
+    XCTAssertEqual(HarmonyText.voicingStatus(inversion: 1, octave: 0, manual: true, autoVoiceLead: true, bass: 68,
+                                             bassName: "Ab4"),
+                   "Manual voicing · Inversion 1 · bass A♭4 · Octave 0")
+  }
+
   func testInversionAndOctaveLabels() {
     XCTAssertEqual(HarmonyText.inversionLabel(1, bass: 64), "Inversion 1 · bass E4")
     XCTAssertEqual(HarmonyText.inversionLabel(0, bass: nil), "Inversion 0")

@@ -1,6 +1,7 @@
 #include "chordlab/harmony.h"
 
 #include "chordlab/relations.h"
+#include "chordlab/symbol.h"
 
 #include <algorithm>
 #include <array>
@@ -161,6 +162,10 @@ Relation relate(const Chord& from, const Chord& to, const Key& projectKey) {
     std::set_intersection(fromSorted.begin(), fromSorted.end(), toSorted.begin(), toSorted.end(),
                           std::back_inserter(relation.commonPcs));
     relation.commonTones = static_cast<int>(relation.commonPcs.size());
+    relation.commonSpellings.reserve(relation.commonPcs.size());
+    for (const PitchClass pc : relation.commonPcs) {
+        relation.commonSpellings.push_back(chordToneSpelling(to, pc, projectKey));
+    }
     relation.motion = rootMotion(from.root, to.root);
     relation.voiceLeadingCost = pcVoiceLeadingCost(fromPcs, toPcs);  // root first: the root is doubled first
     relation.borrowedFrom = borrowedFrom(to, projectKey);
@@ -171,25 +176,26 @@ std::string keyProse(const Key& key) {
     return Spelling{key.tonic.letter, key.tonic.alter}.text() + " " + kModeProse[static_cast<std::size_t>(key.mode)];
 }
 
-std::string commonTonesText(const Relation& relation, const Key& projectKey) {
-    if (relation.commonPcs.empty()) {
+std::string commonTonesText(const Relation& relation) {
+    assert(relation.commonSpellings.size() == relation.commonPcs.size());
+    if (relation.commonSpellings.empty()) {
         return "no common tones";
     }
-    std::string text = std::to_string(relation.commonPcs.size()) +
-                       (relation.commonPcs.size() == 1 ? " common tone (" : " common tones (");
-    for (std::size_t i = 0; i < relation.commonPcs.size(); ++i) {
+    std::string text = std::to_string(relation.commonSpellings.size()) +
+                       (relation.commonSpellings.size() == 1 ? " common tone (" : " common tones (");
+    for (std::size_t i = 0; i < relation.commonSpellings.size(); ++i) {
         if (i > 0) {
             text += ", ";
         }
-        text += spell(relation.commonPcs[i], projectKey).text();
+        text += relation.commonSpellings[i].text();
     }
     return text + ")";
 }
 
-std::string relationText(const Relation& relation, const Key& projectKey) {
+std::string relationText(const Relation& relation) {
     constexpr const char* kSeparator = " · ";
-    std::string text = commonTonesText(relation, projectKey) + kSeparator + rootMotionName(relation.motion) +
-                       kSeparator + "cost " + std::to_string(relation.voiceLeadingCost);
+    std::string text = commonTonesText(relation) + kSeparator + rootMotionName(relation.motion) + kSeparator +
+                       "cost " + std::to_string(relation.voiceLeadingCost);
     if (relation.borrowedFrom) {
         text += kSeparator;
         text += "borrowed from " + keyProse(*relation.borrowedFrom);

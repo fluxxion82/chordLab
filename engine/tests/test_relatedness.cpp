@@ -149,7 +149,7 @@ TEST_CASE("relatedness: the text is relationText of relate, whatever the mode") 
         const std::vector<Relatedness> r = relatedness(kC, candidates, kCIonian, kCIonian, mode);
         REQUIRE(r.size() == candidates.size());
         for (std::size_t i = 0; i < r.size(); ++i) {
-            CHECK(r[i].text == relationText(relate(kC, candidates[i], kCIonian), kCIonian));
+            CHECK(r[i].text == relationText(relate(kC, candidates[i], kCIonian)));
             CHECK(r[i].score >= 0);
             CHECK(r[i].score <= 100);
         }
@@ -426,7 +426,7 @@ TEST_CASE("relatedness with extras: blend normalises extras with the population'
                 const int expected =
                     extras[i] == reference ? 100 : expectedExtraBlend(rawExtras[i], lo, hi, hi <= lo);
                 CHECK(r.score == expected);
-                CHECK(r.text == relationText(relate(reference, extras[i], c.project), c.project));
+                CHECK(r.text == relationText(relate(reference, extras[i], c.project)));
             }
         }
     }

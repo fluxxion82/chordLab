@@ -32,9 +32,9 @@ std::optional<RelationMode> parseRelationMode(std::string_view name);
 struct Relatedness {
     /// 0..100, higher is more related (R3, R4); see `relatedness`.
     int score;
-    /// `relationText(relate(reference, candidate, projectKey), projectKey)` (harmony.h): "2 common tones
-    /// (C, E) · down a third · cost 2", with " · borrowed from C Aeolian" for a borrowed candidate. The
-    /// same whatever the mode.
+    /// `relationText(relate(reference, candidate, projectKey))` (harmony.h): "2 common tones (C, E) · down
+    /// a third · cost 2", with " · borrowed from C Aeolian" for a borrowed candidate. The same whatever the
+    /// mode.
     std::string text;
 };
 

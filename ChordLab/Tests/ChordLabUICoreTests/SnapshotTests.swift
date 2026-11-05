@@ -117,6 +117,24 @@ final class SnapshotTests: XCTestCase {
     XCTAssertEqual(snapshot.autoVoiceLead, true)
   }
 
+  func testSpelledNoteNamesDecodeAndAreNilWhenAbsent() throws {
+    let older = try Self.decode(Snapshot.self, Self.phase2)
+    XCTAssertNil(older.events[0].voicingNames)
+    XCTAssertNil(older.events[0].outOfKeyNames)
+    XCTAssertNil(older.palette.cells[0].voicingNames)
+    XCTAssertNil(older.palette.cells[0].outOfKeyNames)
+    let json = Self.phase2
+      .replacingOccurrences(of: "\"voicing\":[55,59,62,65],\"outOfKey\":[]",
+                            with: "\"voicing\":[55,59,62,65],\"voicingNames\":[\"G3\",\"B3\",\"D4\",\"F4\"],\"outOfKey\":[],\"outOfKeyNames\":[]")
+      .replacingOccurrences(of: "\"voicing\":[48,55],\"outOfKey\":[]",
+                            with: "\"voicing\":[48,55],\"voicingNames\":[\"C3\",\"G3\"],\"outOfKey\":[3],\"outOfKeyNames\":[\"Eb\"]")
+    let snapshot = try Self.decode(Snapshot.self, json)
+    XCTAssertEqual(snapshot.events[0].voicingNames, ["G3", "B3", "D4", "F4"])
+    XCTAssertEqual(snapshot.events[0].outOfKeyNames, [])
+    XCTAssertEqual(snapshot.palette.cells[0].voicingNames, ["C3", "G3"])
+    XCTAssertEqual(snapshot.palette.cells[0].outOfKeyNames, ["Eb"])
+  }
+
   func testWhyIsNullOnTheFirstEventAndDataOnTheSecond() throws {
     let snapshot = try Self.decode(Snapshot.self, Self.phase2)
     XCTAssertNil(snapshot.events[0].why)

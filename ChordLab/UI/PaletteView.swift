@@ -46,7 +46,7 @@ struct PaletteView: View {
     let view = PaletteViewMode.effective(saved: savedView, snapshotHasApplied: hasApplied)
     VStack(alignment: .leading, spacing: 6) {
       // While the home row is shown the switch sits at its trailing end instead (`HomeRowView`), so the
-      // grid keeps its viewport at the 700×480 minimum.
+      // grid keeps its viewport at the 700×540 minimum.
       if showsViewSwitch, hasApplied, state.snapshot?.homeRow.isEmpty ?? true {
         PaletteViewSwitch()
       }
@@ -259,7 +259,9 @@ struct ChordDragPreview: View {
 }
 
 /// The cell's tip: symbol and numeral, family and function word, the voicing as note names, the tension
-/// bar, and the engine's verdict on the project key: "In key" or the borrowed notes (`outOfKey`). The
+/// bar, and the engine's verdict on the project key: "In key" or the borrowed notes (`outOfKey`). Notes
+/// are named as the chord spells them (`voicingNames`, `outOfKeyNames`: G♯ in E7, A♭ in Fm, as the
+/// relation text below spells its common tones), with the sharp-spelled MIDI names as the fallback. The
 /// function, tension and out-of-key lines are omitted when an older plug-in build sends no such field.
 /// (A cell carries no "borrowed from" key, only its out-of-key notes; the block tip, whose event has a
 /// `why`, names the key.) With a `relation` the tip ends with "Relation to G7 · 72" and the engine's
@@ -285,17 +287,13 @@ struct ChordDetailView: View {
           Text(word).font(.callout).foregroundStyle(.secondary)
         }
       }
-      Text(HarmonyText.voicingText(cell.voicing)).font(.body.monospacedDigit())
+      Text(HarmonyText.voicingText(cell.voicing, names: cell.voicingNames)).font(.body.monospacedDigit())
       if let tension = cell.tension {
         TensionBar(tension: tension, function: cell.function)
       }
       if let outside = cell.outOfKey {
-        if outside.isEmpty {
-          Text("In key").font(.callout).foregroundStyle(.secondary)
-        } else {
-          Text("Out of key: " + outside.map(ChordSymbol.pitchClassName).joined(separator: ", "))
-            .font(.callout).foregroundStyle(.orange)
-        }
+        Text(HarmonyText.outOfKeyText(outside, names: cell.outOfKeyNames))
+          .font(.callout).foregroundStyle(outside.isEmpty ? Color.secondary : Color.orange)
       }
       if let headline = RelationStyle.headline(reference: reference, relation: cell.relation) {
         Text(headline).font(.callout)

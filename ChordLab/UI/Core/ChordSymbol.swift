@@ -42,7 +42,8 @@ enum ChordSymbol {
     return root + " " + (spokenQualities[type] ?? String(rest))
   }
 
-  /// Pitch-class names with sharps for the black keys (the UI has no per-note spelling yet).
+  /// Pitch-class names with sharps for the black keys: the fallback for notes the engine has not spelled
+  /// (snapshots of older plug-in builds; see `HarmonyText.noteNames`).
   static let sharpNames = ["C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A", "A♯", "B"]
 
   static func pitchClassName(_ pc: Int) -> String {

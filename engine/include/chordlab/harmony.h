@@ -76,6 +76,9 @@ struct Relation {
     int commonTones;
     /// The shared pitch classes, ascending.
     std::vector<PitchClass> commonPcs;
+    /// `commonPcs` as tones of the second chord (`chordToneSpelling`, symbol.h, its root spelled in the
+    /// project key), one per entry: E7's G# reads G#, where the project key C major would spell pc 8 Ab.
+    std::vector<Spelling> commonSpellings;
     /// Motion from the first root to the second.
     RootMotion motion;
     /// `pcVoiceLeadingCost` of the two chords' pitch classes (root first): how smoothly one chord moves
@@ -102,16 +105,17 @@ Relation relate(const Chord& from, const Chord& to, const Key& projectKey);
 /// "A HarmonicMinor".)
 std::string keyProse(const Key& key);
 
-/// The common-tone phrase of `relation`: the count, "tone" or "tones", and `commonPcs` spelled in
-/// `projectKey` (`spell`, pitch.h), comma-separated: "1 common tone (G)", "2 common tones (C, E)";
-/// "no common tones" when the chords share none.
-std::string commonTonesText(const Relation& relation, const Key& projectKey);
+/// The common-tone phrase of `relation`: the count, "tone" or "tones", and its `commonSpellings` (the
+/// shared tones as the second chord spells them), comma-separated: "1 common tone (G)", "2 common tones
+/// (C, E)", "4 common tones (D, E, G#, B)" for E7 after E7 in C major; "no common tones" when the chords
+/// share none.
+std::string commonTonesText(const Relation& relation);
 
 /// The short sentence for `relation`, as a palette cell's `relationText` shows it: `commonTonesText`, the
 /// `rootMotionName`, "cost <voiceLeadingCost>" and, when `borrowedFrom` is set, "borrowed from <keyProse>",
 /// joined by " · " (a literal UTF-8 middle dot between spaces):
 /// "2 common tones (C, E) · down a third · cost 2",
 /// "1 common tone (C) · down a third · cost 2 · borrowed from C Aeolian".
-std::string relationText(const Relation& relation, const Key& projectKey);
+std::string relationText(const Relation& relation);
 
 }  // namespace chordlab

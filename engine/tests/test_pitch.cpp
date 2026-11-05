@@ -392,3 +392,36 @@ TEST_CASE("spell: every pc in every key round-trips, and chromatic tones carry a
         }
     }
 }
+
+TEST_CASE("Spelling::pitchClass: the letter's natural moved by the accidental, modulo 12") {
+    CHECK(Spelling{'C', 0}.pitchClass() == 0);
+    CHECK(Spelling{'B', 1}.pitchClass() == 0);
+    CHECK(Spelling{'C', -1}.pitchClass() == 11);
+    CHECK(Spelling{'F', 2}.pitchClass() == 7);
+    CHECK(Spelling{'B', -2}.pitchClass() == 9);
+    CHECK(Spelling{'G', 1}.pitchClass() == 8);
+}
+
+TEST_CASE("spellOnLetter: the accidental that reaches the tone, folded like a chromatic tone") {
+    CHECK(spellOnLetter('G', 8).text() == "G#");
+    CHECK(spellOnLetter('A', 8).text() == "Ab");
+    CHECK(spellOnLetter('E', 4).text() == "E");
+    CHECK(spellOnLetter('E', 5).text() == "F");    // E# folds to its natural name
+    CHECK(spellOnLetter('C', 11).text() == "B");   // Cb too
+    CHECK(spellOnLetter('F', 7).text() == "G");    // Fx, a double on a white key
+    CHECK(spellOnLetter('C', 10).text() == "Bb");  // Cbb, a double on a black key: the single flat
+    CHECK(spellOnLetter('G', 9).text() == "A");    // Gx
+    CHECK(spellOnLetter('E', 6).text() == "F#");   // Ex: the single sharp
+    // Every result names the tone and carries at most one accidental.
+    for (char letter = 'A'; letter <= 'G'; ++letter) {
+        const PitchClass natural = naturalPc(letter);
+        for (int offset = -2; offset <= 2; ++offset) {
+            const PitchClass pc = pitchClassOf(natural + offset);
+            CAPTURE(letter);
+            CAPTURE(offset);
+            const Spelling s = spellOnLetter(letter, pc);
+            CHECK(s.pitchClass() == pc);
+            CHECK(std::abs(s.alter) <= 1);
+        }
+    }
+}

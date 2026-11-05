@@ -18,6 +18,21 @@ enum class SymbolStyle { Standard, Klimper };
 /// by the type's suffix in the given style, e.g. `Bm7b5` / `Bø7`, `Eb`, `CmΔ7`.
 std::string chordSymbol(const Chord& chord, const Key& spellingKey, SymbolStyle style = SymbolStyle::Klimper);
 
+/// The spelling of pitch class `pc` as a tone of `chord`, whose root is spelled in `spellingKey` as
+/// `chordSymbol` spells it: the letter the tone's interval above the root lands on (a third on the third
+/// letter from the root, a seventh on the seventh, a ninth on the second), with the accidental that
+/// reaches the tone from that letter (`spellOnLetter`, pitch.h, so never more than one). The letter is
+/// the interval's major degree (`majorDegreeOfInterval`), except where the chord's structure writes it
+/// otherwise: a tritone is a diminished fifth, not a sharp fourth, when the chord has no perfect fifth
+/// (`dim`, `dim7`, `m7b5`; `7#11` keeps its fifth and its #11), eight semitones an augmented fifth, not
+/// a flat sixth, when it has none (`aug`, `augMaj7`), and nine semitones a diminished seventh, not a
+/// sixth, when the chord has that diminished fifth (`dim7`). So E7 in C major spells G#, where `spell`
+/// reads pc 8 as the key's Ab; Bdim7 spells Ab and C+ G#. A scale member of `spellingKey` that the key
+/// writes on the same letter keeps the key's spelling (E#, the seventh of F# major, which the fold would
+/// write F). When no letter-true spelling lies within a double accidental of the tone (the F### of B#+)
+/// it falls back to `spell`. Any `pc` is accepted, in or out of the chord, read by the same rule.
+Spelling chordToneSpelling(const Chord& chord, PitchClass pc, const Key& spellingKey);
+
 /// The key-relative position of a chord's root, as `romanNumeral` writes it: `degree` is the degree
 /// (0..6) of the parallel major of the project tonic that the root is or alters, and `alter` the single
 /// accidental the numeral carries (-1 for `b`, 0 for none, +1 for `#`). Numerals, function labels and

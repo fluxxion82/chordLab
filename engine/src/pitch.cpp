@@ -143,6 +143,10 @@ std::string Spelling::text() const {
     return out;
 }
 
+PitchClass Spelling::pitchClass() const {
+    return pitchClassOf(naturalPitchClass(letter) + alter);
+}
+
 Spelling spellDegree(const Key& key, int degree) {
     assertValidTonic(key.tonic);
     const int d = ((degree % 7) + 7) % 7;
@@ -165,8 +169,13 @@ Spelling spell(PitchClass pc, const Key& key) {
     // same table as the roman numerals, with the accidental that reaches it from that letter.
     const Key major{key.tonic, Mode::Ionian};
     const Spelling base = spellDegree(major, majorDegreeOfInterval(target - major.tonicPc()));
-    const int alter = alterToReach(base.letter, target);
-    assert(alter >= -2 && alter <= 2);  // the major degree is always within a semitone of the tone
+    return spellOnLetter(base.letter, target);  // the major degree is always within a semitone of the tone
+}
+
+Spelling spellOnLetter(char letter, PitchClass pc) {
+    const PitchClass target = pitchClassOf(pc);
+    const int alter = alterToReach(letter, target);
+    assert(alter >= -2 && alter <= 2);  // the caller's letter lies within two semitones of the tone
     const int natural = letterWithNaturalPc(target);
     if (alter != 0 && natural >= 0) {
         // Cb, Fb, E#, B# and any double accidental on a white key fold to the natural name.
@@ -175,11 +184,11 @@ Spelling spell(PitchClass pc, const Key& key) {
     if (alter == 2 || alter == -2) {
         // A double accidental on a black key (Ex in B# major): the single accidental of the same sign.
         const int sign = alter > 0 ? 1 : -1;
-        const int letter = letterWithNaturalPc(pitchClassOf(target - sign));
-        assert(letter >= 0);  // every black key is a semitone from a white key on both sides
-        return Spelling{letterAt(letter), sign};
+        const int index = letterWithNaturalPc(pitchClassOf(target - sign));
+        assert(index >= 0);  // every black key is a semitone from a white key on both sides
+        return Spelling{letterAt(index), sign};
     }
-    return Spelling{base.letter, alter};
+    return Spelling{letter, alter};
 }
 
 }  // namespace chordlab
