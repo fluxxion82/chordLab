@@ -9,7 +9,7 @@ struct KeyTransposeRow: View {
   let row: ChordLabState.KeyRow
   /// In a window shorter than `ContentView.compactHeight`: callout text, small buttons, a small icon and less
   /// vertical padding, so the hint fits on one line at the 700-pt minimum width and the row is at most 24 pt
-  /// tall in either state (the palette keeps 44 pt or more at 700 x 480).
+  /// tall in either state (the palette keeps 104 pt or more at the 700 x 540 minimum).
   var compact = false
 
   static let hintText = "Chords in the sequence kept their notes."
