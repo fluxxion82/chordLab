@@ -6,7 +6,9 @@ import SwiftUI
 /// for the smoothest motion from the chord before; P2-D5). The toggles show the snapshot's `followHost`
 /// / `progressionLoop` / `autoVoiceLead` and send `setFollowHost` / `setProgressionLoop` /
 /// `setAutoVoiceLead`; the snapshot the plug-in answers with is what flips them, so they never drift from
-/// the document (and stay put if a command is rejected). "+ Section" starts a section (P2-D6) on the
+/// the document (and stay put if a command is rejected). They are drawn by `AccentSwitchToggleStyle`
+/// (SwitchToggleStyle.swift), not the system switch, whose on state greys out while the plug-in window is
+/// not Live's key window. "+ Section" starts a section (P2-D6) on the
 /// selected block, else the last one (`addSection {index, name: ""}`; the engine names it). "Presets"
 /// opens `PresetsPopoverView` (plan P7); it is hidden when the snapshot has no `presets` (an older
 /// plug-in build). "Feel" opens `FeelPopoverView` (rhythm, strum, humanise and the meter, plan D1, D2); a
@@ -78,11 +80,11 @@ struct TransportBarView: View {
   private var playbackControls: some View {
     HStack(spacing: 16) {
       Toggle(isOn: followHost) { Text("Follow Live").foregroundStyle(.white) }
-        .toggleStyle(.switch)
+        .toggleStyle(.accentSwitch)
         .help("Play the progression while Live's transport runs")
         .accessibilityLabel("Follow Live")
       Toggle(isOn: loop) { Text("Loop").foregroundStyle(.white) }
-        .toggleStyle(.switch)
+        .toggleStyle(.accentSwitch)
         .help("Repeat the progression; off, it plays once and stops at its end")
         .accessibilityLabel("Loop the progression")
       Button("Panic") { state.panic() }
@@ -94,7 +96,7 @@ struct TransportBarView: View {
   private var editingControls: some View {
     HStack(spacing: 16) {
       Toggle(isOn: autoVoiceLead) { Text("Auto voice-lead").foregroundStyle(.white) }
-        .toggleStyle(.switch)
+        .toggleStyle(.accentSwitch)
         .help("Choose each chord's inversion and octave for the smoothest motion from the chord before (manual chords keep theirs)")
         .accessibilityLabel("Auto voice-lead")
       if showsTransposeSwitch {

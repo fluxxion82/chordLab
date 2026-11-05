@@ -213,7 +213,8 @@ struct KeyBarView_Previews: PreviewProvider {
 
 /// The Transpose with key switch: in the key bar after the Key pickers where the window is wide enough,
 /// else in the transport row after Auto voice-lead (ContentView decides; one of the two shows it). It shows
-/// the snapshot's `transposeWithKey` and sends `setTransposeWithKey`; the next snapshot moves it.
+/// the snapshot's `transposeWithKey` and sends `setTransposeWithKey`; the next snapshot moves it. Drawn by
+/// `AccentSwitchToggleStyle` like the transport row's switches (SwitchToggleStyle.swift).
 struct TransposeWithKeyToggle: View {
   @EnvironmentObject var state: ChordLabState
 
@@ -224,7 +225,7 @@ struct TransposeWithKeyToggle: View {
 
   var body: some View {
     Toggle(isOn: isOn) { Text("Transpose with key").foregroundStyle(.white) }
-      .toggleStyle(.switch)
+      .toggleStyle(.accentSwitch)
       .fixedSize()
       .help(TransposeWithKeyHelp.text)
       .accessibilityLabel("Transpose with key")
