@@ -579,7 +579,7 @@ TEST_CASE("snapshot: the why sentence follows the documented rules clause by cla
     CHECK(textOf(kC, chord(9, "min")) == "C → Am: down a third, 2 common tones (C, E), smooth voice leading (cost 2)");
     // A repeated chord keeps all its tones and costs nothing.
     CHECK(textOf(kC, kC) == "C → C: same root, 3 common tones (C, E, G), smooth voice leading (cost 0)");
-    // A borrowed chord names its source after everything else; common tones are spelled in the project key.
+    // A borrowed chord names its source after everything else; common tones are spelled as the new chord spells them.
     CHECK(textOf(kC, chord(8, "maj")) ==
           "C → Ab: down a third, 1 common tone (C), smooth voice leading (cost 2), borrowed from C Aeolian");
     // Nothing in common, nothing smooth (cost 5 over three voices), in no parallel mode: the root motion
@@ -927,7 +927,7 @@ TEST_CASE("snapshot: blend is normalised over the palette and the home row toget
     const json& home = snap.at("homeTriads");
     CHECK(home[3].at("relation") == 100);  // F itself
     CHECK(home[4].at("relation") == 100);  // G: the best chord after F, D after PD, the top of the population
-    // The relation text is spelled in the project key, borrowings and all.
+    // The relation text: common tones as the cell's chord spells them, the borrowing in the project key.
     CHECK(home[0].at("relationText") == "1 common tone (C) · up a fifth · cost 3");
 }
 
