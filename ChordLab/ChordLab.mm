@@ -541,6 +541,11 @@ bool ChordLab::OnMessage(int msgTag, int ctrlTag, int dataSize, const void* pDat
 
   if (msgTag == kMsgTagClearHeard)
   {
+    // Everything still in the ring arrived before the press: discard it (overflow flag first, as in OnIdle),
+    // or the next idle would feed it and bring the cleared chord back.
+    mHeardRing.takeOverflow();
+    for (chordlab::HeardEvent e{}; mHeardRing.pop(e);)
+      ;
     mListener.clear();                                           // inactive again: the push hides the group
     PushHeard();                                                 // acknowledges
     return true;
