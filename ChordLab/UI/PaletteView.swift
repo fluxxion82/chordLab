@@ -17,8 +17,11 @@ import SwiftUI
 /// resolves to (`PaletteLayout.appliedRows`), at the same cell size and through the same `PaletteCellControl`.
 /// The choice is remembered under `PaletteViewMode.storageKey`. A snapshot without `applied` (an older
 /// plug-in build) hides the switch and shows the diatonic grid, without touching the saved choice; an
-/// empty `applied` shows "No applied chords in this key". The scroll view is rebuilt per view (`.id`), so
-/// switching removes the old grid's cells and `PressAction`'s disappearance path releases a held one
+/// empty `applied` shows "No applied chords in this key". While the listener is active (`state.heard`,
+/// design D15) the switch row is shown whatever the home row or `showsViewSwitch` say, and holds the Heard
+/// group (`HeardView`) at its trailing end; the cell whose root and type match the heard chord
+/// (`PaletteMatch.heardIndex`) gets an accent ring, in either grid. The scroll view is rebuilt per view
+/// (`.id`), so switching removes the old grid's cells and `PressAction`'s disappearance path releases a held one
 /// (never the same views reused for other chords, whose release would not match the held id), and each
 /// view opens at its own anchor: the diatonic grid at its bottom row (the triads), the applied grid at its
 /// `V7/x` row. Pressing a cell
@@ -44,10 +47,23 @@ struct PaletteView: View {
   var body: some View {
     let hasApplied = state.snapshot?.applied != nil
     let view = PaletteViewMode.effective(saved: savedView, snapshotHasApplied: hasApplied)
+    let heardActive = state.heard?.active == true
+    let placement = PaletteSwitchPlacement.resolve(
+      heardActive: heardActive, hasApplied: hasApplied,
+      homeRowEmpty: state.snapshot?.homeRow.isEmpty ?? true, switchRowAllowed: showsViewSwitch)
     VStack(alignment: .leading, spacing: 6) {
       // While the home row is shown the switch sits at its trailing end instead (`HomeRowView`), so the
-      // grid keeps its viewport at the 700×540 minimum.
-      if showsViewSwitch, hasApplied, state.snapshot?.homeRow.isEmpty ?? true {
+      // grid keeps its viewport. While the listener is active the row is always shown, for the Heard group
+      // (the home row then leaves the switch to it); the 700×568 minimum leaves a full palette row in view.
+      if heardActive {
+        HStack(spacing: 8) {
+          if placement == .paletteRow {
+            PaletteViewSwitch()
+          }
+          Spacer(minLength: 8)
+          HeardView()
+        }
+      } else if placement == .paletteRow {
         PaletteViewSwitch()
       }
       GeometryReader { geometry in
@@ -62,10 +78,12 @@ struct PaletteView: View {
                   .foregroundStyle(.gray)
                   .frame(maxWidth: .infinity, minHeight: geometry.size.height)
               } else {
-                grid(PaletteLayout.appliedRows(applied), cellSize: cellSize)
+                grid(PaletteLayout.appliedRows(applied), cellSize: cellSize,
+                     heardCellId: heardCellId(in: applied))
               }
             } else {
-              grid(PaletteLayout.diatonicRows(snapshot.palette), cellSize: cellSize)
+              grid(PaletteLayout.diatonicRows(snapshot.palette), cellSize: cellSize,
+                   heardCellId: heardCellId(in: snapshot.palette.cells))
             }
           } else {
             Text("Waiting for a snapshot…").foregroundStyle(.gray).frame(maxWidth: .infinity).padding()
@@ -88,9 +106,15 @@ struct PaletteView: View {
     .background(Self.background)
   }
 
+  /// Id of the cell of `cells` the heard chord matches (`PaletteMatch.heardIndex`), nil when nothing is heard
+  /// or the chord is not among them.
+  private func heardCellId(in cells: [CellJSON]) -> String? {
+    PaletteMatch.heardIndex(cells, heard: state.heard?.chord).map { cells[$0].id }
+  }
+
   /// `rows` top to bottom, each its gutter label and then its seven columns, an empty slot where a row has
-  /// no chord.
-  private func grid(_ rows: [PaletteRow], cellSize: CGFloat) -> some View {
+  /// no chord; the cell with `heardCellId` gets the heard ring.
+  private func grid(_ rows: [PaletteRow], cellSize: CGFloat, heardCellId: String?) -> some View {
     VStack(spacing: PaletteLayout.spacing) {
       ForEach(rows, id: \.tier) { row in
         HStack(spacing: PaletteLayout.spacing) {
@@ -102,7 +126,7 @@ struct PaletteView: View {
             .accessibilityHidden(true)
           ForEach(0..<PaletteLayout.columns, id: \.self) { degree in
             if let cell = row.cells[degree] {
-              PaletteCellControl(cell: cell, size: cellSize, labelMode: labelMode)
+              PaletteCellControl(cell: cell, size: cellSize, labelMode: labelMode, heard: cell.id == heardCellId)
             } else {
               Color.clear.frame(width: cellSize, height: cellSize)
             }
@@ -119,16 +143,18 @@ struct PaletteView: View {
 /// of `PaletteCellView` (with its hover tip), press to preview through `ChordLabState.pressCell` /
 /// `releaseCell`, and a drag that carries the chord's `ChordRef` to the sequence bar under a
 /// `ChordDragPreview`. The one place these are wired, so the two can not drift apart; the relatedness
-/// look (`RelationStyle`) and the tip's relation line come with it, so home cells get them too.
+/// look (`RelationStyle`) and the tip's relation line come with it, so home cells get them too. `heard`
+/// draws the heard ring (the grids set it on the cell matching the heard chord; the home row never does).
 struct PaletteCellControl: View {
   @EnvironmentObject var state: ChordLabState
   let cell: CellJSON
   let size: CGFloat
   let labelMode: LabelMode
+  var heard = false
 
   var body: some View {
     PaletteCellView(cell: cell, size: size, labelMode: labelMode, isPressed: state.heldCellId == cell.id,
-                    reference: state.snapshot?.relationReference)
+                    isHeard: heard, reference: state.snapshot?.relationReference)
       .pressAction(onPress: { state.pressCell(cell) },
                    onRelease: { state.releaseCell(cell) })
       .draggable(ChordRef(root: cell.root, type: cell.type)) {
@@ -155,14 +181,23 @@ struct PaletteCellControl: View {
 /// horizontal clip so enlarged edge columns are not cut. A pressed cell is
 /// drawn at full opacity, so the pressed look always shows. `reference` (the snapshot's
 /// `relationReference`) names the chord in the tip's relation line.
+///
+/// The heard chord (`isHeard`, design D15): a 2-pt ring in the accent colour (the switches' on colour),
+/// 2 pt inside the circle's edge, so it reads beside the pressed look's white edge ring rather than under it.
+/// It is an overlay after the relation fade (`RelationStyle.opacity`), so it keeps full strength whatever
+/// the cell's relation; it follows the circle's scale.
 struct PaletteCellView: View {
   let cell: CellJSON
   let size: CGFloat
   let labelMode: LabelMode
   var isPressed = false
+  var isHeard = false
   var reference: RelationReferenceJSON? = nil
 
   static let dotSize: CGFloat = 6
+  /// The heard ring's width and its inset from the circle's edge.
+  static let heardRingWidth: CGFloat = 2
+  static let heardRingInset: CGFloat = 2
 
   static func color(family: String) -> Color {
     switch family {
@@ -212,13 +247,23 @@ struct PaletteCellView: View {
     .frame(width: size, height: size)
     .scaleEffect(RelationStyle.scale(relation: cell.relation))   // drawing only: layout keeps the slot
     .opacity(isPressed ? 1 : RelationStyle.opacity(relation: cell.relation))
+    // The heard ring is drawn after the relation fade, scaled like the circle, so it reads at full strength
+    // on a faded cell and on an unfilled one, whose outline it would otherwise blend into.
+    .overlay {
+      if isHeard {
+        Circle().strokeBorder(Color.accentColor, lineWidth: Self.heardRingWidth)
+          .padding(Self.heardRingInset)
+          .scaleEffect(RelationStyle.scale(relation: cell.relation))
+      }
+    }
     .animation(RelationStyle.animation, value: cell.relation)
     .frame(width: size, height: size)   // the unchanged slot
     .contentShape(Circle())             // full-size: the hit area ignores the relation scale
     .accessibilityLabel(ChordSymbol.spokenName(symbol: cell.symbol, type: cell.type)
                         + ", " + PaletteViewMode.numeralText(cell)
                         + (cell.filled ? ", in key" : ", borrowed")
-                        + (cell.relation.map { ", relation \($0)" } ?? ""))
+                        + (cell.relation.map { ", relation \($0)" } ?? "")
+                        + (isHeard ? ", heard" : ""))
     .hoverTip(id: cell.id, suppressed: isPressed) {
       ChordDetailView(cell: cell, reference: reference)
     }
@@ -321,7 +366,8 @@ struct PaletteView_Previews: PreviewProvider {
 }
 
 /// The *Diatonic / Applied* switch over the palette (plan A6), bound to the per-user preference. Drawn above
-/// the grid, or at the trailing end of the home row while that row is shown.
+/// the grid (beside the Heard group while the listener is active), or at the trailing end of the home row
+/// while that row is shown and the listener is not.
 struct PaletteViewSwitch: View {
   @AppStorage(PaletteViewMode.storageKey) private var savedView = PaletteViewMode.defaultMode
 

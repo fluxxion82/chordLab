@@ -10,6 +10,7 @@ namespace chordlab {
 struct Document;
 class DocumentStore;
 struct Key;
+class Listener;
 struct Palette;
 
 /// Version of the wire format. Every message (snapshot, command, state) carries `"schema": kJsonSchema`;
@@ -65,7 +66,7 @@ constexpr int kMaxJsonDepth = 64;
 /// {"schema":1,
 ///  "projectKey":<key>, "browsedKey":<key>, "projectKeyName":"C Ionian", "browsedKeyName":"G Ionian",
 ///  "progressionLoop":true, "followHost":true, "autoVoiceLead":false,
-///  "transposeWithKey":false, "keyHintSeen":false, "endBeat":4.0,
+///  "transposeWithKey":false, "keyHintSeen":false, "midiThru":true, "endBeat":4.0,
 ///  "feel":{"rhythm":"block","strum":"off","strumSpeed":"medium","humanise":"off"},
 ///  "meter":{"num":4,"den":4}, "feelLimited":false,
 ///  "selectedEventId":2|null,
@@ -160,6 +161,8 @@ constexpr int kMaxJsonDepth = 64;
 /// - `autoVoiceLead`: `Document::autoVoiceLead`.
 /// - `transposeWithKey`, `keyHintSeen`: `Document::transposeWithKey` (a tonic change transposes the
 ///   sequence) and `Document::keyHintSeen` (the one-time hint has shown); live state, false by default.
+/// - `midiThru`: `Document::midiThru` (the plug-in passes the MIDI it hears to its output); live state,
+///   true by default. With it the snapshot has 27 top-level keys.
 /// - `feel`, `meter`: `Document::feel` as four wire-name strings (`rhythm` block|pulse|subdivided|offbeats|
 ///   lowThenUpper|arpUp|arpUpDown, `strum` off|down|up|downUp, `strumSpeed` tight|medium|loose, `humanise`
 ///   off|light|medium|heavy) and `Document::meter` as `{num, den}`; 4/4 and block chords by default.
@@ -249,15 +252,33 @@ std::string snapshotJson(const Document& doc, const Palette& palette, int select
 /// Allocates: not for the audio thread.
 std::string keyName(const Key& key);
 
+/// The `kMsgTagHeard` payload (design D14): {"schema":1,"active":bool,"held":[..],"heldNames":[..],
+/// "chord":{"root","type","symbol","roman","inversion","bass"}|null,"chordHeld":bool,
+/// "key":{"tonic":{"letter","alter"},"mode","name","percent"}|null,"onsets":n}.
+/// `held` is the held MIDI pitches ascending and `heldNames` their ASCII spellings in the same order. A held
+/// note that is a tone of the latched chord while `chordHeld` is true is spelled by
+/// `chordToneSpelling(chord, pc, projectKey)` (E7's G# reads "G#"), any other by `spell(pc, projectKey)` (a
+/// lone G# in C major reads "Ab"). The chord's `type` is its `ChordType::id`, `symbol` is
+/// `chordSymbol(chord, projectKey)` and `roman` is `romanNumeral(chord, projectKey)`; `inversion` and `bass`
+/// (a MIDI note) are the listener's. The key is the one the listener shows, named as the snapshot names a key
+/// (`keyName`, "C Ionian"): the project key only spells the notes and the chord, it never renames the heard
+/// key. `percent` is `round(100 * r)` as an integer clamped to 0..100
+/// (a defined but failing `r` below 0 is reported for one tick before the key is dropped). `onsets` is `onsetsInWindow()`. Accidentals are ASCII
+/// throughout (the UI adds glyphs). Allocates: the UI/message thread only.
+std::string heardJson(const Listener& listener, const Key& projectKey);
+
 /// Applies one UI command, `{"schema":1,"cmd":"<name>", ...fields}`, to the store:
 /// - `setKey {letter,alter,mode}`: `setProjectKey` (a browsed key equal to the project key follows it, so
 ///   the palette stays home; any other browsed key is left alone).
 /// - `browseKey` with exactly one of `{"steps":n}` (`fifthsNeighbour` of the current browsed key),
 ///   `{"mode":"<Mode>"}` (the parallel mode on the same tonic pitch class, canonically spelled) or
 ///   `{"home":true}` (browsed key = project key).
-/// - `appendChord {root,type,lengthBeats?,velocity?}`: `appendChord`, with velocity 100 and, without `lengthBeats`, one bar of the document meter
-///   (barTicks(meter) / 960 beats: 4 in 4/4, 3.5 in 7/8). The new chord is selected (document.h), so the
-///   next snapshot's `selectedEventId`, `suggestions` and `relationReference` follow it. Refused (false, an
+/// - `appendChord {root,type,lengthBeats?,velocity?,inversion?}`: `appendChord`, with velocity 100 and,
+///   without `lengthBeats`, one bar of the document meter (barTicks(meter) / 960 beats: 4 in 4/4, 3.5 in
+///   7/8). With `inversion` (an integer in 0..tones - 1 of the chord, else rejected naming the field) the
+///   new chord has that inversion and is manual, so it sounds as given even under auto voice-leading;
+///   without, root position and not manual. The new chord is selected (document.h), so the next
+///   snapshot's `selectedEventId`, `suggestions` and `relationReference` follow it. Refused (false, an
 ///   error naming the reason, no change) when the document already holds `kMaxChords` chords or the id
 ///   counter is exhausted.
 /// - `moveChord {id,index}`, `setLength {id,lengthBeats}`, `setVelocity {id,velocity}`,
@@ -266,8 +287,8 @@ std::string keyName(const Key& key);
 /// - `setInversion {id,inversion}`, `setOctave {id,octave}`, `resetVoicing {id}`: the matching store
 ///   call (the values are clamped by the store and the event is marked manual; see document.h).
 /// - `setAutoVoiceLead {on}`: `setAutoVoiceLead`, undoable.
-/// - `setTransposeWithKey {on}`, `setKeyHintSeen {on}`: the matching live-state setter (never history, kept
-///   across undo and redo, persisted by `stateJson`).
+/// - `setTransposeWithKey {on}`, `setKeyHintSeen {on}`, `setMidiThru {on}`: the matching live-state setter
+///   (never history, kept across undo and redo, persisted by `stateJson`).
 /// - `setFeel {rhythm,strum,strumSpeed,humanise}`: all four required strings (names as in the snapshot);
 ///   `setMeter {num,den}`: JSON integers (3.0 and "3" are rejected like any integer field), `num` 1..16, `den`
 ///   2, 4 or 8. Both are undoable (`DocumentStore::setFeel` / `setMeter`); an equal value pushes no history.
@@ -322,7 +343,7 @@ bool applyCommandJson(DocumentStore& store, std::string_view json, std::string& 
 /// The persistent form of the store's document, without the palette:
 /// ```
 /// {"schema":1, "projectKey":<key>, "browsedKey":<key>, "progressionLoop":true, "followHost":true,
-///  "autoVoiceLead":false, "transposeWithKey":false, "keyHintSeen":false, "relationMode":"blend",
+///  "autoVoiceLead":false, "transposeWithKey":false, "keyHintSeen":false, "midiThru":true, "relationMode":"blend",
 ///  "feel":{"rhythm":"block","strum":"off","strumSpeed":"medium","humanise":"off"}, "meter":{"num":4,"den":4},
 ///  "events":[{"id":1,"root":0,"type":"maj","lengthBeats":4.0,"velocity":100,
 ///             "inversion":0,"octave":0,"manualVoicing":false}, ...],
@@ -336,8 +357,9 @@ bool applyCommandJson(DocumentStore& store, std::string_view json, std::string& 
 /// `autoVoiceLead`, the events' `inversion`, `octave` and `manualVoicing`, `sections` and
 /// `nextSectionId` were added under schema 1 (Phase 2), `relationMode` (`relationModeName` of
 /// `Document::relationMode`, live state that is nonetheless saved with the set, R5) later, and
-/// `transposeWithKey` and `keyHintSeen` (also live state) after it: a reader that predates them ignores
-/// them, and `loadStateJson` defaults them when they are missing, so states cross both ways.
+/// `transposeWithKey` and `keyHintSeen` (also live state) after it, and `midiThru` (live state) after
+/// those: a reader that predates them ignores them, and `loadStateJson` defaults them when they are
+/// missing, so states cross both ways.
 /// Size: the largest state the store can hold (`kMaxChords` chords, a section on each, every name at
 /// `kMaxSectionNameBytes` bytes of characters that escape to two) is pinned by test_json_api.cpp at
 /// well under a tenth of `kMaxJsonBytes`, so a saved state always loads.
@@ -358,9 +380,10 @@ std::string stateJson(const DocumentStore& store, int editorWidth = kDefaultEdit
 /// rather than rejected (a mistyped value is still rejected). Optional, with their defaults: `editor`
 /// (`kDefaultEditorWidth` x `kDefaultEditorHeight`), the events' `inversion` (0), `octave` (0) and
 /// `manualVoicing` (false), `feel` (block chords) and `meter` (4/4; when given, valid as in `setFeel` /
-/// `setMeter`, else the whole state is rejected), `autoVoiceLead` (false), `transposeWithKey` and `keyHintSeen` (false; when
-/// given, booleans), `relationMode` ("blend"; when given, one of the five `relationModeName` strings,
-/// anything else rejecting the state), `sections` (none) and `nextSectionId`
+/// `setMeter`, else the whole state is rejected), `autoVoiceLead` (false), `transposeWithKey` and
+/// `keyHintSeen` (false; when given, booleans), `midiThru` (true; when given, a boolean), `relationMode`
+/// ("blend"; when given, one of the five `relationModeName` strings, anything else rejecting the state),
+/// `sections` (none) and `nextSectionId`
 /// (derived, one past the largest section id, 1 without sections; when given it must be at least that and
 /// is kept, like `nextId`). Every other field is required.
 bool loadStateJson(DocumentStore& store, std::string_view json, std::string& error, int* editorWidth = nullptr,

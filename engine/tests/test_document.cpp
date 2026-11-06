@@ -78,7 +78,7 @@ bool sameUndoableState(const Document& a, const Document& b) {
 bool sameLiveState(const Document& a, const Document& b) {
     return a.browsedKey == b.browsedKey && a.progressionLoop == b.progressionLoop && a.followHost == b.followHost &&
            a.relationMode == b.relationMode && a.transposeWithKey == b.transposeWithKey &&
-           a.keyHintSeen == b.keyHintSeen;
+           a.keyHintSeen == b.keyHintSeen && a.midiThru == b.midiThru;
 }
 
 /// Runs `mutate`, checks it changed the document, then checks that undo restores the document from before
@@ -111,6 +111,7 @@ TEST_CASE("Document: defaults to C Ionian, empty, looping and following the host
     CHECK(doc.relationMode == RelationMode::Blend);
     CHECK(doc.transposeWithKey == false);
     CHECK(doc.keyHintSeen == false);
+    CHECK(doc.midiThru == true);
 }
 
 TEST_CASE("Document: empty document has endBeat 0 and startBeatOf(0) 0") {
@@ -164,6 +165,9 @@ TEST_CASE("ChordEvent / Document: equality compares every field") {
     y.followHost = false;
     CHECK(x != y);
     y = x;
+    y.midiThru = false;
+    CHECK(x != y);
+    y = x;
     y.autoVoiceLead = true;
     CHECK(x != y);
     y = x;
@@ -214,6 +218,36 @@ TEST_CASE("appendChord: a new chord is in root position at octave 0") {
     CHECK(store.doc().events[0].inversion == 0);
     CHECK(store.doc().events[0].octave == 0);
     CHECK(store.doc().events[0].manualVoicing == false);
+}
+
+TEST_CASE("appendChord: an inversion is set on the new event and marks it manual") {
+    const Chord am7 = chord(9, "m7");
+    DocumentStore store;
+    const int inverted = store.appendChord(am7, 4.0, 100, 2);
+    const int zero = store.appendChord(am7, 4.0, 100, 0);
+    const int plain = store.appendChord(am7, 4.0, 100);
+    REQUIRE(inverted != kNoEventId);
+    REQUIRE(zero != kNoEventId);
+    REQUIRE(plain != kNoEventId);
+    const ChordEvent& a = store.doc().events[static_cast<std::size_t>(store.findIndex(inverted))];
+    const ChordEvent& b = store.doc().events[static_cast<std::size_t>(store.findIndex(zero))];
+    const ChordEvent& c = store.doc().events[static_cast<std::size_t>(store.findIndex(plain))];
+    CHECK(a.inversion == 2);
+    CHECK(a.manualVoicing);
+    CHECK(b.inversion == 0);
+    CHECK(b.manualVoicing);
+    CHECK(c.inversion == 0);
+    CHECK_FALSE(c.manualVoicing);
+}
+
+TEST_CASE("appendChord: an inversion is clamped to the chord's inversions") {
+    const Chord am7 = chord(9, "m7");
+    DocumentStore store;
+    const int high = store.appendChord(am7, 4.0, 100, 9);
+    const int low = store.appendChord(am7, 4.0, 100, -3);
+    CHECK(store.doc().events[static_cast<std::size_t>(store.findIndex(high))].inversion == inversionCount(am7) - 1);
+    CHECK(store.doc().events[static_cast<std::size_t>(store.findIndex(low))].inversion == 0);
+    CHECK(store.doc().events[static_cast<std::size_t>(store.findIndex(low))].manualVoicing);
 }
 
 TEST_CASE("appendChord: returns ids 1 then 2 for two appends") {
@@ -938,6 +972,32 @@ TEST_CASE("setProgressionLoop / setFollowHost: toggle independently and never pu
     CHECK(store.doc().followHost == true);
     CHECK_FALSE(store.undo());
     CHECK_FALSE(store.redo());
+}
+
+TEST_CASE("setMidiThru: live state: defaults on, never pushes history, survives undo and redo") {
+    DocumentStore store;
+    CHECK(store.doc().midiThru == true);
+    store.setMidiThru(false);
+    CHECK(store.doc().midiThru == false);
+    CHECK_FALSE(store.undo());  // no history was pushed
+    CHECK_FALSE(store.redo());
+
+    store.appendChord(kC);
+    store.setMidiThru(true);
+    store.appendChord(kF);
+    store.setMidiThru(false);
+    REQUIRE(store.undo());  // the second append
+    CHECK(store.doc().events.size() == 1);
+    CHECK(store.doc().midiThru == false);  // live: kept
+    REQUIRE(store.redo());
+    CHECK(store.doc().events.size() == 2);
+    CHECK(store.doc().midiThru == false);
+    store.setMidiThru(true);
+    REQUIRE(store.undo());
+    REQUIRE(store.undo());
+    CHECK(store.doc().midiThru == true);
+    REQUIRE(store.redo());
+    CHECK(store.doc().midiThru == true);
 }
 
 TEST_CASE("setRelationMode: live state: every mode sticks, never pushes history, survives undo and redo") {

@@ -5,7 +5,8 @@
 // and the host's state thread (SerializeState / UnserializeState: VST3 calls them on the UI thread, AUv2
 // SetState and AUv3 fullState may call them from a background thread). Every access takes mModelMutex, and
 // no lock is held while calling into iPlug2 or the UI, so PushSnapshot can run inline on the main thread
-// without re-entering the lock. The audio thread (ProcessBlock) never touches the model or the mutex.
+// without re-entering the lock. The audio thread (ProcessBlock, ProcessMidiMsg) never touches the model or
+// the mutex.
 // Delivery to the Swift view controller (PushSnapshot, PushError, RestoreEditorSize) always happens on the
 // main thread: OnMain runs the block inline when already there and dispatches it otherwise. A dispatched
 // block holds the Lifeline mutex while it runs and does nothing once `alive` is false; the destructor
@@ -25,9 +26,10 @@
 // The Swift palette sends kMsgTagPreview {id, on, pitches, velocity}, and {id, extend} once a second
 // while a cell is held (merged in the ring while the host is not processing); OnMessage (main thread)
 // parses it and calls Scheduler::pushPreview, the scheduler's single other-thread entry (an SPSC ring of
-// 64; a full ring is reported to the UI as an error). ProcessBlock owns everything else: it consumes the
-// pending reset/panic flags, runs Scheduler::process and forwards the events with SendMidiMsg. The
-// scheduler owns the sounding notes: one physical note per pitch, Start/Stop paired by id, an Extend
+// 64; a full ring is reported to the UI as an error). The audio thread owns everything else: ProcessBlock
+// consumes the pending reset/bypass/panic flags, runs Scheduler::process and forwards the events with
+// SendMidiMsg (ProcessMidiMsg queues incoming notes for thru and may consume the pending reset and bypass
+// release first; see "MIDI in"). The scheduler owns the sounding notes: one physical note per pitch, Start/Stop paired by id, an Extend
 // moving a held preview's deadline, and a 4 s watchdog that releases a preview whose Stop never arrives
 // (editor closed mid-press: Swift's onDisappear sends the Stop, CloseWindow pushes one for an outstanding
 // Start as well, and the watchdog covers the rest). The watchdog counts processed audio time, not wall
@@ -45,13 +47,55 @@
 // already handed the old slot back to the producer. The producer side belongs to whoever holds mModelMutex (main thread for
 // commands, the host's state thread for UnserializeState); the consumer side belongs to ProcessBlock.
 // Rapid edits coalesce: an unacquired publish is simply replaced by the next. The generation only moves
-// when the compiled content moved, so a browsed-key change or a followHost toggle does not make the
-// scheduler flush and re-chase the sounding chord. followHost travels inside the slot, outside the
-// generation (publication.h): ProcessBlock ANDs the acquired slot's flag into BlockInfo.playing, so the
-// progression and the gate that was saved with it always arrive together (a separate atomic could let a
-// block chase an old progression with a newly loaded flag). The other way, ProcessBlock stores the
+// when the compiled content moved, so a browsed-key change or a followHost or midiThru toggle does not make
+// the scheduler flush and re-chase the sounding chord. followHost and midiThru travel inside the slot,
+// outside the generation (publication.h): ProcessBlock ANDs the acquired slot's followHost into
+// BlockInfo.playing and passes its midiThru as BlockInfo.thru, so the progression and the flags that were
+// saved with it always arrive together (a separate atomic could let a block chase an old progression with
+// a newly loaded flag). The other way, ProcessBlock stores the
 // block's host position and playing flag in atomics (mTransportPpq, mTransportPlaying) and OnIdle, on
 // the main thread, pushes them to the editor as the playhead at ~15 Hz when they change.
+//
+// MIDI in (listening design D1, D2, D4, D5): ProcessMidiMsg runs on the audio thread once per incoming event,
+// before the block's ProcessBlock (the VST3 wrapper delivers MIDI while bypassed too). It never allocates,
+// locks or calls the base (iPlug2's default forwards every message to the output, unmanaged). It normalises
+// the event (chordlab::heardEventOf: note-on, note-off, CC64; channels merged), stamps it with mSampleClock
+// (acquire) plus its offset and pushes it into mHeardRing, a fixed SPSC ring the main thread drains (the
+// ring also carries the in-band HeardEvent::Reset of a host reset; see "Reset ordering" below). The
+// clock watermark: ProcessBlock advances mSampleClock by nFrames with a release store at the END of every
+// block, so once a block is done every stamp of it is at or before the published clock; OnIdle reads the
+// clock before draining, feeds the events (a Reset among them clears it) to mListener and calls advance(now) at most every kHeardInterval
+// (the listener's time is monotonic, so a stamp after `now` cannot run it backwards). Note-ons and offs also
+// go to Scheduler::pushThru, always: the Thru flag (BlockInfo::thru) is applied inside process from the slot
+// acquired for that very block, not from the previous block's slot, which is all ProcessMidiMsg could read.
+// Bypass: while GetBypassed() the wrapper runs PassThroughBuffers instead of ProcessBlock, so ProcessMidiMsg
+// queues nothing for thru, still feeds the listener and sets mBypassSeen. ApplyPendingBypassRelease consumes
+// the flag after the reset (at the first non-bypassed note of a callback, before its pushThru, or the top of
+// ProcessBlock) and calls Scheduler::releaseThru, which releases every thru note (an off swallowed by the
+// bypass cannot leave one sounding) on the next block with frames and keeps the queue: a zero-frame block (a
+// VST3 parameter flush) leaves the release pending, and the notes arriving after the bypass still pass
+// through, after the release-all. The sample clock stands still while bypassed (events then are simultaneous
+// to the listener). Overflow: a full heard ring refuses the event and sets a sticky flag. OnIdle takes the
+// flag BEFORE draining: when set, it pops and discards everything in the ring, counts the overflow
+// (mDroppedHeard, reported with the incomplete blocks in kMsgTagStatus) and clears the listener, which
+// resynchronises by forgetting (a lost note-off or pedal-up can never leave a note held); otherwise it drains
+// and feeds. The order matters: drain-then-take would let a burst that overflows between the two leave the
+// pre-refusal events in the ring to be fed after the clear, and a note-on among them whose note-off was the
+// refused event would stay held. The ring stores the flag with release after the events before the refusal
+// and takeOverflow exchanges it with acquire, so the discarding pops see them all. A refused pushThru sets
+// mBlockRefused; the scheduler releases every thru note and discards its ring on the next non-empty block,
+// which counts once as incomplete (a zero-frame block leaves both flags for it). Reset ordering: OnReset only
+// flags the reset, Scheduler::reset discards the queued incoming notes, and iPlug2 delivers a callback's MIDI
+// before its ProcessBlock, so the flag is consumed by whichever comes first on the audio thread, the
+// callback's first incoming message in ProcessMidiMsg (bypassed or not, before its heard push and its
+// pushThru) or the top of ProcessBlock (ApplyPendingReset): the notes arriving in the first block after a
+// reactivation are queued after the reset, not discarded by it. The listener lives on the main thread and
+// cannot see the flag, so ApplyPendingReset also pushes a HeardEvent::Reset into mHeardRing right after
+// Scheduler::reset, from the ring's one producer: the listener clears exactly between the events heard
+// before the reset and those after it (a key held across a deactivation never sends its note-off, and would
+// otherwise stay held). If the ring is full the push is refused and the sticky overflow clears the listener. AUv2 is not a target (check.sh builds the APP and the VST3): its wrapper calls
+// ProcessMidiMsg on the host's thread (IPlugAU.cpp DoMIDIEvent), which would race pushThru and the flag
+// consumers with process.
 //
 // The Cocoa view controller: ARC is off for this file. OpenWindow's alloc/init returns the controller
 // at +1 and CocoaEditorDelegate::CloseWindow only forgets the pointer, so CloseWindow here releases it.
@@ -258,6 +302,60 @@ void ChordLab::OnReset()
   mResetPending.store(true, std::memory_order_release);
 }
 
+void ChordLab::ApplyPendingReset() noexcept
+{
+  if (!mResetPending.exchange(false, std::memory_order_acq_rel))
+    return;
+  mScheduler.reset(mResetSampleRate.load(std::memory_order_relaxed));
+  // In-band, from the ring's one producer: the listener forgets exactly between the events heard before the
+  // reset and after it (keys held across a deactivation never send their note-offs). A refused push means
+  // the ring is full; its sticky overflow flag makes OnIdle discard everything and clear the listener anyway.
+  mHeardRing.push({chordlab::HeardEvent::Reset, 0, 0, mSampleClock.load(std::memory_order_relaxed)});
+}
+
+void ChordLab::ApplyPendingBypassRelease() noexcept
+{
+  if (mBypassSeen.exchange(false, std::memory_order_acq_rel))
+    mScheduler.releaseThru();                                    // pending until a block with frames; the queue stays
+}
+
+// Limits of the wrappers (outside the engine's real-time proof, which covers the scheduler and the rings):
+//  - The standalone APP pops its MIDI input in the audio callback and calls this with offset 0 for every
+//    message (IPlug/APP/IPlugAPP.cpp:138), and its SendMidiMsg allocates a std::vector per message and
+//    ignores the sample offset (IPlugAPP.cpp:79): the APP's thru output is block-quantised and not
+//    allocation-free. The APP delivers CC64 in order with the notes.
+//  - VST3 delivers CC64 as a parameter: the wrapper processes parameter changes before the block's note
+//    events and keeps only the last point of a parameter's queue per block (IPlugVST3_ProcessorBase.cpp:291,
+//    :334), so a pedal transition is ordered before that block's notes, stamped at the parameter point's
+//    offset: the earlier notes of that block are taken as simultaneous with it (less than a block of
+//    shift), and several transitions within one block collapse to the last (design D5; the user guide's
+//    limits). The pedal arrives only on MIDI channel 1: VST3_NUM_CC_CHANS defaults to 1
+//    (IPlugVST3_Defs.h:12), and the host drops the other channels' CCs.
+//  - AUv2 (not a target: check.sh builds the APP and the VST3) calls this on the host's thread
+//    (IPlugAU.cpp DoMIDIEvent), so pushThru and the flag consumers would race process. If AU ever ships,
+//    route the input through an SPSC queue drained in ProcessBlock, or compile thru out under AU_API.
+//  - A bypass end releases the thru notes through Scheduler::releaseThru, on the next block with frames,
+//    and keeps the queued notes (see "MIDI in").
+void ChordLab::ProcessMidiMsg(const IMidiMsg& msg)
+{
+  // Audio thread: no allocation, no locks, no logging, never the base class (see "MIDI in" at the top).
+  ApplyPendingReset();                                           // first: its heard Reset precedes this event, and reset() empties the thru queue
+  const uint64_t stamp = mSampleClock.load(std::memory_order_acquire) + (uint64_t) std::max(0, msg.mOffset);
+  if (const std::optional<chordlab::HeardEvent> heard = chordlab::heardEventOf(msg.mStatus, msg.mData1, msg.mData2, stamp))
+    mHeardRing.push(*heard);                                     // a refusal is sticky in the ring; OnIdle resynchronises
+  if (GetBypassed())
+  {
+    mBypassSeen.store(true, std::memory_order_relaxed);         // no thru while bypassed; the next block releases it
+    return;
+  }
+  if (const std::optional<chordlab::ThruEvent> thru = chordlab::thruEventOf(msg.mStatus, msg.mData1, msg.mData2, msg.mOffset))
+  {
+    ApplyPendingBypassRelease();                                 // after the reset above, which would forget it
+    if (!mScheduler.pushThru(*thru))                             // queued whatever the flag: the block's own slot decides
+      mBlockRefused.store(true, std::memory_order_relaxed);
+  }
+}
+
 void ChordLab::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
 {
   // Audio thread: nothing here may touch mStore, mPalette or mModelMutex (see the note at the top).
@@ -269,8 +367,8 @@ void ChordLab::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
   for (int c = 0; c < nOut; ++c)
     std::fill(outputs[c], outputs[c] + nFrames, 0.0);
 
-  if (mResetPending.exchange(false, std::memory_order_acq_rel))
-    mScheduler.reset(mResetSampleRate.load(std::memory_order_relaxed));
+  ApplyPendingReset();                                           // unless this callback's MIDI already ran it
+  ApplyPendingBypassRelease();                                   // likewise
   // panic() before process(): panic records the preview ring's tail as it sees it, and the drain inside
   // process discards every command queued before that tail (Scheduler::panic), so a Start the UI pushed
   // before pressing Panic never sounds, while commands pushed after the panic are served as usual.
@@ -285,23 +383,29 @@ void ChordLab::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
   // Follow Live gates the progression only: previews are independent of the transport, and the scheduler
   // releases the progression on the playing -> stopped edge, so turning it off mid-chord is clean. The
   // flag comes from the slot the scheduler is playing (the front slot; the document's default before the
-  // first acquire), never from somewhere the progression could outrun.
+  // first acquire), never from somewhere the progression could outrun. Thru comes from the same slot; a
+  // bypass end is a releaseThru above, not a block with thru off (see "MIDI in" at the top).
   const chordlab::SnapshotSlot* front = mSnapshots.current();
   const bool followHost = front ? front->followHost : true;
+  const bool thru = front ? front->midiThru : true;
   const double ppq = GetPPQPos();
   const double bpm = GetTempo();
   const bool playing = GetTransportIsRunning() && followHost;
-  const chordlab::BlockInfo block{ppq, nFrames, GetSampleRate(), bpm, playing};
+  const chordlab::BlockInfo block{ppq, nFrames, GetSampleRate(), bpm, playing, thru};
   mTransportPpq.store(ppq, std::memory_order_relaxed);             // the playhead, read by OnIdle
   mTransportPlaying.store(playing, std::memory_order_relaxed);
   mHostBpm.store(bpm, std::memory_order_relaxed);                  // the export's tempo
   std::size_t written = 0;
   const bool complete = mScheduler.process(block, mMidiOut.data(), mMidiOut.size(), written);
 
-  // Output capacity (plan M3.3): iPlug2's VST3 output event queue is page-rounded (at least 512 entries),
-  // so a burst of at most kMidiOutCapacity events fits without a realloc; but incoming MIDI shares that
-  // queue, its events are retained across blocks while the host passes no pOutputEvents, and the
-  // standalone APP's SendMidiMsg allocates a std::vector per message (IPlug/APP/IPlugAPP.cpp:79).
+  // Output capacity (plan M3.3, listening design D16): iPlug2's VST3 output event queue holds
+  // maxSamplesPerBlock rounded up to a 4 KiB page of 8-byte IMidiMsg, at least 512 entries (IPlugMidi.h's
+  // DEFAULT_BLOCK_SIZE macro, 512, shadows IPlugConstants.h's 1024 there; setupProcessing resizes it), so a
+  // burst of at most kMidiOutCapacity (512) events fits without a realloc. Thru notes are part of that
+  // burst: ProcessMidiMsg replaces iPlug2's default, which forwarded incoming MIDI into the same queue
+  // outside this budget. The queue still retains its events across blocks while the host passes no
+  // pOutputEvents, and the standalone APP's SendMidiMsg allocates a std::vector per message
+  // (IPlug/APP/IPlugAPP.cpp:79; see the limits above ProcessMidiMsg).
   for (std::size_t i = 0; i < written; ++i)
   {
     const chordlab::MidiOut& e = mMidiOut[i];
@@ -313,7 +417,14 @@ void ChordLab::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
     SendMidiMsg(msg);
   }
 
-  if (!complete)
+  // The watermark: every event stamped during this callback is now at or before the published clock.
+  mSampleClock.fetch_add((uint64_t) std::max(0, nFrames), std::memory_order_release);
+
+  // One count per block: a refused thru push also makes process() report the block (it releases the thru
+  // notes and discards the ring), so the two verdicts fold into one increment. A zero-frame block is a
+  // no-op in process() (its only early-out) and leaves the refusal for the next block, which handles it.
+  const bool refused = nFrames != 0 && mBlockRefused.exchange(false, std::memory_order_relaxed);
+  if (!complete || refused)
     mIncompleteBlocks.fetch_add(1, std::memory_order_relaxed);   // no logging on the audio thread; OnIdle reports it
 }
 
@@ -321,17 +432,51 @@ void ChordLab::OnUIOpen()
 {
   Plugin::OnUIOpen();
   PushSnapshot();
-  mReportedIncompleteBlocks = 0;                                 // make OnIdle resend the current count
+  PushHeard();                                                   // replays an active listener; an inactive one hides the group
+  mReportedIncompleteBlocks = 0;                                 // make OnIdle resend the current counts
+  mReportedDroppedHeard = 0;
   mPushedPpq = std::numeric_limits<double>::quiet_NaN();         // ...and the playhead
 }
 
 void ChordLab::OnIdle()
 {
+  // Main thread, with or without an editor (iPlug2 drives it from IPlugAPIBase::OnTimer). What was heard:
+  // the clock first, so it is a watermark for every event drained after it (see "MIDI in" at the top).
+  {
+    const uint64_t now = mSampleClock.load(std::memory_order_acquire);
+    const double bpm = HostBpm();
+    const double sampleRate = GetSampleRate();                   // the listener moves no time while it is unusable
+    // The overflow flag before the drain: taken after it, a burst overflowing in between would leave the
+    // events pushed before the refusal in the ring to be fed after the clear, and a note-on among them
+    // whose note-off was the refused event would stay held. The flag's release store and the exchange's
+    // acquire make every event pushed before the refusal visible to the discarding pops.
+    chordlab::HeardEvent e{};
+    if (mHeardRing.takeOverflow())
+    {
+      while (mHeardRing.pop(e))
+        ;                                                        // the lost epoch, discarded whole
+      ++mDroppedHeard;                                           // resynchronise by forgetting
+      mListener.clear();
+    }
+    else
+      while (mHeardRing.pop(e))
+        mListener.feed(e, bpm, sampleRate);                      // a host reset's in-band Reset clears it in order
+    const auto tick = std::chrono::steady_clock::now();
+    if (tick - mLastHeardTick >= kHeardInterval)
+    {
+      mLastHeardTick = tick;
+      mListener.advance(now, bpm, sampleRate);                   // the only key evaluation
+      if (mListener.changed() && mEditorOpen.load())
+        PushHeard();                                             // acknowledges; a closed editor keeps `changed` for OnUIOpen
+    }
+  }
+
   const uint32_t incomplete = mIncompleteBlocks.load(std::memory_order_relaxed);
-  if (incomplete != mReportedIncompleteBlocks && mEditorOpen.load())
+  if ((incomplete != mReportedIncompleteBlocks || mDroppedHeard != mReportedDroppedHeard) && mEditorOpen.load())
   {
     mReportedIncompleteBlocks = incomplete;
-    PushStatus(incomplete);
+    mReportedDroppedHeard = mDroppedHeard;
+    PushStatus(incomplete, mDroppedHeard);
   }
 
   // The playhead: at most every kTransportPushInterval, only to an open editor, only when it moved more
@@ -381,7 +526,11 @@ bool ChordLab::OnMessage(int msgTag, int ctrlTag, int dataSize, const void* pDat
       }
     }
     if (accepted)
+    {
       PushSnapshot();
+      if (mListener.active())
+        PushHeard();                                             // names, symbol and numeral follow the project key
+    }
     else
     {
       DBGMSG("ChordLab: command rejected: %s\n", error.c_str());
@@ -390,9 +539,22 @@ bool ChordLab::OnMessage(int msgTag, int ctrlTag, int dataSize, const void* pDat
     return true;
   }
 
+  if (msgTag == kMsgTagClearHeard)
+  {
+    // Everything still in the ring arrived before the press: discard it (overflow flag first, as in OnIdle),
+    // or the next idle would feed it and bring the cleared chord back.
+    mHeardRing.takeOverflow();
+    for (chordlab::HeardEvent e{}; mHeardRing.pop(e);)
+      ;
+    mListener.clear();                                           // inactive again: the push hides the group
+    PushHeard();                                                 // acknowledges
+    return true;
+  }
+
   if (msgTag == kMsgTagRequestSnapshot)
   {
     PushSnapshot();
+    PushHeard();                                                 // as OnUIOpen: replays, or hides the group
     return true;
   }
 
@@ -458,8 +620,8 @@ void ChordLab::HandlePreview(std::string_view text)
   }
 }
 
-// The tempo of an export: the host's as ProcessBlock last saw it, 120 before the first block.
-double ChordLab::ExportBpm() const
+// The host's tempo as ProcessBlock last saw it, 120 before the first block: the export's and the listener's.
+double ChordLab::HostBpm() const
 {
   const double bpm = mHostBpm.load(std::memory_order_relaxed);
   return (std::isfinite(bpm) && bpm > 0.0) ? bpm : 120.0;
@@ -473,7 +635,7 @@ void ChordLab::HandleExport()
   // (chordlab::exportClipName); the file name carries the key (WriteExport).
   @autoreleasepool
   {
-  const double bpm = ExportBpm();
+  const double bpm = HostBpm();
   std::vector<uint8_t> bytes;
   std::string label;
   {
@@ -503,7 +665,7 @@ void ChordLab::HandleExportSection(std::string_view text)
     return;
   }
   const int id = request->sectionId;
-  const double bpm = ExportBpm();
+  const double bpm = HostBpm();
   std::vector<uint8_t> bytes;
   std::string label;
   bool found = false;
@@ -626,6 +788,25 @@ void ChordLab::PushSnapshot()
   });
 }
 
+void ChordLab::PushHeard()
+{
+  // The listener is main-thread only, so everything, the build included, happens inside the hop.
+  OnMain([this] {
+    if (!mEditorOpen.load())                                     // `changed` stays set; OnUIOpen replays
+      return;
+    std::string json;
+    {
+      std::lock_guard<std::mutex> lock(mModelMutex);             // the document only read: the project key spells
+      json = chordlab::heardJson(mListener, mStore.doc().projectKey);
+    }
+#ifndef NDEBUG
+    NSLog(@"ChordLab: heard %s", json.c_str());                  // once per push, like the preview log
+#endif
+    SendArbitraryMsgFromDelegate((int) kMsgTagHeard, (int) json.size(), json.data());
+    mListener.acknowledge();                                     // the editor now shows these outputs
+  });
+}
+
 void ChordLab::PushError(const std::string& message)
 {
   OnMain([this, message] {
@@ -639,12 +820,13 @@ void ChordLab::PushError(const std::string& message)
   });
 }
 
-void ChordLab::PushStatus(uint32_t incompleteBlocks)
+void ChordLab::PushStatus(uint32_t incompleteBlocks, uint32_t droppedHeard)
 {
-  OnMain([this, incompleteBlocks] {
+  OnMain([this, incompleteBlocks, droppedHeard] {
     if (!mEditorOpen.load())
       return;
-    const std::string json = nlohmann::json{{"schema", chordlab::kJsonSchema}, {"incompleteBlocks", incompleteBlocks}}.dump();
+    const std::string json = nlohmann::json{{"schema", chordlab::kJsonSchema}, {"incompleteBlocks", incompleteBlocks},
+                                            {"droppedHeard", droppedHeard}}.dump();
     SendArbitraryMsgFromDelegate((int) kMsgTagStatus, (int) json.size(), json.data());
   });
 }
@@ -720,6 +902,7 @@ int ChordLab::UnserializeState(const IByteChunk& chunk, int startPos)
   // returned position unchecked (IPlugVST3_Common.h) and a negative seek reads out of bounds.
   // Seeking to the end makes its bypass read fail cleanly instead.
   const int fail = chunk.Size();
+  bool loaded = false;
 
   uint8_t version = 0;
   int pos = chunk.Get(&version, startPos);
@@ -737,7 +920,6 @@ int ChordLab::UnserializeState(const IByteChunk& chunk, int startPos)
     std::string error;
     int width = 0;
     int height = 0;
-    bool loaded = false;
     bool editorOpen = false;
     {
       std::lock_guard<std::mutex> lock(mModelMutex);
@@ -767,5 +949,10 @@ int ChordLab::UnserializeState(const IByteChunk& chunk, int startPos)
   if (pos < 0)
     pos = fail;
   PushSnapshot();                                                // queued after the resize; no-op without an editor
+  if (loaded)                                                    // the project key may have changed: respell what was heard
+    OnMain([this] {
+      if (mListener.active())                                    // the listener is read on the main thread only
+        PushHeard();
+    });
   return pos;
 }

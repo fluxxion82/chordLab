@@ -22,11 +22,13 @@ static const NSInteger kMsgTagPreview = 12;          // payload: {"schema":1,"id
 static const NSInteger kMsgTagPanic = 13;            // no payload: silence everything on the next audio block
 static const NSInteger kMsgTagExport = 14;           // no payload: write the progression as a .mid file; answered by kMsgTagExportReady or kMsgTagError
 static const NSInteger kMsgTagExportSection = 15;    // payload: {"schema":1,"id":<sectionId>}: write that section alone as a .mid file; same answers
+static const NSInteger kMsgTagClearHeard = 16;       // no payload: forget what the listener heard (the chip's x); answered by kMsgTagHeard
 // plugin -> UI
 static const NSInteger kMsgTagSnapshot = 20;         // payload: snapshotJson (document + palette)
 static const NSInteger kMsgTagError = 21;            // payload: {"schema":1,"error":"..."} for a rejected command or preview, or a failed export
-static const NSInteger kMsgTagStatus = 22;           // payload: {"schema":1,"incompleteBlocks":n} (scheduler debug aid)
+static const NSInteger kMsgTagStatus = 22;           // payload: {"schema":1,"incompleteBlocks":n,"droppedHeard":n} (debug aid: scheduler blocks, heard-ring overflows)
 static const NSInteger kMsgTagTransport = 23;        // payload: {"schema":1,"ppq":<beats>,"playing":true|false}, ~15 Hz while it changes
 static const NSInteger kMsgTagExportReady = 24;      // payload: {"schema":1,"path":"/.../ChordLab/ChordLab-<label>-<stamp>-<pid>-<counter>-<uuid8>.mid"} (see ChordLab.mm, "MIDI export files")
+static const NSInteger kMsgTagHeard = 25;            // payload: heardJson ({"schema":1,"active":..,"held":[..],"chord":..,"key":..}); "active":false hides the Heard group
 
 #endif /* ChordLab_Shared_h */

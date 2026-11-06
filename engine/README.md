@@ -79,8 +79,11 @@ Three mechanisms, chosen by who can get it wrong:
 ## Real-time rules
 
 What may run on the audio thread is exactly the `Scheduler` surface: `process`, `reset`, `adopt`,
-`panic`, `ownersOf`, `sounding`, plus the consumer side of `TripleBuffer` (`acquire`, `current`,
-`currentGeneration`). After construction neither allocates, throws, locks or logs; the scheduler's only
+`panic`, `ownersOf`, `sounding`, `pushThru`, `releaseThru`, plus the consumer side of `TripleBuffer`
+(`acquire`, `current`, `currentGeneration`), the producer side of `HeardRing` (`push`; `pop` and
+`takeOverflow` are the consumer side, on the main thread) and the MIDI adapters `heardEventOf` and
+`thruEventOf` (`midi_in.h`). The `Listener` is main-thread only and may allocate: it is fed from the
+ring, never from the audio thread. After construction none of these allocates, throws, locks or logs; the scheduler's only
 headers are `limits.h` and `note_event.h` plus `<array>`, `<atomic>`, `<cstddef>`, `<cstdint>`, and
 `triple_buffer.h` adds `<type_traits>`, so a translation unit that includes them pulls in nothing that
 allocates. `engine_rt_alloc_test` checks it from the outside: a separate process whose global
@@ -97,10 +100,10 @@ that a compiled snapshot always fits `kMaxSnapshotEvents` (`limits.h`). `TripleB
 (`triple_buffer.h`) is the handoff that satisfies that lifetime rule without a lock: the producer fills
 and publishes preallocated slots, the consumer acquires the latest one per block, and the slot it holds
 is never written until its next acquire. `publication.h` is the producer's half as the plug-in uses it:
-`SnapshotSlot` (the compiled content plus `followHost`, the plug-in's transport gate, which travels with
-the progression it belongs to) and `fillSlot`, which compiles, compares with the last publication and
-fills a slot only when something changed, bumping the generation for content and keeping it for a
-follow-only change.
+`SnapshotSlot` (the compiled content plus `followHost`, the plug-in's transport gate, and `midiThru`,
+which travel with the progression they belong to) and `fillSlot`, which compiles, compares with the last
+publication and fills a slot only when something changed, bumping the generation for content and keeping
+it for a flag-only change.
 
 ## Threading contract
 

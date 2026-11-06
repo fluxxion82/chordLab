@@ -10,9 +10,10 @@ import SwiftUI
 /// The window's measured size decides three things once, here: where the Transpose with key switch is (the
 /// key bar from `keyBarSwitchMinWidth` up, else the transport row; exactly one of them shows it), whether the
 /// Diatonic / Applied switch keeps its row above the palette (not while the key transpose row shows in a
-/// window shorter than `compactHeight`), and whether the key transpose row draws compact (in a window shorter
-/// than `compactHeight`). The palette viewport is the row that gives up height; the status and export row
-/// along the bottom never does.
+/// window shorter than `compactHeight`, unless the listener is active: the row then holds the Heard group and
+/// always shows), and whether the key transpose row draws compact (in a window shorter than `compactHeight`).
+/// The palette viewport is the row that gives up height; the status and export row along the bottom never
+/// does.
 struct ContentView: View {
   @EnvironmentObject var state: ChordLabState
 
@@ -48,7 +49,9 @@ struct ContentView: View {
 
         SuggestionsView()
 
-        PaletteView(showsViewSwitch: state.keyRow == nil || size.height >= Self.compactHeight)
+        // While the listener is active the switch row carries the Heard group and always shows (D15).
+        PaletteView(showsViewSwitch: state.keyRow == nil || size.height >= Self.compactHeight
+                      || state.heard?.active == true)
 
         HomeRowView()
 

@@ -82,7 +82,7 @@ public typealias MIDIVelocity = UInt8
   }
 
   /// Messages from C++ (SendArbitraryMsgFromDelegate): snapshots, errors, scheduler status, the playhead,
-  /// the export file.
+  /// the export file, what the listener heard.
   override func onMessage(_ msgTag: Int, _ ctrlTag: Int, _ msg: Data!) -> Bool {
     guard let msg = msg else { return false }
     switch msgTag {
@@ -100,6 +100,9 @@ public typealias MIDIVelocity = UInt8
       return true
     case kMsgTagExportReady:
       state.applyExportReady(json: msg)
+      return true
+    case kMsgTagHeard:
+      state.applyHeard(json: msg)
       return true
     default:
       return false

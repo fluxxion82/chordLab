@@ -9,6 +9,7 @@
 #include "chordlab/harmony.h"
 #include "chordlab/json_api.h"
 #include "chordlab/limits.h"
+#include "chordlab/listener.h"
 #include "chordlab/palette.h"
 #include "chordlab/pitch.h"
 #include "chordlab/presets.h"
@@ -24,6 +25,7 @@
 #include <algorithm>
 #include <climits>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <string>
 #include <string_view>
@@ -1177,9 +1179,9 @@ TEST_CASE("rejection: transpose commands with missing, mistyped or out-of-range 
     CHECK(error.find("in -11..11") != std::string::npos);
 }
 
-TEST_CASE("snapshot: twenty-six top-level keys, with the transpose flags and the feel") {
+TEST_CASE("snapshot: twenty-seven top-level keys, with the transpose flags, the feel and midiThru") {
     DocumentStore store = threeChords();
-    CHECK(snapshot(store).size() == 26);
+    CHECK(snapshot(store).size() == 27);
 }
 
 // --- Feel and meter --------------------------------------------------------------------------
@@ -1673,6 +1675,25 @@ TEST_CASE("toggles: setProgressionLoop and setFollowHost are live state") {
     CHECK(snapshot(store).at("followHost") == true);
 }
 
+TEST_CASE("setMidiThru: the command sets the live flag, no history, undo and redo keep it") {
+    DocumentStore store = threeChords();
+    CHECK(snapshot(store).at("midiThru") == true);
+    applyOk(store, {{"cmd", "setMidiThru"}, {"on", false}});
+    CHECK(snapshot(store).at("midiThru") == false);
+    CHECK(store.doc().midiThru == false);
+    applyOk(store, {{"cmd", "setMidiThru"}, {"on", false}});  // the same value: a no-op
+    REQUIRE(store.undo());  // the three appendChords are the only history
+    CHECK(snapshot(store).at("midiThru") == false);
+    REQUIRE(store.undo());
+    REQUIRE(store.undo());
+    CHECK_FALSE(store.undo());
+    CHECK(store.doc().midiThru == false);
+    REQUIRE(store.redo());
+    CHECK(snapshot(store).at("midiThru") == false);
+    applyOk(store, {{"cmd", "setMidiThru"}, {"on", true}});
+    CHECK(snapshot(store).at("midiThru") == true);
+}
+
 TEST_CASE("setRelationMode: each of the five modes is live state, untouched by undo and redo") {
     DocumentStore store;
     const std::vector<std::pair<const char*, RelationMode>> modes{{"off", RelationMode::Off},
@@ -2089,6 +2110,9 @@ TEST_CASE("rejection: a fresh store is untouched and gains no history") {
     checkRejected(store, {{"cmd", "setProgressionLoop"}, {"on", "yes"}});
     checkRejected(store, {{"cmd", "setProgressionLoop"}});
     checkRejected(store, {{"cmd", "setFollowHost"}, {"on", 1}});
+    checkRejected(store, {{"cmd", "setMidiThru"}, {"on", 1}});
+    checkRejected(store, {{"cmd", "setMidiThru"}, {"on", "yes"}});
+    checkRejected(store, {{"cmd", "setMidiThru"}});
 
     CHECK(store.doc() == Document{});
     CHECK_FALSE(store.undo());
@@ -2193,6 +2217,25 @@ TEST_CASE("state: transposeWithKey and keyHintSeen round-trip and a legacy state
     REQUIRE_MESSAGE(loadStateJson(loaded, j.dump(), error), error);
     CHECK(loaded.doc().transposeWithKey == false);
     CHECK(loaded.doc().keyHintSeen == false);
+}
+
+TEST_CASE("state: midiThru round-trips as false and a state without it loads true") {
+    DocumentStore original = richStore();
+    CHECK(json::parse(stateJson(original)).at("midiThru") == true);
+    original.setMidiThru(false);
+    json j = json::parse(stateJson(original));
+    CHECK(j.at("midiThru") == false);
+
+    DocumentStore loaded;
+    std::string error;
+    REQUIRE_MESSAGE(loadStateJson(loaded, j.dump(), error), error);
+    CHECK(loaded.doc() == original.doc());
+    CHECK(loaded.doc().midiThru == false);
+
+    j.erase("midiThru");
+    loaded.setMidiThru(false);
+    REQUIRE_MESSAGE(loadStateJson(loaded, j.dump(), error), error);
+    CHECK(loaded.doc().midiThru == true);
 }
 
 TEST_CASE("state: loadStateJson(stateJson(doc)) round-trips the document, the ids, the id counter and the editor size") {
@@ -2426,6 +2469,8 @@ TEST_CASE("state: a bad state is rejected whole and the store keeps its document
     rejects("browsed key missing", [](json& s) { s.erase("browsedKey"); });
     rejects("key not an object", [](json& s) { s["projectKey"] = "C"; });
     rejects("toggle not a bool", [](json& s) { s["followHost"] = 1; });
+    rejects("midiThru not a bool", [](json& s) { s["midiThru"] = 1; });
+    rejects("midiThru a string", [](json& s) { s["midiThru"] = "yes"; });
     rejects("toggle missing", [](json& s) { s.erase("progressionLoop"); });
     rejects("relation mode unknown", [](json& s) { s["relationMode"] = "Blend"; });
     rejects("relation mode not a string", [](json& s) { s["relationMode"] = 4; });
@@ -2694,7 +2739,7 @@ DocumentStore worstCaseStore() {
 /// `stateJson` of `worstCaseStore()` at the default editor size, measured; pinned so that a change to the
 /// state's shape shows up here against `kMaxJsonBytes` (1 MiB) before it shows up as a state that will
 /// not load.
-constexpr std::size_t kWorstCaseStateBytes = 76950;
+constexpr std::size_t kWorstCaseStateBytes = 76966;
 
 }  // namespace
 
@@ -3337,4 +3382,294 @@ TEST_CASE("snapshot: a cell's relationText spells its common tones as the cell's
         }
     }
     CHECK(found);
+}
+
+TEST_CASE("appendChord with an inversion: the new selected event carries it, manual, one bar long") {
+    DocumentStore store;
+    applyOk(store, {{"cmd", "setMeter"}, {"num", 7}, {"den", 8}});
+    applyOk(store, {{"cmd", "appendChord"}, {"root", 9}, {"type", "m7"}, {"inversion", 2}});
+    REQUIRE(store.doc().events.size() == 1);
+    const ChordEvent& e = store.doc().events[0];
+    CHECK(e.inversion == 2);
+    CHECK(e.manualVoicing);
+    CHECK(e.lengthBeats == 3.5);  // one bar of 7/8
+    CHECK(store.selectedEventId() == e.id);
+    const json ev = eventWithId(snapshot(store), e.id);
+    CHECK(ev.at("inversion") == 2);
+    CHECK(ev.at("manualVoicing") == true);
+    CHECK(ev.at("voicing") == json(voicing(chord(9, "m7"), 2, 0)));
+
+    DocumentStore plain;
+    applyOk(plain, {{"cmd", "appendChord"}, {"root", 9}, {"type", "m7"}});
+    CHECK(plain.doc().events[0].inversion == 0);
+    CHECK_FALSE(plain.doc().events[0].manualVoicing);
+    DocumentStore zero;
+    applyOk(zero, {{"cmd", "appendChord"}, {"root", 9}, {"type", "m7"}, {"inversion", 0}});
+    CHECK(zero.doc().events[0].inversion == 0);
+    CHECK(zero.doc().events[0].manualVoicing);
+}
+
+TEST_CASE("appendChord with an inversion: it compiles as given under auto voice-leading") {
+    DocumentStore store;
+    store.setAutoVoiceLead(true);
+    applyOk(store, {{"cmd", "appendChord"}, {"root", 0}, {"type", "maj"}});
+    applyOk(store, {{"cmd", "appendChord"}, {"root", 9}, {"type", "m7"}, {"inversion", 1}});
+    const std::vector<std::vector<int>> chosen = voicings(store.doc());
+    REQUIRE(chosen.size() == 2);
+    CHECK(chosen[1] == voicing(chord(9, "m7"), 1, 0));
+    // The register tells manual from voice-led: the voice-led Am7 after C is [60,64,67,69], also a C on the
+    // bottom, while the manual first inversion is [72,76,79,81].
+    CHECK(chosen[1].front() == 72);
+    CHECK(eventWithId(snapshot(store), store.doc().events[1].id).at("voicing") == json(chosen[1]));
+}
+
+TEST_CASE("appendChord with an inversion: out of range or not an integer is rejected naming the field") {
+    DocumentStore store = cG7Am();
+    for (const json& bad : {json(4), json(-1), json("1"), json(1.5), json(nullptr), json(true)}) {
+        const Document before = store.doc();
+        std::string error;
+        CAPTURE(bad.dump());
+        CHECK_FALSE(apply(store, {{"cmd", "appendChord"}, {"root", 9}, {"type", "m7"}, {"inversion", bad}}, error));
+        CHECK(error.find("inversion") != std::string::npos);
+        CHECK(store.doc() == before);
+    }
+    checkRejected(store, {{"cmd", "appendChord"}, {"root", 0}, {"type", "maj"}, {"inversion", 3}});  // a triad has 3
+    applyOk(store, {{"cmd", "appendChord"}, {"root", 9}, {"type", "m7"}, {"inversion", 3}});  // the last of four
+}
+
+TEST_CASE("appendChord with an inversion: one undo step, redo and the state round trip keep it") {
+    DocumentStore store = cG7Am();
+    const std::size_t before = store.doc().events.size();
+    applyOk(store, {{"cmd", "appendChord"}, {"root", 9}, {"type", "m7"}, {"inversion", 2}});
+    REQUIRE(store.doc().events.size() == before + 1);
+    const int id = store.doc().events.back().id;
+    const Document appended = store.doc();
+
+    DocumentStore loaded;
+    std::string error;
+    REQUIRE_MESSAGE(loadStateJson(loaded, stateJson(store), error), error);
+    CHECK(loaded.doc() == store.doc());
+    CHECK(loaded.doc().events.back().inversion == 2);
+    CHECK(loaded.doc().events.back().manualVoicing);
+
+    applyOk(store, {{"cmd", "undo"}});
+    CHECK(store.doc().events.size() == before);
+    CHECK(store.findIndex(id) < 0);
+    applyOk(store, {{"cmd", "redo"}});
+    CHECK(store.doc() == appended);
+    CHECK(store.doc().events.back().inversion == 2);
+    CHECK(store.doc().events.back().manualVoicing);
+}
+
+// --- heardJson -----------------------------------------------------------------------------
+
+namespace {
+
+// 120 bpm at 48 kHz: one beat is 24000 samples.
+constexpr double kHeardBpm = 120.0;
+constexpr double kHeardRate = 48000.0;
+
+std::uint64_t heardAt(double beat) {
+    return static_cast<std::uint64_t>(beat * 24000.0);
+}
+
+void heardOn(Listener& l, int pitch, double beat) {
+    l.feed({HeardEvent::NoteOn, static_cast<std::uint8_t>(pitch), 100, heardAt(beat)}, kHeardBpm, kHeardRate);
+}
+
+void heardOff(Listener& l, int pitch, double beat) {
+    l.feed({HeardEvent::NoteOff, static_cast<std::uint8_t>(pitch), 0, heardAt(beat)}, kHeardBpm, kHeardRate);
+}
+
+/// Holds `pitches` from beat 0.
+Listener holding(const std::vector<int>& pitches) {
+    Listener l;
+    for (int p : pitches) {
+        heardOn(l, p, 0);
+    }
+    return l;
+}
+
+/// The C major scale played note by note, each released as the next starts: the listener settles on C Ionian.
+Listener heardCMajorScale() {
+    Listener l;
+    const std::vector<int> scale{60, 62, 64, 65, 67, 69, 71, 72};
+    for (std::size_t i = 0; i < scale.size(); ++i) {
+        const double beat = static_cast<double>(i);
+        heardOn(l, scale[i], beat);
+        heardOff(l, scale[i], beat + 1);
+        l.advance(heardAt(beat + 1), kHeardBpm, kHeardRate);
+    }
+    return l;
+}
+
+std::vector<std::string> heldNames(const json& j) {
+    return j.at("heldNames").get<std::vector<std::string>>();
+}
+
+}  // namespace
+
+TEST_CASE("heardJson: a fresh listener is inactive with nothing heard") {
+    const Listener l;
+    const json j = json::parse(heardJson(l, key('C', 0, Mode::Ionian)));
+    CHECK(j["schema"] == 1);
+    CHECK(j["active"] == false);
+    CHECK(j["held"] == json::array());
+    CHECK(j["heldNames"] == json::array());
+    CHECK(j["chord"].is_null());
+    CHECK(j["chordHeld"] == false);
+    CHECK(j["key"].is_null());
+    CHECK(j["onsets"] == 0);
+}
+
+TEST_CASE("heardJson: the top-level members are exactly the wire's") {
+    const Listener l = holding({57, 60, 64, 67});
+    const json j = json::parse(heardJson(l, key('C', 0, Mode::Ionian)));
+    std::vector<std::string> keys;
+    for (auto it = j.begin(); it != j.end(); ++it) {
+        keys.push_back(it.key());
+    }
+    std::sort(keys.begin(), keys.end());
+    CHECK(keys == std::vector<std::string>{"active", "chord", "chordHeld", "held", "heldNames", "key", "onsets",
+                                           "schema"});
+    std::vector<std::string> chordKeys;
+    for (auto it = j["chord"].begin(); it != j["chord"].end(); ++it) {
+        chordKeys.push_back(it.key());
+    }
+    std::sort(chordKeys.begin(), chordKeys.end());
+    CHECK(chordKeys == std::vector<std::string>{"bass", "inversion", "roman", "root", "symbol", "type"});
+}
+
+TEST_CASE("heardJson: Am7 held in C major") {
+    const Listener l = holding({57, 60, 64, 67});
+    const json j = json::parse(heardJson(l, key('C', 0, Mode::Ionian)));
+    CHECK(j["active"] == true);
+    CHECK(j["held"] == json::array({57, 60, 64, 67}));
+    CHECK(heldNames(j) == std::vector<std::string>{"A", "C", "E", "G"});
+    CHECK(j["chord"] == json{{"root", 9}, {"type", "m7"}, {"symbol", "Am7"}, {"roman", "vi7"}, {"inversion", 0},
+                             {"bass", 57}});
+    CHECK(j["chordHeld"] == true);
+    CHECK(j["key"].is_null());
+    CHECK(j["onsets"] == 4);
+}
+
+TEST_CASE("heardJson: E7 spells its third's neighbour G# in C major") {
+    const Listener l = holding({64, 68, 71, 74});
+    const json j = json::parse(heardJson(l, key('C', 0, Mode::Ionian)));
+    CHECK(heldNames(j) == std::vector<std::string>{"E", "G#", "B", "D"});
+    CHECK(j["chord"]["symbol"] == "E7");
+    CHECK(j["chordHeld"] == true);
+}
+
+TEST_CASE("heardJson: a lone held note is spelled by the project key") {
+    const Listener l = holding({68});
+    const json j = json::parse(heardJson(l, key('C', 0, Mode::Ionian)));
+    CHECK(j["active"] == true);
+    CHECK(j["chord"].is_null());
+    CHECK(heldNames(j) == std::vector<std::string>{"Ab"});
+}
+
+TEST_CASE("heardJson: the heard key names the tonic and mode; the project key only spells") {
+    const Listener l = heardCMajorScale();
+    for (const Key& project : {key('C', 0, Mode::Ionian), key('D', 0, Mode::Ionian)}) {
+        const json j = json::parse(heardJson(l, project));
+        REQUIRE(j["key"].is_object());
+        CHECK(j["key"]["tonic"] == json{{"letter", "C"}, {"alter", 0}});
+        CHECK(j["key"]["mode"] == "Ionian");
+        CHECK(j["key"]["name"] == "C Ionian");
+        CHECK(j["key"]["percent"].is_number_integer());
+        // The model's r_s for the 8-note scale is 0.901352, so lround(100 * r) = 90.
+        CHECK(j["key"]["percent"].get<int>() == 90);
+        CHECK(j["key"]["percent"].get<int>() >= 0);
+        CHECK(j["key"]["percent"].get<int>() <= 100);
+        std::vector<std::string> keyMembers;
+        for (auto it = j["key"].begin(); it != j["key"].end(); ++it) {
+            keyMembers.push_back(it.key());
+        }
+        std::sort(keyMembers.begin(), keyMembers.end());
+        CHECK(keyMembers == std::vector<std::string>{"mode", "name", "percent", "tonic"});
+        std::vector<std::string> tonicMembers;
+        for (auto it = j["key"]["tonic"].begin(); it != j["key"]["tonic"].end(); ++it) {
+            tonicMembers.push_back(it.key());
+        }
+        std::sort(tonicMembers.begin(), tonicMembers.end());
+        CHECK(tonicMembers == std::vector<std::string>{"alter", "letter"});
+        CHECK(j["onsets"] == 8);
+    }
+}
+
+TEST_CASE("heardJson: a shown key with a negative correlation reads 0 percent") {
+    // C major acquired, then 40 beats later a lone F# for one beat: the window holds only F#, C Ionian's r is
+    // defined and negative (-0.2297) and fails retain once, so it is still shown for this tick.
+    Listener l = heardCMajorScale();
+    heardOn(l, 66, 48);
+    l.advance(heardAt(49), kHeardBpm, kHeardRate);
+    REQUIRE(l.key().has_value());
+    REQUIRE(l.key()->r < 0.0);
+    CHECK(l.key()->r == doctest::Approx(-0.229749).epsilon(1e-5));
+    const json j = json::parse(heardJson(l, key('C', 0, Mode::Ionian)));
+    REQUIRE(j["key"].is_object());
+    CHECK(j["key"]["name"] == "C Ionian");
+    CHECK(j["key"]["percent"].get<int>() == 0);  // clamped: lround(100 * r) would be -23
+}
+
+TEST_CASE("heardJson: after the hands lift the chord stays, unheld, and loose notes use the key's spelling") {
+    Listener l = holding({57, 60, 64, 67});
+    heardOff(l, 57, 1);
+    heardOff(l, 60, 1);
+    heardOff(l, 64, 1);
+    json j = json::parse(heardJson(l, key('C', 0, Mode::Ionian)));
+    CHECK(j["chord"]["symbol"] == "Am7");
+    CHECK(j["chordHeld"] == false);
+    CHECK(j["held"] == json::array({67}));
+    CHECK(heldNames(j) == std::vector<std::string>{"G"});
+
+    // E7 with its root lifted is no longer held as a chord, so its G# reads by spell(): Ab in C major.
+    Listener e = holding({64, 68, 71, 74});
+    heardOff(e, 64, 1);
+    j = json::parse(heardJson(e, key('C', 0, Mode::Ionian)));
+    CHECK(j["chordHeld"] == false);
+    CHECK(heldNames(j) == std::vector<std::string>{"Ab", "B", "D"});
+}
+
+TEST_CASE("heardJson: a held non-chord-tone reads by spell() while chord tones keep the chord's spelling") {
+    // E7 plus C#/Db (61): the chord stays latched and held, 61 is not one of its tones.
+    const Listener l = holding({64, 68, 71, 74, 61});
+    const json c = json::parse(heardJson(l, key('C', 0, Mode::Ionian)));
+    CHECK(c["chordHeld"] == true);
+    CHECK(c["chord"]["symbol"] == "E7");
+    CHECK(heldNames(c) == std::vector<std::string>{"Db", "E", "G#", "B", "D"});
+    const json d = json::parse(heardJson(l, key('D', 0, Mode::Ionian)));
+    CHECK(d["chordHeld"] == true);
+    CHECK(d["chord"]["symbol"] == "E7");
+    CHECK(heldNames(d) == std::vector<std::string>{"C#", "E", "G#", "B", "D"});
+}
+
+TEST_CASE("heardJson: the project key changes the spellings, never the heard key") {
+    Listener l = heardCMajorScale();
+    heardOn(l, 61, 9);
+    heardOn(l, 66, 9);
+    struct Row {
+        Key project;
+        std::vector<std::string> names;
+        const char* symbol;
+        const char* roman;
+    };
+    const std::vector<Row> rows{{key('C', 0, Mode::Ionian), {"C#", "F#"}, "F#5", "#IV5"},
+                                {key('D', 0, Mode::Ionian), {"C#", "F#"}, "F#5", "III5"},
+                                {key('F', 0, Mode::Ionian), {"Db", "Gb"}, "Gb5", "bII5"}};
+    for (const Row& row : rows) {
+        const json j = json::parse(heardJson(l, row.project));
+        CHECK(heldNames(j) == row.names);
+        CHECK(j["chord"]["symbol"] == row.symbol);
+        CHECK(j["chord"]["roman"] == row.roman);
+        CHECK(j["key"]["name"] == "C Ionian");
+    }
+}
+
+TEST_CASE("heardJson: held is ascending whatever the input order") {
+    const Listener l = holding({67, 57, 64, 60});
+    const json j = json::parse(heardJson(l, key('C', 0, Mode::Ionian)));
+    CHECK(j["held"] == json::array({57, 60, 64, 67}));
+    CHECK(heldNames(j) == std::vector<std::string>{"A", "C", "E", "G"});
 }

@@ -38,7 +38,41 @@ TEST_CASE("publication: the first fill publishes even an empty document, at gene
     CHECK(slot->endBeat == 0.0);
     CHECK(slot->loop == true);
     CHECK(slot->followHost == true);
+    CHECK(slot->midiThru == true);
     CHECK_FALSE(fillSlot(store.doc(), *slot, last));  // nothing changed: nothing to publish
+    CHECK(last.generation == 1);
+}
+
+TEST_CASE("publication: a midiThru-only change publishes a fresh slot under the same generation") {
+    DocumentStore store;
+    store.appendChord(chord(0, "maj"), 4.0, 100);
+    Publication last;
+    auto slot = newSlot();
+    REQUIRE(fillSlot(store.doc(), *slot, last));
+    REQUIRE(last.generation == 1);
+    REQUIRE(slot->midiThru == true);
+    const std::vector<NoteEvent> cMajor = eventsOf(*slot);
+
+    store.setMidiThru(false);
+    REQUIRE(fillSlot(store.doc(), *slot, last));
+    CHECK(last.generation == 1);
+    CHECK(slot->midiThru == false);
+    CHECK(last.midiThru == false);
+    CHECK(eventsOf(*slot) == cMajor);
+    CHECK(slot->endBeat == 4.0);
+    CHECK(slot->followHost == true);
+    CHECK_FALSE(fillSlot(store.doc(), *slot, last));
+
+    store.setMidiThru(true);
+    REQUIRE(fillSlot(store.doc(), *slot, last));
+    CHECK(last.generation == 1);
+    CHECK(slot->midiThru == true);
+
+    // A browsed-key-only change still publishes nothing, whatever midiThru is.
+    store.setMidiThru(false);
+    REQUIRE(fillSlot(store.doc(), *slot, last));
+    store.setBrowsedKey(Key{{'G', 0}, Mode::Ionian});
+    CHECK_FALSE(fillSlot(store.doc(), *slot, last));
     CHECK(last.generation == 1);
 }
 

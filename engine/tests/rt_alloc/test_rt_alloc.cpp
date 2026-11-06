@@ -11,6 +11,7 @@
 #include "chordlab/compiler.h"
 #include "chordlab/document.h"
 #include "chordlab/limits.h"
+#include "chordlab/midi_in.h"
 #include "chordlab/note_event.h"
 #include "chordlab/publication.h"
 #include "chordlab/scheduler.h"
@@ -159,7 +160,7 @@ TEST_CASE("rt alloc: the probe sees an allocation") {
     CHECK(probe.count() >= 1);
 }
 
-TEST_CASE("rt alloc: the scheduler allocates nothing across 10k random blocks with previews and resets") {
+TEST_CASE("rt alloc: the scheduler allocates nothing across 10k random blocks with previews, thru notes and resets") {
     // Everything that allocates is prepared first: the progressions, the random engine, the output.
     const Compiled a = compiled({chord(0, "maj"), chord(9, "min"), chord(5, "maj"), chord(7, "7")}, 4.0);
     const Compiled b = compiled({chord(2, "m7"), chord(7, "7"), chord(0, "maj9")}, 1.5);
@@ -167,7 +168,9 @@ TEST_CASE("rt alloc: the scheduler allocates nothing across 10k random blocks wi
     std::uniform_int_distribution<int> frames(0, 1024);
     std::uniform_int_distribution<int> dice(0, 99);
     std::uniform_int_distribution<int> pitch(36, 96);
-    std::array<MidiOut, 256> out{};
+    std::uniform_int_distribution<int> fine(0, 999);
+    std::uniform_int_distribution<int> offset(0, 1023);
+    std::array<MidiOut, 512> out{};  // ChordLab.h: kMidiOutCapacity
 
     AllocationProbe probe;
     Scheduler scheduler;  // construction included: the contract is "after construction", this is stricter
@@ -178,9 +181,14 @@ TEST_CASE("rt alloc: the scheduler allocates nothing across 10k random blocks wi
     double ppq = 0.0;
     double bpm = 120.0;
     bool playing = true;
+    bool thru = true;
     int previewId = 0;
     int incompleteBlocks = 0;
     int refusedPreviews = 0;
+    int thruPushes = 0;
+    int refusedThru = 0;
+    int thruFlips = 0;
+    int forcedOverflows = 0;
     for (int i = 0; i < 10000; ++i) {
         const int nFrames = frames(rng);
         const int roll = dice(rng);
@@ -216,9 +224,28 @@ TEST_CASE("rt alloc: the scheduler allocates nothing across 10k random blocks wi
             scheduler.adopt(snapshotOf(*current, generation));  // same generation: a no-op by contract
         } else if (roll < 22) {
             scheduler.reset(roll == 20 ? kSr : 44100.0);  // repeated resets, with and without a rate change
+        } else if (roll < 25) {
+            // An incoming note somewhere in the block, and its release anywhere in 0..1023: often beyond a
+            // smaller block, where it is clamped into it.
+            const int p = pitch(rng);
+            const int span = std::max(nFrames, 1);
+            refusedThru += scheduler.pushThru(ThruEvent{true, static_cast<std::uint8_t>(p), 90, offset(rng) % span}) ? 0 : 1;
+            refusedThru += scheduler.pushThru(ThruEvent{false, static_cast<std::uint8_t>(p), 0, offset(rng)}) ? 0 : 1;
+            thruPushes += 2;
+        } else if (roll == 25) {
+            thru = !thru;  // the on -> off edge releases every thru note; disabled blocks discard the ring
+            ++thruFlips;
+        }
+        if (fine(rng) == 0) {
+            // A burst beyond the thru ring: the next block releases every thru note and discards the ring.
+            for (int k = 0; k < 300; ++k) {
+                refusedThru += scheduler.pushThru(ThruEvent{k % 2 == 0, static_cast<std::uint8_t>(pitch(rng)), 90, 0}) ? 0 : 1;
+            }
+            thruPushes += 300;
+            ++forcedOverflows;
         }
         std::size_t written = 0;
-        const BlockInfo info{ppq, nFrames, kSr, bpm, playing};
+        const BlockInfo info{ppq, nFrames, kSr, bpm, playing, thru};
         if (!scheduler.process(info, out.data(), out.size(), written)) {
             ++incompleteBlocks;
         }
@@ -229,6 +256,10 @@ TEST_CASE("rt alloc: the scheduler allocates nothing across 10k random blocks wi
     CHECK(probe.count() == 0);
     CHECK(previewId > 0);  // the random walk did exercise previews
     CHECK(generation > 1);  // ...and adopts
+    CHECK(thruPushes > 0);   // ...and thru notes
+    CHECK(thruFlips > 0);    // ...and the thru switch
+    CHECK(forcedOverflows > 0);
+    CHECK(refusedThru > 0);  // ...and the overflow path
     (void) incompleteBlocks;  // seeks and stops may make blocks incomplete; that is not what is measured
     (void) refusedPreviews;
 }
@@ -321,7 +352,7 @@ TEST_CASE("rt alloc: handing over full 4096-event performed snapshots allocates 
                                  buffer->currentGeneration()});
         for (int block = 0; block < 2000; ++block) {
             std::size_t written = 0;
-            const BlockInfo info{ppq, 512, kSr, 120.0, true};
+            const BlockInfo info{ppq, 512, kSr, 120.0, true, true};
             incomplete += scheduler.process(info, out.data(), out.size(), written) ? 0 : 1;
             emitted += written;
             ppq += 512.0 / 24000.0;
@@ -348,4 +379,88 @@ TEST_CASE("rt alloc: handing over full 4096-event performed snapshots allocates 
     CHECK(missing == 0);
     CHECK(emitted > 1000);
     CHECK(incomplete == 0);  // 512-frame blocks at 120 bpm: the density never outruns a block
+}
+
+TEST_CASE("rt alloc: the heard ring and the MIDI adapter allocate nothing across 10k pushes, pops and messages") {
+    HeardRing ring;  // constructed before the measured scope
+    std::mt19937 rng(20261105);
+    std::uniform_int_distribution<int> byte(0, 255);
+    std::uniform_int_distribution<int> dice(0, 99);
+    std::uint64_t pushed = 0;
+    std::uint64_t popped = 0;
+    std::uint64_t refused = 0;
+    std::uint64_t overflows = 0;
+    std::uint64_t heard = 0;
+    std::uint64_t thru = 0;
+    std::uint64_t order = 0;  // pops not strictly after the previous one (out of order or duplicate), must stay 0
+    constexpr std::uint64_t kNone = ~std::uint64_t{0};
+    std::uint64_t lastPop = kNone;
+
+    AllocationProbe probe;
+    for (int i = 0; i < 10000; ++i) {
+        // Every 1000 iterations the first 400 only push, so the ring fills (256) and refuses; after that
+        // single pops and the odd drain keep it moving.
+        const HeardEvent event{HeardEvent::NoteOn, static_cast<std::uint8_t>(i & 127), 100,
+                               static_cast<std::uint64_t>(i)};
+        if (ring.push(event)) {
+            ++pushed;
+        } else {
+            ++refused;
+        }
+        const int roll = i % 1000 < 400 ? 99 : dice(rng);
+        if (roll < 30) {
+            HeardEvent out{};
+            if (ring.pop(out)) {
+                ++popped;
+                if (lastPop != kNone && out.sampleTime <= lastPop) {
+                    ++order;
+                }
+                lastPop = out.sampleTime;
+            }
+        } else if (roll < 33) {
+            HeardEvent out{};
+            while (ring.pop(out)) {
+                ++popped;
+                if (lastPop != kNone && out.sampleTime <= lastPop) {
+                    ++order;
+                }
+                lastPop = out.sampleTime;
+            }
+        }
+        if (ring.takeOverflow()) {
+            ++overflows;
+        }
+        const auto status = static_cast<std::uint8_t>(byte(rng));
+        const auto d1 = static_cast<std::uint8_t>(byte(rng));
+        const auto d2 = static_cast<std::uint8_t>(byte(rng));
+        if (heardEventOf(status, d1, d2, static_cast<std::uint64_t>(i))) {
+            ++heard;
+        }
+        if (thruEventOf(status, d1, d2, i & 1023)) {
+            ++thru;
+        }
+    }
+    const std::size_t allocations = probe.count();
+
+    // Drain what is left (outside the measured scope): everything accepted must come out exactly once.
+    {
+        HeardEvent out{};
+        while (ring.pop(out)) {
+            ++popped;
+            if (lastPop != kNone && out.sampleTime <= lastPop) {
+                ++order;
+            }
+            lastPop = out.sampleTime;
+        }
+    }
+
+    CHECK(allocations == 0);
+    CHECK(popped == pushed);  // "pushed" counts accepted pushes (attempts minus refused)
+    CHECK(refused > 0);  // the ring did fill up
+    CHECK(overflows > 0);
+    CHECK(pushed + refused == 10000);
+    CHECK(order == 0);
+    CHECK(popped <= pushed);
+    CHECK(heard > 0);
+    CHECK(thru > 0);
 }

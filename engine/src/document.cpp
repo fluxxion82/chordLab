@@ -210,7 +210,7 @@ std::string sectionNameOr(std::string name, const std::vector<Section>& sections
 }
 
 /// Copies the live (non-undoable) fields of `current` into `target`, so that restoring a snapshot keeps
-/// the transport toggles, the relation mode and the key-transpose flags as they are now, and the browsed key
+/// the transport toggles, the relation mode, the key-transpose flags and MIDI Thru as they are now, and the browsed key
 /// too, with one exception: a browsed key that is the project key ("home") follows the project key `target`
 /// restores, as it follows `setProjectKey`, so that undoing or redoing a key change leaves the palette on the
 /// key the progression is in, not on the key it just left. A browse elsewhere is kept as it is.
@@ -223,6 +223,7 @@ void keepLiveState(Document& target, const Document& current) {
     target.relationMode = current.relationMode;
     target.transposeWithKey = current.transposeWithKey;
     target.keyHintSeen = current.keyHintSeen;
+    target.midiThru = current.midiThru;
 }
 
 }  // namespace
@@ -315,7 +316,7 @@ void DocumentStore::setSelectedEvent(int id) {
     }
 }
 
-int DocumentStore::appendChord(Chord chord, double lengthBeats, int velocity) {
+int DocumentStore::appendChord(Chord chord, double lengthBeats, int velocity, std::optional<int> inversion) {
     assertValidChord(chord);
     if (!std::isfinite(lengthBeats) || nextId_ == INT_MAX ||
         doc_.events.size() >= static_cast<std::size_t>(kMaxChords)) {
@@ -323,7 +324,12 @@ int DocumentStore::appendChord(Chord chord, double lengthBeats, int velocity) {
     }
     const int id = nextId_;
     Document next = doc_;
-    next.events.push_back(ChordEvent{id, chord, clampLength(lengthBeats), clampVelocity(velocity)});
+    ChordEvent event{id, chord, clampLength(lengthBeats), clampVelocity(velocity)};
+    if (inversion.has_value()) {
+        event.inversion = clampInversion(chord, *inversion);
+        event.manualVoicing = true;
+    }
+    next.events.push_back(event);
     [[maybe_unused]] const bool changed = commit(std::move(next));
     assert(changed);  // a fresh id always makes the sequence differ
     ++nextId_;        // only now: a throw above leaves the counter, like the rest of the store, untouched
@@ -592,6 +598,10 @@ void DocumentStore::setTransposeWithKey(bool on) {
 
 void DocumentStore::setKeyHintSeen(bool seen) {
     doc_.keyHintSeen = seen;  // live state: no history
+}
+
+void DocumentStore::setMidiThru(bool on) {
+    doc_.midiThru = on;  // live state: no history
 }
 
 int DocumentStore::addSection(int firstEventIndex, std::string name) {

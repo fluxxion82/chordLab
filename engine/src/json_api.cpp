@@ -7,6 +7,8 @@
 #include "chordlab/feel.h"
 #include "chordlab/function.h"
 #include "chordlab/harmony.h"
+#include "chordlab/identify.h"
+#include "chordlab/listener.h"
 #include "chordlab/meter.h"
 #include "chordlab/palette.h"
 #include "chordlab/pitch.h"
@@ -761,6 +763,7 @@ struct Command {
         SetAutoVoiceLead,
         SetTransposeWithKey,
         SetKeyHintSeen,
+        SetMidiThru,
         SetFeel,
         SetMeter,
         TransposeFromKey,
@@ -786,11 +789,13 @@ struct Command {
     int velocity = 100;        // AppendChord (optional, store default), SetVelocity
     int id = 0;                // MoveChord, SetLength, SetVelocity, RemoveChord, the voicing, section and selection commands
     int index = 0;             // MoveChord, AddSection, MoveSectionStart
-    bool on = false;           // SetProgressionLoop, SetFollowHost, SetAutoVoiceLead, SetTransposeWithKey, SetKeyHintSeen
+    // SetProgressionLoop, SetFollowHost, SetAutoVoiceLead, SetTransposeWithKey, SetKeyHintSeen, SetMidiThru
+    bool on = false;
     Feel feel{};               // SetFeel
     Meter meter{};             // SetMeter
     int semitones = 0;         // TransposeFromKey (the pitch class moved from, 0..11), TransposeProgression (-11..11)
-    int inversion = 0;         // SetInversion
+    int inversion = 0;         // SetInversion, AppendChord (when `hasInversion`)
+    bool hasInversion = false; // AppendChord: `inversion` was given; the chord is then manual
     int octave = 0;            // SetOctave
     int colourIndex = 0;       // SetSectionColour
     RelationMode relationMode = RelationMode::Blend;  // SetRelationMode
@@ -851,6 +856,12 @@ bool parseAppendChord(Fields& fields, Command& out) {
         return false;
     }
     out.chord = Chord{root, type};
+    if (fields.has("inversion")) {
+        if (!fields.getIntIn("inversion", 0, inversionCount(out.chord) - 1, out.inversion)) {
+            return false;
+        }
+        out.hasInversion = true;
+    }
     return true;
 }
 
@@ -874,7 +885,8 @@ bool parseRemoveChord(Fields& fields, Command& out) {
     return fields.getInt("id", out.id);
 }
 
-/// `setProgressionLoop` / `setFollowHost` / `setAutoVoiceLead` / `setTransposeWithKey` / `setKeyHintSeen`.
+/// `setProgressionLoop` / `setFollowHost` / `setAutoVoiceLead` / `setTransposeWithKey` / `setKeyHintSeen` /
+/// `setMidiThru`.
 bool parseToggle(Fields& fields, Command::Kind kind, Command& out) {
     out.kind = kind;
     return fields.getBool("on", out.on);
@@ -1030,6 +1042,9 @@ bool parseCommand(std::string_view text, Command& out, std::string& name, std::s
     if (cmd == "setFollowHost") {
         return parseToggle(fields, Command::Kind::SetFollowHost, out);
     }
+    if (cmd == "setMidiThru") {
+        return parseToggle(fields, Command::Kind::SetMidiThru, out);
+    }
     if (cmd == "setInversion") {
         return parseSetInversion(fields, out);
     }
@@ -1174,7 +1189,9 @@ Refusal applyCommand(DocumentStore& store, const Command& command, std::string& 
             return store.appendChord(command.chord,
                                      command.hasLength ? command.lengthBeats
                                                        : barTicks(doc.meter) / static_cast<double>(kFeelTicksPerBeat),
-                                     command.velocity) != kNoEventId
+                                     command.velocity,
+                                     command.hasInversion ? std::optional<int>(command.inversion) : std::nullopt) !=
+                           kNoEventId
                        ? Refusal::None
                        : Refusal::IdsExhausted;
         case Command::Kind::MoveChord:
@@ -1194,6 +1211,9 @@ Refusal applyCommand(DocumentStore& store, const Command& command, std::string& 
             return Refusal::None;
         case Command::Kind::SetFollowHost:
             store.setFollowHost(command.on);
+            return Refusal::None;
+        case Command::Kind::SetMidiThru:
+            store.setMidiThru(command.on);
             return Refusal::None;
         case Command::Kind::SetInversion:
             store.setInversion(command.id, command.inversion);
@@ -1323,6 +1343,10 @@ bool parseState(std::string_view text, Document& doc, int& nextId, int& nextSect
         return false;
     }
     if (fields.has("keyHintSeen") && !fields.getBool("keyHintSeen", doc.keyHintSeen)) {
+        return false;
+    }
+    // Optional (states saved before MIDI Thru have none): true.
+    if (fields.has("midiThru") && !fields.getBool("midiThru", doc.midiThru)) {
         return false;
     }
     // Optional (states saved before the feel have neither): block chords in 4/4. Present means valid, or the
@@ -1455,6 +1479,53 @@ std::string keyName(const Key& key) {
     return tonicText(key.tonic) + " " + modeName(key.mode);
 }
 
+std::string heardJson(const Listener& listener, const Key& projectKey) {
+    const std::vector<int> held = listener.held();
+    const std::optional<HeardChord> heard = listener.chord();
+    const bool chordHeld = listener.chordHeld();
+
+    json names = json::array();
+    json pitches = json::array();
+    for (const int pitch : held) {
+        const PitchClass pc = static_cast<PitchClass>(pitch % 12);
+        bool chordTone = false;
+        if (heard && chordHeld) {
+            for (const PitchClass tone : pitchClasses(heard->chord)) {
+                chordTone = chordTone || tone == pc;
+            }
+        }
+        names.push_back((chordTone ? chordToneSpelling(heard->chord, pc, projectKey) : spell(pc, projectKey)).text());
+        pitches.push_back(pitch);
+    }
+
+    json chord;  // null
+    if (heard) {
+        chord = {{"root", heard->chord.root},
+                 {"type", heard->chord.type->id},
+                 {"symbol", chordSymbol(heard->chord, projectKey)},
+                 {"roman", romanNumeral(heard->chord, projectKey)},
+                 {"inversion", heard->inversion},
+                 {"bass", heard->bass}};
+    }
+
+    json key;  // null
+    if (const std::optional<HeardKey> heardKey = listener.key()) {
+        key = keyToJson(heardKey->key);  // {"tonic":{"letter","alter"},"mode"}
+        key["name"] = keyName(heardKey->key);
+        key["percent"] = std::clamp(static_cast<int>(std::lround(100.0 * heardKey->r)), 0, 100);
+    }
+
+    return json{{"schema", kJsonSchema},
+                {"active", listener.active()},
+                {"held", std::move(pitches)},
+                {"heldNames", std::move(names)},
+                {"chord", std::move(chord)},
+                {"chordHeld", chordHeld},
+                {"key", std::move(key)},
+                {"onsets", listener.onsetsInWindow()}}
+        .dump();
+}
+
 static_assert(kNoEventId == -1, "snapshotJson's default selectedEventId must be kNoEventId");
 
 std::string snapshotJson(const Document& doc, const Palette& palette, int selectedEventId) {
@@ -1553,6 +1624,7 @@ std::string snapshotJson(const Document& doc, const Palette& palette, int select
                            {"autoVoiceLead", doc.autoVoiceLead},
                            {"transposeWithKey", doc.transposeWithKey},
                            {"keyHintSeen", doc.keyHintSeen},
+                           {"midiThru", doc.midiThru},
                            {"endBeat", compiled.endBeat},
                            {"selectedEventId", selectedIndex >= 0 ? json(selectedEventId) : json()},
                            {"modes", modesJson()},
@@ -1591,6 +1663,7 @@ std::string stateJson(const DocumentStore& store, int editorWidth, int editorHei
                         {"autoVoiceLead", doc.autoVoiceLead},
                         {"transposeWithKey", doc.transposeWithKey},
                         {"keyHintSeen", doc.keyHintSeen},
+                        {"midiThru", doc.midiThru},
                         {"feel", feelToJson(doc.feel)},
                         {"meter", meterToJson(doc.meter)},
                         {"relationMode", relationModeName(doc.relationMode)},

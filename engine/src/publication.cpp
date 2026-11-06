@@ -12,7 +12,8 @@ bool fillSlot(const Document& doc, SnapshotSlot& slot, Publication& last) {
     const bool contentChanged = first || compiled.events != last.compiled.events ||
                                 compiled.endBeat != last.compiled.endBeat || doc.progressionLoop != last.loop;
     const bool followChanged = first || doc.followHost != last.followHost;
-    if (!contentChanged && !followChanged) {
+    const bool thruChanged = first || doc.midiThru != last.midiThru;
+    if (!contentChanged && !followChanged && !thruChanged) {
         return false;
     }
     const bool fits = compiled.events.size() <= slot.events.size();
@@ -22,9 +23,11 @@ bool fillSlot(const Document& doc, SnapshotSlot& slot, Publication& last) {
     slot.endBeat = fits ? compiled.endBeat : 0.0;
     slot.loop = doc.progressionLoop;
     slot.followHost = doc.followHost;
+    slot.midiThru = doc.midiThru;
     last.compiled = std::move(compiled);
     last.loop = doc.progressionLoop;
     last.followHost = doc.followHost;
+    last.midiThru = doc.midiThru;
     if (contentChanged) {
         ++last.generation;
     }

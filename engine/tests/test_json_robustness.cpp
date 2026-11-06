@@ -350,6 +350,7 @@ std::vector<std::string> commandCorpus() {
         {{"cmd", "setAutoVoiceLead"}, {"on", true}},
         {{"cmd", "setTransposeWithKey"}, {"on", true}},
         {{"cmd", "setKeyHintSeen"}, {"on", true}},
+        {{"cmd", "setMidiThru"}, {"on", false}},
         {{"cmd", "transposeFromKey"}, {"fromTonicPc", 7}},
         {{"cmd", "transposeProgression"}, {"semitones", -3}},
         {{"cmd", "addSection"}, {"index", 3}, {"name", "Bridge"}},
@@ -700,6 +701,32 @@ TEST_CASE("json robustness: worst-case inputs are rejected cleanly") {
     SUBCASE("trailing garbage and truncation") {
         checkRejectedByBoth("{\"schema\":1,\"cmd\":\"undo\"} x", "trailing garbage");
         checkRejectedByBoth("{\"schema\":1,\"cmd\":\"undo\"", "truncated");
+    }
+}
+
+TEST_CASE("json robustness: a mistyped midiThru is rejected by both readers") {
+    for (const char* name : {"state-progression.json", "state-legacy-phase1.json", "state-feel.json"}) {
+        const std::string fixture = readFixture(name);
+        REQUIRE_FALSE(fixture.empty());
+        for (const json& bad : {json(1), json("yes"), json(nullptr), json::array()}) {
+            json state = json::parse(fixture);
+            state["midiThru"] = bad;
+            DocumentStore store = prefilledStore();
+            const Observable before(store);
+            std::string error;
+            CHECK_FALSE(loadStateJson(store, state.dump(), error));
+            CHECK_FALSE(error.empty());
+            CHECK(error.find("midiThru") != std::string::npos);
+            CHECK(Observable(store) == before);
+        }
+    }
+    for (const json& bad : {json(1), json("yes"), json(nullptr)}) {
+        DocumentStore store = prefilledStore();
+        const Observable before(store);
+        std::string error;
+        CHECK_FALSE(applyCommandJson(store, json({{"schema", 1}, {"cmd", "setMidiThru"}, {"on", bad}}).dump(), error));
+        CHECK(error.find("on") != std::string::npos);
+        CHECK(Observable(store) == before);
     }
 }
 

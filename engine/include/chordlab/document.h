@@ -11,6 +11,7 @@
 
 #include <cstddef>
 #include <deque>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -113,13 +114,14 @@ inline bool operator!=(const Section& a, const Section& b) noexcept {
 }
 
 /// The whole editable state of a project: the two keys, the progression, its sections, the voicing flag,
-/// the transport toggles, the palette's relation mode and the key-transpose switch and hint flag. Plain data
+/// the transport toggles, the palette's relation mode, the key-transpose switch and hint flag and the MIDI
+/// Thru switch. Plain data
 /// so that `DocumentStore` can snapshot it for undo; mutate it through the store, not directly.
 ///
 /// Undo scope: `events`, `sections`, `projectKey`, `autoVoiceLead`, `feel` and `meter` are undoable (they are what the user
 /// composes: the flag changes which notes `compile` produces, so toggling it is an edit of the progression,
-/// not a view of it). `browsedKey`, `progressionLoop`, `followHost`, `relationMode`, `transposeWithKey` and
-/// `keyHintSeen` are live session state: changing them never creates history, and undo/redo leave their
+/// not a view of it). `browsedKey`, `progressionLoop`, `followHost`, `relationMode`, `transposeWithKey`,
+/// `keyHintSeen` and `midiThru` are live session state: changing them never creates history, and undo/redo leave their
 /// current values alone while restoring the rest, with one exception: a `browsedKey` equal to `projectKey`
 /// (home) follows the project key wherever it changes, through `setProjectKey`, `undo` and `redo`, so the
 /// palette never stays on a key the project just left.
@@ -136,6 +138,7 @@ struct Document {
     RelationMode relationMode = RelationMode::Blend;  // what sizes the palette cells (relatedness.h, R5)
     bool transposeWithKey = false;  // live, persisted: a tonic change of the project key transposes the sequence
     bool keyHintSeen = false;       // live, persisted: the one-time "chords kept their notes" hint has shown
+    bool midiThru = true;           // live, persisted: the plug-in passes the MIDI it hears to its output
 
     /// Beat at which the event at `index` starts: the sum of the lengths before it. `index` must be in
     /// 0..events.size(); `startBeatOf(events.size())` is `endBeat()`.
@@ -157,7 +160,7 @@ inline bool operator==(const Document& a, const Document& b) noexcept {
            a.feel == b.feel && a.meter == b.meter &&
            a.progressionLoop == b.progressionLoop && a.followHost == b.followHost &&
            a.relationMode == b.relationMode && a.transposeWithKey == b.transposeWithKey &&
-           a.keyHintSeen == b.keyHintSeen;
+           a.keyHintSeen == b.keyHintSeen && a.midiThru == b.midiThru;
 }
 
 inline bool operator!=(const Document& a, const Document& b) noexcept {
@@ -188,8 +191,8 @@ enum class ProgressionRefusal { None, Empty, NonFiniteLength, DocumentFull, Even
 /// undo stack and clears the redo stack. A call that changes nothing (an unknown id, a value equal to the
 /// current one after clamping, a move to the chord's current position, a rejected argument) pushes nothing
 /// and leaves the redo stack intact.
-/// `browsedKey`, `progressionLoop`, `followHost`, `relationMode`, `transposeWithKey` and `keyHintSeen` are
-/// live state: their setters never touch the history, and `undo()`/`redo()` keep their current values
+/// `browsedKey`, `progressionLoop`, `followHost`, `relationMode`, `transposeWithKey`, `keyHintSeen` and
+/// `midiThru` are live state: their setters never touch the history, and `undo()`/`redo()` keep their current values
 /// while restoring the undoable state, except that a browsed key equal to the project key (home) follows the
 /// project key they restore, as it follows `setProjectKey`, so that a key change, undone or redone, never
 /// leaves the palette on the old key. So is the selection (`selectedEventId`), which lives in the store
@@ -226,10 +229,14 @@ public:
     /// and `velocity` to [kMinVelocity, kMaxVelocity]. The sections are untouched: the new chord joins the
     /// last section, if any. The new chord becomes the selection (`selectedEventId`, live state: an undo
     /// of the append clears it, like any removal), so the suggestions and relations read from it.
+    /// Without `inversion` the chord is in root position and not manual (auto voice-leading applies). With
+    /// one the event gets it, clamped to 0..`inversionCount(chord) - 1`, and `manualVoicing = true`, so it
+    /// sounds as given (the inversion, at octave 0) even under auto voice-leading, as after `setInversion`.
     /// Returns `kNoEventId` and changes nothing (no event, no history, no id consumed) when `lengthBeats`
     /// is NaN or infinite, when the document already holds `kMaxChords` chords, or when the id counter
     /// has reached INT_MAX. The counter advances only once the append is committed.
-    int appendChord(Chord chord, double lengthBeats = 4.0, int velocity = 100);
+    int appendChord(Chord chord, double lengthBeats = 4.0, int velocity = 100,
+                    std::optional<int> inversion = std::nullopt);
 
     /// Appends a whole progression, `steps` being each chord with its length, as ONE undoable step, and
     /// starts a section named `sectionName` on its first chord (the preset load of P4/P5, json_api.h's
@@ -353,6 +360,11 @@ public:
     /// Live state, never recorded in the history. Persisted by `stateJson`. Whether the one-time hint
     /// offering to move the chords after a tonic change has been shown in this project.
     void setKeyHintSeen(bool seen);
+
+    /// Live state, never recorded in the history. Persisted by `stateJson`. Whether the plug-in passes the
+    /// MIDI it hears through to its output (on by default); the audio thread reads it from the snapshot
+    /// slot (publication.h).
+    void setMidiThru(bool on);
 
     /// The id of the event the UI has selected, or `kNoEventId`. Live state (see the class comment): kept
     /// while that event exists, whatever edits, undos and redos happen around it, and cleared as soon as

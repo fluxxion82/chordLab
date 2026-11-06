@@ -259,6 +259,9 @@ struct Snapshot: Codable, Equatable {
   /// in the engine's order; empty when the key has none. Absent from older plug-in builds, whose UI then
   /// hides the Diatonic / Applied switch. Laid out by `PaletteViewMode.appliedLayout`.
   let applied: [CellJSON]?
+  /// Whether incoming MIDI notes are passed on to the plug-in's output (the transport row's Thru switch);
+  /// absent from older plug-in builds, whose UI then hides the switch.
+  let midiThru: Bool?
 
   /// `relationMode` as a case; nil when absent or unknown.
   var relationModeValue: RelationMode? { relationMode.flatMap(RelationMode.init(rawValue:)) }
@@ -283,8 +286,9 @@ struct ErrorJSON: Codable {
   let error: String
 }
 
-/// `kMsgTagStatus` payload: `{"schema":1,"incompleteBlocks":n}`, audio blocks the scheduler could not
-/// complete (a debug aid; the count only grows).
+/// `kMsgTagStatus` payload: `{"schema":1,"incompleteBlocks":n,"droppedHeard":m}`, audio blocks the
+/// scheduler could not complete and heard-ring overflows (debug aids; the counts only grow). Only
+/// `incompleteBlocks` is decoded here.
 struct StatusJSON: Codable {
   let schema: Int
   let incompleteBlocks: Int
