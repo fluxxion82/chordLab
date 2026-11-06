@@ -637,6 +637,39 @@ TEST_CASE("listener: hysteresis: one acquisition, one replacement, never back") 
     CHECK(changeTicks == std::vector<int>{6, 12 + 7});
 }
 
+TEST_CASE("listener: retain needs no gap, over two consecutive ticks") {
+    // The hysteresis test's material: C Ionian acquired over the major phrase (last tick gap 0.272), the first
+    // six minor notes without ticks, then A3 held from beat 19. At 19.25 and 19.45 A Aeolian leads C Ionian
+    // by less than kMinGap while r_C stays above kMinR: both ticks retain C (two misses would remove it).
+    const std::vector<Step> major{{60, 1}, {64, 1}, {67, 1}, {72, 1}, {65, 1}, {69, 1},
+                                  {72, 1}, {67, 1}, {71, 1}, {74, 1}, {67, 1}, {72, 1}};
+    const std::vector<Step> minorStart{{57, 2}, {60, 1}, {64, 1}, {69, 1}, {64, 1}, {71, 1}};
+    Listener l;
+    double t = play(l, major, 0);
+    REQUIRE(l.key().has_value());
+    REQUIRE(l.key()->key == cIonian());
+    REQUIRE(l.key()->gap >= Listener::kMinGap);
+    t = play(l, minorStart, t, /*tick=*/false);
+    REQUIRE(t == doctest::Approx(19.0));
+    onAt(l, 57, t);
+
+    advanceTo(l, t + 0.25);
+    REQUIRE(l.key().has_value());
+    CHECK(l.key()->key == cIonian());
+    CHECK(l.key()->gap < Listener::kMinGap);
+    CHECK(l.key()->gap == doctest::Approx(0.0293).epsilon(1e-3));
+    CHECK(l.key()->r >= Listener::kMinR);
+    CHECK(l.key()->r == doctest::Approx(0.8503).epsilon(1e-3));
+
+    advanceTo(l, t + 0.45);
+    REQUIRE(l.key().has_value());
+    CHECK(l.key()->key == cIonian());
+    CHECK(l.key()->gap < Listener::kMinGap);
+    CHECK(l.key()->gap == doctest::Approx(0.0451).epsilon(1e-3));
+    CHECK(l.key()->r >= Listener::kMinR);
+    CHECK(l.key()->r == doctest::Approx(0.8414).epsilon(1e-3));
+}
+
 TEST_CASE("listener: removal takes two consecutive failing ticks") {
     Listener l;
     const double end = play(l, kCMajorScale, 0);

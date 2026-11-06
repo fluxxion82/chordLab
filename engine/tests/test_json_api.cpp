@@ -3598,6 +3598,21 @@ TEST_CASE("heardJson: the heard key names the tonic and mode; the project key on
     }
 }
 
+TEST_CASE("heardJson: a shown key with a negative correlation reads 0 percent") {
+    // C major acquired, then 40 beats later a lone F# for one beat: the window holds only F#, C Ionian's r is
+    // defined and negative (-0.2297) and fails retain once, so it is still shown for this tick.
+    Listener l = heardCMajorScale();
+    heardOn(l, 66, 48);
+    l.advance(heardAt(49), kHeardBpm, kHeardRate);
+    REQUIRE(l.key().has_value());
+    REQUIRE(l.key()->r < 0.0);
+    CHECK(l.key()->r == doctest::Approx(-0.229749).epsilon(1e-5));
+    const json j = json::parse(heardJson(l, key('C', 0, Mode::Ionian)));
+    REQUIRE(j["key"].is_object());
+    CHECK(j["key"]["name"] == "C Ionian");
+    CHECK(j["key"]["percent"].get<int>() == 0);  // clamped: lround(100 * r) would be -23
+}
+
 TEST_CASE("heardJson: after the hands lift the chord stays, unheld, and loose notes use the key's spelling") {
     Listener l = holding({57, 60, 64, 67});
     heardOff(l, 57, 1);

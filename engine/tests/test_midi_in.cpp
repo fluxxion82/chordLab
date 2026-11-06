@@ -2,8 +2,11 @@
 
 #include "chordlab/midi_in.h"
 
+#include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <thread>
 #include <vector>
 
 using namespace chordlab;
@@ -238,4 +241,119 @@ TEST_CASE("HeardRing: many wraps with a ring kept nearly full stay in order") {
         REQUIRE(e.sampleTime == expected++);
     }
     CHECK_FALSE(ring.takeOverflow());
+}
+
+namespace {
+
+/// The deadline every cross-thread ring test stays inside, so a lost wake-up fails instead of hanging.
+constexpr auto kThreadedBudget = std::chrono::seconds(5);
+
+bool intact(const HeardEvent& e, std::uint64_t seq) {
+    return e.kind == HeardEvent::NoteOn && e.sampleTime == seq && e.pitch == seq % 128 && e.velocity == 100;
+}
+
+}  // namespace
+
+TEST_CASE("HeardRing: a producer thread's 10 000 events arrive in order and intact through many wraps") {
+    constexpr std::uint64_t kEvents = 10000;  // 39 wraps of the 256-slot ring
+    HeardRing ring;
+    const auto deadline = std::chrono::steady_clock::now() + kThreadedBudget;
+    std::atomic<bool> timedOut{false};
+    std::thread producer([&] {
+        for (std::uint64_t seq = 0; seq < kEvents;) {
+            if (ring.push(noteOn(seq))) {
+                ++seq;
+            } else if (std::chrono::steady_clock::now() > deadline) {
+                timedOut = true;
+                return;
+            } else {
+                std::this_thread::yield();  // full: let the consumer catch up
+            }
+        }
+    });
+    std::uint64_t expected = 0;
+    std::uint64_t broken = 0;  // events out of order or damaged; must stay 0
+    while (expected < kEvents && std::chrono::steady_clock::now() <= deadline) {
+        HeardEvent e{};
+        if (!ring.pop(e)) {
+            std::this_thread::yield();
+            continue;
+        }
+        if (!intact(e, expected)) ++broken;
+        ++expected;
+    }
+    producer.join();
+    CHECK_FALSE(timedOut.load());
+    CHECK(expected == kEvents);
+    CHECK(broken == 0);
+    // A full ring refuses, and every refusal sets the flag: the producer retried each one, so nothing was lost.
+    ring.takeOverflow();
+    HeardEvent e{};
+    CHECK_FALSE(ring.pop(e));
+}
+
+TEST_CASE("HeardRing: across threads an overrun is reported once and the stream after it is in order again") {
+    constexpr std::uint64_t kBurst = 1000;   // pushed while the consumer sleeps: 744 are refused
+    constexpr std::uint64_t kAfter = 5000;   // pushed after the producer saw the consumer resynchronise
+    HeardRing ring;
+    const auto deadline = std::chrono::steady_clock::now() + kThreadedBudget;
+    std::atomic<bool> burstDone{false};
+    std::atomic<bool> resynced{false};
+    std::atomic<bool> timedOut{false};
+    std::atomic<std::uint64_t> refused{0};
+    std::thread producer([&] {
+        for (std::uint64_t seq = 0; seq < kBurst; ++seq) {
+            if (!ring.push(noteOn(seq))) refused.fetch_add(1, std::memory_order_relaxed);
+        }
+        burstDone = true;
+        while (!resynced) {
+            if (std::chrono::steady_clock::now() > deadline) {
+                timedOut = true;
+                return;
+            }
+            std::this_thread::yield();
+        }
+        for (std::uint64_t seq = kBurst; seq < kBurst + kAfter;) {
+            if (ring.push(noteOn(seq))) {
+                ++seq;
+            } else if (std::chrono::steady_clock::now() > deadline) {
+                timedOut = true;
+                return;
+            } else {
+                std::this_thread::yield();
+            }
+        }
+    });
+    // The consumer sleeps through the burst, then resynchronises as OnIdle does: the flag first, then the
+    // lost epoch discarded whole.
+    while (!burstDone && std::chrono::steady_clock::now() <= deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    REQUIRE(burstDone.load());
+    CHECK(ring.takeOverflow());
+    CHECK_FALSE(ring.takeOverflow());  // reported once
+    std::uint64_t discarded = 0;
+    for (HeardEvent e{}; ring.pop(e);) {
+        if (!intact(e, discarded)) break;  // the discarded epoch is the first 256, in order
+        ++discarded;
+    }
+    CHECK(discarded == HeardRing::kCapacity);
+    CHECK(refused.load() == kBurst - HeardRing::kCapacity);
+    resynced = true;
+
+    std::uint64_t expected = kBurst;
+    std::uint64_t broken = 0;
+    while (expected < kBurst + kAfter && std::chrono::steady_clock::now() <= deadline) {
+        HeardEvent e{};
+        if (!ring.pop(e)) {
+            std::this_thread::yield();
+            continue;
+        }
+        if (!intact(e, expected)) ++broken;
+        ++expected;
+    }
+    producer.join();
+    CHECK_FALSE(timedOut.load());
+    CHECK(expected == kBurst + kAfter);
+    CHECK(broken == 0);
 }
