@@ -321,6 +321,9 @@ TEST_CASE("listener: changed() follows feed, acknowledge and advance") {
     CHECK(l.changed());
     l.acknowledge();
     CHECK_FALSE(l.changed());
+    // Nothing held and no note inside the window: an advance stays unchanged.
+    advanceTo(l, 50);
+    CHECK_FALSE(l.changed());
 }
 
 TEST_CASE("listener: advance on an idle listener stays unchanged") {
@@ -328,6 +331,7 @@ TEST_CASE("listener: advance on an idle listener stays unchanged") {
     advanceTo(l, 1);
     advanceTo(l, 50);
     CHECK_FALSE(l.changed());
+    CHECK_FALSE(l.active());
 }
 
 TEST_CASE("listener: clear forgets everything and flips active") {
@@ -383,8 +387,76 @@ TEST_CASE("listener: a held note survives the ring wrapping over its slot") {
         offAt(l, 60, beat + 1.0 / 16.0);
     }
     CHECK(l.held() == std::vector<int>{40});
-    offAt(l, 40, 30);
+    advanceTo(l, 30);
+    const auto before = l.histogram();
+    offAt(l, 40, 30);  // the slot now holds a later note: closing must not touch it
     CHECK(l.held().empty());
+    CHECK(l.histogram() == before);
+}
+
+TEST_CASE("listener: a note released exactly 256 notes back still closes") {
+    Listener l;
+    onAt(l, 40, 0);
+    for (int i = 1; i <= 255; ++i) {  // 255 later onsets: note 40 is the oldest the ring still holds
+        onAt(l, 60, i / 128.0);
+        offAt(l, 60, i / 128.0 + 1.0 / 256.0);
+    }
+    offAt(l, 40, 2.5);
+    CHECK(l.histogram()[4] == doctest::Approx(2.75));
+    advanceTo(l, 3.5);
+    CHECK(l.histogram()[4] == doctest::Approx(2.75));  // closed: its weight stops growing
+}
+
+TEST_CASE("listener: a note event with a pitch of 128 or more is ignored but moves time") {
+    Listener l;
+    l.feed({HeardEvent::NoteOn, 200, 100, 0}, kBpm, kRate);
+    l.feed({HeardEvent::NoteOff, 200, 0, 24000}, kBpm, kRate);
+    CHECK(l.held().empty());
+    CHECK(l.active());
+    CHECK(l.nowBeats() == doctest::Approx(1.0));
+    CHECK(l.onsetsInWindow() == 0);
+}
+
+TEST_CASE("listener: an unusable tempo or sample rate moves no time") {
+    Listener l;
+    onAt(l, 60, 0);
+    l.feed({HeardEvent::NoteOn, 62, 100, 24000}, 0.0, kRate);
+    CHECK(l.nowBeats() == doctest::Approx(0.0));
+    l.advance(48000, std::numeric_limits<double>::quiet_NaN(), kRate);
+    CHECK(l.nowBeats() == doctest::Approx(0.0));
+    l.advance(72000, kBpm, 0.0);
+    CHECK(l.nowBeats() == doctest::Approx(0.0));
+    // The next usable call adds only the samples after the last stamp.
+    l.advance(96000, kBpm, kRate);
+    CHECK(l.nowBeats() == doctest::Approx(1.0));
+}
+
+TEST_CASE("listener: a note-off with no key down is ignored") {
+    Listener l;
+    onAt(l, 60, 0);
+    l.clear();
+    pedal(l, 127, 1);
+    offAt(l, 60, 2);  // the key was forgotten by clear: the pedal must not take it
+    CHECK(l.held().empty());
+}
+
+TEST_CASE("listener: the pedal down before any note holds the released note") {
+    Listener l;
+    pedal(l, 127, 0);
+    onAt(l, 60, 1);
+    offAt(l, 60, 2);
+    CHECK(l.held() == std::vector<int>{60});
+    pedal(l, 0, 3);
+    CHECK(l.held().empty());
+}
+
+TEST_CASE("listener: a tempo change across an open note") {
+    Listener l;
+    l.feed({HeardEvent::NoteOn, 60, 100, 0}, kBpm, kRate);
+    l.advance(24000, kBpm, kRate);  // 1 beat at 120 bpm
+    l.advance(48000, 60.0, kRate);  // 24000 samples at 60 bpm: half a beat
+    CHECK(l.nowBeats() == doctest::Approx(1.5));
+    CHECK(l.histogram()[0] == doctest::Approx(1.75));
 }
 
 // ---- Key estimate (design D8) ----
