@@ -60,16 +60,17 @@
 // before the block's ProcessBlock (the VST3 wrapper delivers MIDI while bypassed too). It never allocates,
 // locks or calls the base (iPlug2's default forwards every message to the output, unmanaged). It normalises
 // the event (chordlab::heardEventOf: note-on, note-off, CC64; channels merged), stamps it with mSampleClock
-// (acquire) plus its offset and pushes it into mHeardRing, a fixed SPSC ring the main thread drains. The
+// (acquire) plus its offset and pushes it into mHeardRing, a fixed SPSC ring the main thread drains (the
+// ring also carries the in-band HeardEvent::Reset of a host reset; see "Reset ordering" below). The
 // clock watermark: ProcessBlock advances mSampleClock by nFrames with a release store at the END of every
 // block, so once a block is done every stamp of it is at or before the published clock; OnIdle reads the
-// clock before draining, feeds the events to mListener and calls advance(now) at most every kHeardInterval
+// clock before draining, feeds the events (a Reset among them clears it) to mListener and calls advance(now) at most every kHeardInterval
 // (the listener's time is monotonic, so a stamp after `now` cannot run it backwards). Note-ons and offs also
 // go to Scheduler::pushThru, always: the Thru flag (BlockInfo::thru) is applied inside process from the slot
 // acquired for that very block, not from the previous block's slot, which is all ProcessMidiMsg could read.
 // Bypass: while GetBypassed() the wrapper runs PassThroughBuffers instead of ProcessBlock, so ProcessMidiMsg
 // queues nothing for thru, still feeds the listener and sets mBypassSeen. ApplyPendingBypassRelease consumes
-// the flag like the reset (the first non-bypassed note of a callback, before its pushThru, or the top of
+// the flag after the reset (at the first non-bypassed note of a callback, before its pushThru, or the top of
 // ProcessBlock) and calls Scheduler::releaseThru, which releases every thru note (an off swallowed by the
 // bypass cannot leave one sounding) on the next block with frames and keeps the queue: a zero-frame block (a
 // VST3 parameter flush) leaves the release pending, and the notes arriving after the bypass still pass
@@ -86,9 +87,13 @@
 // which counts once as incomplete (a zero-frame block leaves both flags for it). Reset ordering: OnReset only
 // flags the reset, Scheduler::reset discards the queued incoming notes, and iPlug2 delivers a callback's MIDI
 // before its ProcessBlock, so the flag is consumed by whichever comes first on the audio thread, the
-// callback's first non-bypassed note in ProcessMidiMsg (before its pushThru) or the top of ProcessBlock
-// (ApplyPendingReset): the notes arriving in the first block after a reactivation are queued after the reset,
-// not discarded by it. AUv2 is not a target (check.sh builds the APP and the VST3): its wrapper calls
+// callback's first incoming message in ProcessMidiMsg (bypassed or not, before its heard push and its
+// pushThru) or the top of ProcessBlock (ApplyPendingReset): the notes arriving in the first block after a
+// reactivation are queued after the reset, not discarded by it. The listener lives on the main thread and
+// cannot see the flag, so ApplyPendingReset also pushes a HeardEvent::Reset into mHeardRing right after
+// Scheduler::reset, from the ring's one producer: the listener clears exactly between the events heard
+// before the reset and those after it (a key held across a deactivation never sends its note-off, and would
+// otherwise stay held). If the ring is full the push is refused and the sticky overflow clears the listener. AUv2 is not a target (check.sh builds the APP and the VST3): its wrapper calls
 // ProcessMidiMsg on the host's thread (IPlugAU.cpp DoMIDIEvent), which would race pushThru and the flag
 // consumers with process.
 //
@@ -299,8 +304,13 @@ void ChordLab::OnReset()
 
 void ChordLab::ApplyPendingReset() noexcept
 {
-  if (mResetPending.exchange(false, std::memory_order_acq_rel))
-    mScheduler.reset(mResetSampleRate.load(std::memory_order_relaxed));
+  if (!mResetPending.exchange(false, std::memory_order_acq_rel))
+    return;
+  mScheduler.reset(mResetSampleRate.load(std::memory_order_relaxed));
+  // In-band, from the ring's one producer: the listener forgets exactly between the events heard before the
+  // reset and after it (keys held across a deactivation never send their note-offs). A refused push means
+  // the ring is full; its sticky overflow flag makes OnIdle discard everything and clear the listener anyway.
+  mHeardRing.push({chordlab::HeardEvent::Reset, 0, 0, mSampleClock.load(std::memory_order_relaxed)});
 }
 
 void ChordLab::ApplyPendingBypassRelease() noexcept
@@ -329,6 +339,7 @@ void ChordLab::ApplyPendingBypassRelease() noexcept
 void ChordLab::ProcessMidiMsg(const IMidiMsg& msg)
 {
   // Audio thread: no allocation, no locks, no logging, never the base class (see "MIDI in" at the top).
+  ApplyPendingReset();                                           // first: its heard Reset precedes this event, and reset() empties the thru queue
   const uint64_t stamp = mSampleClock.load(std::memory_order_acquire) + (uint64_t) std::max(0, msg.mOffset);
   if (const std::optional<chordlab::HeardEvent> heard = chordlab::heardEventOf(msg.mStatus, msg.mData1, msg.mData2, stamp))
     mHeardRing.push(*heard);                                     // a refusal is sticky in the ring; OnIdle resynchronises
@@ -339,8 +350,7 @@ void ChordLab::ProcessMidiMsg(const IMidiMsg& msg)
   }
   if (const std::optional<chordlab::ThruEvent> thru = chordlab::thruEventOf(msg.mStatus, msg.mData1, msg.mData2, msg.mOffset))
   {
-    ApplyPendingReset();                                         // before the push: reset() empties the thru queue
-    ApplyPendingBypassRelease();                                 // after the reset, which would forget it
+    ApplyPendingBypassRelease();                                 // after the reset above, which would forget it
     if (!mScheduler.pushThru(*thru))                             // queued whatever the flag: the block's own slot decides
       mBlockRefused.store(true, std::memory_order_relaxed);
   }
@@ -450,7 +460,7 @@ void ChordLab::OnIdle()
     }
     else
       while (mHeardRing.pop(e))
-        mListener.feed(e, bpm, sampleRate);
+        mListener.feed(e, bpm, sampleRate);                      // a host reset's in-band Reset clears it in order
     const auto tick = std::chrono::steady_clock::now();
     if (tick - mLastHeardTick >= kHeardInterval)
     {

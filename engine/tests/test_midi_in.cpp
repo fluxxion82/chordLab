@@ -140,6 +140,24 @@ TEST_CASE("HeardRing: events come out in the order they went in") {
     }
 }
 
+TEST_CASE("HeardRing: a Reset event round-trips unchanged") {
+    HeardRing ring;
+    REQUIRE(ring.push(noteOn(1)));
+    REQUIRE(ring.push(HeardEvent{HeardEvent::Reset, 0, 0, 4242}));
+    REQUIRE(ring.push(noteOn(2)));
+    HeardEvent e{};
+    REQUIRE(ring.pop(e));
+    CHECK(e.kind == HeardEvent::NoteOn);
+    REQUIRE(ring.pop(e));
+    CHECK(e.kind == HeardEvent::Reset);
+    CHECK(e.pitch == 0);
+    CHECK(e.velocity == 0);
+    CHECK(e.sampleTime == 4242);
+    REQUIRE(ring.pop(e));
+    CHECK(e.kind == HeardEvent::NoteOn);
+    CHECK(e.sampleTime == 2);
+}
+
 TEST_CASE("HeardRing: pop on an empty ring returns false and leaves the output alone") {
     HeardRing ring;
     HeardEvent e{HeardEvent::Sustain, 1, 2, 3};

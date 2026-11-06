@@ -15,8 +15,9 @@ namespace chordlab {
 /// Normalises one incoming MIDI message (status byte with channel, two data bytes) into what the listener
 /// and the scheduler take (design D1): note-on with velocity 0 is a note-off; CC 64 is `Sustain` with the
 /// value as velocity; every other message is nothing. Channels are merged (the channel nibble is
-/// ignored). `sampleTime` is stamped on the result unchanged. Data bytes are not range-checked (the
-/// listener and the scheduler ignore pitches >= 128 and clamp velocities). Audio thread; no allocation.
+/// ignored). `sampleTime` is stamped on the result unchanged; the result is never `Reset`, which only the
+/// shell pushes. Data bytes are not range-checked (the listener and the scheduler ignore pitches >= 128
+/// and clamp velocities). Audio thread; no allocation.
 std::optional<HeardEvent> heardEventOf(std::uint8_t status, std::uint8_t data1, std::uint8_t data2,
                                        std::uint64_t sampleTime) noexcept;
 

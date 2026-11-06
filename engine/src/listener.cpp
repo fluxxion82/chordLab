@@ -103,6 +103,10 @@ void Listener::release(int pitch) {
 }
 
 void Listener::feed(const HeardEvent& e, double bpm, double sampleRate) {
+    if (e.kind == HeardEvent::Reset) {
+        clear();  // the host reset the plug-in: held keys' note-offs will never come
+        return;
+    }
     moveTo(e.sampleTime, bpm, sampleRate);
     active_ = true;
     changed_ = true;
@@ -142,6 +146,8 @@ void Listener::feed(const HeardEvent& e, double bpm, double sampleRate) {
             pedalDown_ = down;
             break;
         }
+        case HeardEvent::Reset:
+            break;  // handled above
     }
     if (noteOn) latchChord();
     updateChordHeld();

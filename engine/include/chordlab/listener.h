@@ -16,9 +16,11 @@ namespace chordlab {
 /// pedal change; channels are merged. For a note `pitch` is the MIDI note (0-127; larger values are
 /// ignored by `Listener`) and `velocity` its velocity; for `Sustain` `pitch` is unused and `velocity`
 /// carries the CC64 value (0-127; 64 and above is pedal down). `sampleTime` is the audio thread's running
-/// sample clock at the event, in samples, the same clock for every event.
+/// sample clock at the event, in samples, the same clock for every event. `Reset` (pitch and velocity 0)
+/// is not MIDI: the shell pushes it in-band when the host resets the plug-in, so it lands exactly between
+/// the events before and after the reset; `heardEventOf` never produces it.
 struct HeardEvent {
-    enum Kind : std::uint8_t { NoteOn, NoteOff, Sustain } kind;
+    enum Kind : std::uint8_t { NoteOn, NoteOff, Sustain, Reset } kind;
     std::uint8_t pitch;
     std::uint8_t velocity;
     std::uint64_t sampleTime;
@@ -123,7 +125,8 @@ public:
     /// Applies one event after moving time to its stamp (see the class comment), at tempo `bpm` and
     /// `sampleRate` Hz. Updates the held set, the notes and the latched chord (design D10), recomputes
     /// `chordHeld` and sets `changed`. Never evaluates the key. A note event with a pitch of 128 or more
-    /// is ignored (it still counts as an event and moves time).
+    /// is ignored (it still counts as an event and moves time). A `Reset` event is `clear()` and nothing
+    /// else: it moves no time and leaves the listener inactive.
     void feed(const HeardEvent& e, double bpm, double sampleRate);
 
     /// Moves time to `nowSampleTime` (never backwards) at tempo `bpm` and `sampleRate` Hz and sets
@@ -135,8 +138,9 @@ public:
     /// Forgets everything: notes, the held set, the pedal, time and its reference stamp, the shown key and
     /// the latched chord. `active` becomes false and `changed` true, so the UI is told to hide the group.
     /// It resynchronises by forgetting: a key still physically down is forgotten and its later note-off
-    /// ignored, and a pedal still down counts as up until the next CC64. Two callers: the shell after a
-    /// lost epoch (a heard-ring overflow), so no note stays held by a lost note-off, and the user's ×.
+    /// ignored, and a pedal still down counts as up until the next CC64. Callers: the shell after a lost
+    /// epoch (a heard-ring overflow), so no note stays held by a lost note-off, the user's ×, and `feed`
+    /// on a `Reset` event (a host reset).
     void clear();
 
     /// Whether an event arrived since construction or the last `clear`.

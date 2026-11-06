@@ -362,6 +362,40 @@ TEST_CASE("listener: clear drops the pedal state too") {
     CHECK(l.held().empty());
 }
 
+TEST_CASE("listener: a Reset event forgets everything, like clear") {
+    // The shell pushes Reset into the heard ring when the host resets the plug-in, so notes held across a
+    // deactivation cannot stay held: their note-offs never arrive.
+    Listener l;
+    play(l, kCMajorScale, 0);
+    onAt(l, 60, 8);
+    onAt(l, 64, 8);
+    onAt(l, 67, 8);
+    pedal(l, 127, 8);
+    REQUIRE(l.key().has_value());
+    REQUIRE(l.chord().has_value());
+    REQUIRE(l.chordHeld());
+    REQUIRE(l.held() == std::vector<int>{60, 64, 67});
+    l.acknowledge();
+
+    l.feed({HeardEvent::Reset, 0, 0, at(9)}, kBpm, kRate);
+    CHECK_FALSE(l.active());
+    CHECK(l.changed());
+    CHECK(l.held().empty());
+    CHECK_FALSE(l.chord().has_value());
+    CHECK_FALSE(l.chordHeld());
+    CHECK_FALSE(l.key().has_value());
+    CHECK(l.onsetsInWindow() == 0);
+    CHECK(l.nowBeats() == doctest::Approx(0.0));
+
+    // A note after the reset starts fresh: the pedal was forgotten too, so its note-off releases.
+    onAt(l, 62, 10);
+    CHECK(l.active());
+    CHECK(l.held() == std::vector<int>{62});
+    CHECK(l.onsetsInWindow() == 1);
+    offAt(l, 62, 11);
+    CHECK(l.held().empty());
+}
+
 TEST_CASE("listener: 300 notes wrap the ring, held set and histogram stay right") {
     Listener l;
     for (int i = 0; i < 300; ++i) {

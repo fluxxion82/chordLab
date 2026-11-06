@@ -81,13 +81,14 @@ private:
   // on the main thread (queued when called elsewhere); with no editor it does nothing and leaves `changed`
   // set, and OnUIOpen replays. The JSON is built under mModelMutex (the document only read).
   void PushHeard();
-  // Audio thread: runs the scheduler reset OnReset flagged, if one is pending. Called at the top of
-  // ProcessBlock and before the first pushThru of a callback (ProcessMidiMsg), so a reset never discards
-  // incoming notes of the block it precedes.
+  // Audio thread: runs the scheduler reset OnReset flagged, if one is pending, then pushes a
+  // HeardEvent::Reset into mHeardRing so the main-thread listener forgets in order. Called at the top of
+  // ProcessBlock and at the top of every ProcessMidiMsg (before its heard push and pushThru), so a reset
+  // never discards incoming notes of the block it precedes.
   void ApplyPendingReset() noexcept;
   // Audio thread: if MIDI arrived while bypassed, asks the scheduler to release every thru note on the
-  // next block with frames (Scheduler::releaseThru, which keeps the queue). Called where ApplyPendingReset
-  // is, after it.
+  // next block with frames (Scheduler::releaseThru, which keeps the queue). Called at the top of
+  // ProcessBlock and before a callback's first pushThru, always after ApplyPendingReset.
   void ApplyPendingBypassRelease() noexcept;
   // Main thread: pushes {"schema":1,"ppq":ppq,"playing":playing} (the playhead) to the editor.
   void PushTransport(double ppq, bool playing);
@@ -134,7 +135,8 @@ private:
   // The scheduler belongs to the audio thread (process, reset, panic, and pushThru from ProcessMidiMsg);
   // pushPreview is its one other-thread entry and is called from the main thread only (OnMessage,
   // CloseWindow). OnReset and panic requests are flagged here and consumed at the top of ProcessBlock; a
-  // pending reset is consumed earlier, by the callback's first ProcessMidiMsg, when MIDI arrives.
+  // pending reset is consumed earlier, by the callback's first ProcessMidiMsg, when MIDI arrives (bypassed
+  // or not).
   chordlab::Scheduler mScheduler;
   // Output capacity (listening design D16): iPlug2's VST3 output queue (IMidiQueue) is sized in
   // setupProcessing to the host's maxSamplesPerBlock rounded up to a 4 KiB page of 8-byte IMidiMsg, so at
@@ -165,6 +167,7 @@ private:
   // event into mHeardRing stamped on mSampleClock, which ProcessBlock advances by nFrames at the end of
   // each block (a watermark: every stamp is at or before the published clock once its block is done);
   // OnIdle (the consumer) drains it into mListener and pushes kMsgTagHeard when its visible outputs change.
+  // ApplyPendingReset pushes an in-band HeardEvent::Reset (same producer thread) after a host reset.
   chordlab::HeardRing mHeardRing;
   std::atomic<uint64_t> mSampleClock{0};                       // processed samples since construction
   std::atomic<bool> mBlockRefused{false};                      // a thru push was refused in the block being gathered
