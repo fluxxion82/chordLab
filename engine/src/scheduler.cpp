@@ -143,7 +143,8 @@ Scheduler::Scheduler() noexcept
       mThruHead(0),
       mThruCount(0),
       mThruOverflow(false),
-      mThruWas(false) {
+      mThruWas(false),
+      mThruResetPending(false) {
     mState.owners.fill(0);
     mState.owed.fill(false);
     for (Preview& preview : mState.previews) {
@@ -157,6 +158,11 @@ void Scheduler::reset(double sampleRate) noexcept {
         mSampleRate = sampleRate;
     }
     mPendingFlush = true;
+    // The thru notes go too: their note-offs may never come (a host deactivating the plug-in swallows
+    // them). `reset` runs on the audio thread or while no `process` (and so no `pushThru`) runs.
+    mThruHead = 0;
+    mThruCount = 0;
+    mThruResetPending = true;
 }
 
 void Scheduler::adopt(const Snapshot& snapshot) noexcept {
@@ -351,15 +357,22 @@ void Scheduler::pushExpiries(int nFrames, std::int64_t previewSamples) noexcept 
 /// arrival order, each at its due time on the preview clock clamped into the block (an overdue one at
 /// offset 0); what the block cannot take stays queued, in order, and makes the block incomplete. With
 /// `thru` off, or after an overflow, the ring is discarded; a mandatory release-all frees every thru
-/// note on the on -> off edge and after an overflow (with `mThruWas` false no thru note can exist: thru
-/// attacks happen only in blocks with `thru` on, each of which sets it).
+/// note on the on -> off edge, after an overflow and after a `reset` (with `mThruWas` false no thru note
+/// can exist: thru attacks happen only in blocks with `thru` on, each of which sets it). The release-all
+/// sits in the flush phase, so the attacks this block takes still sound after it.
 void Scheduler::collectThru(bool thru, int lastOffset) noexcept {
     const bool overflow = mThruOverflow;
+    const bool wasReset = mThruResetPending;
     mThruOverflow = false;
+    mThruResetPending = false;
+    if (wasReset || ((!thru || overflow) && (overflow || mThruWas))) {
+        // Mandatory pushes before this one are at most one progression release-all and two expiry
+        // candidates per preview; the static_assert on kReservedReleaseEvents keeps room for this one.
+        const bool pushed = pushLogical(Logical{mBlockSample, ThruReleaseAll, PhaseFlush, 0, 0, 0, 0}, true);
+        assert(pushed);
+        static_cast<void>(pushed);
+    }
     if (!thru || overflow) {
-        if (overflow || mThruWas) {
-            pushLogical(Logical{mBlockSample, ThruReleaseAll, PhaseFlush, 0, 0, 0, 0}, true);
-        }
         if (overflow) {
             mDropped = true;  // incoming notes were lost
         }

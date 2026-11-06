@@ -67,7 +67,8 @@ struct PreviewCmd {
 };
 
 /// One incoming note the plug-in passes through (design D2): `on` with `velocity`, or a release,
-/// `sampleOffset` samples into the block it arrived in. `pitch` must be below 128.
+/// `sampleOffset` samples into the block it arrived in. A `pitch` of 128 or more is ignored (`pushThru`
+/// reports it as queued).
 struct ThruEvent {
     bool on;
     std::uint8_t pitch;
@@ -90,8 +91,8 @@ constexpr std::uint8_t kOwnerThru = 4;
 /// sounds retriggers it (off then on); a preview joining a sounding pitch is silent. Previews release
 /// themselves four seconds after they start, or after their last applied `Extend`, counted in processed
 /// samples. A thru note is released by its own note-off (a note-off with no thru note-on is ignored), by
-/// a block with `BlockInfo::thru` false, by an overflow of its ring, or by `panic`; the progression's
-/// releases, flushes and chases never touch it.
+/// a block with `BlockInfo::thru` false, by an overflow of its ring, by `reset` (on the next block) or by
+/// `panic`; the progression's releases, flushes and chases never touch it.
 ///
 /// Position: progression beat 0 sits at host ppq 0. With `Snapshot::loop` the progression repeats every
 /// `endBeat` beats; without it, it plays once and nothing sounds at or after `endBeat`. The progression
@@ -108,12 +109,11 @@ constexpr std::uint8_t kOwnerThru = 4;
 /// earlier blocks, preview commands in arrival order, the discontinuity's releases (by pitch, and the thru
 /// release-all), the chase (by pitch), the thru notes in arrival order, then the timeline in the
 /// snapshot's own order, which `compile` makes `(beat, off before on, pitch)`; the final offs of one wrap
-/// precede the first attacks of the next. Timeline events that did
-/// not fit an earlier block are written first, at offset 0, still in their order. Releases are never
-/// lost: one that does not fit the output is owed and paid at the start of the next block before anything
-/// else, and a capacity of at least `kCapacityForImmediateRelease` always pays every owed release in the
-/// block that owes it. Attacks that do not fit are dropped and left unowned, and `process` then returns
-/// false.
+/// precede the first attacks of the next. Timeline events that did not fit an earlier block are written
+/// first, at offset 0, still in their order. Releases are never lost: one that does not fit the output is
+/// owed and paid at the start of the next block before anything else, and a capacity of at least
+/// `kCapacityForImmediateRelease` always pays every owed release in the block that owes it. Attacks that do
+/// not fit are dropped and left unowned, and `process` then returns false.
 ///
 /// Bounded work: a block of unusable timing (`nFrames < 0`, `sampleRate` or `bpm` not positive and finite,
 /// a non-finite `ppqStart`, samples per beat outside `(0, kMaxSamplesPerBeat]`, or a preview timer that
@@ -133,8 +133,8 @@ constexpr std::uint8_t kOwnerThru = 4;
 class Scheduler {
 public:
     static constexpr std::size_t kMaxEventsPerBlock = 512;
-    /// Scratch entries kept back for the block's own releases (the discontinuity's release-all and the
-    /// preview expiries), so that no number of attacks can displace them.
+    /// Scratch entries kept back for the block's own releases (the discontinuity's release-all, the thru
+    /// notes' release-all and the preview expiries), so that no number of attacks can displace them.
     static constexpr std::size_t kReservedReleaseEvents = 32;
     static constexpr std::size_t kPreviewQueueCapacity = 64;
     static constexpr std::size_t kMaxPreviews = 8;
@@ -163,8 +163,11 @@ public:
     /// Records the sample rate the preview timers use and marks a pending flush: the next `process`
     /// releases every progression note and chases the current position. Ownership state is kept, so the
     /// notes that sound are released properly; previews are untouched, and so are the queued preview
-    /// commands, which the next block serves as usual (only `panic` discards them). `sampleRate` must be
-    /// positive and finite (an unusable value is ignored).
+    /// commands, which the next block serves as usual (only `panic` discards them). Thru notes are released
+    /// too, by a release-all on the next block whatever its `BlockInfo::thru` (a host that deactivates the
+    /// plug-in while a key is held never delivers that key's note-off), and the incoming notes queued
+    /// before the call are discarded. `sampleRate` must be positive and finite (an unusable value is
+    /// ignored).
     void reset(double sampleRate) noexcept;
 
     /// Replaces the progression. A changed `generation` marks a pending flush (release all, then chase on
@@ -200,14 +203,14 @@ public:
     /// could not emit everything it was due to: an attack was dropped (output capacity, scratch space or the
     /// preview table ran out), a release had to be owed to a later block, part of the timeline was carried
     /// over, dropped or skipped, an `adopt` abandoned overdue occurrences, queued incoming notes were left
-    /// for a later block or lost to a full ring, or the block's timing was unusable. Only an empty block (`nFrames == 0`) is a true no-op. `out` may be null only when
-    /// `capacity` is 0.
+    /// for a later block or lost to a full ring, or the block's timing was unusable. Only an empty block
+    /// (`nFrames == 0`) is a true no-op. `out` may be null only when `capacity` is 0.
     bool process(const BlockInfo& info, MidiOut* out, std::size_t capacity, std::size_t& written) noexcept;
 
     /// Silences everything: every sounding pitch, progression, preview and thru note alike, is released
     /// (its note-off is owed and paid by the next block), every preview is forgotten and every queued
-    /// incoming note is discarded (`pushThru` and `panic` share a thread, so the cut is exact). The progression is not chased
-    /// afterwards: it stays silent until its next attack.
+    /// incoming note is discarded (`pushThru` and `panic` share a thread, so the cut is exact). The
+    /// progression is not chased afterwards: it stays silent until its next attack.
     /// The preview commands queued before the call are discarded too, at the next block's drain: a start
     /// that has not sounded yet never will, and a stop has nothing left to stop. Commands pushed after
     /// `panic` returns are served as usual. The cut is the queue's tail as `panic` saw it (recorded, not
@@ -352,6 +355,7 @@ private:
     std::size_t mThruCount;
     bool mThruOverflow;  // an event was refused since the last block
     bool mThruWas;       // the last block's BlockInfo::thru; thru owners exist only while it is true
+    bool mThruResetPending;  // a `reset` since the last block: the next one releases every thru note
 };
 
 }  // namespace chordlab

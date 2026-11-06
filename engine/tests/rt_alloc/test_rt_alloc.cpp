@@ -224,11 +224,12 @@ TEST_CASE("rt alloc: the scheduler allocates nothing across 10k random blocks wi
         } else if (roll < 22) {
             scheduler.reset(roll == 20 ? kSr : 44100.0);  // repeated resets, with and without a rate change
         } else if (roll < 25) {
-            // An incoming note and its release, each somewhere in the block (or beyond it: clamped).
+            // An incoming note somewhere in the block, and its release anywhere in 0..1023: often beyond a
+            // smaller block, where it is clamped into it.
             const int p = pitch(rng);
             const int span = std::max(nFrames, 1);
             refusedThru += scheduler.pushThru(ThruEvent{true, static_cast<std::uint8_t>(p), 90, offset(rng) % span}) ? 0 : 1;
-            refusedThru += scheduler.pushThru(ThruEvent{false, static_cast<std::uint8_t>(p), 0, offset(rng) % span}) ? 0 : 1;
+            refusedThru += scheduler.pushThru(ThruEvent{false, static_cast<std::uint8_t>(p), 0, offset(rng)}) ? 0 : 1;
             thruPushes += 2;
         } else if (roll == 25) {
             thru = !thru;  // the on -> off edge releases every thru note; disabled blocks discard the ring

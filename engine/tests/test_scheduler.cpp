@@ -117,20 +117,21 @@ std::vector<Ev> decode(const MidiOut* out, std::size_t written) {
     return events;
 }
 
-/// Drives one scheduler block by block at 48 kHz.
+/// Drives one scheduler block by block at `sampleRate` (48 kHz unless given).
 struct Host {
     Scheduler scheduler;
+    double sampleRate;
     std::array<MidiOut, kBig> buffer{};
     std::size_t lastWritten = 0;
     bool lastOk = true;
     bool thru = true;  // BlockInfo::thru of every block `run` processes
 
-    Host() {
-        scheduler.reset(kSr);
+    explicit Host(double sampleRate_ = kSr) : sampleRate(sampleRate_) {
+        scheduler.reset(sampleRate);
     }
 
     std::vector<Ev> run(double ppqStart, int nFrames, bool playing, double bpm = kBpm, std::size_t capacity = kBig) {
-        const BlockInfo info{ppqStart, nFrames, kSr, bpm, playing, thru};
+        const BlockInfo info{ppqStart, nFrames, sampleRate, bpm, playing, thru};
         lastOk = scheduler.process(info, buffer.data(), capacity, lastWritten);
         REQUIRE(lastWritten <= capacity);
         return decode(buffer.data(), lastWritten);
@@ -2458,12 +2459,124 @@ TEST_CASE("scheduler thru: an overflowing ring releases every thru note, discard
     CHECK(host.run(0.0, 512, false) == std::vector<Ev>{on(0, 72, 90)});
 }
 
+TEST_CASE("scheduler thru: a pitch of 128 or more is ignored and reported as queued") {
+    Host host;
+    CHECK(host.pushThru(true, 200, 90, 0));
+    CHECK(host.run(0.0, 512, false) == kNone);
+    CHECK(host.lastOk);
+}
+
+TEST_CASE("scheduler thru: an attack pushed into the on -> off edge block is discarded; only the offs play") {
+    Host host;
+    CHECK(host.pushThru(true, 60, 90, 0));
+    REQUIRE(host.run(0.0, 512, false) == std::vector<Ev>{on(0, 60, 90)});
+    host.thru = false;
+    CHECK(host.pushThru(true, 62, 90, 10));
+    const std::vector<Ev> edge = host.run(0.0, 512, false);
+    CAPTURE(describe(edge));
+    CHECK(host.lastOk);
+    CHECK(edge == std::vector<Ev>{off(0, 60)});
+    CHECK(host.owners(60) == 0);
+    CHECK(host.owners(62) == 0);
+    CHECK_FALSE(host.scheduler.sounding(62));
+}
+
+TEST_CASE("scheduler thru: the edge's release-all at capacity 1 owes the rest to the next block") {
+    Host host;
+    CHECK(host.pushThru(true, 60, 90, 0));
+    CHECK(host.pushThru(true, 67, 90, 0));
+    REQUIRE(host.run(0.0, 512, false) == std::vector<Ev>{on(0, 60, 90), on(0, 67, 90)});
+    host.thru = false;
+    const std::vector<Ev> edge = host.run(0.0, 512, false, kBpm, 1);
+    CAPTURE(describe(edge));
+    CHECK(edge == std::vector<Ev>{off(0, 60)});
+    CHECK_FALSE(host.lastOk);  // a release had to be owed
+    CHECK(host.owners(67) == 0);
+    CHECK(host.scheduler.sounding(67));
+    const std::vector<Ev> paid = host.run(0.0, 512, false);
+    CAPTURE(describe(paid));
+    CHECK(paid == std::vector<Ev>{off(0, 67)});
+    CHECK(host.lastOk);
+    CHECK_FALSE(host.scheduler.sounding(67));
+}
+
+TEST_CASE("scheduler thru: an overflow while the progression co-owns a thru note leaves the note to it") {
+    Host host;
+    host.adopt(snapshotOf(cFour()));
+    REQUIRE(host.run(0.0, 512, true) == std::vector<Ev>{on(0, 60), on(0, 64), on(0, 67)});
+    CHECK(host.pushThru(true, 64, 80, 5));
+    REQUIRE(host.run(512.0 / kSamplesPerBeat, 512, true) == std::vector<Ev>{off(5, 64), on(5, 64, 80)});
+    REQUIRE(host.owners(64) == (kOwnerProgression | kOwnerThru));
+    for (std::size_t i = 0; i < Scheduler::kThruQueueCapacity; ++i) {
+        REQUIRE(host.pushThru(i % 2 == 0, 70, 90, 0));
+    }
+    CHECK_FALSE(host.pushThru(true, 71, 90, 0));
+    const std::vector<Ev> events = host.run(1024.0 / kSamplesPerBeat, 512, true);
+    CAPTURE(describe(events));
+    CHECK(events == kNone);  // no physical off: the progression still holds 64
+    CHECK_FALSE(host.lastOk);
+    CHECK(host.owners(64) == kOwnerProgression);
+    CHECK(host.scheduler.sounding(64));
+}
+
+TEST_CASE("scheduler thru: a block of unusable timing still delivers its thru notes, at offset 0") {
+    Host host;
+    CHECK(host.pushThru(true, 60, 90, 100));
+    CHECK(host.pushThru(true, 62, 90, 300));
+    const std::vector<Ev> events = host.run(0.0, 512, false, 0.0);  // bpm 0: unusable timing
+    CAPTURE(describe(events));
+    CHECK(events == std::vector<Ev>{on(0, 60, 90), on(0, 62, 90)});
+    CHECK_FALSE(host.lastOk);  // the block is not the one the host asked for
+    CHECK(host.owners(60) == kOwnerThru);
+    CHECK(host.owners(62) == kOwnerThru);
+}
+
+TEST_CASE("scheduler thru: reset releases thru notes on the next block and forgets queued input") {
+    Host host;
+    CHECK(host.pushThru(true, 60, 90, 0));
+    REQUIRE(host.run(0.0, 512, false) == std::vector<Ev>{on(0, 60, 90)});
+    CHECK(host.pushThru(true, 64, 90, 0));  // queued before the reset, never processed
+    host.scheduler.reset(kSr);
+    const std::vector<Ev> events = host.run(0.0, 512, false);
+    CAPTURE(describe(events));
+    CHECK(events == std::vector<Ev>{off(0, 60)});
+    CHECK(host.lastOk);
+    CHECK(host.owners(60) == 0);
+    CHECK(host.owners(64) == 0);
+    CHECK_FALSE(host.scheduler.sounding(60));
+    CHECK_FALSE(host.scheduler.sounding(64));
+
+    // Input pushed after the reset plays in that same block, after the release-all.
+    CHECK(host.pushThru(true, 62, 90, 0));
+    REQUIRE(host.run(0.0, 512, false) == std::vector<Ev>{on(0, 62, 90)});
+    host.scheduler.reset(kSr);
+    CHECK(host.pushThru(true, 62, 70, 0));
+    const std::vector<Ev> again = host.run(0.0, 512, false);
+    CAPTURE(describe(again));
+    CHECK(again == std::vector<Ev>{off(0, 62), on(0, 62, 70)});
+    CHECK(host.lastOk);
+    CHECK(host.owners(62) == kOwnerThru);
+}
+
 TEST_CASE("scheduler: a worst-case block fits the plug-in's output capacity") {
     // The densest progression (the throughput test's fixture above: eight-note chords at 96 events per beat,
-    // 300 bpm, 44.1 kHz, 4096-frame blocks), then in one block eight previews of eight fresh pitches and 64
-    // thru attacks on the pitches the progression holds (each one a retrigger: off and on), and a seek on the
-    // following block. ChordLab.h's kMidiOutCapacity (512) must carry every block complete.
+    // 300 bpm, 44.1 kHz, 4096-frame blocks) with eight previews of eight pitches each already sounding (0..55
+    // and 68..75, apart from the progression's 60..67). Then one block that is also a seek stops the eight
+    // previews, starts eight new ones on the same pitches and carries 64 thru attacks on those pitches, each
+    // a retrigger (off and on): 64 + 64 + 128 events on top of the progression's release-all, chase and
+    // timeline. That block needs more than the old 256; ChordLab.h's kMidiOutCapacity (512) must carry every
+    // block complete.
     constexpr std::size_t kCapacity = 512;  // ChordLab.h: kMidiOutCapacity
+    constexpr double kRate = 44100.0;
+    constexpr double kTempo = 300.0;
+    constexpr int kFrames = 4096;
+    constexpr double kDenseSamplesPerBeat = kRate * 60.0 / kTempo;  // 8820
+    const int bases[8] = {0, 8, 16, 24, 32, 40, 48, 68};            // each preview's eight pitches from here
+    auto pitchesFrom = [](int base) {
+        std::vector<int> pitches;
+        for (int i = 0; i < 8; ++i) pitches.push_back(base + i);
+        return pitches;
+    };
     for (const Feel feel : {Feel{Rhythm::Subdivided}, Feel{Rhythm::Subdivided, Strum::DownUp, StrumSpeed::Loose}}) {
         CAPTURE(static_cast<int>(feel.strum));
         DocumentStore store;
@@ -2475,72 +2588,57 @@ TEST_CASE("scheduler: a worst-case block fits the plug-in's output capacity") {
         REQUIRE(densestBeat(performance.events, performance.endTick()) == kMaxFeelEventsPerBeat);
         const Compiled compiled = compile(store.doc());
 
-        constexpr double kRate = 44100.0;
-        constexpr double kTempo = 300.0;
-        constexpr int kFrames = 4096;
-        const double samplesPerBeat = kRate * 60.0 / kTempo;  // 8820
-        Scheduler scheduler;
-        scheduler.reset(kRate);
-        scheduler.adopt(snapshotOf(compiled));
-        std::array<MidiOut, kCapacity> out{};
+        Host host(kRate);
+        host.adopt(snapshotOf(compiled));
         bool sounding[128] = {};
         std::size_t maxWritten = 0;
         int incomplete = 0;
-        int retriggerTargets = 0;
         double ppq = 0.0;
         auto block = [&](double at) {
-            std::size_t written = 0;
-            const bool ok = scheduler.process(BlockInfo{at, kFrames, kRate, kTempo, true, true}, out.data(),
-                                              out.size(), written);
-            incomplete += ok ? 0 : 1;
-            REQUIRE(written <= out.size());
-            maxWritten = std::max(maxWritten, written);
-            for (std::size_t i = 0; i < written; ++i) {
-                const bool isOn = out[i].status == 0x90;
-                const bool retrigger = !isOn && i + 1 < written && out[i + 1].status == 0x90 &&
-                                       out[i + 1].data1 == out[i].data1 && out[i + 1].sampleOffset == out[i].sampleOffset;
+            const std::vector<Ev> events = host.run(at, kFrames, true, kTempo, kCapacity);
+            incomplete += host.lastOk ? 0 : 1;
+            maxWritten = std::max(maxWritten, host.lastWritten);
+            for (std::size_t i = 0; i < events.size(); ++i) {
+                const Ev& e = events[i];
+                const bool retrigger = !e.on && i + 1 < events.size() && events[i + 1].on &&
+                                       events[i + 1].pitch == e.pitch && events[i + 1].offset == e.offset;
                 if (retrigger) {
-                    REQUIRE(sounding[out[i].data1]);
+                    REQUIRE(sounding[e.pitch]);
                     ++i;  // the on that follows keeps it sounding
                     continue;
                 }
-                REQUIRE(sounding[out[i].data1] != isOn);  // no double on, no orphan off
-                sounding[out[i].data1] = isOn;
+                REQUIRE(sounding[e.pitch] != e.on);  // no double on, no orphan off
+                sounding[e.pitch] = e.on;
             }
-            ppq = at + static_cast<double>(kFrames) / samplesPerBeat;
+            ppq = at + static_cast<double>(kFrames) / kDenseSamplesPerBeat;
         };
         for (int b = 0; b < 40; ++b) {
             block(ppq);
         }
-        // The burst: eight previews of eight pitches each, none of them the progression's (60..67)...
-        int pitch = 0;
         for (int id = 1; id <= 8; ++id) {
-            std::vector<int> pitches;
-            while (pitches.size() < 8) {
-                if (pitch < 60 || pitch > 67) pitches.push_back(pitch);
-                ++pitch;
-            }
-            REQUIRE(scheduler.pushPreview(previewStart(id, pitches)));
+            REQUIRE(host.scheduler.pushPreview(previewStart(id, pitchesFrom(bases[id - 1]))));
         }
-        // ...and 64 thru attacks cycling over the pitches the progression holds now.
-        std::vector<int> held;
-        for (int p = 60; p <= 67; ++p) {
-            if ((scheduler.ownersOf(p) & kOwnerProgression) != 0) held.push_back(p);
+        block(ppq);  // the previews start sounding
+        // The burst, all in the seek block: stop the eight, start eight new ones on the same pitches, and 64
+        // thru attacks on those pitches.
+        for (int id = 1; id <= 8; ++id) {
+            REQUIRE(host.scheduler.pushPreview(previewStop(id)));
         }
-        REQUIRE(!held.empty());
-        retriggerTargets = static_cast<int>(held.size());
+        for (int id = 9; id <= 16; ++id) {
+            REQUIRE(host.scheduler.pushPreview(previewStart(id, pitchesFrom(bases[id - 9]))));
+        }
         for (std::size_t i = 0; i < Scheduler::kMaxThruPerBlock; ++i) {
-            REQUIRE(scheduler.pushThru(ThruEvent{true, static_cast<std::uint8_t>(held[i % held.size()]), 90, 0}));
+            REQUIRE(host.pushThru(true, bases[i / 8] + static_cast<int>(i % 8), 90, 0));
         }
-        block(ppq);
         block(ppq + 7.25);  // the seek
+        const std::size_t burst = host.lastWritten;
         for (int b = 0; b < 40; ++b) {
             block(ppq);
         }
-        MESSAGE("capacity budget, strum " << static_cast<int>(feel.strum) << ": " << retriggerTargets
-                                          << " progression pitches retriggered, worst block " << maxWritten
-                                          << " events (of " << kCapacity << ")");
+        MESSAGE("capacity budget, strum " << static_cast<int>(feel.strum) << ": seek block " << burst
+                                          << " events, worst block " << maxWritten << " (of " << kCapacity << ")");
         CHECK(incomplete == 0);
         CHECK(maxWritten <= kCapacity);
+        CHECK(maxWritten > 256);  // the old capacity could not carry it: why kMidiOutCapacity is 512
     }
 }

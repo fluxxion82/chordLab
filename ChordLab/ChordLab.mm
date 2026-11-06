@@ -298,10 +298,14 @@ void ChordLab::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
   std::size_t written = 0;
   const bool complete = mScheduler.process(block, mMidiOut.data(), mMidiOut.size(), written);
 
-  // Output capacity (plan M3.3): iPlug2's VST3 output event queue is page-rounded (at least 512 entries),
-  // so a burst of at most kMidiOutCapacity events fits without a realloc; but incoming MIDI shares that
-  // queue, its events are retained across blocks while the host passes no pOutputEvents, and the
-  // standalone APP's SendMidiMsg allocates a std::vector per message (IPlug/APP/IPlugAPP.cpp:79).
+  // Output capacity (plan M3.3, design D16): iPlug2's VST3 output event queue holds maxSamplesPerBlock
+  // rounded up to a 4 KiB page of 8-byte IMidiMsg, at least 512 entries (IPlugMidi.h's DEFAULT_BLOCK_SIZE
+  // macro, 512, shadows IPlugConstants.h's 1024 there; setupProcessing resizes it), so a burst of at most
+  // kMidiOutCapacity events fits without a realloc. But until Task 8b overrides ProcessMidiMsg, iPlug2's
+  // default forwards incoming MIDI into the same queue (at a 512-sample buffer a full block leaves no room
+  // for it, and the queue reallocs), its events are retained across blocks while the host passes no
+  // pOutputEvents, and the standalone APP's SendMidiMsg allocates a std::vector per message
+  // (IPlug/APP/IPlugAPP.cpp:79).
   for (std::size_t i = 0; i < written; ++i)
   {
     const chordlab::MidiOut& e = mMidiOut[i];

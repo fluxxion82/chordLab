@@ -115,12 +115,18 @@ private:
   // entry and is called from the main thread only (OnMessage, CloseWindow). OnReset and panic requests
   // are flagged here and consumed at the top of ProcessBlock.
   chordlab::Scheduler mScheduler;
-  // Output capacity (listening design D16): iPlug2's VST3 output queue is page-rounded to at least 512
-  // entries. The naive worst case of one block, 96 performed + 64 preview attacks + 64 thru + 64 retrigger
-  // offs + 128 owed releases + 128 flush releases = 544, overstates it: releases are counted by the
-  // scheduler's dry run and attacks get only what is left. The proof is the engine test "scheduler: a
-  // worst-case block fits the plug-in's output capacity" (the densest Feel progression, eight 8-pitch
-  // previews and 64 thru retriggers in one block, a seek in the next: every block complete at 512).
+  // Output capacity (listening design D16): iPlug2's VST3 output queue (IMidiQueue) is sized in
+  // setupProcessing to the host's maxSamplesPerBlock rounded up to a 4 KiB page of 8-byte IMidiMsg, so at
+  // least 512 entries (exactly 512 at a 512-sample host buffer; IPlugMidi.h's own DEFAULT_BLOCK_SIZE macro,
+  // 512, not IPlugConstants.h's 1024, sizes it at construction), and it grows by realloc when full. Until
+  // Task 8b overrides ProcessMidiMsg, iPlug2's default forwards incoming MIDI into that same queue, so a
+  // full 512-event block leaves no room for it there. The naive worst case of one block, 96 performed + 64
+  // preview attacks + 64 thru + 64 retrigger offs + 128 owed releases + 128 flush releases = 544,
+  // overstates it: releases are counted by the scheduler's dry run and attacks get only what is left. The
+  // proof is the engine test "scheduler: a worst-case block fits the plug-in's output capacity": over the
+  // densest Feel progression with eight 8-pitch previews already sounding, one seek block stops them,
+  // starts eight new ones on the same pitches and retriggers 64 thru notes on those pitches, 320 events
+  // (more than the old 256), and every block is complete at 512.
   static constexpr std::size_t kMidiOutCapacity = 512;
   static_assert(kMidiOutCapacity >= chordlab::Scheduler::kCapacityForImmediateRelease,
                 "every owed release must fit the block that owes it");
