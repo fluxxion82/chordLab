@@ -91,8 +91,9 @@ constexpr std::uint8_t kOwnerThru = 4;
 /// sounds retriggers it (off then on); a preview joining a sounding pitch is silent. Previews release
 /// themselves four seconds after they start, or after their last applied `Extend`, counted in processed
 /// samples. A thru note is released by its own note-off (a note-off with no thru note-on is ignored), by
-/// a block with `BlockInfo::thru` false, by an overflow of its ring, by `reset` (on the next block) or by
-/// `panic`; the progression's releases, flushes and chases never touch it.
+/// a block with `BlockInfo::thru` false, by an overflow of its ring, by `reset` (on the next block), by a
+/// bypass end (`releaseThru`, on the next block) or by `panic`; the progression's releases, flushes and
+/// chases never touch it.
 ///
 /// Position: progression beat 0 sits at host ppq 0. With `Snapshot::loop` the progression repeats every
 /// `endBeat` beats; without it, it plays once and nothing sounds at or after `endBeat`. The progression
@@ -126,7 +127,7 @@ constexpr std::uint8_t kOwnerThru = 4;
 /// nothing at all and changes nothing.
 ///
 /// Real time: after construction nothing allocates, throws, locks or logs. `process`, `reset`, `adopt`,
-/// `panic`, `pushThru`, `ownersOf` and `sounding` belong to one thread, the audio thread; `pushPreview`
+/// `panic`, `pushThru`, `releaseThru`, `ownersOf` and `sounding` belong to one thread, the audio thread; `pushPreview`
 /// may be called from one other thread. `reset` and `adopt` may also be called from another thread while the
 /// host guarantees that no `process` runs concurrently (iPlug2's `OnReset` before processing starts, for
 /// instance); without such a guarantee the plugin must marshal them to the audio callback.
@@ -198,6 +199,14 @@ public:
     /// discards everything queued, and the first such block after one with `thru` true releases every thru
     /// note.
     bool pushThru(const ThruEvent& event) noexcept;
+
+    /// Releases every thru note on the next block with `nFrames > 0` (an empty block leaves the release
+    /// pending), by a release-all whatever that block's `BlockInfo::thru`. Audio thread only, the same
+    /// thread as `process`. The shell calls it when a host bypass ends, so that a note-off swallowed while
+    /// bypassed cannot leave a thru note sounding. Unlike `reset`, it keeps the queued incoming notes: with
+    /// `thru` on, that block applies them after the release-all as usual, so an attack on a released pitch
+    /// at the same sample comes out as its off then its on.
+    void releaseThru() noexcept;
 
     /// Produces this block's events into `out[0..capacity)`, setting `written`. Returns false if the block
     /// could not emit everything it was due to: an attack was dropped (output capacity, scratch space or the
@@ -355,7 +364,8 @@ private:
     std::size_t mThruCount;
     bool mThruOverflow;  // an event was refused since the last block
     bool mThruWas;       // the last block's BlockInfo::thru; thru owners exist only while it is true
-    bool mThruResetPending;  // a `reset` since the last block: the next one releases every thru note
+    bool mThruReleasePending;  // a `reset` or `releaseThru` since the last non-empty block: the next one
+                               // releases every thru note
 };
 
 }  // namespace chordlab

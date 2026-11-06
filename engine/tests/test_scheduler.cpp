@@ -2558,6 +2558,101 @@ TEST_CASE("scheduler thru: reset releases thru notes on the next block and forge
     CHECK(host.owners(62) == kOwnerThru);
 }
 
+TEST_CASE("scheduler thru: releaseThru releases thru notes on the next block") {
+    Host host;
+    CHECK(host.pushThru(true, 60, 90, 0));
+    REQUIRE(host.run(0.0, 512, false) == std::vector<Ev>{on(0, 60, 90)});
+    host.scheduler.releaseThru();
+    const std::vector<Ev> events = host.run(0.0, 512, false);
+    CAPTURE(describe(events));
+    CHECK(events == std::vector<Ev>{off(0, 60)});
+    CHECK(host.lastOk);
+    CHECK(host.owners(60) == 0);
+    CHECK_FALSE(host.scheduler.sounding(60));
+}
+
+TEST_CASE("scheduler thru: releaseThru keeps the queued input, which plays after the release-all") {
+    Host host;
+    CHECK(host.pushThru(true, 60, 90, 0));
+    REQUIRE(host.run(0.0, 512, false) == std::vector<Ev>{on(0, 60, 90)});
+    host.scheduler.releaseThru();
+    CHECK(host.pushThru(true, 62, 80, 5));
+    const std::vector<Ev> events = host.run(0.0, 512, false);
+    CAPTURE(describe(events));
+    CHECK(events == std::vector<Ev>{off(0, 60), on(5, 62, 80)});
+    CHECK(host.lastOk);
+    CHECK(host.owners(60) == 0);
+    CHECK(host.owners(62) == kOwnerThru);
+}
+
+TEST_CASE("scheduler thru: releaseThru then an attack on the same pitch at offset 0 comes out off then on") {
+    Host host;
+    CHECK(host.pushThru(true, 60, 90, 0));
+    REQUIRE(host.run(0.0, 512, false) == std::vector<Ev>{on(0, 60, 90)});
+    host.scheduler.releaseThru();
+    CHECK(host.pushThru(true, 60, 70, 0));
+    const std::vector<Ev> events = host.run(0.0, 512, false);
+    CAPTURE(describe(events));
+    CHECK(events == std::vector<Ev>{off(0, 60), on(0, 60, 70)});
+    CHECK(host.lastOk);
+    CHECK(host.owners(60) == kOwnerThru);
+}
+
+TEST_CASE("scheduler thru: a pending release from releaseThru or reset survives a zero-frame block") {
+    SUBCASE("releaseThru") {
+        Host host;
+        CHECK(host.pushThru(true, 60, 90, 0));
+        REQUIRE(host.run(0.0, 512, false) == std::vector<Ev>{on(0, 60, 90)});
+        host.scheduler.releaseThru();
+        CHECK(host.run(0.0, 0, false) == kNone);  // a parameter flush
+        CHECK(host.lastOk);
+        CHECK(host.owners(60) == kOwnerThru);
+        const std::vector<Ev> events = host.run(0.0, 512, false);
+        CAPTURE(describe(events));
+        CHECK(events == std::vector<Ev>{off(0, 60)});
+        CHECK(host.lastOk);
+        CHECK(host.owners(60) == 0);
+    }
+    SUBCASE("reset") {
+        Host host;
+        CHECK(host.pushThru(true, 60, 90, 0));
+        REQUIRE(host.run(0.0, 512, false) == std::vector<Ev>{on(0, 60, 90)});
+        host.scheduler.reset(kSr);
+        CHECK(host.run(0.0, 0, false) == kNone);
+        CHECK(host.lastOk);
+        const std::vector<Ev> events = host.run(0.0, 512, false);
+        CAPTURE(describe(events));
+        CHECK(events == std::vector<Ev>{off(0, 60)});
+        CHECK(host.lastOk);
+        CHECK(host.owners(60) == 0);
+    }
+}
+
+TEST_CASE("scheduler thru: releaseThru on a pitch the progression co-owns leaves the note to it") {
+    Host host;
+    host.adopt(snapshotOf(cFour()));
+    REQUIRE(host.run(0.0, 512, true) == std::vector<Ev>{on(0, 60), on(0, 64), on(0, 67)});
+    CHECK(host.pushThru(true, 60, 80, 5));
+    REQUIRE(host.run(512.0 / kSamplesPerBeat, 512, true) == std::vector<Ev>{off(5, 60), on(5, 60, 80)});
+    REQUIRE(host.owners(60) == (kOwnerProgression | kOwnerThru));
+    host.scheduler.releaseThru();
+    const std::vector<Ev> events = host.run(1024.0 / kSamplesPerBeat, 512, true);
+    CAPTURE(describe(events));
+    CHECK(events == kNone);  // no physical off: the progression still holds 60
+    CHECK(host.lastOk);
+    CHECK(host.owners(60) == kOwnerProgression);
+    CHECK(host.scheduler.sounding(60));
+}
+
+TEST_CASE("scheduler thru: releaseThru with nothing held writes nothing") {
+    Host host;
+    host.scheduler.releaseThru();
+    const std::vector<Ev> events = host.run(0.0, 512, false);
+    CAPTURE(describe(events));
+    CHECK(events == kNone);
+    CHECK(host.lastOk);
+}
+
 TEST_CASE("scheduler: a worst-case block fits the plug-in's output capacity") {
     // The densest progression (the throughput test's fixture above: eight-note chords at 96 events per beat,
     // 300 bpm, 44.1 kHz, 4096-frame blocks) with eight previews of eight pitches each already sounding (0..55

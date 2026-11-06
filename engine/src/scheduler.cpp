@@ -144,7 +144,7 @@ Scheduler::Scheduler() noexcept
       mThruCount(0),
       mThruOverflow(false),
       mThruWas(false),
-      mThruResetPending(false) {
+      mThruReleasePending(false) {
     mState.owners.fill(0);
     mState.owed.fill(false);
     for (Preview& preview : mState.previews) {
@@ -162,7 +162,7 @@ void Scheduler::reset(double sampleRate) noexcept {
     // them). `reset` runs on the audio thread or while no `process` (and so no `pushThru`) runs.
     mThruHead = 0;
     mThruCount = 0;
-    mThruResetPending = true;
+    mThruReleasePending = true;
 }
 
 void Scheduler::adopt(const Snapshot& snapshot) noexcept {
@@ -238,6 +238,11 @@ bool Scheduler::pushThru(const ThruEvent& event) noexcept {
         ThruQueued{mPreviewClock + event.sampleOffset, event.on, event.pitch, event.velocity};
     ++mThruCount;
     return true;
+}
+
+void Scheduler::releaseThru() noexcept {
+    // Only marked: the queue stays, and the next non-empty block releases before it applies the queue.
+    mThruReleasePending = true;
 }
 
 void Scheduler::panic() noexcept {
@@ -357,15 +362,15 @@ void Scheduler::pushExpiries(int nFrames, std::int64_t previewSamples) noexcept 
 /// arrival order, each at its due time on the preview clock clamped into the block (an overdue one at
 /// offset 0); what the block cannot take stays queued, in order, and makes the block incomplete. With
 /// `thru` off, or after an overflow, the ring is discarded; a mandatory release-all frees every thru
-/// note on the on -> off edge, after an overflow and after a `reset` (with `mThruWas` false no thru note
-/// can exist: thru attacks happen only in blocks with `thru` on, each of which sets it). The release-all
-/// sits in the flush phase, so the attacks this block takes still sound after it.
+/// note on the on -> off edge, after an overflow and after a `reset` or `releaseThru` (with `mThruWas`
+/// false no thru note can exist: thru attacks happen only in blocks with `thru` on, each of which sets
+/// it). The release-all sits in the flush phase, so the attacks this block takes still sound after it.
 void Scheduler::collectThru(bool thru, int lastOffset) noexcept {
     const bool overflow = mThruOverflow;
-    const bool wasReset = mThruResetPending;
+    const bool released = mThruReleasePending;
     mThruOverflow = false;
-    mThruResetPending = false;
-    if (wasReset || ((!thru || overflow) && (overflow || mThruWas))) {
+    mThruReleasePending = false;
+    if (released || ((!thru || overflow) && (overflow || mThruWas))) {
         // Mandatory pushes before this one are at most one progression release-all and two expiry
         // candidates per preview; the static_assert on kReservedReleaseEvents keeps room for this one.
         const bool pushed = pushLogical(Logical{mBlockSample, ThruReleaseAll, PhaseFlush, 0, 0, 0, 0}, true);
@@ -763,7 +768,7 @@ bool Scheduler::process(const BlockInfo& info, MidiOut* out, std::size_t capacit
         capacity = 0;
     }
     if (info.nFrames == 0) {
-        return true;  // an empty block: nothing happens, nothing moves
+        return true;  // an empty block: nothing happens, nothing moves (pending flushes and releases stay)
     }
 
     // Timing. A block whose values are unusable is a stopped block: previews are still served and the
