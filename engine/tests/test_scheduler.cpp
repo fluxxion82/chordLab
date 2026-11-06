@@ -2658,7 +2658,7 @@ TEST_CASE("scheduler: a worst-case block fits the plug-in's output capacity") {
     // above: eight-note chords at 96 events per beat, 300 bpm, 44.1 kHz, 4096-frame blocks) with eight
     // previews of eight pitches each already sounding (0..55 and 68..75, apart from the progression's
     // 60..67). Then one block that is also a seek stops the eight previews, starts eight new ones on the same
-    // pitches (one preview replacement) and carries a full thru queue, 64 attacks on those pitches, each a
+    // pitches (one preview replacement) and carries the full per-block thru allowance (kMaxThruPerBlock), 64 attacks on those pitches, each a
     // retrigger (off and on): 64 + 64 + 128 events on top of the progression's release-all, chase and
     // timeline. That burst peaks at 320, more than the old 256; ChordLab.h's kMidiOutCapacity (512) covers
     // it and every block here is complete. A pathological run of queued preview commands (the queue holds
@@ -2733,7 +2733,7 @@ TEST_CASE("scheduler: a worst-case block fits the plug-in's output capacity") {
         for (int b = 0; b < 40; ++b) {
             block(ppq);
         }
-        MESSAGE("capacity budget, strum " << static_cast<int>(feel.strum) << ": modelled burst (full thru queue, "
+        MESSAGE("capacity budget, strum " << static_cast<int>(feel.strum) << ": modelled burst (full per-block thru allowance, "
                 << "one preview replacement, progression) " << burst << " events, worst block " << maxWritten
                 << " (of " << kCapacity << "); queued preview runs beyond it take the incomplete-block path");
         CHECK(incomplete == 0);

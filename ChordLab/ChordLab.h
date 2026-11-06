@@ -148,8 +148,8 @@ private:
   // overstates it: releases are counted by the scheduler's dry run and attacks get only what is left. The
   // engine test "scheduler: a worst-case block fits the plug-in's output capacity" models one burst: over
   // the densest Feel progression with eight 8-pitch previews already sounding, one seek block stops them,
-  // starts eight new ones on the same pitches and retriggers a full thru queue (64) on those pitches. That
-  // modelled burst (full thru queue, one preview replacement, progression) peaks at 320 events (more than
+  // starts eight new ones on the same pitches and retriggers the full per-block thru allowance (kMaxThruPerBlock, 64) on those pitches. That
+  // modelled burst (full per-block thru allowance, one preview replacement, progression) peaks at 320 events (more than
   // the old 256), and 512 covers it. It is not a bound on every block: a pathological run of queued preview
   // commands (up to 64, each replacing sounding previews) can ask for more, and is bounded by the writer's
   // incomplete-block path (attacks dropped, the block reported), not by this number.

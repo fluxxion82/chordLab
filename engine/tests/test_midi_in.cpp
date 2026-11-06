@@ -248,6 +248,18 @@ namespace {
 /// The deadline every cross-thread ring test stays inside, so a lost wake-up fails instead of hanging.
 constexpr auto kThreadedBudget = std::chrono::seconds(5);
 
+/// Stops and joins its producer on every exit, including a throwing REQUIRE: a joinable std::thread destroyed
+/// during unwinding calls std::terminate and would abort the whole binary instead of failing one test.
+struct ProducerJoiner {
+    std::thread& thread;
+    std::atomic<bool>& stop;
+    void join() {
+        stop = true;  // a no-op after a normal finish; on a timeout it frees a producer blocked on a full ring
+        if (thread.joinable()) thread.join();
+    }
+    ~ProducerJoiner() { join(); }
+};
+
 bool intact(const HeardEvent& e, std::uint64_t seq) {
     return e.kind == HeardEvent::NoteOn && e.sampleTime == seq && e.pitch == seq % 128 && e.velocity == 100;
 }
@@ -258,19 +270,19 @@ TEST_CASE("HeardRing: a producer thread's 10 000 events arrive in order and inta
     constexpr std::uint64_t kEvents = 10000;  // 39 wraps of the 256-slot ring
     HeardRing ring;
     const auto deadline = std::chrono::steady_clock::now() + kThreadedBudget;
-    std::atomic<bool> timedOut{false};
+    std::atomic<bool> stop{false};
     std::thread producer([&] {
         for (std::uint64_t seq = 0; seq < kEvents;) {
             if (ring.push(noteOn(seq))) {
                 ++seq;
-            } else if (std::chrono::steady_clock::now() > deadline) {
-                timedOut = true;
+            } else if (stop) {
                 return;
             } else {
                 std::this_thread::yield();  // full: let the consumer catch up
             }
         }
     });
+    ProducerJoiner joiner{producer, stop};
     std::uint64_t expected = 0;
     std::uint64_t broken = 0;  // events out of order or damaged; must stay 0
     while (expected < kEvents && std::chrono::steady_clock::now() <= deadline) {
@@ -282,8 +294,7 @@ TEST_CASE("HeardRing: a producer thread's 10 000 events arrive in order and inta
         if (!intact(e, expected)) ++broken;
         ++expected;
     }
-    producer.join();
-    CHECK_FALSE(timedOut.load());
+    joiner.join();  // join first: no assertion below may throw while the producer is still running
     CHECK(expected == kEvents);
     CHECK(broken == 0);
     // A full ring refuses, and every refusal sets the flag: the producer retried each one, so nothing was lost.
@@ -299,7 +310,7 @@ TEST_CASE("HeardRing: across threads an overrun is reported once and the stream 
     const auto deadline = std::chrono::steady_clock::now() + kThreadedBudget;
     std::atomic<bool> burstDone{false};
     std::atomic<bool> resynced{false};
-    std::atomic<bool> timedOut{false};
+    std::atomic<bool> stop{false};
     std::atomic<std::uint64_t> refused{0};
     std::thread producer([&] {
         for (std::uint64_t seq = 0; seq < kBurst; ++seq) {
@@ -307,23 +318,21 @@ TEST_CASE("HeardRing: across threads an overrun is reported once and the stream 
         }
         burstDone = true;
         while (!resynced) {
-            if (std::chrono::steady_clock::now() > deadline) {
-                timedOut = true;
-                return;
-            }
+            if (stop) return;
             std::this_thread::yield();
         }
         for (std::uint64_t seq = kBurst; seq < kBurst + kAfter;) {
             if (ring.push(noteOn(seq))) {
                 ++seq;
-            } else if (std::chrono::steady_clock::now() > deadline) {
-                timedOut = true;
+            } else if (stop) {
                 return;
             } else {
                 std::this_thread::yield();
             }
         }
     });
+    // Declared right after the thread: every exit below, a throwing REQUIRE included, stops and joins it first.
+    ProducerJoiner joiner{producer, stop};
     // The consumer sleeps through the burst, then resynchronises as OnIdle does: the flag first, then the
     // lost epoch discarded whole.
     while (!burstDone && std::chrono::steady_clock::now() <= deadline) {
@@ -352,8 +361,7 @@ TEST_CASE("HeardRing: across threads an overrun is reported once and the stream 
         if (!intact(e, expected)) ++broken;
         ++expected;
     }
-    producer.join();
-    CHECK_FALSE(timedOut.load());
+    joiner.join();  // join first: no assertion below may throw while the producer is still running
     CHECK(expected == kBurst + kAfter);
     CHECK(broken == 0);
 }
