@@ -56,6 +56,8 @@ TEST_CASE("midi_in: every other message is nothing") {
     CHECK_FALSE(heardEventOf(0xC0, 5, 0, 0).has_value());     // program change
     CHECK_FALSE(heardEventOf(0xD0, 50, 0, 0).has_value());    // channel pressure
     CHECK_FALSE(heardEventOf(0xF8, 0, 0, 0).has_value());     // clock
+    CHECK_FALSE(heardEventOf(0x3C, 64, 0, 0).has_value());    // a data byte where a status belongs
+    CHECK_FALSE(heardEventOf(0xF0, 0x7E, 0x7F, 0).has_value());  // SysEx start
 }
 
 TEST_CASE("midi_in: channels are merged") {
@@ -111,6 +113,8 @@ TEST_CASE("midi_in: thru ignores CCs and everything else") {
     CHECK_FALSE(thruEventOf(0xC0, 5, 0, 0).has_value());
     CHECK_FALSE(thruEventOf(0xD0, 50, 0, 0).has_value());
     CHECK_FALSE(thruEventOf(0xF8, 0, 0, 0).has_value());
+    CHECK_FALSE(thruEventOf(0x3C, 64, 0, 0).has_value());  // a data byte where a status belongs
+    CHECK_FALSE(thruEventOf(0xF0, 0x7E, 0x7F, 0).has_value());  // SysEx start
 }
 
 namespace {

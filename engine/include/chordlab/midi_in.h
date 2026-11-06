@@ -8,13 +8,15 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <type_traits>
 
 namespace chordlab {
 
 /// Normalises one incoming MIDI message (status byte with channel, two data bytes) into what the listener
 /// and the scheduler take (design D1): note-on with velocity 0 is a note-off; CC 64 is `Sustain` with the
 /// value as velocity; every other message is nothing. Channels are merged (the channel nibble is
-/// ignored). `sampleTime` is stamped on the result unchanged. Audio thread; no allocation.
+/// ignored). `sampleTime` is stamped on the result unchanged. Data bytes are not range-checked (the
+/// listener and the scheduler ignore pitches >= 128 and clamp velocities). Audio thread; no allocation.
 std::optional<HeardEvent> heardEventOf(std::uint8_t status, std::uint8_t data1, std::uint8_t data2,
                                        std::uint64_t sampleTime) noexcept;
 
@@ -34,6 +36,10 @@ std::optional<ThruEvent> thruEventOf(std::uint8_t status, std::uint8_t data1, st
 ///
 /// Overflow: `push` on a full ring returns false, drops the event and sets a sticky flag; `takeOverflow`
 /// returns the flag and clears it, so the consumer can resynchronise (the listener forgets, design D1).
+/// The consumer must call `takeOverflow()` *before* draining and, when it returns true, pop and discard
+/// everything then resynchronise. The flag's release store and the exchange's acquire make every event
+/// pushed before the refusal visible to those pops; draining first and taking the flag afterwards could
+/// feed the listener a pre-drop note-on whose note-off was the refused event.
 ///
 /// Threads: `push` belongs to the one producer thread, `pop` and `takeOverflow` to the one consumer
 /// thread.
@@ -62,10 +68,11 @@ private:
                   "the capacity must be a power of two so the 32-bit counters wrap cleanly");
     static_assert(std::atomic<std::uint32_t>::is_always_lock_free, "the ring must never lock");
     static_assert(std::atomic<bool>::is_always_lock_free, "the ring must never lock");
+    static_assert(std::is_trivially_copyable_v<HeardEvent>, "slots are copied while the other thread may read others");
 
     std::array<HeardEvent, kCapacity> slots_{};
-    std::atomic<std::uint32_t> head_{0};  // next slot to write; written by the producer
-    std::atomic<std::uint32_t> tail_{0};  // next slot to read; written by the consumer
+    alignas(64) std::atomic<std::uint32_t> head_{0};  // next slot to write; written by the producer
+    alignas(64) std::atomic<std::uint32_t> tail_{0};  // next slot to read; written by the consumer
     std::atomic<bool> overflow_{false};
 };
 

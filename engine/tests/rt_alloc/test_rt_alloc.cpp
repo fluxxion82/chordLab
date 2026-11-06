@@ -392,8 +392,9 @@ TEST_CASE("rt alloc: the heard ring and the MIDI adapter allocate nothing across
     std::uint64_t overflows = 0;
     std::uint64_t heard = 0;
     std::uint64_t thru = 0;
-    std::uint64_t order = 0;  // sum of out-of-order pops, must stay 0
-    std::uint64_t nextPop = 0;
+    std::uint64_t order = 0;  // pops not strictly after the previous one (out of order or duplicate), must stay 0
+    constexpr std::uint64_t kNone = ~std::uint64_t{0};
+    std::uint64_t lastPop = kNone;
 
     AllocationProbe probe;
     for (int i = 0; i < 10000; ++i) {
@@ -411,19 +412,19 @@ TEST_CASE("rt alloc: the heard ring and the MIDI adapter allocate nothing across
             HeardEvent out{};
             if (ring.pop(out)) {
                 ++popped;
-                if (out.sampleTime < nextPop) {
+                if (lastPop != kNone && out.sampleTime <= lastPop) {
                     ++order;
                 }
-                nextPop = out.sampleTime;
+                lastPop = out.sampleTime;
             }
         } else if (roll < 33) {
             HeardEvent out{};
             while (ring.pop(out)) {
                 ++popped;
-                if (out.sampleTime < nextPop) {
+                if (lastPop != kNone && out.sampleTime <= lastPop) {
                     ++order;
                 }
-                nextPop = out.sampleTime;
+                lastPop = out.sampleTime;
             }
         }
         if (ring.takeOverflow()) {
@@ -441,7 +442,20 @@ TEST_CASE("rt alloc: the heard ring and the MIDI adapter allocate nothing across
     }
     const std::size_t allocations = probe.count();
 
+    // Drain what is left (outside the measured scope): everything accepted must come out exactly once.
+    {
+        HeardEvent out{};
+        while (ring.pop(out)) {
+            ++popped;
+            if (lastPop != kNone && out.sampleTime <= lastPop) {
+                ++order;
+            }
+            lastPop = out.sampleTime;
+        }
+    }
+
     CHECK(allocations == 0);
+    CHECK(popped == pushed);  // "pushed" counts accepted pushes (attempts minus refused)
     CHECK(refused > 0);  // the ring did fill up
     CHECK(overflows > 0);
     CHECK(pushed + refused == 10000);
