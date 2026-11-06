@@ -85,6 +85,10 @@ private:
   // ProcessBlock and before the first pushThru of a callback (ProcessMidiMsg), so a reset never discards
   // incoming notes of the block it precedes.
   void ApplyPendingReset() noexcept;
+  // Audio thread: if MIDI arrived while bypassed, asks the scheduler to release every thru note on the
+  // next block with frames (Scheduler::releaseThru, which keeps the queue). Called where ApplyPendingReset
+  // is, after it.
+  void ApplyPendingBypassRelease() noexcept;
   // Main thread: pushes {"schema":1,"ppq":ppq,"playing":playing} (the playhead) to the editor.
   void PushTransport(double ppq, bool playing);
   // Main thread: exports the document (chordlab::exportMidi under mModelMutex, with its meter), writes it as a format 0 MIDI file under a unique, never-reused
@@ -164,7 +168,7 @@ private:
   chordlab::HeardRing mHeardRing;
   std::atomic<uint64_t> mSampleClock{0};                       // processed samples since construction
   std::atomic<bool> mBlockRefused{false};                      // a thru push was refused in the block being gathered
-  std::atomic<bool> mBypassSeen{false};                        // MIDI arrived while bypassed: the next block runs thru off once
+  std::atomic<bool> mBypassSeen{false};                        // MIDI arrived while bypassed: the thru notes are released after it
   uint32_t mDroppedHeard = 0;                                  // main thread: heard-ring overflows seen
   uint32_t mReportedDroppedHeard = 0;                          // main thread: last value pushed to the UI
   chordlab::Listener mListener;                                // main thread only (it may allocate)
