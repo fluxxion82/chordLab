@@ -3,6 +3,8 @@
 #include "IPlug_include_in_plug_hdr.h"
 
 #include "chordlab/document.h"
+#include "chordlab/listener.h"
+#include "chordlab/midi_in.h"
 #include "chordlab/palette.h"
 #include "chordlab/publication.h"
 #include "chordlab/scheduler.h"
@@ -39,6 +41,10 @@ public:
   void OnIdle() override;
   void OnReset() override;
   void ProcessBlock(sample** inputs, sample** outputs, int nFrames) override;
+  // Audio thread, once per incoming MIDI event before the block's ProcessBlock (also while bypassed):
+  // feeds the heard ring and queues the note for thru. Replaces iPlug2's default, which forwards every
+  // message to the output unmanaged; the base is never called. See "MIDI in" in ChordLab.mm.
+  void ProcessMidiMsg(const IMidiMsg& msg) override;
   bool OnMessage(int msgTag, int ctrlTag, int dataSize, const void* pData) override;
   // Keys the host delivers through the plug-in API (VST3 onKeyDown): forwarded to the Swift editor's
   // key router (ChordLabViewController.handleKey); true when the editor consumed the key.
@@ -55,7 +61,7 @@ private:
   // Palette of the browsed key annotated against the project key; call after anything that may have
   // changed either key (commands, undo/redo, a state load). The caller holds mModelMutex.
   void RebuildPaletteLocked();
-  // Compiles the document and, when anything a slot carries changed (content or followHost), publishes
+  // Compiles the document and, when anything a slot carries changed (content, followHost or midiThru), publishes
   // it to the audio thread (see "Playback snapshots" in ChordLab.mm). Call after every accepted command
   // and state load. The caller holds mModelMutex, which is what makes it a single producer.
   void PublishSnapshotLocked();
@@ -69,8 +75,16 @@ private:
   void RestoreEditorSize(int width, int height);
   // Main thread: parses a kMsgTagPreview payload and queues it for the scheduler.
   void HandlePreview(std::string_view json);
-  // Main thread: pushes {"schema":1,"incompleteBlocks":n} to the editor.
-  void PushStatus(uint32_t incompleteBlocks);
+  // Main thread: pushes {"schema":1,"incompleteBlocks":n,"droppedHeard":n} to the editor.
+  void PushStatus(uint32_t incompleteBlocks, uint32_t droppedHeard);
+  // Pushes heardJson(mListener, projectKey) as kMsgTagHeard to an open editor and acknowledges the listener,
+  // on the main thread (queued when called elsewhere); with no editor it does nothing and leaves `changed`
+  // set, and OnUIOpen replays. The JSON is built under mModelMutex (the document only read).
+  void PushHeard();
+  // Audio thread: runs the scheduler reset OnReset flagged, if one is pending. Called at the top of
+  // ProcessBlock and before the first pushThru of a callback (ProcessMidiMsg), so a reset never discards
+  // incoming notes of the block it precedes.
+  void ApplyPendingReset() noexcept;
   // Main thread: pushes {"schema":1,"ppq":ppq,"playing":playing} (the playhead) to the editor.
   void PushTransport(double ppq, bool playing);
   // Main thread: exports the document (chordlab::exportMidi under mModelMutex, with its meter), writes it as a format 0 MIDI file under a unique, never-reused
@@ -82,8 +96,9 @@ private:
   // with compileSection (re-based to beat 0) and named after the key and the section; an unknown id or a
   // malformed message is a kMsgTagError.
   void HandleExportSection(std::string_view json);
-  // The export tempo: the host's last seen bpm, 120 before the first block or when unusable.
-  double ExportBpm() const;
+  // The host's last seen bpm, 120 before the first block or when unusable: the export's tempo and the
+  // listener's (any thread).
+  double HostBpm() const;
   // Main thread: the shared tail of the two exports: writes `bytes` (chordlab::exportMidi) under a unique name carrying
   // `label` ("C Ionian", "C Ionian-Verse"; sanitised), purges stale exports and pushes the path or an error.
   void WriteExport(const std::vector<uint8_t>& bytes, const std::string& label);
@@ -105,22 +120,24 @@ private:
   // it, which the triple buffer keeps unmodified until the next acquire: exactly the lifetime adopt
   // requires. Every slot is preallocated, so the handoff never allocates, locks or blocks either thread.
   // The generation (mPublication.generation) moves only with the content, so the scheduler's rule "same
-  // generation, same content" holds; followHost travels in the slot outside the generation, so a block
-  // always gates the progression it is playing with the flag that was saved with it, and a follow-only
-  // change costs the scheduler nothing (publication.h). mPublication belongs to the producer.
+  // generation, same content" holds; followHost and midiThru travel in the slot outside the generation, so
+  // a block always gates the progression it is playing (and its thru) with the flags that were saved with
+  // it, and a flag-only change costs the scheduler nothing (publication.h). mPublication belongs to the
+  // producer.
   chordlab::TripleBuffer<chordlab::SnapshotSlot> mSnapshots;
   chordlab::Publication mPublication;
 
-  // The scheduler belongs to the audio thread (process, reset, panic); pushPreview is its one other-thread
-  // entry and is called from the main thread only (OnMessage, CloseWindow). OnReset and panic requests
-  // are flagged here and consumed at the top of ProcessBlock.
+  // The scheduler belongs to the audio thread (process, reset, panic, and pushThru from ProcessMidiMsg);
+  // pushPreview is its one other-thread entry and is called from the main thread only (OnMessage,
+  // CloseWindow). OnReset and panic requests are flagged here and consumed at the top of ProcessBlock; a
+  // pending reset is consumed earlier, by the callback's first ProcessMidiMsg, when MIDI arrives.
   chordlab::Scheduler mScheduler;
   // Output capacity (listening design D16): iPlug2's VST3 output queue (IMidiQueue) is sized in
   // setupProcessing to the host's maxSamplesPerBlock rounded up to a 4 KiB page of 8-byte IMidiMsg, so at
   // least 512 entries (exactly 512 at a 512-sample host buffer; IPlugMidi.h's own DEFAULT_BLOCK_SIZE macro,
-  // 512, not IPlugConstants.h's 1024, sizes it at construction), and it grows by realloc when full. Until
-  // Task 8b overrides ProcessMidiMsg, iPlug2's default forwards incoming MIDI into that same queue, so a
-  // full 512-event block leaves no room for it there. The naive worst case of one block, 96 performed + 64
+  // 512, not IPlugConstants.h's 1024, sizes it at construction), and it grows by realloc when full. Incoming
+  // MIDI no longer reaches that queue on its own (ProcessMidiMsg overrides iPlug2's forwarding default):
+  // thru notes are scheduler output and count against this capacity. The naive worst case of one block, 96 performed + 64
   // preview attacks + 64 thru + 64 retrigger offs + 128 owed releases + 128 flush releases = 544,
   // overstates it: releases are counted by the scheduler's dry run and attacks get only what is left. The
   // proof is the engine test "scheduler: a worst-case block fits the plug-in's output capacity": over the
@@ -132,18 +149,33 @@ private:
                 "every owed release must fit the block that owes it");
   std::array<chordlab::MidiOut, kMidiOutCapacity> mMidiOut{};
   static_assert(std::atomic<bool>::is_always_lock_free && std::atomic<double>::is_always_lock_free &&
-                std::atomic<uint32_t>::is_always_lock_free, "the audio thread must never lock on these");
+                std::atomic<uint32_t>::is_always_lock_free && std::atomic<uint64_t>::is_always_lock_free,
+                "the audio thread must never lock on these");
   std::atomic<bool> mResetPending{false};
   std::atomic<double> mResetSampleRate{44100.0};
   std::atomic<bool> mPanicPending{false};
   std::atomic<uint32_t> mIncompleteBlocks{0};                  // blocks whose process() returned false
   uint32_t mReportedIncompleteBlocks = 0;                      // main thread: last value pushed to the UI
 
+  // MIDI in (see "MIDI in" in ChordLab.mm). ProcessMidiMsg (the producer) pushes every note and pedal
+  // event into mHeardRing stamped on mSampleClock, which ProcessBlock advances by nFrames at the end of
+  // each block (a watermark: every stamp is at or before the published clock once its block is done);
+  // OnIdle (the consumer) drains it into mListener and pushes kMsgTagHeard when its visible outputs change.
+  chordlab::HeardRing mHeardRing;
+  std::atomic<uint64_t> mSampleClock{0};                       // processed samples since construction
+  std::atomic<bool> mBlockRefused{false};                      // a thru push was refused in the block being gathered
+  std::atomic<bool> mBypassSeen{false};                        // MIDI arrived while bypassed: the next block runs thru off once
+  uint32_t mDroppedHeard = 0;                                  // main thread: heard-ring overflows seen
+  uint32_t mReportedDroppedHeard = 0;                          // main thread: last value pushed to the UI
+  chordlab::Listener mListener;                                // main thread only (it may allocate)
+  std::chrono::steady_clock::time_point mLastHeardTick{};      // main thread: the last mListener.advance
+  static constexpr std::chrono::milliseconds kHeardInterval{67};   // key evaluation and heard pushes, at most ~15 Hz
+
   // The playhead. ProcessBlock stores the block's host position and whether the progression plays; OnIdle
   // pushes them as kMsgTagTransport at most every kTransportPushInterval, and only when they changed.
   std::atomic<double> mTransportPpq{0.0};
   std::atomic<bool> mTransportPlaying{false};
-  // The host tempo as ProcessBlock last saw it, for the MIDI export; 120 until the first block.
+  // The host tempo as ProcessBlock last saw it, for the MIDI export and the listener; 120 until the first block.
   std::atomic<double> mHostBpm{120.0};
   std::string mLastExportPath;                                 // main thread: the path the UI was last given
   std::vector<std::string> mExportPaths;                       // main thread: this instance's exports, for the destructor's cleanup
