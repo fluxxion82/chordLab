@@ -5,7 +5,8 @@ import SwiftUI
 /// event of the session; × makes it inactive again). Then, in one line:
 /// `Heard · A Minor · 87% [Use] · Am7 · vi7 [Add] ×`. Before a key qualifies the key part reads
 /// `listening · 5 notes` and has no Use; with no chord identified the chord part is the held notes
-/// (`C, E, G♯`, nothing when none is held) and has no Add; Add is disabled once the heard chord is released.
+/// (`C, E, G♯`, nothing when none is held) and has no Add. Once the heard chord is released it dims and Add
+/// stays enabled (D10: a two-hand chord cannot be held while clicking).
 /// The texts are `HeardText`'s and truncate at the tail when the row is short of width; the buttons never do.
 ///
 /// Use is the Key pickers' change (`ChordLabState.useHeardKey`), Add appends the chord as played
@@ -53,12 +54,12 @@ struct HeardView: View {
   @ViewBuilder private func chordPart(_ heard: HeardJSON) -> some View {
     if let line = HeardText.chordLine(heard) {
       Text("·").foregroundStyle(.secondary).fixedSize().accessibilityHidden(true)
-      Text(line).foregroundStyle(.white).truncationMode(.tail)
+      Text(line).foregroundStyle(heard.chordHeld ? AnyShapeStyle(.white) : AnyShapeStyle(.secondary))
+        .truncationMode(.tail)
       Button("Add") { state.addHeardChord() }
         .fixedSize()
-        .disabled(!heard.chordHeld)
-        .help(heard.chordHeld ? "Add the heard chord, as played, to the end of the progression"
-                              : "Hold the chord to add it")
+        .disabled(heard.chord == nil)
+        .help("Add the heard chord, as played, to the end of the progression")
         .accessibilityLabel("Add the heard chord")
     } else {
       let held = HeardText.heldLine(heard)

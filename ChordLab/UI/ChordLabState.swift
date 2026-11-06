@@ -249,15 +249,15 @@ class ChordLabState: NSObject, ObservableObject {
   /// (`changeProjectKey`), so the browse comes home and Transpose with key, its hint and the moved note
   /// behave exactly as after a pick. Nothing without a heard key.
   @MainActor func useHeardKey() {
-    guard let key = heard?.key else { return }
-    changeProjectKey(pc: KeyNames.pitchClass(of: key.tonic), mode: key.mode)
+    guard let key = HeardCommands.use(heard) else { return }
+    changeProjectKey(pc: key.pc, mode: key.mode)
   }
 
   /// The group's Add: appends the heard chord as it was played (`appendChord` with its inversion, which the
-  /// engine marks manual, D11). Nothing unless a chord is identified and still held.
+  /// engine marks manual, D11), held or already released (D10; `HeardCommands.add`). Nothing without a chord.
   @MainActor func addHeardChord() {
-    guard let heard, heard.chordHeld, let chord = heard.chord else { return }
-    send(command: ["cmd": "appendChord", "root": chord.root, "type": chord.type, "inversion": chord.inversion])
+    guard let append = HeardCommands.add(heard) else { return }
+    send(command: append.command)
   }
 
   /// The group's ×: the listener forgets everything (`kMsgTagClearHeard`, no payload, D13); the plug-in
