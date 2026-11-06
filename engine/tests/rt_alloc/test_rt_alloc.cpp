@@ -11,6 +11,7 @@
 #include "chordlab/compiler.h"
 #include "chordlab/document.h"
 #include "chordlab/limits.h"
+#include "chordlab/midi_in.h"
 #include "chordlab/note_event.h"
 #include "chordlab/publication.h"
 #include "chordlab/scheduler.h"
@@ -378,4 +379,74 @@ TEST_CASE("rt alloc: handing over full 4096-event performed snapshots allocates 
     CHECK(missing == 0);
     CHECK(emitted > 1000);
     CHECK(incomplete == 0);  // 512-frame blocks at 120 bpm: the density never outruns a block
+}
+
+TEST_CASE("rt alloc: the heard ring and the MIDI adapter allocate nothing across 10k pushes, pops and messages") {
+    HeardRing ring;  // constructed before the measured scope
+    std::mt19937 rng(20261105);
+    std::uniform_int_distribution<int> byte(0, 255);
+    std::uniform_int_distribution<int> dice(0, 99);
+    std::uint64_t pushed = 0;
+    std::uint64_t popped = 0;
+    std::uint64_t refused = 0;
+    std::uint64_t overflows = 0;
+    std::uint64_t heard = 0;
+    std::uint64_t thru = 0;
+    std::uint64_t order = 0;  // sum of out-of-order pops, must stay 0
+    std::uint64_t nextPop = 0;
+
+    AllocationProbe probe;
+    for (int i = 0; i < 10000; ++i) {
+        // Every 1000 iterations the first 400 only push, so the ring fills (256) and refuses; after that
+        // single pops and the odd drain keep it moving.
+        const HeardEvent event{HeardEvent::NoteOn, static_cast<std::uint8_t>(i & 127), 100,
+                               static_cast<std::uint64_t>(i)};
+        if (ring.push(event)) {
+            ++pushed;
+        } else {
+            ++refused;
+        }
+        const int roll = i % 1000 < 400 ? 99 : dice(rng);
+        if (roll < 30) {
+            HeardEvent out{};
+            if (ring.pop(out)) {
+                ++popped;
+                if (out.sampleTime < nextPop) {
+                    ++order;
+                }
+                nextPop = out.sampleTime;
+            }
+        } else if (roll < 33) {
+            HeardEvent out{};
+            while (ring.pop(out)) {
+                ++popped;
+                if (out.sampleTime < nextPop) {
+                    ++order;
+                }
+                nextPop = out.sampleTime;
+            }
+        }
+        if (ring.takeOverflow()) {
+            ++overflows;
+        }
+        const auto status = static_cast<std::uint8_t>(byte(rng));
+        const auto d1 = static_cast<std::uint8_t>(byte(rng));
+        const auto d2 = static_cast<std::uint8_t>(byte(rng));
+        if (heardEventOf(status, d1, d2, static_cast<std::uint64_t>(i))) {
+            ++heard;
+        }
+        if (thruEventOf(status, d1, d2, i & 1023)) {
+            ++thru;
+        }
+    }
+    const std::size_t allocations = probe.count();
+
+    CHECK(allocations == 0);
+    CHECK(refused > 0);  // the ring did fill up
+    CHECK(overflows > 0);
+    CHECK(pushed + refused == 10000);
+    CHECK(order == 0);
+    CHECK(popped <= pushed);
+    CHECK(heard > 0);
+    CHECK(thru > 0);
 }
