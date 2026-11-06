@@ -1512,7 +1512,7 @@ std::string heardJson(const Listener& listener, const Key& projectKey) {
     if (const std::optional<HeardKey> heardKey = listener.key()) {
         key = keyToJson(heardKey->key);  // {"tonic":{"letter","alter"},"mode"}
         key["name"] = keyName(heardKey->key);
-        key["percent"] = static_cast<int>(std::lround(100.0 * heardKey->r));
+        key["percent"] = std::clamp(static_cast<int>(std::lround(100.0 * heardKey->r)), 0, 100);
     }
 
     return json{{"schema", kJsonSchema},

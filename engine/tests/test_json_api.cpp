@@ -3490,6 +3490,19 @@ Listener holding(const std::vector<int>& pitches) {
     return l;
 }
 
+/// The C major scale played note by note, each released as the next starts: the listener settles on C Ionian.
+Listener heardCMajorScale() {
+    Listener l;
+    const std::vector<int> scale{60, 62, 64, 65, 67, 69, 71, 72};
+    for (std::size_t i = 0; i < scale.size(); ++i) {
+        const double beat = static_cast<double>(i);
+        heardOn(l, scale[i], beat);
+        heardOff(l, scale[i], beat + 1);
+        l.advance(heardAt(beat + 1), kHeardBpm, kHeardRate);
+    }
+    return l;
+}
+
 std::vector<std::string> heldNames(const json& j) {
     return j.at("heldNames").get<std::vector<std::string>>();
 }
@@ -3557,13 +3570,7 @@ TEST_CASE("heardJson: a lone held note is spelled by the project key") {
 }
 
 TEST_CASE("heardJson: the heard key names the tonic and mode; the project key only spells") {
-    Listener l;
-    for (int i = 0; i < 8; ++i) {
-        const int pitch = std::vector<int>{60, 62, 64, 65, 67, 69, 71, 72}[static_cast<std::size_t>(i)];
-        heardOn(l, pitch, i);
-        heardOff(l, pitch, i + 1);
-        l.advance(heardAt(i + 1), kHeardBpm, kHeardRate);
-    }
+    const Listener l = heardCMajorScale();
     for (const Key& project : {key('C', 0, Mode::Ionian), key('D', 0, Mode::Ionian)}) {
         const json j = json::parse(heardJson(l, project));
         REQUIRE(j["key"].is_object());
@@ -3571,7 +3578,22 @@ TEST_CASE("heardJson: the heard key names the tonic and mode; the project key on
         CHECK(j["key"]["mode"] == "Ionian");
         CHECK(j["key"]["name"] == "C Ionian");
         CHECK(j["key"]["percent"].is_number_integer());
-        CHECK(j["key"]["percent"].get<int>() >= 85);
+        // The model's r_s for the 8-note scale is 0.901352, so lround(100 * r) = 90.
+        CHECK(j["key"]["percent"].get<int>() == 90);
+        CHECK(j["key"]["percent"].get<int>() >= 0);
+        CHECK(j["key"]["percent"].get<int>() <= 100);
+        std::vector<std::string> keyMembers;
+        for (auto it = j["key"].begin(); it != j["key"].end(); ++it) {
+            keyMembers.push_back(it.key());
+        }
+        std::sort(keyMembers.begin(), keyMembers.end());
+        CHECK(keyMembers == std::vector<std::string>{"mode", "name", "percent", "tonic"});
+        std::vector<std::string> tonicMembers;
+        for (auto it = j["key"]["tonic"].begin(); it != j["key"]["tonic"].end(); ++it) {
+            tonicMembers.push_back(it.key());
+        }
+        std::sort(tonicMembers.begin(), tonicMembers.end());
+        CHECK(tonicMembers == std::vector<std::string>{"alter", "letter"});
         CHECK(j["onsets"] == 8);
     }
 }
@@ -3593,4 +3615,46 @@ TEST_CASE("heardJson: after the hands lift the chord stays, unheld, and loose no
     j = json::parse(heardJson(e, key('C', 0, Mode::Ionian)));
     CHECK(j["chordHeld"] == false);
     CHECK(heldNames(j) == std::vector<std::string>{"Ab", "B", "D"});
+}
+
+TEST_CASE("heardJson: a held non-chord-tone reads by spell() while chord tones keep the chord's spelling") {
+    // E7 plus C#/Db (61): the chord stays latched and held, 61 is not one of its tones.
+    const Listener l = holding({64, 68, 71, 74, 61});
+    const json c = json::parse(heardJson(l, key('C', 0, Mode::Ionian)));
+    CHECK(c["chordHeld"] == true);
+    CHECK(c["chord"]["symbol"] == "E7");
+    CHECK(heldNames(c) == std::vector<std::string>{"Db", "E", "G#", "B", "D"});
+    const json d = json::parse(heardJson(l, key('D', 0, Mode::Ionian)));
+    CHECK(d["chordHeld"] == true);
+    CHECK(d["chord"]["symbol"] == "E7");
+    CHECK(heldNames(d) == std::vector<std::string>{"C#", "E", "G#", "B", "D"});
+}
+
+TEST_CASE("heardJson: the project key changes the spellings, never the heard key") {
+    Listener l = heardCMajorScale();
+    heardOn(l, 61, 9);
+    heardOn(l, 66, 9);
+    struct Row {
+        Key project;
+        std::vector<std::string> names;
+        const char* symbol;
+        const char* roman;
+    };
+    const std::vector<Row> rows{{key('C', 0, Mode::Ionian), {"C#", "F#"}, "F#5", "#IV5"},
+                                {key('D', 0, Mode::Ionian), {"C#", "F#"}, "F#5", "III5"},
+                                {key('F', 0, Mode::Ionian), {"Db", "Gb"}, "Gb5", "bII5"}};
+    for (const Row& row : rows) {
+        const json j = json::parse(heardJson(l, row.project));
+        CHECK(heldNames(j) == row.names);
+        CHECK(j["chord"]["symbol"] == row.symbol);
+        CHECK(j["chord"]["roman"] == row.roman);
+        CHECK(j["key"]["name"] == "C Ionian");
+    }
+}
+
+TEST_CASE("heardJson: held is ascending whatever the input order") {
+    const Listener l = holding({67, 57, 64, 60});
+    const json j = json::parse(heardJson(l, key('C', 0, Mode::Ionian)));
+    CHECK(j["held"] == json::array({57, 60, 64, 67}));
+    CHECK(heldNames(j) == std::vector<std::string>{"A", "C", "E", "G"});
 }

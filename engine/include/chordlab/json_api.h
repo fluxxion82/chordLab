@@ -262,7 +262,8 @@ std::string keyName(const Key& key);
 /// `chordSymbol(chord, projectKey)` and `roman` is `romanNumeral(chord, projectKey)`; `inversion` and `bass`
 /// (a MIDI note) are the listener's. The key is the one the listener shows, named as the snapshot names a key
 /// (`keyName`, "C Ionian"): the project key only spells the notes and the chord, it never renames the heard
-/// key. `percent` is `round(100 * r)` as an integer. `onsets` is `onsetsInWindow()`. Accidentals are ASCII
+/// key. `percent` is `round(100 * r)` as an integer clamped to 0..100
+/// (a defined but failing `r` below 0 is reported for one tick before the key is dropped). `onsets` is `onsetsInWindow()`. Accidentals are ASCII
 /// throughout (the UI adds glyphs). Allocates: the UI/message thread only.
 std::string heardJson(const Listener& listener, const Key& projectKey);
 

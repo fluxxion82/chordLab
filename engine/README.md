@@ -97,10 +97,10 @@ that a compiled snapshot always fits `kMaxSnapshotEvents` (`limits.h`). `TripleB
 (`triple_buffer.h`) is the handoff that satisfies that lifetime rule without a lock: the producer fills
 and publishes preallocated slots, the consumer acquires the latest one per block, and the slot it holds
 is never written until its next acquire. `publication.h` is the producer's half as the plug-in uses it:
-`SnapshotSlot` (the compiled content plus `followHost`, the plug-in's transport gate, and `midiThru`, which
-travel with the progression they belong to) and `fillSlot`, which compiles, compares with the last publication and
-fills a slot only when something changed, bumping the generation for content and keeping it for a
-flag-only change.
+`SnapshotSlot` (the compiled content plus `followHost`, the plug-in's transport gate, and `midiThru`,
+which travel with the progression they belong to) and `fillSlot`, which compiles, compares with the last
+publication and fills a slot only when something changed, bumping the generation for content and keeping
+it for a flag-only change.
 
 ## Threading contract
 
