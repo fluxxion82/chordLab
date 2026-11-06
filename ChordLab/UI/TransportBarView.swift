@@ -2,8 +2,10 @@ import SwiftUI
 
 /// Transport row above the sequence bar: Follow Live (the progression plays while Live's transport runs;
 /// off, it is silent and previews still work), Loop (the progression repeats; off, it plays once and stops
-/// at its end), Panic, and Auto voice-lead (`compile` picks each non-manual chord's inversion and octave
-/// for the smoothest motion from the chord before; P2-D5). The toggles show the snapshot's `followHost`
+/// at its end), Thru (the notes on the MIDI input pass to the output; `ChordLabState.thru` over the
+/// snapshot's `midiThru`, sending `setMidiThru`; hidden when the snapshot has no `midiThru`, an older
+/// plug-in), Panic, and Auto voice-lead (`compile` picks each non-manual chord's inversion and octave for the
+/// smoothest motion from the chord before; P2-D5). The toggles show the snapshot's `followHost`
 /// / `progressionLoop` / `autoVoiceLead` and send `setFollowHost` / `setProgressionLoop` /
 /// `setAutoVoiceLead`; the snapshot the plug-in answers with is what flips them, so they never drift from
 /// the document (and stay put if a command is rejected). They are drawn by `AccentSwitchToggleStyle`
@@ -21,8 +23,8 @@ import SwiftUI
 /// (`showsTransposeSwitch`).
 ///
 /// One row when it fits (the 900-pt default); at the 700-pt minimum the playback controls (Follow Live,
-/// Loop, Panic) and the editing ones (Auto voice-lead, Transpose with key, + Section, Presets, Feel) take a
-/// row each.
+/// Loop, Thru, Panic) and the editing ones (Auto voice-lead, Transpose with key, + Section, Presets, Feel)
+/// take a row each.
 struct TransportBarView: View {
   @EnvironmentObject var state: ChordLabState
   @State private var showingPresets = false
@@ -87,6 +89,12 @@ struct TransportBarView: View {
         .toggleStyle(.accentSwitch)
         .help("Repeat the progression; off, it plays once and stops at its end")
         .accessibilityLabel("Loop the progression")
+      if state.snapshot?.midiThru != nil {
+        Toggle(isOn: state.thru) { Text("Thru").foregroundStyle(.white) }
+          .toggleStyle(.accentSwitch)
+          .help("Pass incoming MIDI notes to the output")
+          .accessibilityLabel("Pass MIDI through")
+      }
       Button("Panic") { state.panic() }
         .help("Silence every sounding note")
         .accessibilityLabel("Silence every sounding note")

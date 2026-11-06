@@ -1,8 +1,8 @@
 import SwiftUI
 
 /// UI-side state. Logic lives in C++; this object only mirrors what the plugin
-/// pushes (snapshot, error, status, transport and export-ready JSON) and forwards user intent
-/// (commands, previews, export requests) back.
+/// pushes (snapshot, error, status, transport, export-ready and heard JSON) and forwards user intent
+/// (commands, previews, export requests, forgetting what was heard) back.
 class ChordLabState: NSObject, ObservableObject {
   var params: [Param] = []
   @Published var bundleID = String("")
@@ -19,6 +19,9 @@ class ChordLabState: NSObject, ObservableObject {
   @Published var transport: TransportJSON?
   /// The MIDI file of the last export request (`kMsgTagExportReady`), or nil while none is ready.
   @Published var exportPath: String?
+  /// What the plug-in hears on its MIDI input (`kMsgTagHeard`, design D14); nil until the first push. The
+  /// Heard group (`HeardView`) shows only while `active` is true.
+  @Published var heard: HeardJSON?
   /// Whether a text field (a section rename) is being edited: the key routes (`EditorKeyRouter`) stand
   /// down meanwhile, so typing a name never appends or removes chords.
   @Published var editingText = false
@@ -240,6 +243,36 @@ class ChordLabState: NSObject, ObservableObject {
     send(command: ["cmd": "browseKey", "home": true])
   }
 
+  // MARK: - What the plug-in heard (the Heard group, design D11–D13)
+
+  /// The group's Use: makes the heard key the project key through the Key pickers' own entry
+  /// (`changeProjectKey`), so the browse comes home and Transpose with key, its hint and the moved note
+  /// behave exactly as after a pick. Nothing without a heard key.
+  @MainActor func useHeardKey() {
+    guard let key = heard?.key else { return }
+    changeProjectKey(pc: KeyNames.pitchClass(of: key.tonic), mode: key.mode)
+  }
+
+  /// The group's Add: appends the heard chord as it was played (`appendChord` with its inversion, which the
+  /// engine marks manual, D11). Nothing unless a chord is identified and still held.
+  @MainActor func addHeardChord() {
+    guard let heard, heard.chordHeld, let chord = heard.chord else { return }
+    send(command: ["cmd": "appendChord", "root": chord.root, "type": chord.type, "inversion": chord.inversion])
+  }
+
+  /// The group's ×: the listener forgets everything (`kMsgTagClearHeard`, no payload, D13); the plug-in
+  /// answers with an inactive heard push, which hides the group.
+  @MainActor func clearHeard() {
+    sendCommand(kMsgTagClearHeard, Data())
+  }
+
+  /// The transport row's Thru switch: the snapshot's `midiThru` (off when an older plug-in sends none; the
+  /// switch is hidden then), set with `setMidiThru`. The answering snapshot is what flips it.
+  @MainActor var thru: Binding<Bool> {
+    Binding(get: { self.snapshot?.midiThru ?? false },
+            set: { self.send(command: ["cmd": "setMidiThru", "on": $0]) })
+  }
+
   /// The hint's Move once (`always` false) and Move and always transpose (`always` true): moves the chords
   /// from the hint's old tonic, provided the sequence is still the one the hint was shown for and the
   /// project key is still the one browsed (`KeyTransposeHint.stillValid`).
@@ -364,6 +397,15 @@ class ChordLabState: NSObject, ObservableObject {
   func applyTransport(json: Data) {
     if let transport = try? JSONDecoder().decode(TransportJSON.self, from: json) {
       self.transport = transport
+    }
+  }
+
+  /// `kMsgTagHeard` payload. A payload that does not decode is reported and leaves the last one shown.
+  func applyHeard(json: Data) {
+    do {
+      heard = try JSONDecoder().decode(HeardJSON.self, from: json)
+    } catch {
+      reportError("heard decode failed: \(error)")
     }
   }
 
