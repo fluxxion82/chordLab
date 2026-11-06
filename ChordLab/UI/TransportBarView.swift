@@ -22,7 +22,10 @@ import SwiftUI
 /// the Transpose with key switch (`TransposeWithKeyToggle`) is here instead, right after Auto voice-lead
 /// (`showsTransposeSwitch`).
 ///
-/// One row when it fits (the 900-pt default); at the 700-pt minimum the playback controls (Follow Live,
+/// One row when it fits (the 900-pt default). With the Thru switch shown the row wraps to two lines between
+/// about 856 and 879 pt wide and the palette viewport loses 32 pt there; from 880 pt it is one line again,
+/// and the 568-pt minimum height still holds with one full palette row (worst viewport 106 pt in that band).
+/// At the 700-pt minimum the playback controls (Follow Live,
 /// Loop, Thru, Panic) and the editing ones (Auto voice-lead, Transpose with key, + Section, Presets, Feel)
 /// take a row each.
 struct TransportBarView: View {

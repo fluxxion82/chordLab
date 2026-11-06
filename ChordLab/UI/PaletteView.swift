@@ -48,19 +48,22 @@ struct PaletteView: View {
     let hasApplied = state.snapshot?.applied != nil
     let view = PaletteViewMode.effective(saved: savedView, snapshotHasApplied: hasApplied)
     let heardActive = state.heard?.active == true
+    let placement = PaletteSwitchPlacement.resolve(
+      heardActive: heardActive, hasApplied: hasApplied,
+      homeRowEmpty: state.snapshot?.homeRow.isEmpty ?? true, switchRowAllowed: showsViewSwitch)
     VStack(alignment: .leading, spacing: 6) {
       // While the home row is shown the switch sits at its trailing end instead (`HomeRowView`), so the
       // grid keeps its viewport. While the listener is active the row is always shown, for the Heard group
       // (the home row then leaves the switch to it); the 700×568 minimum leaves a full palette row in view.
       if heardActive {
         HStack(spacing: 8) {
-          if hasApplied {
+          if placement == .paletteRow {
             PaletteViewSwitch()
           }
           Spacer(minLength: 8)
           HeardView()
         }
-      } else if showsViewSwitch, hasApplied, state.snapshot?.homeRow.isEmpty ?? true {
+      } else if placement == .paletteRow {
         PaletteViewSwitch()
       }
       GeometryReader { geometry in
@@ -181,6 +184,8 @@ struct PaletteCellControl: View {
 ///
 /// The heard chord (`isHeard`, design D15): a 2-pt ring in the accent colour (the switches' on colour),
 /// 2 pt inside the circle's edge, so it reads beside the pressed look's white edge ring rather than under it.
+/// It is an overlay after the relation fade (`RelationStyle.opacity`), so it keeps full strength whatever
+/// the cell's relation; it follows the circle's scale.
 struct PaletteCellView: View {
   let cell: CellJSON
   let size: CGFloat
@@ -220,10 +225,6 @@ struct PaletteCellView: View {
         Circle().fill(Color.white.opacity(cell.filled ? 0.25 : 0.15))
         Circle().strokeBorder(Color.white, lineWidth: 2)
       }
-      if isHeard {
-        Circle().strokeBorder(Color.accentColor, lineWidth: Self.heardRingWidth)
-          .padding(Self.heardRingInset)
-      }
       VStack(spacing: 1) {
         if labelMode != .numerals {
           Text(ChordSymbol.glyphs(cell.symbol))
@@ -246,6 +247,15 @@ struct PaletteCellView: View {
     .frame(width: size, height: size)
     .scaleEffect(RelationStyle.scale(relation: cell.relation))   // drawing only: layout keeps the slot
     .opacity(isPressed ? 1 : RelationStyle.opacity(relation: cell.relation))
+    // The heard ring is drawn after the relation fade, scaled like the circle, so it reads at full strength
+    // on a faded cell and on an unfilled one, whose outline it would otherwise blend into.
+    .overlay {
+      if isHeard {
+        Circle().strokeBorder(Color.accentColor, lineWidth: Self.heardRingWidth)
+          .padding(Self.heardRingInset)
+          .scaleEffect(RelationStyle.scale(relation: cell.relation))
+      }
+    }
     .animation(RelationStyle.animation, value: cell.relation)
     .frame(width: size, height: size)   // the unchanged slot
     .contentShape(Circle())             // full-size: the hit area ignores the relation scale

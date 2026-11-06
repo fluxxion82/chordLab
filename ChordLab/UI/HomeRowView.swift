@@ -27,8 +27,11 @@ struct HomeRowView: View {
           PaletteCellControl(cell: cell, size: Self.cellSize, labelMode: labelMode)
         }
         Spacer(minLength: 0)
-        // While the listener is active the switch is in the palette's switch row, beside the Heard group.
-        if snapshot.applied != nil, state.heard?.active != true {
+        // While the listener is active the switch is in the palette's switch row, beside the Heard group
+        // (`PaletteSwitchPlacement`).
+        if PaletteSwitchPlacement.resolve(heardActive: state.heard?.active == true,
+                                          hasApplied: snapshot.applied != nil, homeRowEmpty: snapshot.homeRow.isEmpty,
+                                          switchRowAllowed: true) == .homeRow {
           PaletteViewSwitch()
         }
       }

@@ -403,7 +403,9 @@ class ChordLabState: NSObject, ObservableObject {
   /// `kMsgTagHeard` payload. A payload that does not decode is reported and leaves the last one shown.
   func applyHeard(json: Data) {
     do {
-      heard = try JSONDecoder().decode(HeardJSON.self, from: json)
+      // Only a changed value is published: an equal push is not republished and the views do not redraw.
+      let decoded = try JSONDecoder().decode(HeardJSON.self, from: json)
+      if decoded != heard { heard = decoded }
     } catch {
       reportError("heard decode failed: \(error)")
     }
