@@ -38,8 +38,10 @@ bool usableSampleRate(double sampleRate) noexcept {
 
 }  // namespace
 
-static_assert(Scheduler::kReservedReleaseEvents >= 1 + 2 * Scheduler::kMaxPreviews,
-              "the reserve must hold a release-all and two expiry candidates per preview");
+static_assert(Scheduler::kReservedReleaseEvents >= 2 + 2 * Scheduler::kMaxPreviews,
+              "the reserve must hold the progression's and the thru notes' release-alls and two expiry "
+              "candidates per preview");
+static_assert(Scheduler::kMaxThruPerBlock <= Scheduler::kThruQueueCapacity, "a block takes from the ring");
 static_assert(Scheduler::kReservedReleaseEvents < Scheduler::kMaxEventsPerBlock, "no room left for attacks");
 static_assert(Scheduler::kCapacityForImmediateRelease >= 128, "one note-off per pitch may be owed");
 
@@ -136,7 +138,12 @@ Scheduler::Scheduler() noexcept
       mQueueHead(0),
       mQueueTail(0),
       mCancelQueued(false),
-      mCancelTail(0) {
+      mCancelTail(0),
+      mThru{},
+      mThruHead(0),
+      mThruCount(0),
+      mThruOverflow(false),
+      mThruWas(false) {
     mState.owners.fill(0);
     mState.owed.fill(false);
     for (Preview& preview : mState.previews) {
@@ -211,12 +218,31 @@ bool Scheduler::pushPreview(const PreviewCmd& cmd) noexcept {
     return true;
 }
 
+bool Scheduler::pushThru(const ThruEvent& event) noexcept {
+    if (!validPitch(event.pitch)) {
+        return true;  // nothing that could sound
+    }
+    if (mThruCount >= kThruQueueCapacity) {
+        mThruOverflow = true;  // the next block releases every thru note and discards the ring
+        return false;
+    }
+    // Stamped on the preview clock, which `process` advances by every processed block whether or not the
+    // transport runs: an event the block cannot take keeps its absolute time and is overdue next block.
+    mThru[(mThruHead + mThruCount) % kThruQueueCapacity] =
+        ThruQueued{mPreviewClock + event.sampleOffset, event.on, event.pitch, event.velocity};
+    ++mThruCount;
+    return true;
+}
+
 void Scheduler::panic() noexcept {
     // Everything in the ring right now is stale: remember where it ends and let the next drain skip it.
     // Only the tail is read, so the producer is never waited for; commands it pushes from here on sit
     // past the cut and are served.
     mCancelTail = mQueueTail.load(std::memory_order_acquire);
     mCancelQueued = true;
+    // The thru ring shares this thread: emptied outright. A pending overflow still reports its block.
+    mThruHead = 0;
+    mThruCount = 0;
     for (int pitch = 0; pitch < kPitchCount; ++pitch) {
         if (mState.owners[static_cast<std::size_t>(pitch)] != 0) {
             mState.owners[static_cast<std::size_t>(pitch)] = 0;
@@ -317,6 +343,43 @@ void Scheduler::pushExpiries(int nFrames, std::int64_t previewSamples) noexcept 
         if (previewSamples < nFrames && previewSamples != running) {
             pushLogical(Logical{mBlockSample + previewSamples, PreviewExpiry, PhaseTimeline, 0, 0, slot, 0}, true);
         }
+    }
+}
+
+/// Turns the queued incoming notes into this block's thru events, or discards them. Runs before the sort,
+/// so the dry run and the real run apply the same list. With `thru` on, up to `kMaxThruPerBlock` events in
+/// arrival order, each at its due time on the preview clock clamped into the block (an overdue one at
+/// offset 0); what the block cannot take stays queued, in order, and makes the block incomplete. With
+/// `thru` off, or after an overflow, the ring is discarded; a mandatory release-all frees every thru
+/// note on the on -> off edge and after an overflow (with `mThruWas` false no thru note can exist: thru
+/// attacks happen only in blocks with `thru` on, each of which sets it).
+void Scheduler::collectThru(bool thru, int lastOffset) noexcept {
+    const bool overflow = mThruOverflow;
+    mThruOverflow = false;
+    if (!thru || overflow) {
+        if (overflow || mThruWas) {
+            pushLogical(Logical{mBlockSample, ThruReleaseAll, PhaseFlush, 0, 0, 0, 0}, true);
+        }
+        if (overflow) {
+            mDropped = true;  // incoming notes were lost
+        }
+        mThruHead = 0;
+        mThruCount = 0;
+        return;
+    }
+    for (std::size_t taken = 0; mThruCount > 0 && taken < kMaxThruPerBlock; ++taken) {
+        const ThruQueued& e = mThru[mThruHead];
+        const std::int64_t offset = std::clamp<std::int64_t>(e.due - mPreviewClock, 0, lastOffset);
+        if (!pushLogical(Logical{mBlockSample + offset, e.on ? ThruAttack : ThruRelease, PhaseThru, e.pitch,
+                                 e.on ? clampVelocity(e.velocity) : std::uint8_t{0}, 0, 0},
+                         false)) {
+            break;  // scratch full: this event and the rest wait for the next block
+        }
+        mThruHead = (mThruHead + 1) % kThruQueueCapacity;
+        --mThruCount;
+    }
+    if (mThruCount > 0) {
+        mDropped = true;  // late, not lost: the next block plays them first, overdue
     }
 }
 
@@ -512,7 +575,7 @@ bool Scheduler::attack(State& state, std::uint8_t owner, int offset, std::uint8_
         } else if (!writer.on(offset, pitch, velocity)) {
             return false;
         }
-    } else if (owner == kOwnerProgression) {
+    } else if (owner == kOwnerProgression || owner == kOwnerThru) {
         if (!writer.retrigger(offset, pitch, velocity)) {
             return false;
         }
@@ -527,6 +590,19 @@ void Scheduler::releaseProgression(State& state, int offset, std::uint8_t pitch,
         return;
     }
     owners = static_cast<std::uint8_t>(owners & ~kOwnerProgression);
+    if (owners == 0) {
+        physicalOff(state, offset, pitch, writer);
+    }
+}
+
+/// Frees the thru owner of `pitch`, the note-off only when no other owner remains; a pitch without the
+/// thru bit (a note-off with no thru note-on) is left alone.
+void Scheduler::releaseThru(State& state, int offset, std::uint8_t pitch, Writer& writer) noexcept {
+    std::uint8_t& owners = state.owners[pitch];
+    if ((owners & kOwnerThru) == 0) {
+        return;
+    }
+    owners = static_cast<std::uint8_t>(owners & ~kOwnerThru);
     if (owners == 0) {
         physicalOff(state, offset, pitch, writer);
     }
@@ -651,6 +727,17 @@ void Scheduler::apply(State& state, const Logical& event, int offset, std::int64
             }
             break;
         }
+        case ThruAttack:
+            attack(state, kOwnerThru, offset, event.pitch, event.velocity, writer);
+            break;
+        case ThruRelease:
+            releaseThru(state, offset, event.pitch, writer);
+            break;
+        case ThruReleaseAll:
+            for (int pitch = 0; pitch < kPitchCount; ++pitch) {
+                releaseThru(state, offset, static_cast<std::uint8_t>(pitch), writer);
+            }
+            break;
     }
 }
 
@@ -744,6 +831,8 @@ bool Scheduler::process(const BlockInfo& info, MidiOut* out, std::size_t capacit
             enumerate(windowHi, samplesPerBeat);
         }
     }
+    const int lastOffset = nFrames > 0 ? nFrames - 1 : 0;
+    collectThru(info.thru, lastOffset);
 
     // Order, then apply ownership twice: a dry run to count the note-offs, the real run with the rest of
     // the capacity for attacks. Owed note-offs and the preview commands come before the sorted events.
@@ -759,7 +848,6 @@ bool Scheduler::process(const BlockInfo& info, MidiOut* out, std::size_t capacit
                   }
                   return a.seq < b.seq;
               });
-    const int lastOffset = nFrames > 0 ? nFrames - 1 : 0;
     auto offsetOf = [&](const Logical& event) noexcept -> int {
         return static_cast<int>(std::clamp<std::int64_t>(event.sample - mBlockSample, 0, lastOffset));
     };
@@ -791,6 +879,7 @@ bool Scheduler::process(const BlockInfo& info, MidiOut* out, std::size_t capacit
     }
     mWasPlaying = playing;
     mPendingFlush = false;
+    mThruWas = info.thru;
     return !mDropped && !writer.dropped;
 }
 

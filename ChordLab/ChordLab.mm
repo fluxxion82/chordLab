@@ -291,7 +291,7 @@ void ChordLab::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
   const double ppq = GetPPQPos();
   const double bpm = GetTempo();
   const bool playing = GetTransportIsRunning() && followHost;
-  const chordlab::BlockInfo block{ppq, nFrames, GetSampleRate(), bpm, playing};
+  const chordlab::BlockInfo block{ppq, nFrames, GetSampleRate(), bpm, playing, /* thru */ true};
   mTransportPpq.store(ppq, std::memory_order_relaxed);             // the playhead, read by OnIdle
   mTransportPlaying.store(playing, std::memory_order_relaxed);
   mHostBpm.store(bpm, std::memory_order_relaxed);                  // the export's tempo

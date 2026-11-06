@@ -159,7 +159,7 @@ TEST_CASE("rt alloc: the probe sees an allocation") {
     CHECK(probe.count() >= 1);
 }
 
-TEST_CASE("rt alloc: the scheduler allocates nothing across 10k random blocks with previews and resets") {
+TEST_CASE("rt alloc: the scheduler allocates nothing across 10k random blocks with previews, thru notes and resets") {
     // Everything that allocates is prepared first: the progressions, the random engine, the output.
     const Compiled a = compiled({chord(0, "maj"), chord(9, "min"), chord(5, "maj"), chord(7, "7")}, 4.0);
     const Compiled b = compiled({chord(2, "m7"), chord(7, "7"), chord(0, "maj9")}, 1.5);
@@ -167,7 +167,9 @@ TEST_CASE("rt alloc: the scheduler allocates nothing across 10k random blocks wi
     std::uniform_int_distribution<int> frames(0, 1024);
     std::uniform_int_distribution<int> dice(0, 99);
     std::uniform_int_distribution<int> pitch(36, 96);
-    std::array<MidiOut, 256> out{};
+    std::uniform_int_distribution<int> fine(0, 999);
+    std::uniform_int_distribution<int> offset(0, 1023);
+    std::array<MidiOut, 512> out{};  // ChordLab.h: kMidiOutCapacity
 
     AllocationProbe probe;
     Scheduler scheduler;  // construction included: the contract is "after construction", this is stricter
@@ -178,9 +180,14 @@ TEST_CASE("rt alloc: the scheduler allocates nothing across 10k random blocks wi
     double ppq = 0.0;
     double bpm = 120.0;
     bool playing = true;
+    bool thru = true;
     int previewId = 0;
     int incompleteBlocks = 0;
     int refusedPreviews = 0;
+    int thruPushes = 0;
+    int refusedThru = 0;
+    int thruFlips = 0;
+    int forcedOverflows = 0;
     for (int i = 0; i < 10000; ++i) {
         const int nFrames = frames(rng);
         const int roll = dice(rng);
@@ -216,9 +223,27 @@ TEST_CASE("rt alloc: the scheduler allocates nothing across 10k random blocks wi
             scheduler.adopt(snapshotOf(*current, generation));  // same generation: a no-op by contract
         } else if (roll < 22) {
             scheduler.reset(roll == 20 ? kSr : 44100.0);  // repeated resets, with and without a rate change
+        } else if (roll < 25) {
+            // An incoming note and its release, each somewhere in the block (or beyond it: clamped).
+            const int p = pitch(rng);
+            const int span = std::max(nFrames, 1);
+            refusedThru += scheduler.pushThru(ThruEvent{true, static_cast<std::uint8_t>(p), 90, offset(rng) % span}) ? 0 : 1;
+            refusedThru += scheduler.pushThru(ThruEvent{false, static_cast<std::uint8_t>(p), 0, offset(rng) % span}) ? 0 : 1;
+            thruPushes += 2;
+        } else if (roll == 25) {
+            thru = !thru;  // the on -> off edge releases every thru note; disabled blocks discard the ring
+            ++thruFlips;
+        }
+        if (fine(rng) == 0) {
+            // A burst beyond the thru ring: the next block releases every thru note and discards the ring.
+            for (int k = 0; k < 300; ++k) {
+                refusedThru += scheduler.pushThru(ThruEvent{k % 2 == 0, static_cast<std::uint8_t>(pitch(rng)), 90, 0}) ? 0 : 1;
+            }
+            thruPushes += 300;
+            ++forcedOverflows;
         }
         std::size_t written = 0;
-        const BlockInfo info{ppq, nFrames, kSr, bpm, playing};
+        const BlockInfo info{ppq, nFrames, kSr, bpm, playing, thru};
         if (!scheduler.process(info, out.data(), out.size(), written)) {
             ++incompleteBlocks;
         }
@@ -229,6 +254,10 @@ TEST_CASE("rt alloc: the scheduler allocates nothing across 10k random blocks wi
     CHECK(probe.count() == 0);
     CHECK(previewId > 0);  // the random walk did exercise previews
     CHECK(generation > 1);  // ...and adopts
+    CHECK(thruPushes > 0);   // ...and thru notes
+    CHECK(thruFlips > 0);    // ...and the thru switch
+    CHECK(forcedOverflows > 0);
+    CHECK(refusedThru > 0);  // ...and the overflow path
     (void) incompleteBlocks;  // seeks and stops may make blocks incomplete; that is not what is measured
     (void) refusedPreviews;
 }
@@ -321,7 +350,7 @@ TEST_CASE("rt alloc: handing over full 4096-event performed snapshots allocates 
                                  buffer->currentGeneration()});
         for (int block = 0; block < 2000; ++block) {
             std::size_t written = 0;
-            const BlockInfo info{ppq, 512, kSr, 120.0, true};
+            const BlockInfo info{ppq, 512, kSr, 120.0, true, true};
             incomplete += scheduler.process(info, out.data(), out.size(), written) ? 0 : 1;
             emitted += written;
             ppq += 512.0 / 24000.0;

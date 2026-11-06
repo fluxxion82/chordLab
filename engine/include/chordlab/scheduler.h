@@ -11,13 +11,16 @@
 namespace chordlab {
 
 /// What the host tells us about one audio block. `ppqStart` is the host position in beats at the first
-/// sample; `bpm` the tempo in force for the block; `playing` whether the transport runs.
+/// sample; `bpm` the tempo in force for the block; `playing` whether the transport runs; `thru` whether
+/// incoming notes pass through this block (the document's flag, read from the slot acquired for this very
+/// block; see `Scheduler::pushThru`).
 struct BlockInfo {
     double ppqStart;
     int nFrames;
     double sampleRate;
     double bpm;
     bool playing;
+    bool thru;
 };
 
 /// One output MIDI event: a note-on (`0x90`, velocity in `data2`) or a note-off (`0x80`, `data2` 0),
@@ -63,18 +66,32 @@ struct PreviewCmd {
     std::uint8_t pitches[8];
 };
 
+/// One incoming note the plug-in passes through (design D2): `on` with `velocity`, or a release,
+/// `sampleOffset` samples into the block it arrived in. `pitch` must be below 128.
+struct ThruEvent {
+    bool on;
+    std::uint8_t pitch;
+    std::uint8_t velocity;
+    int sampleOffset;
+};
+
 /// Owner bits of a pitch, as `Scheduler::ownersOf` reports them.
 constexpr std::uint8_t kOwnerProgression = 1;
 constexpr std::uint8_t kOwnerPreview = 2;
+constexpr std::uint8_t kOwnerThru = 4;
 
-/// Turns the host's transport position, a compiled progression and preview requests into sample-accurate
-/// note-ons and note-offs, with one physical note per pitch no matter how many sources hold it.
+/// Turns the host's transport position, a compiled progression, preview requests and incoming notes into
+/// sample-accurate note-ons and note-offs, with one physical note per pitch no matter how many sources
+/// hold it.
 ///
-/// Ownership: a pitch has up to two owners, the progression and the previews. The first owner to acquire
-/// a pitch produces the physical note-on; the last to release it produces the note-off. The progression
-/// attacking a pitch that already sounds retriggers it (off then on); a preview joining a sounding pitch
-/// is silent. Previews release themselves four seconds after they start, or after their last applied
-/// `Extend`, counted in processed samples.
+/// Ownership: a pitch has up to three owners, the progression, the previews and the thru notes (incoming
+/// MIDI passed to the output). The first owner to acquire a pitch produces the physical note-on; the last
+/// to release it produces the note-off. The progression or a thru note attacking a pitch that already
+/// sounds retriggers it (off then on); a preview joining a sounding pitch is silent. Previews release
+/// themselves four seconds after they start, or after their last applied `Extend`, counted in processed
+/// samples. A thru note is released by its own note-off (a note-off with no thru note-on is ignored), by
+/// a block with `BlockInfo::thru` false, by an overflow of its ring, or by `panic`; the progression's
+/// releases, flushes and chases never touch it.
 ///
 /// Position: progression beat 0 sits at host ppq 0. With `Snapshot::loop` the progression repeats every
 /// `endBeat` beats; without it, it plays once and nothing sounds at or after `endBeat`. The progression
@@ -88,9 +105,10 @@ constexpr std::uint8_t kOwnerPreview = 2;
 /// are chased (attacked at offset 0). Start, stop, `reset` and a changed `adopt` are discontinuities too.
 ///
 /// Output order: events are written in time order. At one sample the phases run note-offs owed from
-/// earlier blocks, preview commands in arrival order, the discontinuity's releases (by pitch) and chase
-/// (by pitch), then the timeline in the snapshot's own order, which `compile` makes `(beat, off before on,
-/// pitch)`; the final offs of one wrap precede the first attacks of the next. Timeline events that did
+/// earlier blocks, preview commands in arrival order, the discontinuity's releases (by pitch, and the thru
+/// release-all), the chase (by pitch), the thru notes in arrival order, then the timeline in the
+/// snapshot's own order, which `compile` makes `(beat, off before on, pitch)`; the final offs of one wrap
+/// precede the first attacks of the next. Timeline events that did
 /// not fit an earlier block are written first, at offset 0, still in their order. Releases are never
 /// lost: one that does not fit the output is owed and paid at the start of the next block before anything
 /// else, and a capacity of at least `kCapacityForImmediateRelease` always pays every owed release in the
@@ -108,8 +126,8 @@ constexpr std::uint8_t kOwnerPreview = 2;
 /// nothing at all and changes nothing.
 ///
 /// Real time: after construction nothing allocates, throws, locks or logs. `process`, `reset`, `adopt`,
-/// `panic`, `ownersOf` and `sounding` belong to one thread, the audio thread; `pushPreview` may be
-/// called from one other thread. `reset` and `adopt` may also be called from another thread while the
+/// `panic`, `pushThru`, `ownersOf` and `sounding` belong to one thread, the audio thread; `pushPreview`
+/// may be called from one other thread. `reset` and `adopt` may also be called from another thread while the
 /// host guarantees that no `process` runs concurrently (iPlug2's `OnReset` before processing starts, for
 /// instance); without such a guarantee the plugin must marshal them to the audio callback.
 class Scheduler {
@@ -131,6 +149,10 @@ public:
     static constexpr std::size_t kMaxSnapshotEvents = ::chordlab::kMaxSnapshotEvents;
     /// An output capacity that always pays every owed release in one block.
     static constexpr std::size_t kCapacityForImmediateRelease = 128;
+    /// The incoming notes `pushThru` can hold between two blocks.
+    static constexpr std::size_t kThruQueueCapacity = 256;
+    /// The most queued incoming notes one block turns into events; the rest wait for the next block.
+    static constexpr std::size_t kMaxThruPerBlock = 64;
     /// The largest sane sample-rate-to-tempo ratio; beyond it the block's timing is unusable.
     static constexpr double kMaxSamplesPerBeat = 1e9;
     /// How far a carried-over timeline may fall behind the transport before it is dropped.
@@ -159,16 +181,32 @@ public:
     /// is not processing cannot fill the ring with them.
     bool pushPreview(const PreviewCmd& cmd) noexcept;
 
+    /// Queues an incoming note for the block about to be processed. Audio thread only, the same thread as
+    /// `process`, so the ring needs no atomics. The event is stamped with the preview clock (which runs on
+    /// processed samples whether or not the transport does) plus its offset, so one that waits for a later
+    /// block keeps its place in time. Returns false, and queues nothing, when the ring is full; the next
+    /// `process` then releases every thru-owned pitch, discards the ring and reports the block incomplete.
+    /// An event with a pitch of 128 or more is ignored (and reported as queued).
+    ///
+    /// The next `process` applies the event only if its `BlockInfo::thru` is true: it takes up to
+    /// `kMaxThruPerBlock` events in arrival order, each at its offset on the preview clock (an overdue one,
+    /// or one beyond the block, at the nearest offset inside it), and leaves the rest for the following
+    /// blocks, reporting each block that leaves some behind as incomplete. A block with `thru` false
+    /// discards everything queued, and the first such block after one with `thru` true releases every thru
+    /// note.
+    bool pushThru(const ThruEvent& event) noexcept;
+
     /// Produces this block's events into `out[0..capacity)`, setting `written`. Returns false if the block
     /// could not emit everything it was due to: an attack was dropped (output capacity, scratch space or the
     /// preview table ran out), a release had to be owed to a later block, part of the timeline was carried
-    /// over, dropped or skipped, an `adopt` abandoned overdue occurrences, or the block's timing was
-    /// unusable. Only an empty block (`nFrames == 0`) is a true no-op. `out` may be null only when
+    /// over, dropped or skipped, an `adopt` abandoned overdue occurrences, queued incoming notes were left
+    /// for a later block or lost to a full ring, or the block's timing was unusable. Only an empty block (`nFrames == 0`) is a true no-op. `out` may be null only when
     /// `capacity` is 0.
     bool process(const BlockInfo& info, MidiOut* out, std::size_t capacity, std::size_t& written) noexcept;
 
-    /// Silences everything: every sounding pitch, progression and preview alike, is released (its note-off
-    /// is owed and paid by the next block) and every preview is forgotten. The progression is not chased
+    /// Silences everything: every sounding pitch, progression, preview and thru note alike, is released
+    /// (its note-off is owed and paid by the next block), every preview is forgotten and every queued
+    /// incoming note is discarded (`pushThru` and `panic` share a thread, so the cut is exact). The progression is not chased
     /// afterwards: it stays silent until its next attack.
     /// The preview commands queued before the call are discarded too, at the next block's drain: a start
     /// that has not sounded yet never will, and a stop has nothing left to stop. Commands pushed after
@@ -176,7 +214,8 @@ public:
     /// drained, so the pushing thread needs no lock); the last of several panics before one block wins.
     void panic() noexcept;
 
-    /// The owners currently holding `pitch` (a combination of `kOwnerProgression` and `kOwnerPreview`).
+    /// The owners currently holding `pitch` (a combination of `kOwnerProgression`, `kOwnerPreview` and
+    /// `kOwnerThru`).
     /// `pitch` must be in 0..127.
     std::uint8_t ownersOf(int pitch) const noexcept;
 
@@ -185,10 +224,18 @@ public:
     bool sounding(int pitch) const noexcept;
 
 private:
-    enum Kind : std::uint8_t { ProgressionAttack, ProgressionRelease, ProgressionReleaseAll, PreviewExpiry };
+    enum Kind : std::uint8_t {
+        ProgressionAttack,
+        ProgressionRelease,
+        ProgressionReleaseAll,
+        PreviewExpiry,
+        ThruAttack,
+        ThruRelease,
+        ThruReleaseAll,
+    };
 
     /// Where in the block an event came from; earlier phases write first at equal offsets.
-    enum Phase : std::uint8_t { PhaseFlush, PhaseChase, PhaseTimeline };
+    enum Phase : std::uint8_t { PhaseFlush, PhaseChase, PhaseThru, PhaseTimeline };
 
     /// One owner-level event of the block, before ownership turns it into physical MIDI (or into nothing).
     /// `sample` is on the clock (`mBlockSample` is this block's first sample); a timeline event carried
@@ -201,6 +248,14 @@ private:
         std::uint8_t velocity;
         std::uint8_t slot;  // PreviewExpiry: the preview slot
         std::uint16_t seq;  // insertion order, the final tie-break
+    };
+
+    /// One queued incoming note: `due` is its sample on the preview clock.
+    struct ThruQueued {
+        std::int64_t due;
+        bool on;
+        std::uint8_t pitch;
+        std::uint8_t velocity;
     };
 
     /// One running preview.
@@ -227,6 +282,7 @@ private:
     void drainQueue() noexcept;
     bool pushLogical(const Logical& event, bool mandatory) noexcept;
     void pushExpiries(int nFrames, std::int64_t previewSamples) noexcept;
+    void collectThru(bool thru, int lastOffset) noexcept;
     void chase(double samplesPerBeat) noexcept;
     void seekCursor(std::int64_t targetSample, double samplesPerBeat) noexcept;
     void placeCursor(std::int64_t targetSample, double samplesPerBeat) noexcept;
@@ -241,6 +297,7 @@ private:
                        Writer& writer) noexcept;
     static void physicalOff(State& state, int offset, std::uint8_t pitch, Writer& writer) noexcept;
     static void releaseProgression(State& state, int offset, std::uint8_t pitch, Writer& writer) noexcept;
+    static void releaseThru(State& state, int offset, std::uint8_t pitch, Writer& writer) noexcept;
     static void releasePreview(State& state, std::size_t slot, int offset, Writer& writer) noexcept;
     static bool previewHeldElsewhere(const State& state, std::size_t slot, std::uint8_t pitch) noexcept;
     static void payOwed(State& state, Writer& writer) noexcept;
@@ -287,6 +344,14 @@ private:
     std::atomic<std::uint32_t> mQueueTail;
     bool mCancelQueued;           // a panic has cut the queue: the next drain discards up to mCancelTail
     std::uint32_t mCancelTail;    // the queue's tail index as that panic saw it
+
+    // Incoming notes, pushed and consumed on the audio thread (no atomics): a FIFO of mThruCount entries
+    // from mThruHead.
+    std::array<ThruQueued, kThruQueueCapacity> mThru;
+    std::size_t mThruHead;
+    std::size_t mThruCount;
+    bool mThruOverflow;  // an event was refused since the last block
+    bool mThruWas;       // the last block's BlockInfo::thru; thru owners exist only while it is true
 };
 
 }  // namespace chordlab

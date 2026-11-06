@@ -115,7 +115,13 @@ private:
   // entry and is called from the main thread only (OnMessage, CloseWindow). OnReset and panic requests
   // are flagged here and consumed at the top of ProcessBlock.
   chordlab::Scheduler mScheduler;
-  static constexpr std::size_t kMidiOutCapacity = 256;
+  // Output capacity (listening design D16): iPlug2's VST3 output queue is page-rounded to at least 512
+  // entries. The naive worst case of one block, 96 performed + 64 preview attacks + 64 thru + 64 retrigger
+  // offs + 128 owed releases + 128 flush releases = 544, overstates it: releases are counted by the
+  // scheduler's dry run and attacks get only what is left. The proof is the engine test "scheduler: a
+  // worst-case block fits the plug-in's output capacity" (the densest Feel progression, eight 8-pitch
+  // previews and 64 thru retriggers in one block, a seek in the next: every block complete at 512).
+  static constexpr std::size_t kMidiOutCapacity = 512;
   static_assert(kMidiOutCapacity >= chordlab::Scheduler::kCapacityForImmediateRelease,
                 "every owed release must fit the block that owes it");
   std::array<chordlab::MidiOut, kMidiOutCapacity> mMidiOut{};
