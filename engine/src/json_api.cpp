@@ -761,6 +761,7 @@ struct Command {
         SetAutoVoiceLead,
         SetTransposeWithKey,
         SetKeyHintSeen,
+        SetMidiThru,
         SetFeel,
         SetMeter,
         TransposeFromKey,
@@ -786,7 +787,7 @@ struct Command {
     int velocity = 100;        // AppendChord (optional, store default), SetVelocity
     int id = 0;                // MoveChord, SetLength, SetVelocity, RemoveChord, the voicing, section and selection commands
     int index = 0;             // MoveChord, AddSection, MoveSectionStart
-    bool on = false;           // SetProgressionLoop, SetFollowHost, SetAutoVoiceLead, SetTransposeWithKey, SetKeyHintSeen
+    bool on = false;           // SetProgressionLoop, SetFollowHost, SetAutoVoiceLead, SetTransposeWithKey, SetKeyHintSeen, SetMidiThru
     Feel feel{};               // SetFeel
     Meter meter{};             // SetMeter
     int semitones = 0;         // TransposeFromKey (the pitch class moved from, 0..11), TransposeProgression (-11..11)
@@ -874,7 +875,8 @@ bool parseRemoveChord(Fields& fields, Command& out) {
     return fields.getInt("id", out.id);
 }
 
-/// `setProgressionLoop` / `setFollowHost` / `setAutoVoiceLead` / `setTransposeWithKey` / `setKeyHintSeen`.
+/// `setProgressionLoop` / `setFollowHost` / `setAutoVoiceLead` / `setTransposeWithKey` / `setKeyHintSeen` /
+/// `setMidiThru`.
 bool parseToggle(Fields& fields, Command::Kind kind, Command& out) {
     out.kind = kind;
     return fields.getBool("on", out.on);
@@ -1029,6 +1031,9 @@ bool parseCommand(std::string_view text, Command& out, std::string& name, std::s
     }
     if (cmd == "setFollowHost") {
         return parseToggle(fields, Command::Kind::SetFollowHost, out);
+    }
+    if (cmd == "setMidiThru") {
+        return parseToggle(fields, Command::Kind::SetMidiThru, out);
     }
     if (cmd == "setInversion") {
         return parseSetInversion(fields, out);
@@ -1195,6 +1200,9 @@ Refusal applyCommand(DocumentStore& store, const Command& command, std::string& 
         case Command::Kind::SetFollowHost:
             store.setFollowHost(command.on);
             return Refusal::None;
+        case Command::Kind::SetMidiThru:
+            store.setMidiThru(command.on);
+            return Refusal::None;
         case Command::Kind::SetInversion:
             store.setInversion(command.id, command.inversion);
             return Refusal::None;
@@ -1323,6 +1331,10 @@ bool parseState(std::string_view text, Document& doc, int& nextId, int& nextSect
         return false;
     }
     if (fields.has("keyHintSeen") && !fields.getBool("keyHintSeen", doc.keyHintSeen)) {
+        return false;
+    }
+    // Optional (states saved before MIDI Thru have none): true.
+    if (fields.has("midiThru") && !fields.getBool("midiThru", doc.midiThru)) {
         return false;
     }
     // Optional (states saved before the feel have neither): block chords in 4/4. Present means valid, or the
@@ -1553,6 +1565,7 @@ std::string snapshotJson(const Document& doc, const Palette& palette, int select
                            {"autoVoiceLead", doc.autoVoiceLead},
                            {"transposeWithKey", doc.transposeWithKey},
                            {"keyHintSeen", doc.keyHintSeen},
+                           {"midiThru", doc.midiThru},
                            {"endBeat", compiled.endBeat},
                            {"selectedEventId", selectedIndex >= 0 ? json(selectedEventId) : json()},
                            {"modes", modesJson()},
@@ -1591,6 +1604,7 @@ std::string stateJson(const DocumentStore& store, int editorWidth, int editorHei
                         {"autoVoiceLead", doc.autoVoiceLead},
                         {"transposeWithKey", doc.transposeWithKey},
                         {"keyHintSeen", doc.keyHintSeen},
+                        {"midiThru", doc.midiThru},
                         {"feel", feelToJson(doc.feel)},
                         {"meter", meterToJson(doc.meter)},
                         {"relationMode", relationModeName(doc.relationMode)},

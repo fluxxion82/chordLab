@@ -210,7 +210,7 @@ std::string sectionNameOr(std::string name, const std::vector<Section>& sections
 }
 
 /// Copies the live (non-undoable) fields of `current` into `target`, so that restoring a snapshot keeps
-/// the transport toggles, the relation mode and the key-transpose flags as they are now, and the browsed key
+/// the transport toggles, the relation mode, the key-transpose flags and MIDI Thru as they are now, and the browsed key
 /// too, with one exception: a browsed key that is the project key ("home") follows the project key `target`
 /// restores, as it follows `setProjectKey`, so that undoing or redoing a key change leaves the palette on the
 /// key the progression is in, not on the key it just left. A browse elsewhere is kept as it is.
@@ -223,6 +223,7 @@ void keepLiveState(Document& target, const Document& current) {
     target.relationMode = current.relationMode;
     target.transposeWithKey = current.transposeWithKey;
     target.keyHintSeen = current.keyHintSeen;
+    target.midiThru = current.midiThru;
 }
 
 }  // namespace
@@ -592,6 +593,10 @@ void DocumentStore::setTransposeWithKey(bool on) {
 
 void DocumentStore::setKeyHintSeen(bool seen) {
     doc_.keyHintSeen = seen;  // live state: no history
+}
+
+void DocumentStore::setMidiThru(bool on) {
+    doc_.midiThru = on;  // live state: no history
 }
 
 int DocumentStore::addSection(int firstEventIndex, std::string name) {

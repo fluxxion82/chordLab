@@ -1177,9 +1177,9 @@ TEST_CASE("rejection: transpose commands with missing, mistyped or out-of-range 
     CHECK(error.find("in -11..11") != std::string::npos);
 }
 
-TEST_CASE("snapshot: twenty-six top-level keys, with the transpose flags and the feel") {
+TEST_CASE("snapshot: twenty-seven top-level keys, with the transpose flags, the feel and midiThru") {
     DocumentStore store = threeChords();
-    CHECK(snapshot(store).size() == 26);
+    CHECK(snapshot(store).size() == 27);
 }
 
 // --- Feel and meter --------------------------------------------------------------------------
@@ -1673,6 +1673,25 @@ TEST_CASE("toggles: setProgressionLoop and setFollowHost are live state") {
     CHECK(snapshot(store).at("followHost") == true);
 }
 
+TEST_CASE("setMidiThru: the command sets the live flag, no history, undo and redo keep it") {
+    DocumentStore store = threeChords();
+    CHECK(snapshot(store).at("midiThru") == true);
+    applyOk(store, {{"cmd", "setMidiThru"}, {"on", false}});
+    CHECK(snapshot(store).at("midiThru") == false);
+    CHECK(store.doc().midiThru == false);
+    applyOk(store, {{"cmd", "setMidiThru"}, {"on", false}});  // the same value: a no-op
+    REQUIRE(store.undo());  // the three appendChords are the only history
+    CHECK(snapshot(store).at("midiThru") == false);
+    REQUIRE(store.undo());
+    REQUIRE(store.undo());
+    CHECK_FALSE(store.undo());
+    CHECK(store.doc().midiThru == false);
+    REQUIRE(store.redo());
+    CHECK(snapshot(store).at("midiThru") == false);
+    applyOk(store, {{"cmd", "setMidiThru"}, {"on", true}});
+    CHECK(snapshot(store).at("midiThru") == true);
+}
+
 TEST_CASE("setRelationMode: each of the five modes is live state, untouched by undo and redo") {
     DocumentStore store;
     const std::vector<std::pair<const char*, RelationMode>> modes{{"off", RelationMode::Off},
@@ -2089,6 +2108,9 @@ TEST_CASE("rejection: a fresh store is untouched and gains no history") {
     checkRejected(store, {{"cmd", "setProgressionLoop"}, {"on", "yes"}});
     checkRejected(store, {{"cmd", "setProgressionLoop"}});
     checkRejected(store, {{"cmd", "setFollowHost"}, {"on", 1}});
+    checkRejected(store, {{"cmd", "setMidiThru"}, {"on", 1}});
+    checkRejected(store, {{"cmd", "setMidiThru"}, {"on", "yes"}});
+    checkRejected(store, {{"cmd", "setMidiThru"}});
 
     CHECK(store.doc() == Document{});
     CHECK_FALSE(store.undo());
@@ -2193,6 +2215,25 @@ TEST_CASE("state: transposeWithKey and keyHintSeen round-trip and a legacy state
     REQUIRE_MESSAGE(loadStateJson(loaded, j.dump(), error), error);
     CHECK(loaded.doc().transposeWithKey == false);
     CHECK(loaded.doc().keyHintSeen == false);
+}
+
+TEST_CASE("state: midiThru round-trips as false and a state without it loads true") {
+    DocumentStore original = richStore();
+    CHECK(json::parse(stateJson(original)).at("midiThru") == true);
+    original.setMidiThru(false);
+    json j = json::parse(stateJson(original));
+    CHECK(j.at("midiThru") == false);
+
+    DocumentStore loaded;
+    std::string error;
+    REQUIRE_MESSAGE(loadStateJson(loaded, j.dump(), error), error);
+    CHECK(loaded.doc() == original.doc());
+    CHECK(loaded.doc().midiThru == false);
+
+    j.erase("midiThru");
+    loaded.setMidiThru(false);
+    REQUIRE_MESSAGE(loadStateJson(loaded, j.dump(), error), error);
+    CHECK(loaded.doc().midiThru == true);
 }
 
 TEST_CASE("state: loadStateJson(stateJson(doc)) round-trips the document, the ids, the id counter and the editor size") {
@@ -2426,6 +2467,8 @@ TEST_CASE("state: a bad state is rejected whole and the store keeps its document
     rejects("browsed key missing", [](json& s) { s.erase("browsedKey"); });
     rejects("key not an object", [](json& s) { s["projectKey"] = "C"; });
     rejects("toggle not a bool", [](json& s) { s["followHost"] = 1; });
+    rejects("midiThru not a bool", [](json& s) { s["midiThru"] = 1; });
+    rejects("midiThru a string", [](json& s) { s["midiThru"] = "yes"; });
     rejects("toggle missing", [](json& s) { s.erase("progressionLoop"); });
     rejects("relation mode unknown", [](json& s) { s["relationMode"] = "Blend"; });
     rejects("relation mode not a string", [](json& s) { s["relationMode"] = 4; });
@@ -2694,7 +2737,7 @@ DocumentStore worstCaseStore() {
 /// `stateJson` of `worstCaseStore()` at the default editor size, measured; pinned so that a change to the
 /// state's shape shows up here against `kMaxJsonBytes` (1 MiB) before it shows up as a state that will
 /// not load.
-constexpr std::size_t kWorstCaseStateBytes = 76950;
+constexpr std::size_t kWorstCaseStateBytes = 76966;
 
 }  // namespace
 

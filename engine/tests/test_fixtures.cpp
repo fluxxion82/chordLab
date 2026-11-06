@@ -71,7 +71,7 @@ Chord chordOf(PitchClass root, const char* typeId) {
     return Chord{root, &chordType(typeId)};
 }
 
-/// Every top-level member of a snapshot, as documented in json_api.h (26 of them). A contract change updates
+/// Every top-level member of a snapshot, as documented in json_api.h (27 of them). A contract change updates
 /// this list and the fixtures together: the snapshot's key set must equal it, so an undocumented key and a
 /// missing documented one both fail.
 const std::set<std::string> kSnapshotKeys = {
@@ -80,7 +80,7 @@ const std::set<std::string> kSnapshotKeys = {
     "modes",          "tonics",         "events",       "sections",       "suggestions",
     "palette",        "homeTriads",     "relationMode", "relationReference", "presets",
     "applied",        "transposeWithKey", "keyHintSeen",    "feel",           "meter",
-    "feelLimited"};
+    "feelLimited",    "midiThru"};
 
 void checkSnapshotShape(const std::string& text) {
     const json j = json::parse(text);
@@ -268,7 +268,7 @@ TEST_CASE("golden fixtures: the legacy Phase 1 state loads with Phase 2 defaults
     std::string text;
     REQUIRE_MESSAGE(readFile("state-legacy-phase1.json", text), "state-legacy-phase1.json missing");
     const json raw = json::parse(text);
-    for (const char* absent : {"autoVoiceLead", "sections", "nextSectionId", "relationMode"}) {
+    for (const char* absent : {"autoVoiceLead", "sections", "nextSectionId", "relationMode", "midiThru"}) {
         CHECK_FALSE(raw.contains(absent));
     }
     for (const json& e : raw.at("events")) {
@@ -286,6 +286,7 @@ TEST_CASE("golden fixtures: the legacy Phase 1 state loads with Phase 2 defaults
     CHECK(w == 900);
     CHECK(h == 620);
     const Document& d = store.doc();
+    CHECK(d.midiThru == true);  // a state saved before the flag existed loads with Thru on
     REQUIRE(d.events.size() == raw.at("events").size());
     CHECK(d.events[0].id == 1);
     CHECK(d.events[1].id == 2);
