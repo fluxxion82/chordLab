@@ -9,11 +9,11 @@ namespace {
 
 constexpr int kOctave = 12;
 
-/// Bit mask of the pitch classes of `chord`.
-unsigned maskOf(const Chord& chord) {
+/// Bit mask of the pitch classes of the chord of `type` on `root` (0..11).
+unsigned maskOf(int root, const ChordType& type) {
     unsigned mask = 0;
-    for (const PitchClass pc : pitchClasses(chord)) {
-        mask |= 1u << static_cast<unsigned>(pc);
+    for (const int interval : type.intervals) {
+        mask |= 1u << static_cast<unsigned>((((root + interval) % kOctave) + kOctave) % kOctave);
     }
     return mask;
 }
@@ -52,18 +52,19 @@ std::optional<HeardChord> identifyChord(const std::vector<int>& heldPitches) {
             if ((held & (1u << static_cast<unsigned>(root))) == 0) {
                 continue;
             }
-            const Chord candidate{root, &types[index]};
-            if (maskOf(candidate) != held) {
+            if (maskOf(root, types[index]) != held) {
                 continue;
             }
             const int rootRank = root == bassClass ? 0 : 1;
+            // Exact matching makes the tone count a no-op today (every type has distinct classes, so
+            // every match has popcount(held) tones); it goes live only if a type with duplicate classes is added.
             const std::size_t tones = types[index].intervals.size();
             const bool better = !found || rootRank < bestRootRank ||
                                 (rootRank == bestRootRank &&
                                  (tones < bestTones || (tones == bestTones && index < bestIndex)));
             if (better) {
                 found = true;
-                best = candidate;
+                best = Chord{root, &types[index]};
                 bestRootRank = rootRank;
                 bestTones = tones;
                 bestIndex = index;
@@ -74,9 +75,14 @@ std::optional<HeardChord> identifyChord(const std::vector<int>& heldPitches) {
         return std::nullopt;
     }
 
-    const std::vector<PitchClass> pcs = pitchClasses(best);
-    const auto at = std::find(pcs.begin(), pcs.end(), bassClass);
-    return HeardChord{best, bass, static_cast<int>(at - pcs.begin())};
+    int inversion = 0;
+    for (const int interval : best.type->intervals) {
+        if ((((best.root + interval) % kOctave) + kOctave) % kOctave == bassClass) {
+            break;
+        }
+        ++inversion;
+    }
+    return HeardChord{best, bass, inversion};
 }
 
 }  // namespace chordlab

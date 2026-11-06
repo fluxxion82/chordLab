@@ -18,12 +18,13 @@ struct HeardChord {
 
 /// The dictionary chord whose pitch-class set equals that of `heldPitches`, or nullopt.
 /// `heldPitches` are MIDI note numbers (0..127) in any order, duplicates and octave doublings allowed;
-/// they must span at least two distinct pitch classes, otherwise the result is nullopt. The match is
+/// they must span at least two distinct pitch classes, otherwise the result is nullopt. Values outside
+/// 0..127 are reduced modulo 12 for the match and `bass` is returned as given. The match is
 /// exact: every held class belongs to the chord and every chord tone is held (no near matches, no
 /// omitted fifths). A set matched by several (root, type) pairs is resolved by rank: a root equal to the
 /// class of the lowest held pitch first, then fewer tones, then dictionary order of the type
 /// (`allChordTypes()`), so A-C-E-G reads Am7 over A but C6 over C, and a symmetric chord (augmented,
-/// diminished seventh) takes the bass as its root. Pure: no state, no allocation beyond the result.
+/// diminished seventh) takes the bass as its root. Pure: no state and no allocation.
 std::optional<HeardChord> identifyChord(const std::vector<int>& heldPitches);
 
 }  // namespace chordlab

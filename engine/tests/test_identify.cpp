@@ -50,6 +50,11 @@ TEST_CASE("identify: input order is irrelevant and the bass is the lowest pitch"
     expectHeard({74, 70, 60, 67, 64}, chord(0, "9"), 60, 0);
 }
 
+TEST_CASE("identify: pitches outside 0..127 are reduced modulo 12 and the bass is returned as given") {
+    expectHeard({-12, -8, -5}, chord(0, "maj"), -12, 0);
+    expectHeard({130, 134, 137}, chord(10, "maj"), 130, 0);
+}
+
 TEST_CASE("identify: fewer than two classes, or no exact match, is nullopt") {
     CHECK_FALSE(identifyChord({}).has_value());
     CHECK_FALSE(identifyChord({60}).has_value());
@@ -57,6 +62,8 @@ TEST_CASE("identify: fewer than two classes, or no exact match, is nullopt") {
     CHECK_FALSE(identifyChord({60, 61}).has_value());
     CHECK_FALSE(identifyChord({60, 61, 62}).has_value());
     CHECK_FALSE(identifyChord({60, 64, 67, 70, 73}).has_value());  // C7 plus a flat nine: no near matches
+    CHECK_FALSE(identifyChord({60, 64}).has_value());  // C major with the fifth omitted
+    CHECK_FALSE(identifyChord({60, 64, 70}).has_value());  // C7 with the fifth omitted
 }
 
 TEST_CASE("identify: collision family {0,4,7,9}: 6 before m7 unless the bass is the m7 root") {
@@ -89,6 +96,7 @@ TEST_CASE("identify: the diminished seventh resolves to the root equal to the ba
     expectHeard({51, 54, 57, 60}, chord(3, "dim7"), 51, 0);  // Eb in the bass
     expectHeard({57, 60, 63, 66}, chord(9, "dim7"), 57, 0);  // A in the bass
     expectHeard({48, 51, 54, 57}, chord(0, "dim7"), 48, 0);  // C in the bass
+    expectHeard({54, 57, 60, 63}, chord(6, "dim7"), 54, 0);  // F# in the bass
 }
 
 TEST_CASE("identify: every dictionary type in every inversion identifies its pitch-class set") {
