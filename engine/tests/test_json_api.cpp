@@ -9,6 +9,7 @@
 #include "chordlab/harmony.h"
 #include "chordlab/json_api.h"
 #include "chordlab/limits.h"
+#include "chordlab/listener.h"
 #include "chordlab/palette.h"
 #include "chordlab/pitch.h"
 #include "chordlab/presets.h"
@@ -24,6 +25,7 @@
 #include <algorithm>
 #include <climits>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <string>
 #include <string_view>
@@ -3415,7 +3417,9 @@ TEST_CASE("appendChord with an inversion: it compiles as given under auto voice-
     const std::vector<std::vector<int>> chosen = voicings(store.doc());
     REQUIRE(chosen.size() == 2);
     CHECK(chosen[1] == voicing(chord(9, "m7"), 1, 0));
-    CHECK(chosen[1].front() % 12 == 0);  // C, Am7's second tone, in the bass
+    // The register tells manual from voice-led: the voice-led Am7 after C is [60,64,67,69], also a C on the
+    // bottom, while the manual first inversion is [72,76,79,81].
+    CHECK(chosen[1].front() == 72);
     CHECK(eventWithId(snapshot(store), store.doc().events[1].id).at("voicing") == json(chosen[1]));
 }
 
@@ -3455,4 +3459,138 @@ TEST_CASE("appendChord with an inversion: one undo step, redo and the state roun
     CHECK(store.doc() == appended);
     CHECK(store.doc().events.back().inversion == 2);
     CHECK(store.doc().events.back().manualVoicing);
+}
+
+// --- heardJson -----------------------------------------------------------------------------
+
+namespace {
+
+// 120 bpm at 48 kHz: one beat is 24000 samples.
+constexpr double kHeardBpm = 120.0;
+constexpr double kHeardRate = 48000.0;
+
+std::uint64_t heardAt(double beat) {
+    return static_cast<std::uint64_t>(beat * 24000.0);
+}
+
+void heardOn(Listener& l, int pitch, double beat) {
+    l.feed({HeardEvent::NoteOn, static_cast<std::uint8_t>(pitch), 100, heardAt(beat)}, kHeardBpm, kHeardRate);
+}
+
+void heardOff(Listener& l, int pitch, double beat) {
+    l.feed({HeardEvent::NoteOff, static_cast<std::uint8_t>(pitch), 0, heardAt(beat)}, kHeardBpm, kHeardRate);
+}
+
+/// Holds `pitches` from beat 0.
+Listener holding(const std::vector<int>& pitches) {
+    Listener l;
+    for (int p : pitches) {
+        heardOn(l, p, 0);
+    }
+    return l;
+}
+
+std::vector<std::string> heldNames(const json& j) {
+    return j.at("heldNames").get<std::vector<std::string>>();
+}
+
+}  // namespace
+
+TEST_CASE("heardJson: a fresh listener is inactive with nothing heard") {
+    const Listener l;
+    const json j = json::parse(heardJson(l, key('C', 0, Mode::Ionian)));
+    CHECK(j["schema"] == 1);
+    CHECK(j["active"] == false);
+    CHECK(j["held"] == json::array());
+    CHECK(j["heldNames"] == json::array());
+    CHECK(j["chord"].is_null());
+    CHECK(j["chordHeld"] == false);
+    CHECK(j["key"].is_null());
+    CHECK(j["onsets"] == 0);
+}
+
+TEST_CASE("heardJson: the top-level members are exactly the wire's") {
+    const Listener l = holding({57, 60, 64, 67});
+    const json j = json::parse(heardJson(l, key('C', 0, Mode::Ionian)));
+    std::vector<std::string> keys;
+    for (auto it = j.begin(); it != j.end(); ++it) {
+        keys.push_back(it.key());
+    }
+    std::sort(keys.begin(), keys.end());
+    CHECK(keys == std::vector<std::string>{"active", "chord", "chordHeld", "held", "heldNames", "key", "onsets",
+                                           "schema"});
+    std::vector<std::string> chordKeys;
+    for (auto it = j["chord"].begin(); it != j["chord"].end(); ++it) {
+        chordKeys.push_back(it.key());
+    }
+    std::sort(chordKeys.begin(), chordKeys.end());
+    CHECK(chordKeys == std::vector<std::string>{"bass", "inversion", "roman", "root", "symbol", "type"});
+}
+
+TEST_CASE("heardJson: Am7 held in C major") {
+    const Listener l = holding({57, 60, 64, 67});
+    const json j = json::parse(heardJson(l, key('C', 0, Mode::Ionian)));
+    CHECK(j["active"] == true);
+    CHECK(j["held"] == json::array({57, 60, 64, 67}));
+    CHECK(heldNames(j) == std::vector<std::string>{"A", "C", "E", "G"});
+    CHECK(j["chord"] == json{{"root", 9}, {"type", "m7"}, {"symbol", "Am7"}, {"roman", "vi7"}, {"inversion", 0},
+                             {"bass", 57}});
+    CHECK(j["chordHeld"] == true);
+    CHECK(j["key"].is_null());
+    CHECK(j["onsets"] == 4);
+}
+
+TEST_CASE("heardJson: E7 spells its third's neighbour G# in C major") {
+    const Listener l = holding({64, 68, 71, 74});
+    const json j = json::parse(heardJson(l, key('C', 0, Mode::Ionian)));
+    CHECK(heldNames(j) == std::vector<std::string>{"E", "G#", "B", "D"});
+    CHECK(j["chord"]["symbol"] == "E7");
+    CHECK(j["chordHeld"] == true);
+}
+
+TEST_CASE("heardJson: a lone held note is spelled by the project key") {
+    const Listener l = holding({68});
+    const json j = json::parse(heardJson(l, key('C', 0, Mode::Ionian)));
+    CHECK(j["active"] == true);
+    CHECK(j["chord"].is_null());
+    CHECK(heldNames(j) == std::vector<std::string>{"Ab"});
+}
+
+TEST_CASE("heardJson: the heard key names the tonic and mode; the project key only spells") {
+    Listener l;
+    for (int i = 0; i < 8; ++i) {
+        const int pitch = std::vector<int>{60, 62, 64, 65, 67, 69, 71, 72}[static_cast<std::size_t>(i)];
+        heardOn(l, pitch, i);
+        heardOff(l, pitch, i + 1);
+        l.advance(heardAt(i + 1), kHeardBpm, kHeardRate);
+    }
+    for (const Key& project : {key('C', 0, Mode::Ionian), key('D', 0, Mode::Ionian)}) {
+        const json j = json::parse(heardJson(l, project));
+        REQUIRE(j["key"].is_object());
+        CHECK(j["key"]["tonic"] == json{{"letter", "C"}, {"alter", 0}});
+        CHECK(j["key"]["mode"] == "Ionian");
+        CHECK(j["key"]["name"] == "C Ionian");
+        CHECK(j["key"]["percent"].is_number_integer());
+        CHECK(j["key"]["percent"].get<int>() >= 85);
+        CHECK(j["onsets"] == 8);
+    }
+}
+
+TEST_CASE("heardJson: after the hands lift the chord stays, unheld, and loose notes use the key's spelling") {
+    Listener l = holding({57, 60, 64, 67});
+    heardOff(l, 57, 1);
+    heardOff(l, 60, 1);
+    heardOff(l, 64, 1);
+    json j = json::parse(heardJson(l, key('C', 0, Mode::Ionian)));
+    CHECK(j["chord"]["symbol"] == "Am7");
+    CHECK(j["chordHeld"] == false);
+    CHECK(j["held"] == json::array({67}));
+    CHECK(heldNames(j) == std::vector<std::string>{"G"});
+
+    // E7 with its root lifted is no longer held as a chord, so its G# reads by spell(): Ab in C major.
+    Listener e = holding({64, 68, 71, 74});
+    heardOff(e, 64, 1);
+    j = json::parse(heardJson(e, key('C', 0, Mode::Ionian)));
+    CHECK(j["chordHeld"] == false);
+    CHECK(heldNames(j) == std::vector<std::string>{"Ab", "B", "D"});
 }

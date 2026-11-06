@@ -7,6 +7,8 @@
 #include "chordlab/feel.h"
 #include "chordlab/function.h"
 #include "chordlab/harmony.h"
+#include "chordlab/identify.h"
+#include "chordlab/listener.h"
 #include "chordlab/meter.h"
 #include "chordlab/palette.h"
 #include "chordlab/pitch.h"
@@ -787,7 +789,8 @@ struct Command {
     int velocity = 100;        // AppendChord (optional, store default), SetVelocity
     int id = 0;                // MoveChord, SetLength, SetVelocity, RemoveChord, the voicing, section and selection commands
     int index = 0;             // MoveChord, AddSection, MoveSectionStart
-    bool on = false;           // SetProgressionLoop, SetFollowHost, SetAutoVoiceLead, SetTransposeWithKey, SetKeyHintSeen, SetMidiThru
+    // SetProgressionLoop, SetFollowHost, SetAutoVoiceLead, SetTransposeWithKey, SetKeyHintSeen, SetMidiThru
+    bool on = false;
     Feel feel{};               // SetFeel
     Meter meter{};             // SetMeter
     int semitones = 0;         // TransposeFromKey (the pitch class moved from, 0..11), TransposeProgression (-11..11)
@@ -1474,6 +1477,53 @@ void setInternalError(std::string& error) noexcept {
 
 std::string keyName(const Key& key) {
     return tonicText(key.tonic) + " " + modeName(key.mode);
+}
+
+std::string heardJson(const Listener& listener, const Key& projectKey) {
+    const std::vector<int> held = listener.held();
+    const std::optional<HeardChord> heard = listener.chord();
+    const bool chordHeld = listener.chordHeld();
+
+    json names = json::array();
+    json pitches = json::array();
+    for (const int pitch : held) {
+        const PitchClass pc = static_cast<PitchClass>(pitch % 12);
+        bool chordTone = false;
+        if (heard && chordHeld) {
+            for (const PitchClass tone : pitchClasses(heard->chord)) {
+                chordTone = chordTone || tone == pc;
+            }
+        }
+        names.push_back((chordTone ? chordToneSpelling(heard->chord, pc, projectKey) : spell(pc, projectKey)).text());
+        pitches.push_back(pitch);
+    }
+
+    json chord;  // null
+    if (heard) {
+        chord = {{"root", heard->chord.root},
+                 {"type", heard->chord.type->id},
+                 {"symbol", chordSymbol(heard->chord, projectKey)},
+                 {"roman", romanNumeral(heard->chord, projectKey)},
+                 {"inversion", heard->inversion},
+                 {"bass", heard->bass}};
+    }
+
+    json key;  // null
+    if (const std::optional<HeardKey> heardKey = listener.key()) {
+        key = keyToJson(heardKey->key);  // {"tonic":{"letter","alter"},"mode"}
+        key["name"] = keyName(heardKey->key);
+        key["percent"] = static_cast<int>(std::lround(100.0 * heardKey->r));
+    }
+
+    return json{{"schema", kJsonSchema},
+                {"active", listener.active()},
+                {"held", std::move(pitches)},
+                {"heldNames", std::move(names)},
+                {"chord", std::move(chord)},
+                {"chordHeld", chordHeld},
+                {"key", std::move(key)},
+                {"onsets", listener.onsetsInWindow()}}
+        .dump();
 }
 
 static_assert(kNoEventId == -1, "snapshotJson's default selectedEventId must be kNoEventId");
