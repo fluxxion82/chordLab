@@ -129,19 +129,20 @@ final class HeardTests: XCTestCase {
     let cells = try fixtureCells()
     let am7 = HeardChordJSON(root: 9, type: "m7", symbol: "Am7", roman: "vi7", inversion: 0, bass: 57)
     let index = try XCTUnwrap(PaletteMatch.heardIndex(cells, heard: am7))
+    XCTAssertEqual(index, 18)                                   // tier 2, vi7 of C Ionian
     XCTAssertEqual(cells[index].symbol, "Am7")
-    XCTAssertEqual(index, cells.firstIndex { $0.root == 9 && $0.type == "m7" })
   }
 
   func testHeardIndexMatchesRootAndTypeNotTheInversion() throws {
     let cells = try fixtureCells()
     let inverted = HeardChordJSON(root: 9, type: "m7", symbol: "Am7", roman: "vi7", inversion: 1, bass: 60)
-    XCTAssertNotNil(PaletteMatch.heardIndex(cells, heard: inverted))
+    XCTAssertEqual(PaletteMatch.heardIndex(cells, heard: inverted), 18)
   }
 
   func testHeardIndexIsNilForAChordNotInTheCells() throws {
     let cells = try fixtureCells()
-    let odd = HeardChordJSON(root: 1, type: "dim7", symbol: "C#dim7", roman: "#i°7", inversion: 0, bass: 61)
+    // The root is in the palette (Am, Am7...), the type is not.
+    let odd = HeardChordJSON(root: 9, type: "dim7", symbol: "Adim7", roman: "vi°7", inversion: 0, bass: 57)
     XCTAssertNil(PaletteMatch.heardIndex(cells, heard: odd))
   }
 

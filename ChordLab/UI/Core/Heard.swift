@@ -27,7 +27,7 @@ struct HeardKeyJSON: Codable, Equatable {
 /// `heldNames` their spellings (a tone of the identified chord is spelled as the chord spells it, any other
 /// as the project key does); `chord` and `key` are nil (JSON null) until one is identified; `chordHeld` is
 /// false once the notes of `chord` have been released (the engine keeps the last chord); `onsets` counts the
-/// notes the key estimate is built from.
+/// notes the key estimate is built from; `schema` is the payload version, currently 1.
 struct HeardJSON: Codable, Equatable {
   let schema: Int
   let active: Bool
