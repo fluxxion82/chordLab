@@ -26,8 +26,10 @@ struct HeardEvent {
 
 /// The key the listener shows (design D8): `key` (Ionian for a major estimate, Aeolian for a minor one,
 /// the tonic spelled by `canonicalTonic`), `r` the Pearson correlation of the histogram with that key's
-/// profile as of the last evaluation tick (0 when the correlation is undefined, an empty or flat
-/// histogram), and `gap` the best candidate's `r` minus the runner-up's at that tick (0 when undefined).
+/// profile as of the last evaluation tick, and `gap` the best candidate's `r` minus the runner-up's at
+/// that tick. A tick on which the shown key's correlation is undefined (an empty or flat histogram, as
+/// after a jump of more than `kWindowBeats` in one `advance`) keeps the previous `r` and `gap`, so the UI
+/// does not flash 0 %; a defined correlation that fails the retain test is still reported.
 struct HeardKey {
     Key key;
     double r;
@@ -78,7 +80,10 @@ double pearson(const std::array<double, 12>& a, const std::array<double, 12>& b)
 ///    `gap >= kMinGap`;
 ///  - retain (`s` shown): `r_s >= kMinR` and `onsets >= kMinOnsets` (the gap need not persist);
 ///  - replace: `best != s`, `best` satisfies acquire and `best.r >= r_s + kHysteresis`, so a relative
-///    major and minor do not flicker;
+///    major and minor do not flicker. While `kHysteresis == kMinGap` the last clause is implied by the
+///    acquire gap (when `s` is not the best it is at most the runner-up, so `best.r - r_s >= gap >=
+///    kMinGap`); it only matters if `kHysteresis > kMinGap`. The constant stays 0.05 until Live listening
+///    says otherwise;
 ///  - remove: retain failed on two consecutive ticks (a retaining or replacing tick resets the count).
 /// `key()` reports `r_s` and the gap as of the last tick.
 ///
@@ -123,8 +128,8 @@ public:
 
     /// Moves time to `nowSampleTime` (never backwards) at tempo `bpm` and `sampleRate` Hz and sets
     /// `changed` when a visible output now differs from the acknowledged one. An evaluation tick for the
-    /// key estimate (design D4, D8: acquire, retain, replace, remove); it never clears `changed`. An `advance` before any event only sets
-    /// the reference stamp and does not make the listener active.
+    /// key estimate (design D4, D8: acquire, retain, replace, remove); it never clears `changed`. An
+    /// `advance` before any event only sets the reference stamp and does not make the listener active.
     void advance(std::uint64_t nowSampleTime, double bpm, double sampleRate);
 
     /// Forgets everything: notes, the held set, the pedal, time and its reference stamp, the shown key and

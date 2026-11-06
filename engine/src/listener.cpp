@@ -49,9 +49,6 @@ double correlate(const std::array<double, 12>& h, const std::array<double, 12>& 
 const std::array<double, 12>& profileOf(Mode mode) noexcept {
     return mode == Mode::Aeolian ? kMinorProfile : kMajorProfile;
 }
-
-/// An undefined correlation (NaN) is reported as 0.
-double reported(double r) noexcept { return std::isnan(r) ? 0.0 : r; }
 }  // namespace
 
 Listener::Listener() { openSeq_.fill(kNoNote); }
@@ -158,6 +155,7 @@ void Listener::latchChord() {
         if (!classes[p % 12]) ++distinct;
         classes[p % 12] = true;
     }
+    // Mirrors identifyChord's own check; kept here to document D10: fewer than two classes never identify.
     if (distinct < 2) return;
     if (auto heard = identifyChord(pitches)) chord_ = *heard;  // no match keeps the latched chord
 }
@@ -168,8 +166,9 @@ void Listener::updateChordHeld() {
     std::array<bool, 12> classes{};
     for (int p = 0; p < 128; ++p)
         if (keyDown_[p] || pedalHeld_[p]) classes[p % 12] = true;
-    for (const PitchClass pc : pitchClasses(chord_->chord))
-        if (!classes[pc]) return;
+    // Walks the intervals instead of pitchClasses(): that returns a vector, and this runs on every feed.
+    for (const int interval : chord_->chord.type->intervals)
+        if (!classes[((chord_->chord.root + interval) % 12 + 12) % 12]) return;
     chordHeld_ = true;
 }
 
@@ -222,8 +221,12 @@ void Listener::evaluateKey() {
         keyMisses_ = 0;
         return;
     }
-    key_->r = reported(rs);
-    key_->gap = gap;
+    // A tick whose r_s is undefined (an empty or flat histogram) keeps the last good r and gap, so the
+    // UI does not flash 0 %; a defined r_s, even a failing one, is reported.
+    if (!std::isnan(rs)) {
+        key_->r = rs;
+        key_->gap = gap;
+    }
 }
 
 void Listener::advance(std::uint64_t nowSampleTime, double bpm, double sampleRate) {
@@ -243,7 +246,8 @@ void Listener::clear() {
     hasStamp_ = false;
     lastStamp_ = 0;
     now_ = 0.0;
-    // The tick on an empty histogram can only drop the key: drop it, and the latched chord.
+    // Clear drops the key outright (an evaluation on an empty histogram would only count a miss), and
+    // the latched chord.
     key_.reset();
     keyMisses_ = 0;
     chord_.reset();

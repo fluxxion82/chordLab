@@ -562,6 +562,17 @@ TEST_CASE("listener: hysteresis: one acquisition, one replacement, never back") 
     double t = 0;
     for (std::size_t i = 0; i < all.size(); ++i) {
         onAt(l, all[i].pitch, t);
+        if (i + 1 == 12 + 7) {
+            // The 7th minor note, A(2), is held over beats 19 to 21. A Aeolian leads C Ionian by 0.029 at
+            // beat 19.25 (a gap under kMinGap and a lead under kHysteresis: C stays) and by 0.068 at
+            // beat 19.75 (past both: A replaces C).
+            advanceTo(l, t + 0.25);
+            REQUIRE(l.key().has_value());
+            CHECK(l.key()->key == cIonian());
+            advanceTo(l, t + 0.75);
+            REQUIRE(l.key().has_value());
+            CHECK(l.key()->key == aAeolian());
+        }
         t += all[i].beats;
         offAt(l, all[i].pitch, t);
         advanceTo(l, t);
@@ -578,7 +589,9 @@ TEST_CASE("listener: hysteresis: one acquisition, one replacement, never back") 
         }
         if (i + 1 > 6 && i + 1 < 12 + 7) {
             REQUIRE(now.has_value());
-            CHECK(*now == cIonian());  // the relative minor creeps up but stays within the hysteresis
+            // At the note-offs A Aeolian never leads before tick 19 and then jumps ahead, so the dead
+            // band is exercised by the mid-note ticks above, not here.
+            CHECK(*now == cIonian());
         }
         if (i + 1 >= 12 + 7) {
             REQUIRE(now.has_value());
@@ -586,7 +599,7 @@ TEST_CASE("listener: hysteresis: one acquisition, one replacement, never back") 
         }
     }
     CHECK(changes == 2);
-    // Acquired at the 6th onset, replaced at the 7th note of the minor phrase (tick 19).
+    // Acquired at the 6th onset, replaced during the 7th note of the minor phrase (seen at tick 19).
     CHECK(changeTicks == std::vector<int>{6, 12 + 7});
 }
 
@@ -598,7 +611,9 @@ TEST_CASE("listener: removal takes two consecutive failing ticks") {
     advanceTo(l, end + 40);
     REQUIRE(l.key().has_value());  // one miss: still shown
     CHECK(l.key()->key == cIonian());
-    CHECK(l.key()->r == doctest::Approx(0.0));  // an undefined correlation reports 0
+    // An undefined correlation (empty histogram) keeps the last good r and gap rather than reporting 0.
+    CHECK(l.key()->r == doctest::Approx(0.901352).epsilon(1e-6));
+    CHECK(l.key()->gap == doctest::Approx(0.901352 - 0.756305).epsilon(1e-5));
     advanceTo(l, end + 41);
     CHECK_FALSE(l.key().has_value());  // the second consecutive miss removes it
 }
@@ -622,6 +637,68 @@ TEST_CASE("listener: a retaining tick resets the miss count") {
     REQUIRE(l.key().has_value());
     advanceTo(l, end + 41);
     CHECK_FALSE(l.key().has_value());
+}
+
+TEST_CASE("listener: retain fails on too few onsets alone") {
+    Listener l;
+    play(l, kCMajorScale, 0);
+    REQUIRE(l.key().has_value());
+    // At beat 35 the onsets at 3..7 are inside the window: 5 < 6, r_C 0.6366 still passes. First miss.
+    advanceTo(l, 35);
+    REQUIRE(l.onsetsInWindow() == 5);
+    REQUIRE(l.key().has_value());
+    CHECK(l.key()->key == cIonian());
+    CHECK(l.key()->r == doctest::Approx(0.6366).epsilon(1e-3));
+    CHECK(std::lround(100.0 * l.key()->r) == 64);
+    // At 35.25 the onset at 3 is gone: 4 onsets, r_C 0.6403 (r never drops under 0.6), second miss.
+    advanceTo(l, 35.25);
+    REQUIRE(l.onsetsInWindow() == 4);
+    CHECK(pearson(l.histogram(), kMajorProfile) >= Listener::kMinR);
+    CHECK(pearson(l.histogram(), kMajorProfile) == doctest::Approx(0.6403).epsilon(1e-3));
+    CHECK_FALSE(l.key().has_value());
+}
+
+TEST_CASE("listener: retain fails on a low r alone") {
+    Listener l;
+    play(l, kCMajorScale, 0);
+    REQUIRE(l.key().has_value());
+    // Whole-tone notes 66 68 70 72 74 76, two beats each, a tick after each note-off; onsets only grow.
+    double t = play(l, {{66, 2}}, 8);  // beat 10: 9 onsets, r_C 0.6779, retained
+    REQUIRE(l.onsetsInWindow() == 9);
+    REQUIRE(l.key().has_value());
+    CHECK(l.key()->r == doctest::Approx(0.6779).epsilon(1e-3));
+
+    t = play(l, {{68, 2}}, t);  // beat 12: 10 onsets, r_C 0.4801: first miss; C is still the best (no replace)
+    REQUIRE(l.onsetsInWindow() == 10);
+    REQUIRE(l.key().has_value());
+    CHECK(l.key()->key == cIonian());
+    CHECK(l.key()->r == doctest::Approx(0.4801).epsilon(1e-3));  // a defined failing r is reported
+
+    t = play(l, {{70, 2}}, t);  // beat 14: 11 onsets, r_C 0.2803: second miss
+    REQUIRE(l.onsetsInWindow() == 11);
+    CHECK_FALSE(l.key().has_value());
+}
+
+TEST_CASE("listener: a percent-only change sets changed() at the tick") {
+    Listener l;
+    play(l, kCMajorScale, 0);
+    onAt(l, 60, 8);  // hold C: it only grows from here, the onset count stays at 9
+    advanceTo(l, 8);
+    REQUIRE(l.key().has_value());
+    REQUIRE(std::lround(100.0 * l.key()->r) == 91);  // r_C 0.9082
+    l.acknowledge();
+    const double r0 = l.key()->r;
+
+    advanceTo(l, 8.5);  // r_C 0.9112: r moved, the rounded percent did not
+    REQUIRE(l.key().has_value());
+    CHECK(l.key()->r != doctest::Approx(r0).epsilon(1e-6));
+    CHECK(std::lround(100.0 * l.key()->r) == 91);
+    CHECK_FALSE(l.changed());
+
+    advanceTo(l, 9.25);  // r_C 0.9019: the percent is 90 now
+    REQUIRE(l.key().has_value());
+    CHECK(std::lround(100.0 * l.key()->r) == 90);
+    CHECK(l.changed());
 }
 
 TEST_CASE("listener: best r just under 0.6 shows no key") {
@@ -723,6 +800,26 @@ TEST_CASE("listener: Am7 latches and stays after its notes are released") {
     CHECK(l.chordHeld());
 }
 
+TEST_CASE("listener: releasing the top or a middle note keeps the chord latched, not held") {
+    Listener top;
+    for (const int p : {57, 60, 64, 67}) onAt(top, p, 0);
+    REQUIRE(top.chord().has_value());
+    CHECK(top.chord()->chord == chord(9, "m7"));
+    offAt(top, 67, 1);  // top first: A C E stay down, no new identification at a note-off
+    CHECK(top.held() == std::vector<int>{57, 60, 64});
+    REQUIRE(top.chord().has_value());
+    CHECK(top.chord()->chord == chord(9, "m7"));
+    CHECK_FALSE(top.chordHeld());
+
+    Listener mid;
+    for (const int p : {57, 60, 64, 67}) onAt(mid, p, 0);
+    offAt(mid, 60, 1);  // a middle note first: A E G stay down
+    CHECK(mid.held() == std::vector<int>{57, 64, 67});
+    REQUIRE(mid.chord().has_value());
+    CHECK(mid.chord()->chord == chord(9, "m7"));
+    CHECK_FALSE(mid.chordHeld());
+}
+
 TEST_CASE("listener: an unidentified set keeps the latched chord") {
     Listener l;
     onAt(l, 60, 0);
@@ -781,14 +878,13 @@ TEST_CASE("listener: octave doubling reads C in root position over the lowest pi
     CHECK(l.chordHeld());
 }
 
-TEST_CASE("listener: a newly latched chord sets changed() even when acknowledged state matched") {
+TEST_CASE("listener: an acknowledged latched chord does not make a later tick report a change") {
     Listener l;
     onAt(l, 60, 0);
     onAt(l, 64, 0);
+    onAt(l, 67, 0);  // latches C
+    REQUIRE(l.chord().has_value());
     l.acknowledge();
-    onAt(l, 67, 0);
-    CHECK(l.changed());
-    l.acknowledge();
-    advanceTo(l, 1);  // nothing visible moves
+    advanceTo(l, 1);  // nothing visible moves: the acknowledged state includes the chord
     CHECK_FALSE(l.changed());
 }
