@@ -791,7 +791,8 @@ struct Command {
     Feel feel{};               // SetFeel
     Meter meter{};             // SetMeter
     int semitones = 0;         // TransposeFromKey (the pitch class moved from, 0..11), TransposeProgression (-11..11)
-    int inversion = 0;         // SetInversion
+    int inversion = 0;         // SetInversion, AppendChord (when `hasInversion`)
+    bool hasInversion = false; // AppendChord: `inversion` was given; the chord is then manual
     int octave = 0;            // SetOctave
     int colourIndex = 0;       // SetSectionColour
     RelationMode relationMode = RelationMode::Blend;  // SetRelationMode
@@ -852,6 +853,12 @@ bool parseAppendChord(Fields& fields, Command& out) {
         return false;
     }
     out.chord = Chord{root, type};
+    if (fields.has("inversion")) {
+        if (!fields.getIntIn("inversion", 0, inversionCount(out.chord) - 1, out.inversion)) {
+            return false;
+        }
+        out.hasInversion = true;
+    }
     return true;
 }
 
@@ -1179,7 +1186,9 @@ Refusal applyCommand(DocumentStore& store, const Command& command, std::string& 
             return store.appendChord(command.chord,
                                      command.hasLength ? command.lengthBeats
                                                        : barTicks(doc.meter) / static_cast<double>(kFeelTicksPerBeat),
-                                     command.velocity) != kNoEventId
+                                     command.velocity,
+                                     command.hasInversion ? std::optional<int>(command.inversion) : std::nullopt) !=
+                           kNoEventId
                        ? Refusal::None
                        : Refusal::IdsExhausted;
         case Command::Kind::MoveChord:

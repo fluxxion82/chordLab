@@ -220,6 +220,36 @@ TEST_CASE("appendChord: a new chord is in root position at octave 0") {
     CHECK(store.doc().events[0].manualVoicing == false);
 }
 
+TEST_CASE("appendChord: an inversion is set on the new event and marks it manual") {
+    const Chord am7 = chord(9, "m7");
+    DocumentStore store;
+    const int inverted = store.appendChord(am7, 4.0, 100, 2);
+    const int zero = store.appendChord(am7, 4.0, 100, 0);
+    const int plain = store.appendChord(am7, 4.0, 100);
+    REQUIRE(inverted != kNoEventId);
+    REQUIRE(zero != kNoEventId);
+    REQUIRE(plain != kNoEventId);
+    const ChordEvent& a = store.doc().events[static_cast<std::size_t>(store.findIndex(inverted))];
+    const ChordEvent& b = store.doc().events[static_cast<std::size_t>(store.findIndex(zero))];
+    const ChordEvent& c = store.doc().events[static_cast<std::size_t>(store.findIndex(plain))];
+    CHECK(a.inversion == 2);
+    CHECK(a.manualVoicing);
+    CHECK(b.inversion == 0);
+    CHECK(b.manualVoicing);
+    CHECK(c.inversion == 0);
+    CHECK_FALSE(c.manualVoicing);
+}
+
+TEST_CASE("appendChord: an inversion is clamped to the chord's inversions") {
+    const Chord am7 = chord(9, "m7");
+    DocumentStore store;
+    const int high = store.appendChord(am7, 4.0, 100, 9);
+    const int low = store.appendChord(am7, 4.0, 100, -3);
+    CHECK(store.doc().events[static_cast<std::size_t>(store.findIndex(high))].inversion == inversionCount(am7) - 1);
+    CHECK(store.doc().events[static_cast<std::size_t>(store.findIndex(low))].inversion == 0);
+    CHECK(store.doc().events[static_cast<std::size_t>(store.findIndex(low))].manualVoicing);
+}
+
 TEST_CASE("appendChord: returns ids 1 then 2 for two appends") {
     DocumentStore store;
     CHECK(store.appendChord(kC, 4.0, 100) == 1);

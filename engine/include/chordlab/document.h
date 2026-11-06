@@ -11,6 +11,7 @@
 
 #include <cstddef>
 #include <deque>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -228,10 +229,14 @@ public:
     /// and `velocity` to [kMinVelocity, kMaxVelocity]. The sections are untouched: the new chord joins the
     /// last section, if any. The new chord becomes the selection (`selectedEventId`, live state: an undo
     /// of the append clears it, like any removal), so the suggestions and relations read from it.
+    /// Without `inversion` the chord is in root position and not manual (auto voice-leading applies). With
+    /// one the event gets it, clamped to 0..`inversionCount(chord) - 1`, and `manualVoicing = true`, so it
+    /// sounds as given (the inversion, at octave 0) even under auto voice-leading, as after `setInversion`.
     /// Returns `kNoEventId` and changes nothing (no event, no history, no id consumed) when `lengthBeats`
     /// is NaN or infinite, when the document already holds `kMaxChords` chords, or when the id counter
     /// has reached INT_MAX. The counter advances only once the append is committed.
-    int appendChord(Chord chord, double lengthBeats = 4.0, int velocity = 100);
+    int appendChord(Chord chord, double lengthBeats = 4.0, int velocity = 100,
+                    std::optional<int> inversion = std::nullopt);
 
     /// Appends a whole progression, `steps` being each chord with its length, as ONE undoable step, and
     /// starts a section named `sectionName` on its first chord (the preset load of P4/P5, json_api.h's

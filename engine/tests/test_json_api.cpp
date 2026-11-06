@@ -3381,3 +3381,78 @@ TEST_CASE("snapshot: a cell's relationText spells its common tones as the cell's
     }
     CHECK(found);
 }
+
+TEST_CASE("appendChord with an inversion: the new selected event carries it, manual, one bar long") {
+    DocumentStore store;
+    applyOk(store, {{"cmd", "setMeter"}, {"num", 7}, {"den", 8}});
+    applyOk(store, {{"cmd", "appendChord"}, {"root", 9}, {"type", "m7"}, {"inversion", 2}});
+    REQUIRE(store.doc().events.size() == 1);
+    const ChordEvent& e = store.doc().events[0];
+    CHECK(e.inversion == 2);
+    CHECK(e.manualVoicing);
+    CHECK(e.lengthBeats == 3.5);  // one bar of 7/8
+    CHECK(store.selectedEventId() == e.id);
+    const json ev = eventWithId(snapshot(store), e.id);
+    CHECK(ev.at("inversion") == 2);
+    CHECK(ev.at("manualVoicing") == true);
+    CHECK(ev.at("voicing") == json(voicing(chord(9, "m7"), 2, 0)));
+
+    DocumentStore plain;
+    applyOk(plain, {{"cmd", "appendChord"}, {"root", 9}, {"type", "m7"}});
+    CHECK(plain.doc().events[0].inversion == 0);
+    CHECK_FALSE(plain.doc().events[0].manualVoicing);
+    DocumentStore zero;
+    applyOk(zero, {{"cmd", "appendChord"}, {"root", 9}, {"type", "m7"}, {"inversion", 0}});
+    CHECK(zero.doc().events[0].inversion == 0);
+    CHECK(zero.doc().events[0].manualVoicing);
+}
+
+TEST_CASE("appendChord with an inversion: it compiles as given under auto voice-leading") {
+    DocumentStore store;
+    store.setAutoVoiceLead(true);
+    applyOk(store, {{"cmd", "appendChord"}, {"root", 0}, {"type", "maj"}});
+    applyOk(store, {{"cmd", "appendChord"}, {"root", 9}, {"type", "m7"}, {"inversion", 1}});
+    const std::vector<std::vector<int>> chosen = voicings(store.doc());
+    REQUIRE(chosen.size() == 2);
+    CHECK(chosen[1] == voicing(chord(9, "m7"), 1, 0));
+    CHECK(chosen[1].front() % 12 == 0);  // C, Am7's second tone, in the bass
+    CHECK(eventWithId(snapshot(store), store.doc().events[1].id).at("voicing") == json(chosen[1]));
+}
+
+TEST_CASE("appendChord with an inversion: out of range or not an integer is rejected naming the field") {
+    DocumentStore store = cG7Am();
+    for (const json& bad : {json(4), json(-1), json("1"), json(1.5), json(nullptr), json(true)}) {
+        const Document before = store.doc();
+        std::string error;
+        CAPTURE(bad.dump());
+        CHECK_FALSE(apply(store, {{"cmd", "appendChord"}, {"root", 9}, {"type", "m7"}, {"inversion", bad}}, error));
+        CHECK(error.find("inversion") != std::string::npos);
+        CHECK(store.doc() == before);
+    }
+    checkRejected(store, {{"cmd", "appendChord"}, {"root", 0}, {"type", "maj"}, {"inversion", 3}});  // a triad has 3
+    applyOk(store, {{"cmd", "appendChord"}, {"root", 9}, {"type", "m7"}, {"inversion", 3}});  // the last of four
+}
+
+TEST_CASE("appendChord with an inversion: one undo step, redo and the state round trip keep it") {
+    DocumentStore store = cG7Am();
+    const std::size_t before = store.doc().events.size();
+    applyOk(store, {{"cmd", "appendChord"}, {"root", 9}, {"type", "m7"}, {"inversion", 2}});
+    REQUIRE(store.doc().events.size() == before + 1);
+    const int id = store.doc().events.back().id;
+    const Document appended = store.doc();
+
+    DocumentStore loaded;
+    std::string error;
+    REQUIRE_MESSAGE(loadStateJson(loaded, stateJson(store), error), error);
+    CHECK(loaded.doc() == store.doc());
+    CHECK(loaded.doc().events.back().inversion == 2);
+    CHECK(loaded.doc().events.back().manualVoicing);
+
+    applyOk(store, {{"cmd", "undo"}});
+    CHECK(store.doc().events.size() == before);
+    CHECK(store.findIndex(id) < 0);
+    applyOk(store, {{"cmd", "redo"}});
+    CHECK(store.doc() == appended);
+    CHECK(store.doc().events.back().inversion == 2);
+    CHECK(store.doc().events.back().manualVoicing);
+}

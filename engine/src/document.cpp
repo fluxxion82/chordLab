@@ -316,7 +316,7 @@ void DocumentStore::setSelectedEvent(int id) {
     }
 }
 
-int DocumentStore::appendChord(Chord chord, double lengthBeats, int velocity) {
+int DocumentStore::appendChord(Chord chord, double lengthBeats, int velocity, std::optional<int> inversion) {
     assertValidChord(chord);
     if (!std::isfinite(lengthBeats) || nextId_ == INT_MAX ||
         doc_.events.size() >= static_cast<std::size_t>(kMaxChords)) {
@@ -324,7 +324,12 @@ int DocumentStore::appendChord(Chord chord, double lengthBeats, int velocity) {
     }
     const int id = nextId_;
     Document next = doc_;
-    next.events.push_back(ChordEvent{id, chord, clampLength(lengthBeats), clampVelocity(velocity)});
+    ChordEvent event{id, chord, clampLength(lengthBeats), clampVelocity(velocity)};
+    if (inversion.has_value()) {
+        event.inversion = clampInversion(chord, *inversion);
+        event.manualVoicing = true;
+    }
+    next.events.push_back(event);
     [[maybe_unused]] const bool changed = commit(std::move(next));
     assert(changed);  // a fresh id always makes the sequence differ
     ++nextId_;        // only now: a throw above leaves the counter, like the rest of the store, untouched
