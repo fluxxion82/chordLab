@@ -146,10 +146,13 @@ private:
   // thru notes are scheduler output and count against this capacity. The naive worst case of one block, 96 performed + 64
   // preview attacks + 64 thru + 64 retrigger offs + 128 owed releases + 128 flush releases = 544,
   // overstates it: releases are counted by the scheduler's dry run and attacks get only what is left. The
-  // proof is the engine test "scheduler: a worst-case block fits the plug-in's output capacity": over the
-  // densest Feel progression with eight 8-pitch previews already sounding, one seek block stops them,
-  // starts eight new ones on the same pitches and retriggers 64 thru notes on those pitches, 320 events
-  // (more than the old 256), and every block is complete at 512.
+  // engine test "scheduler: a worst-case block fits the plug-in's output capacity" models one burst: over
+  // the densest Feel progression with eight 8-pitch previews already sounding, one seek block stops them,
+  // starts eight new ones on the same pitches and retriggers a full thru queue (64) on those pitches. That
+  // modelled burst (full thru queue, one preview replacement, progression) peaks at 320 events (more than
+  // the old 256), and 512 covers it. It is not a bound on every block: a pathological run of queued preview
+  // commands (up to 64, each replacing sounding previews) can ask for more, and is bounded by the writer's
+  // incomplete-block path (attacks dropped, the block reported), not by this number.
   static constexpr std::size_t kMidiOutCapacity = 512;
   static_assert(kMidiOutCapacity >= chordlab::Scheduler::kCapacityForImmediateRelease,
                 "every owed release must fit the block that owes it");

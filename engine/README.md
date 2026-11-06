@@ -79,8 +79,11 @@ Three mechanisms, chosen by who can get it wrong:
 ## Real-time rules
 
 What may run on the audio thread is exactly the `Scheduler` surface: `process`, `reset`, `adopt`,
-`panic`, `ownersOf`, `sounding`, plus the consumer side of `TripleBuffer` (`acquire`, `current`,
-`currentGeneration`). After construction neither allocates, throws, locks or logs; the scheduler's only
+`panic`, `ownersOf`, `sounding`, `pushThru`, `releaseThru`, plus the consumer side of `TripleBuffer`
+(`acquire`, `current`, `currentGeneration`), the producer side of `HeardRing` (`push`; `pop` and
+`takeOverflow` are the consumer side, on the main thread) and the MIDI adapters `heardEventOf` and
+`thruEventOf` (`midi_in.h`). The `Listener` is main-thread only and may allocate: it is fed from the
+ring, never from the audio thread. After construction none of these allocates, throws, locks or logs; the scheduler's only
 headers are `limits.h` and `note_event.h` plus `<array>`, `<atomic>`, `<cstddef>`, `<cstdint>`, and
 `triple_buffer.h` adds `<type_traits>`, so a translation unit that includes them pulls in nothing that
 allocates. `engine_rt_alloc_test` checks it from the outside: a separate process whose global

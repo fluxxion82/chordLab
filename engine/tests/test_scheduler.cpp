@@ -2654,13 +2654,16 @@ TEST_CASE("scheduler thru: releaseThru with nothing held writes nothing") {
 }
 
 TEST_CASE("scheduler: a worst-case block fits the plug-in's output capacity") {
-    // The densest progression (the throughput test's fixture above: eight-note chords at 96 events per beat,
-    // 300 bpm, 44.1 kHz, 4096-frame blocks) with eight previews of eight pitches each already sounding (0..55
-    // and 68..75, apart from the progression's 60..67). Then one block that is also a seek stops the eight
-    // previews, starts eight new ones on the same pitches and carries 64 thru attacks on those pitches, each
-    // a retrigger (off and on): 64 + 64 + 128 events on top of the progression's release-all, chase and
-    // timeline. That block needs more than the old 256; ChordLab.h's kMidiOutCapacity (512) must carry every
-    // block complete.
+    // The modelled burst, not every possible block. The densest progression (the throughput test's fixture
+    // above: eight-note chords at 96 events per beat, 300 bpm, 44.1 kHz, 4096-frame blocks) with eight
+    // previews of eight pitches each already sounding (0..55 and 68..75, apart from the progression's
+    // 60..67). Then one block that is also a seek stops the eight previews, starts eight new ones on the same
+    // pitches (one preview replacement) and carries a full thru queue, 64 attacks on those pitches, each a
+    // retrigger (off and on): 64 + 64 + 128 events on top of the progression's release-all, chase and
+    // timeline. That burst peaks at 320, more than the old 256; ChordLab.h's kMidiOutCapacity (512) covers
+    // it and every block here is complete. A pathological run of queued preview commands (the queue holds
+    // 64, each able to replace sounding previews in the same block) is not modelled: it is bounded by the
+    // writer's incomplete-block path (attacks dropped, the block reported), not by this number.
     constexpr std::size_t kCapacity = 512;  // ChordLab.h: kMidiOutCapacity
     constexpr double kRate = 44100.0;
     constexpr double kTempo = 300.0;
@@ -2730,8 +2733,9 @@ TEST_CASE("scheduler: a worst-case block fits the plug-in's output capacity") {
         for (int b = 0; b < 40; ++b) {
             block(ppq);
         }
-        MESSAGE("capacity budget, strum " << static_cast<int>(feel.strum) << ": seek block " << burst
-                                          << " events, worst block " << maxWritten << " (of " << kCapacity << ")");
+        MESSAGE("capacity budget, strum " << static_cast<int>(feel.strum) << ": modelled burst (full thru queue, "
+                << "one preview replacement, progression) " << burst << " events, worst block " << maxWritten
+                << " (of " << kCapacity << "); queued preview runs beyond it take the incomplete-block path");
         CHECK(incomplete == 0);
         CHECK(maxWritten <= kCapacity);
         CHECK(maxWritten > 256);  // the old capacity could not carry it: why kMidiOutCapacity is 512
