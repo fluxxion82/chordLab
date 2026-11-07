@@ -27,11 +27,14 @@ import SwiftUI
 /// `V7/x` row. Pressing a cell
 /// previews its voicing through `ChordLabState.pressCell` / `releaseCell` (press, release, cancel and
 /// disappearance are all handled by `PressAction`); dragging a cell carries a `ChordRef` to the
-/// sequence bar (both wired in `PaletteCellControl`). The press is a simultaneous gesture under `.draggable`: the preview starts on mouse
-/// down and ends when the press gesture ends or is cancelled. Starting the native drag session is
-/// expected, not guaranteed, to cancel it; if it does not, the preview lasts until the drop, and the
-/// scheduler's 4 s watchdog is the backstop either way. A press that never moves far enough simply
-/// releases on mouse up.
+/// sequence bar (both wired in `PaletteCellControl`). The press is read from the window's left button
+/// (`MouseButton`, in the environment from `TipHost`; the cell whose frame holds the down owns the press,
+/// `PressLogic`), never from a gesture of the cell's own: a zero-distance `DragGesture` under `.draggable`,
+/// even a simultaneous one, kept the native drag session from ever starting (Session 12/13 finding). The
+/// preview starts on mouse down and ends on mouse up, or as soon as the press travels past the drag
+/// threshold, so a dragged cell goes quiet as its drag begins; `ChordLabState`'s keep-alive releases a hold
+/// whose mouse-up the window never saw (it went to the drag session), and the scheduler's 4 s watchdog is
+/// the backstop either way.
 struct PaletteView: View {
   @EnvironmentObject var state: ChordLabState
   @AppStorage(LabelMode.storageKey) private var labelMode = LabelMode.defaultMode
@@ -155,7 +158,8 @@ struct PaletteCellControl: View {
   var body: some View {
     PaletteCellView(cell: cell, size: size, labelMode: labelMode, isPressed: state.heldCellId == cell.id,
                     isHeard: heard, reference: state.snapshot?.relationReference)
-      .pressAction(onPress: { state.pressCell(cell) },
+      .pressAction(circular: true,                                  // the cell's `.contentShape(Circle())`
+                   onPress: { state.pressCell(cell) },
                    onRelease: { state.releaseCell(cell) })
       .draggable(ChordRef(root: cell.root, type: cell.type)) {
         ChordDragPreview(cell: cell, labelMode: labelMode, beats: RulerMarks.barBeats(state.snapshot?.meter))

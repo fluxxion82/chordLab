@@ -31,6 +31,21 @@ private struct TipButtonsDownKey: EnvironmentKey {
   static let defaultValue: () -> Bool = { NSEvent.pressedMouseButtons != 0 }
 }
 
+extension EnvironmentValues {
+  /// The left mouse button as the editor's window sees it (`MouseButton`), published by `TipHost` from the
+  /// window's own events: what a tip disarms on and what a palette cell's press (`PressAction`) starts and
+  /// ends on. Neither reads it through a gesture, so `.draggable` on the same view keeps its drag. The
+  /// default never changes; a view outside a `tipHost()` sees no presses.
+  var mouseButton: MouseButton {
+    get { self[MouseButtonKey.self] }
+    set { self[MouseButtonKey.self] = newValue }
+  }
+}
+
+private struct MouseButtonKey: EnvironmentKey {
+  static let defaultValue = MouseButton()
+}
+
 /// A tip that opens after the mouse rests on the view for `delay` and closes on hover exit, drawn by
 /// `TipOverlay` at the editor's root (`tipHost()`) — inside the window, never a popover, never
 /// hit-testable, so it cannot take a click or key status. It never opens while a mouse button is down
@@ -38,12 +53,14 @@ private struct TipButtonsDownKey: EnvironmentKey {
 /// stays closed after a click until the mouse leaves and comes back (so a press, then a drag of the handle,
 /// is never covered), closes the moment `suppressed` turns true and is scheduled again when `suppressed`
 /// turns false with the mouse still there (entering a block over its handle, then moving onto the block).
-/// Every request carries a generation: an exit, a press, a change of `suppressed` or `id`, a dismissal or
-/// disappearance starts a new one, so a delayed callback from before it shows nothing. The root overlay
-/// drops a tip whose view is not under the pointer (a missed hover exit) and every tip when the pointer
-/// leaves the editor, any mouse button goes down in the window (a right-click's context menu included, which
-/// the left-button gesture above never sees), the application deactivates or the editor's window resigns
-/// key. The palette cells, the sequence blocks and the suggestion chips share this one mechanism.
+/// The press that disarms it is the window's left button (`MouseButton` in the environment) seen while the
+/// view is hovered, not a gesture of the view's own: a zero-distance `DragGesture` here kept `.draggable` on
+/// the same view from ever starting a drag. Every request carries a generation: an exit, a press, a change
+/// of `suppressed` or `id`, a dismissal or disappearance starts a new one, so a delayed callback from before
+/// it shows nothing. The root overlay drops a tip whose view is not under the pointer (a missed hover exit)
+/// and every tip when the pointer leaves the editor, any mouse button goes down in the window (a
+/// right-click's context menu included), the application deactivates or the editor's window resigns key.
+/// The palette cells, the sequence blocks and the suggestion chips share this one mechanism.
 struct HoverTip<Tip: View>: ViewModifier {
   static var defaultDelay: TimeInterval { 0.6 }
 
@@ -58,6 +75,7 @@ struct HoverTip<Tip: View>: ViewModifier {
   @State private var armed = true          // false from a mouse-down until the next hover exit
   @State private var generation = 0
   @Environment(\.tipButtonsDown) private var buttonsDown
+  @Environment(\.mouseButton) private var button
 
   func body(content: Content) -> some View {
     content
@@ -70,12 +88,11 @@ struct HoverTip<Tip: View>: ViewModifier {
           armed = true
         }
       }
-      .simultaneousGesture(
-        DragGesture(minimumDistance: 0)
-          .onChanged { _ in
-            armed = false
-            invalidate()
-          })
+      .onChange(of: button.presses) { _, _ in
+        guard hovering else { return }
+        armed = false
+        invalidate()
+      }
       .onChange(of: suppressed) { _, now in
         invalidate()
         if !now { schedule() }
@@ -122,15 +139,20 @@ extension View {
 
 /// The editor's root: tracks the pointer in the root's space (`PointerTracker`) and draws the published
 /// tips over everything with `TipOverlay`. The pointer is forgotten when it leaves the editor, when the
-/// application resigns active and when the editor's window resigns key, which takes every tip down. Kept
-/// in a modifier of its own so that the pointer's state, which changes on every mouse move, re-renders only
-/// the overlay.
+/// application resigns active and when the editor's window resigns key, which takes every tip down. The
+/// same tracker's view of the left button goes down the tree as `mouseButton` (a value that changes only
+/// on a down, an up and the first move past the drag threshold, never per mouse move), with the root named
+/// `MouseButton.coordinateSpace` so a view can place the press against its own frame. Kept in a modifier
+/// of its own so that the pointer's state, which changes on every mouse move, re-renders only the overlay.
 struct TipHost: ViewModifier {
   @State private var pointer: CGPoint?
+  @State private var button = MouseButton()
 
   func body(content: Content) -> some View {
     content
-      .background(PointerTracker { pointer = $0 })
+      .environment(\.mouseButton, button)
+      .coordinateSpace(name: MouseButton.coordinateSpace)   // what `pressLocation` and a cell's frame are in
+      .background(PointerTracker(onPointer: { pointer = $0 }, onButton: { button = $0 }))
       .overlayPreferenceValue(TipPreferenceKey.self) { items in TipOverlay(items: items, pointer: pointer) }
   }
 }
@@ -140,23 +162,32 @@ struct TipHost: ViewModifier {
 /// move counts however deep the view under the mouse is: SwiftUI's own hover tracking at the root
 /// (`onContinuousHover`) missed moves, and every move over the palette's and the strip's scroll views,
 /// in the harness. Nil when the pointer leaves, on any mouse-down in the window (every tip comes down), when
-/// the application resigns active and when the window resigns key. It takes no clicks.
+/// the application resigns active and when the window resigns key. It also reports the left button
+/// (`MouseButton`: down, up, and the press's first move past the drag threshold) from the same events,
+/// whenever that state changes. It takes no clicks and passes every event on.
 private struct PointerTracker: NSViewRepresentable {
   let onPointer: (CGPoint?) -> Void
+  let onButton: (MouseButton) -> Void
 
   func makeNSView(context: Context) -> PointerTrackingView {
     let view = PointerTrackingView()
     view.onPointer = onPointer
+    view.onButton = onButton
     return view
   }
 
-  func updateNSView(_ view: PointerTrackingView, context: Context) { view.onPointer = onPointer }
+  func updateNSView(_ view: PointerTrackingView, context: Context) {
+    view.onPointer = onPointer
+    view.onButton = onButton
+  }
 
   static func dismantleNSView(_ view: PointerTrackingView, coordinator: ()) { view.stop() }
 }
 
 private final class PointerTrackingView: NSView {
   var onPointer: ((CGPoint?) -> Void)?
+  var onButton: ((MouseButton) -> Void)?
+  private var button = MouseButton()
   private var monitor: Any?
   private var observers: [NSObjectProtocol] = []
 
@@ -169,7 +200,7 @@ private final class PointerTrackingView: NSView {
     guard let window else { return }
     let events: NSEvent.EventTypeMask = [.mouseMoved, .mouseEntered, .mouseExited,
                                          .leftMouseDragged, .rightMouseDragged, .otherMouseDragged,
-                                         .leftMouseDown, .rightMouseDown, .otherMouseDown]
+                                         .leftMouseDown, .rightMouseDown, .otherMouseDown, .leftMouseUp]
     monitor = NSEvent.addLocalMonitorForEvents(matching: events) { [weak self] event in
       MainActor.assumeIsolated { self?.track(event) }
       return event
@@ -189,11 +220,20 @@ private final class PointerTrackingView: NSView {
 
   private func track(_ event: NSEvent) {
     guard let window, event.window === window else { return }
+    let point = convert(event.locationInWindow, from: nil)
+    let before = button
+    switch event.type {
+    case .leftMouseDown: button.down(at: point)
+    case .leftMouseDragged: button.dragged(to: point)
+    case .leftMouseUp: button.up()
+    default: break
+    }
+    if button != before { onButton?(button) }
+    if event.type == .leftMouseUp { return }   // the pointer did not move
     if [.leftMouseDown, .rightMouseDown, .otherMouseDown].contains(event.type) {
       onPointer?(nil)
       return
     }
-    let point = convert(event.locationInWindow, from: nil)
     onPointer?(bounds.contains(point) ? point : nil)
   }
 }
