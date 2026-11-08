@@ -369,8 +369,8 @@ void Scheduler::pushExpiries(int nFrames, std::int64_t previewSamples) noexcept 
 /// arrival order, each at its due time on the preview clock clamped into the block (an overdue one at
 /// offset 0); what the block cannot take stays queued, in order, and makes the block incomplete. With
 /// `thru` off, or after an overflow, the ring is discarded; a mandatory release-all frees every thru
-/// note on the on -> off edge, after an overflow and after a `reset` or `releaseThru` (with `mThruWas`
-/// false no thru note can exist: thru attacks happen only in blocks with `thru` on, each of which sets
+/// note on the on -> off edge, after an overflow and after a `reset`, `releaseThru` or `dropThru` (with
+/// `mThruWas` false no thru note can exist: thru attacks happen only in blocks with `thru` on, each of which sets
 /// it). The release-all sits in the flush phase, so the attacks this block takes still sound after it.
 void Scheduler::collectThru(bool thru, int lastOffset) noexcept {
     const bool overflow = mThruOverflow;

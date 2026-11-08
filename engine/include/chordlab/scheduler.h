@@ -371,8 +371,8 @@ private:
     std::size_t mThruCount;
     bool mThruOverflow;  // an event was refused since the last block
     bool mThruWas;       // the last block's BlockInfo::thru; thru owners exist only while it is true
-    bool mThruReleasePending;  // a `reset` or `releaseThru` since the last non-empty block: the next one
-                               // releases every thru note
+    bool mThruReleasePending;  // a `reset`, `releaseThru` or `dropThru` since the last non-empty block: the
+                               // next one releases every thru note
 };
 
 }  // namespace chordlab

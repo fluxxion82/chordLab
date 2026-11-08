@@ -79,20 +79,22 @@ Three mechanisms, chosen by who can get it wrong:
 ## Real-time rules
 
 What may run on the audio thread is exactly the `Scheduler` surface: `process`, `reset`, `adopt`,
-`panic`, `ownersOf`, `sounding`, `pushThru`, `releaseThru`, `dropThru`, plus the consumer side of `TripleBuffer`
-(`acquire`, `current`, `currentGeneration`), the producer side of `HeardRing` (`push`; `pop` and
-`takeOverflow` are the consumer side, on the main thread), both sides of `RawMidiRing` as the Audio Unit
-uses it (`push` on the host's MIDI delivery thread, which is also not allowed to allocate; `pop`,
-`takeOverflow` and `drainRawMidi` on the audio thread), `Scheduler::dropThru` and the MIDI adapters
-`heardEventOf` and `thruEventOf` (`midi_in.h`). The `Listener` is main-thread only and may allocate: it is fed from the
-ring, never from the audio thread. After construction none of these allocates, throws, locks or logs; the scheduler's only
-headers are `limits.h` and `note_event.h` plus `<array>`, `<atomic>`, `<cstddef>`, `<cstdint>`, and
-`triple_buffer.h` adds `<type_traits>`, and `spsc_ring.h` (`HeardRing`, `RawMidiRing`) adds `<array>`, `<atomic>`, `<type_traits>`, so a translation unit that includes them pulls in nothing that
-allocates. `engine_rt_alloc_test` checks it from the outside: a separate process whose global
-`operator new`/`delete` are replaced by counting versions runs the scheduler through ten thousand random
-blocks (starts, stops, seeks, tempo changes, previews, panics, resets, adopts) and both sides of the triple
-buffer, and the raw MIDI ring through pushes, refused pushes, `takeOverflow` and `drainRawMidi`, and asserts zero intercepted C++ allocations on the exercised paths. It cannot see a direct
-`malloc` or a path the random walk never reaches, so it is evidence, not a proof.
+`panic`, `ownersOf`, `sounding`, `pushThru`, `releaseThru`, `dropThru`, plus the consumer side of
+`TripleBuffer` (`acquire`, `current`, `currentGeneration`), the producer side of `HeardRing` (`push`;
+`pop` and `takeOverflow` are the consumer side, on the main thread), both sides of `RawMidiRing` as the
+Audio Unit uses it (`push` on the host's MIDI delivery thread, which is also not allowed to allocate;
+`pop`, `takeOverflow` and `drainRawMidi` on the audio thread) and the MIDI adapters `heardEventOf` and
+`thruEventOf` (`midi_in.h`). The `Listener` is main-thread only and may allocate: it is fed from the
+ring, never from the audio thread. After construction none of these allocates, throws, locks or logs; the
+scheduler's only headers are `limits.h` and `note_event.h` plus `<array>`, `<atomic>`, `<cstddef>`,
+`<cstdint>`; `triple_buffer.h` adds `<type_traits>` and `spsc_ring.h` (`HeardRing`, `RawMidiRing`)
+nothing beyond those; `midi_in.h` also pulls in the main-thread `listener.h`, whose `<vector>` is used
+only off the audio thread. `engine_rt_alloc_test` checks it from the outside: a separate process whose
+global `operator new`/`delete` are replaced by counting versions runs the scheduler through ten thousand
+random blocks (starts, stops, seeks, tempo changes, previews, panics, resets, adopts) and both sides of
+the triple buffer, and the raw MIDI ring through pushes, refused pushes, `takeOverflow` and
+`drainRawMidi`, and asserts zero intercepted C++ allocations on the exercised paths. It cannot see a
+direct `malloc` or a path the random walk never reaches, so it is evidence, not a proof.
 
 Everything else (`DocumentStore`, `compile`, the palette and symbols, `json_api`, `smf`) is ordinary
 allocating code for the UI/message thread. The hand-over is a `Snapshot`: `compile` produces the

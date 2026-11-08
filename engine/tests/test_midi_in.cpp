@@ -2,7 +2,6 @@
 
 #include "chordlab/midi_in.h"
 
-#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -491,7 +490,7 @@ TEST_CASE("drainRawMidi: an overflow discards everything unread and reports Forg
     CHECK(handled == 1);
 }
 
-TEST_CASE("drainRawMidi: one call pops at most the capacity while a producer keeps pushing; nothing is lost or reordered") {
+TEST_CASE("drainRawMidi: order and integrity hold while a producer keeps pushing") {
     constexpr std::uint64_t kEvents = 20000;
     constexpr std::uint64_t kInFlight = 200;  // the producer keeps the ring below capacity, so no push is refused
     RawMidiRing ring;
@@ -516,7 +515,6 @@ TEST_CASE("drainRawMidi: one call pops at most the capacity while a producer kee
     ProducerJoiner joiner{producer, stop};
     std::uint64_t expected = 0;
     std::uint64_t broken = 0;
-    std::size_t largestCall = 0;
     while (expected < kEvents && std::chrono::steady_clock::now() <= deadline) {
         std::size_t thisCall = 0;
         const RawDrain r = drainRawMidi(ring, 0, [&](const RawMidi& m) {
@@ -525,7 +523,6 @@ TEST_CASE("drainRawMidi: one call pops at most the capacity while a producer kee
             ++thisCall;
         });
         CHECK(r == RawDrain::Handled);
-        largestCall = std::max(largestCall, thisCall);
         handled.store(expected, std::memory_order_release);
         if (thisCall == 0) std::this_thread::yield();
     }
@@ -533,5 +530,22 @@ TEST_CASE("drainRawMidi: one call pops at most the capacity while a producer kee
     CHECK_FALSE(refused);
     CHECK(expected == kEvents);
     CHECK(broken == 0);
-    CHECK(largestCall <= RawMidiRing::kCapacity);
+}
+
+TEST_CASE("drainRawMidi: one call pops at most the capacity even when the handler refills the ring") {
+    // The main thread is both producer and consumer here, which the SPSC contract allows.
+    RawMidiRing ring;
+    for (int i = 0; i < 256; ++i) REQUIRE(ring.push(rawNote(i)));
+    int handled = 0;
+    int next = 256;
+    const RawDrain r = drainRawMidi(ring, 0, [&](const RawMidi&) {
+        ++handled;
+        if (handled < 1000) CHECK(ring.push(rawNote(next++)));  // a broken bound fails here instead of looping forever
+    });
+    CHECK(r == RawDrain::Handled);
+    CHECK(handled == 256);  // stopped at the bound although the ring never ran dry
+    RawMidi m{};
+    int left = 0;
+    while (ring.pop(m)) ++left;
+    CHECK(left == 256);
 }

@@ -53,7 +53,8 @@ enum class RawDrain { Handled, Forgot };
 /// calls `handle(const RawMidi&)` for the rest, in order. The overflow flag is taken first, as the heard
 /// ring's rule says: when it reads true, messages were lost, so everything still queued is discarded unread
 /// (bounded the same way) and `Forgot` is returned; the caller then forgets (heard `Reset`, `dropThru`) and
-/// counts the loss. `handle` must not allocate or block; it runs on the render thread.
+/// counts the loss. `handle` must not allocate, block or throw (the drain is `noexcept`); it runs on the
+/// render thread.
 template <typename Handle>
 RawDrain drainRawMidi(RawMidiRing& ring, std::uint32_t epoch, Handle&& handle) noexcept {
     RawMidi m{};

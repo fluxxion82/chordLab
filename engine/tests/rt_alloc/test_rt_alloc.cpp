@@ -243,6 +243,7 @@ TEST_CASE("rt alloc: the scheduler allocates nothing across 10k random blocks wi
             }
             thruPushes += 300;
             ++forcedOverflows;
+            scheduler.dropThru();  // as the Audio Unit's shell does after its raw MIDI ring overflowed
         }
         std::size_t written = 0;
         const BlockInfo info{ppq, nFrames, kSr, bpm, playing, thru};
