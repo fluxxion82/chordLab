@@ -130,7 +130,8 @@ def main():
   auv2['AudioComponents'][0]['manufacturer'] = config['PLUG_MFR_ID']
   auv2['AudioComponents'][0]['name'] = config['PLUG_MFR'] + ": " + config['PLUG_NAME']
   auv2['AudioComponents'][0]['subtype'] = config['PLUG_UNIQUE_ID']
-  auv2['AudioComponents'][0]['type'] = COMPONENT_TYPE
+  # ChordLab: the AUv2 is always a MIDI processor (Release design D12), whichever PLUG_TYPE line the parser read.
+  auv2['AudioComponents'][0]['type'] = kAudioUnitType_MIDIProcessor
   auv2['AudioComponents'][0]['version'] = config['PLUG_VERSION_INT']
   auv2['AudioComponents'][0]['sandboxSafe'] = True
 
@@ -219,7 +220,7 @@ def main():
   with open(plistpath, 'wb') as fp:
     plistlib.dump(macOSapp, fp)
 
-  check_plists(LSMinimumSystemVersion)
+  check_plists(LSMinimumSystemVersion, au_type=kAudioUnitType_MIDIProcessor)
 
 def check_plists(min_version, au_type=None):
   """Fails the build when a written plist disagrees with config.h or the deployment target."""
