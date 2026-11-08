@@ -245,6 +245,13 @@ void Scheduler::releaseThru() noexcept {
     mThruReleasePending = true;
 }
 
+void Scheduler::dropThru() noexcept {
+    // The queue is stale (what was lost may include its note-offs); the release-all waits for a block with frames.
+    mThruHead = 0;
+    mThruCount = 0;
+    mThruReleasePending = true;
+}
+
 void Scheduler::panic() noexcept {
     // Everything in the ring right now is stale: remember where it ends and let the next drain skip it.
     // Only the tail is read, so the producer is never waited for; commands it pushes from here on sit

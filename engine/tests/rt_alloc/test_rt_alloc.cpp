@@ -326,6 +326,10 @@ TEST_CASE("rt alloc: the raw MIDI ring allocates nothing on push, pop or an over
         (void) ring->takeOverflow();
         chordlab::RawMidi m{};
         while (ring->pop(m)) {}
+        for (int i = 0; i < 300; ++i) ring->push(chordlab::RawMidi{0x90, std::uint8_t(i % 128), 100, 0, i});  // refused again
+        (void) chordlab::drainRawMidi(*ring, 0, [](const chordlab::RawMidi&) {});  // overflowed: Forgot
+        for (int i = 0; i < 10; ++i) ring->push(chordlab::RawMidi{0x90, std::uint8_t(i), 100, 0, i});
+        (void) chordlab::drainRawMidi(*ring, 0, [](const chordlab::RawMidi&) {});  // normal: Handled
     }
     CHECK(probe.count() == 0);
 }

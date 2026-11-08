@@ -127,7 +127,7 @@ constexpr std::uint8_t kOwnerThru = 4;
 /// nothing at all and changes nothing.
 ///
 /// Real time: after construction nothing allocates, throws, locks or logs. `process`, `reset`, `adopt`,
-/// `panic`, `pushThru`, `releaseThru`, `ownersOf` and `sounding` belong to one thread, the audio thread; `pushPreview`
+/// `panic`, `pushThru`, `releaseThru`, `dropThru`, `ownersOf` and `sounding` belong to one thread, the audio thread; `pushPreview`
 /// may be called from one other thread. `reset` and `adopt` may also be called from another thread while the
 /// host guarantees that no `process` runs concurrently (iPlug2's `OnReset` before processing starts, for
 /// instance); without such a guarantee the plugin must marshal them to the audio callback.
@@ -207,6 +207,13 @@ public:
     /// `thru` on, that block applies them after the release-all as usual, so an attack on a released pitch
     /// at the same sample comes out as its off then its on.
     void releaseThru() noexcept;
+
+    /// Forgets the queued incoming notes and releases every thru note on the next block with `nFrames > 0`
+    /// (an empty block leaves the release pending), by a release-all whatever that block's `BlockInfo::thru`.
+    /// Audio thread only, the same thread as `process`. The shell calls it when its raw input overflowed
+    /// (Release design D13): the queued notes' note-offs may be among what was lost, so, unlike `releaseThru`,
+    /// the queue goes too. Previews, their commands and the progression are untouched (unlike `reset`).
+    void dropThru() noexcept;
 
     /// Produces this block's events into `out[0..capacity)`, setting `written`. Returns false if the block
     /// could not emit everything it was due to: an attack was dropped (output capacity, scratch space or the

@@ -2,6 +2,7 @@
 
 #include "chordlab/midi_in.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -371,8 +372,9 @@ namespace {
 RawMidi rawNote(std::uint64_t seq, std::uint32_t epoch = 0) {
     return RawMidi{0x90, std::uint8_t(seq % 128), 100, epoch, int(seq)};
 }
-bool intactRaw(const RawMidi& m, std::uint64_t seq) {
-    return m.status == 0x90 && m.data1 == seq % 128 && m.data2 == 100 && m.sampleOffset == int(seq);
+bool intactRaw(const RawMidi& m, std::uint64_t seq, std::uint32_t epoch = 0) {
+    return m.status == 0x90 && m.data1 == seq % 128 && m.data2 == 100 && m.epoch == epoch &&
+           m.sampleOffset == int(seq);
 }
 }  // namespace
 
@@ -450,4 +452,86 @@ TEST_CASE("SpscRing: the heard ring is the same template") {
     static_assert(std::is_same_v<HeardRing, SpscRing<HeardEvent, 256>>);
     static_assert(std::is_trivially_copyable_v<RawMidi>);
     CHECK(HeardRing::kCapacity == RawMidiRing::kCapacity);
+}
+
+TEST_CASE("drainRawMidi: handles the queued messages in order and empties the ring") {
+    RawMidiRing ring;
+    for (int i = 0; i < 5; ++i) REQUIRE(ring.push(rawNote(i, 7)));
+    std::vector<int> seen;
+    CHECK(drainRawMidi(ring, 7, [&](const RawMidi& m) { seen.push_back(m.sampleOffset); }) == RawDrain::Handled);
+    CHECK(seen == std::vector<int>{0, 1, 2, 3, 4});
+    RawMidi m{};
+    CHECK_FALSE(ring.pop(m));
+}
+
+TEST_CASE("drainRawMidi: messages queued before the current epoch are skipped, the current epoch's handled") {
+    RawMidiRing ring;
+    REQUIRE(ring.push(rawNote(0, 1)));
+    REQUIRE(ring.push(rawNote(1, 1)));
+    REQUIRE(ring.push(rawNote(2, 2)));
+    REQUIRE(ring.push(rawNote(3, 1)));  // a straggler of the old epoch: the host's thread raced the reset
+    std::vector<int> seen;
+    CHECK(drainRawMidi(ring, 2, [&](const RawMidi& m) { seen.push_back(m.sampleOffset); }) == RawDrain::Handled);
+    CHECK(seen == std::vector<int>{2});
+    RawMidi m{};
+    CHECK_FALSE(ring.pop(m));
+}
+
+TEST_CASE("drainRawMidi: an overflow discards everything unread and reports Forgot; the next drain is normal again") {
+    RawMidiRing ring;
+    for (int i = 0; i < 256; ++i) REQUIRE(ring.push(rawNote(i)));
+    CHECK_FALSE(ring.push(rawNote(256)));
+    int handled = 0;
+    CHECK(drainRawMidi(ring, 0, [&](const RawMidi&) { ++handled; }) == RawDrain::Forgot);
+    CHECK(handled == 0);
+    RawMidi m{};
+    CHECK_FALSE(ring.pop(m));
+    REQUIRE(ring.push(rawNote(300)));
+    CHECK(drainRawMidi(ring, 0, [&](const RawMidi&) { ++handled; }) == RawDrain::Handled);
+    CHECK(handled == 1);
+}
+
+TEST_CASE("drainRawMidi: one call pops at most the capacity while a producer keeps pushing; nothing is lost or reordered") {
+    constexpr std::uint64_t kEvents = 20000;
+    constexpr std::uint64_t kInFlight = 200;  // the producer keeps the ring below capacity, so no push is refused
+    RawMidiRing ring;
+    std::atomic<std::uint64_t> handled{0};
+    std::atomic<bool> stop{false};
+    std::atomic<bool> refused{false};
+    const auto deadline = std::chrono::steady_clock::now() + kThreadedBudget;
+    std::thread producer([&] {
+        for (std::uint64_t seq = 0; seq < kEvents;) {
+            if (stop) return;
+            if (seq - handled.load(std::memory_order_acquire) >= kInFlight) {
+                std::this_thread::yield();
+                continue;
+            }
+            if (!ring.push(rawNote(seq))) {
+                refused = true;
+                return;
+            }
+            ++seq;
+        }
+    });
+    ProducerJoiner joiner{producer, stop};
+    std::uint64_t expected = 0;
+    std::uint64_t broken = 0;
+    std::size_t largestCall = 0;
+    while (expected < kEvents && std::chrono::steady_clock::now() <= deadline) {
+        std::size_t thisCall = 0;
+        const RawDrain r = drainRawMidi(ring, 0, [&](const RawMidi& m) {
+            if (!intactRaw(m, expected)) ++broken;
+            ++expected;
+            ++thisCall;
+        });
+        CHECK(r == RawDrain::Handled);
+        largestCall = std::max(largestCall, thisCall);
+        handled.store(expected, std::memory_order_release);
+        if (thisCall == 0) std::this_thread::yield();
+    }
+    joiner.join();
+    CHECK_FALSE(refused);
+    CHECK(expected == kEvents);
+    CHECK(broken == 0);
+    CHECK(largestCall <= RawMidiRing::kCapacity);
 }

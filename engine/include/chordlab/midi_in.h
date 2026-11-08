@@ -43,4 +43,31 @@ struct RawMidi {
 /// Producer: the host's MIDI delivery thread; consumer: the render thread (the AU shell's ProcessBlock).
 using RawMidiRing = SpscRing<RawMidi, 256>;
 
+/// What the drain of the raw ring did (Release design D13).
+enum class RawDrain { Handled, Forgot };
+
+/// The render thread's policy for the raw ring, once per block, before anything else touches the scheduler:
+/// pops at most `RawMidiRing::kCapacity` messages (a producer that keeps pushing cannot make the loop
+/// endless; what it adds meanwhile waits for the next block), skips the messages whose `epoch` is not
+/// `epoch` (they were queued before the host's last reset, which forgets everything, this included), and
+/// calls `handle(const RawMidi&)` for the rest, in order. The overflow flag is taken first, as the heard
+/// ring's rule says: when it reads true, messages were lost, so everything still queued is discarded unread
+/// (bounded the same way) and `Forgot` is returned; the caller then forgets (heard `Reset`, `dropThru`) and
+/// counts the loss. `handle` must not allocate or block; it runs on the render thread.
+template <typename Handle>
+RawDrain drainRawMidi(RawMidiRing& ring, std::uint32_t epoch, Handle&& handle) noexcept {
+    RawMidi m{};
+    if (ring.takeOverflow()) {
+        for (std::size_t n = 0; n < RawMidiRing::kCapacity && ring.pop(m); ++n) {
+        }
+        return RawDrain::Forgot;
+    }
+    for (std::size_t n = 0; n < RawMidiRing::kCapacity && ring.pop(m); ++n) {
+        if (m.epoch == epoch) {
+            handle(m);
+        }
+    }
+    return RawDrain::Handled;
+}
+
 }  // namespace chordlab

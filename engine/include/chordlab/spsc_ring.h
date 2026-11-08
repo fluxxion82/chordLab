@@ -22,6 +22,8 @@ namespace chordlab {
 /// `takeOverflow()` *before* draining and, when it returns true, pop and discard everything, then
 /// resynchronise (the listener forgets; the AU shell also drops its thru notes). The flag's release
 /// store and the exchange's acquire make every item pushed before the refusal visible to those pops.
+/// Draining first and taking the flag afterwards could hand the consumer a pre-drop note-on whose note-off
+/// was the refused item.
 ///
 /// Threads: `push` belongs to the one producer thread, `pop` and `takeOverflow` to the one consumer thread.
 template <typename T, std::size_t N>
@@ -56,7 +58,9 @@ public:
     /// Consumer. Copies the oldest item into `out` and returns true, or returns false (leaving `out`
     /// untouched) when the ring is empty.
     bool pop(T& out) noexcept {
+        // Relaxed: only the consumer writes tail_, so it reads its own last value.
         const std::uint32_t tail = tail_.load(std::memory_order_relaxed);
+        // Acquire: pairs with the producer's release store of head_; the slot's content happens-before this read.
         const std::uint32_t head = head_.load(std::memory_order_acquire);
         if (head == tail) {
             return false;
