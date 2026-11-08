@@ -52,6 +52,12 @@ def main():
       print("copying " + font + " to " + dst)
       shutil.copy(projectpath + "/resources/fonts/" + font, dst)
 
+  # The licence and the third-party notices travel with every copy (GPL-3.0 and the MIT-style notices ask for it).
+  repo = os.path.abspath(os.path.join(projectpath, os.pardir))
+  for legal in ["LICENSE", "THIRD_PARTY_NOTICES.txt"]:
+    print("copying " + legal + " to " + dst)
+    shutil.copy(os.path.join(repo, legal), dst)
+
   print("Processing Info.plist files...")
 
 # VST3

@@ -148,6 +148,25 @@ belongs in `ChordLab/bridge/` with a case in `ChordLab/bridge/tests/`.
   real-time rules, threading contract); [engine/include/chordlab/json_api.h](engine/include/chordlab/json_api.h)
   is the engine ↔ UI contract.
 
+## Licence
+
+ChordLab is free software under the [GNU General Public License v3.0](LICENSE) (GPL-3.0-only),
+copyright 2026 Sterling Albury. It is built on third-party code under its own terms, reproduced in
+[THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt), which ships inside every bundle:
+
+- [iPlug2](https://github.com/iPlug2/iPlug2) and Cockos WDL: zlib-style licence.
+- [RtAudio](https://github.com/thestk/rtaudio) 5.1.0 and [RtMidi](https://github.com/thestk/rtmidi) 4.0.0 (the
+  standalone app's audio and MIDI I/O): MIT-style.
+- [nlohmann/json](https://github.com/nlohmann/json) 3.11.2 (`engine/third_party/nlohmann`): MIT.
+  [doctest](https://github.com/doctest/doctest) (MIT) is used by the tests only.
+- The Steinberg [VST 3 SDK](https://github.com/steinbergmedia/vst3sdk) 3.7.14: dual-licensed; ChordLab uses it under the
+  GPLv3 branch, which is why the VST3 binary and this repository are GPL.
+- Apple SDKs and the Audio Unit headers: Apple's SDK terms.
+
+**Corresponding source.** A release's `.provenance.txt` names the ChordLab tag and commit, the iPlug2 commit
+(public at github.com/iPlug2/iPlug2), and the VST3 SDK, RtAudio, RtMidi and nlohmann/json versions it was built
+from, all public upstream; "Build" above is the recipe. Together they are the complete source of the binaries.
+
 ## Status
 
 - **Live verification is pending.** The engine is covered by tests and both the VST3 and the standalone

@@ -22,6 +22,7 @@ gui/*
 Icon?
 .DS_Stor*
 # project
+dist/
 .worktrees/
 engine/build/
 .DS_Store
