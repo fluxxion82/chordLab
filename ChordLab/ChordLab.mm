@@ -93,9 +93,15 @@
 // cannot see the flag, so ApplyPendingReset also pushes a HeardEvent::Reset into mHeardRing right after
 // Scheduler::reset, from the ring's one producer: the listener clears exactly between the events heard
 // before the reset and those after it (a key held across a deactivation never sends its note-off, and would
-// otherwise stay held). If the ring is full the push is refused and the sticky overflow clears the listener. AUv2 is not a target (check.sh builds the APP and the VST3): its wrapper calls
-// ProcessMidiMsg on the host's thread (IPlugAU.cpp DoMIDIEvent), which would race pushThru and the flag
-// consumers with process.
+// otherwise stay held). If the ring is full the push is refused and the sticky overflow clears the listener.
+// AUv2's wrapper calls ProcessMidiMsg on the host's MIDIEvent thread (IPlugAU.cpp DoMIDIEvent), so under
+// AU_API it only queues the raw bytes (mRawMidiIn, an SPSC ring, tagged with mInputEpoch) and ProcessBlock
+// drains them first (DrainRawMidiIn, chordlab::drainRawMidi: bounded, skipping what preceded the last
+// reset) on the render thread, where pushThru and the flag consumers belong. The ring's single-producer
+// contract assumes the host delivers MIDIEvent from one thread at a time, as Logic and auval do; a host
+// delivering from two threads concurrently would race push. iPlug2's AU render also feeds editor-sent MIDI
+// to ProcessMidiMsg on the render thread (IPlugAU.cpp:1746-1753); ChordLab never calls SendMidiMsgFromUI,
+// so the ring keeps its single producer: do not start.
 //
 // The Cocoa view controller: ARC is off for this file. OpenWindow's alloc/init returns the controller
 // at +1 and CocoaEditorDelegate::CloseWindow only forgets the pointer, so CloseWindow here releases it.
@@ -299,6 +305,7 @@ void ChordLab::OnReset()
 {
   // May run off the audio thread; the scheduler's reset is marshalled to the next ProcessBlock.
   mResetSampleRate.store(GetSampleRate(), std::memory_order_relaxed);
+  mInputEpoch.fetch_add(1, std::memory_order_release);          // raw AU input queued before this is forgotten by the drain
   mResetPending.store(true, std::memory_order_release);
 }
 
@@ -331,12 +338,29 @@ void ChordLab::ApplyPendingBypassRelease() noexcept
 //    shift), and several transitions within one block collapse to the last (design D5; the user guide's
 //    limits). The pedal arrives only on MIDI channel 1: VST3_NUM_CC_CHANS defaults to 1
 //    (IPlugVST3_Defs.h:12), and the host drops the other channels' CCs.
-//  - AUv2 (not a target: check.sh builds the APP and the VST3) calls this on the host's thread
-//    (IPlugAU.cpp DoMIDIEvent), so pushThru and the flag consumers would race process. If AU ever ships,
-//    route the input through an SPSC queue drained in ProcessBlock, or compile thru out under AU_API.
+//  - AUv2 calls ProcessMidiMsg on the host's MIDIEvent thread (IPlugAU.cpp DoMIDIEvent), not the render
+//    thread, so under AU_API it only pushes the raw message into mRawMidiIn and DrainRawMidiIn runs the
+//    normal path at the top of ProcessBlock (offsets are relative to the next render, so they are block
+//    offsets already). The wrapper runs OnReset on both edges of a bypass (kAudioUnitProperty_BypassEffect)
+//    and does not call ProcessBlock while bypassed (PassThroughBuffers), so a bypass forgets: nothing is
+//    queued meanwhile, the Heard group goes quiet, and the progression chases back in afterwards (the user
+//    guide's Logic limits).
 //  - A bypass end releases the thru notes through Scheduler::releaseThru, on the next block with frames,
 //    and keeps the queued notes (see "MIDI in").
 void ChordLab::ProcessMidiMsg(const IMidiMsg& msg)
+{
+#if defined(AU_API)
+  // The host's MIDIEvent thread: only the ring (its one producer). A refusal is sticky; the drain resynchronises.
+  if (GetBypassed())                                             // a bypass is a reset in the AU wrapper: nothing to keep
+    return;
+  mRawMidiIn.push(chordlab::RawMidi{msg.mStatus, msg.mData1, msg.mData2,
+                                    mInputEpoch.load(std::memory_order_acquire), msg.mOffset});
+#else
+  HandleMidiIn(msg);
+#endif
+}
+
+void ChordLab::HandleMidiIn(const IMidiMsg& msg) noexcept
 {
   // Audio thread: no allocation, no locks, no logging, never the base class (see "MIDI in" at the top).
   ApplyPendingReset();                                           // first: its heard Reset precedes this event, and reset() empties the thru queue
@@ -356,6 +380,29 @@ void ChordLab::ProcessMidiMsg(const IMidiMsg& msg)
   }
 }
 
+#if defined(AU_API)
+void ChordLab::DrainRawMidiIn() noexcept
+{
+  // The policy (bounded pops, the flag before the drain, stale epochs skipped) is the engine's, tested there.
+  const uint32_t epoch = mInputEpoch.load(std::memory_order_acquire);
+  const chordlab::RawDrain drained = chordlab::drainRawMidi(mRawMidiIn, epoch, [this](const chordlab::RawMidi& raw) {
+    IMidiMsg msg;
+    msg.mStatus = raw.status;
+    msg.mData1 = raw.data1;
+    msg.mData2 = raw.data2;
+    msg.mOffset = raw.sampleOffset;
+    HandleMidiIn(msg);
+  });
+  if (drained == chordlab::RawDrain::Forgot)
+  {
+    mDroppedRaw.fetch_add(1, std::memory_order_relaxed);
+    ApplyPendingReset();                                         // keeps the order HandleMidiIn would have kept
+    mHeardRing.push({chordlab::HeardEvent::Reset, 0, 0, mSampleClock.load(std::memory_order_relaxed)});   // the listener forgets
+    mScheduler.dropThru();                                       // the queued thru notes are stale too; a lost note-off never sticks a note
+  }
+}
+#endif
+
 void ChordLab::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
 {
   // Audio thread: nothing here may touch mStore, mPalette or mModelMutex (see the note at the top).
@@ -367,6 +414,9 @@ void ChordLab::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
   for (int c = 0; c < nOut; ++c)
     std::fill(outputs[c], outputs[c] + nFrames, 0.0);
 
+#if defined(AU_API)
+  DrainRawMidiIn();                                              // the host's MIDIEvent thread only queued (see "MIDI in")
+#endif
   ApplyPendingReset();                                           // unless this callback's MIDI already ran it
   ApplyPendingBypassRelease();                                   // likewise
   // panic() before process(): panic records the preview ring's tail as it sees it, and the drain inside
@@ -471,6 +521,9 @@ void ChordLab::OnIdle()
     }
   }
 
+#if defined(AU_API)
+  mDroppedHeard += mDroppedRaw.exchange(0, std::memory_order_relaxed);   // AU input overflows read as forgotten epochs too
+#endif
   const uint32_t incomplete = mIncompleteBlocks.load(std::memory_order_relaxed);
   if ((incomplete != mReportedIncompleteBlocks || mDroppedHeard != mReportedDroppedHeard) && mEditorOpen.load())
   {

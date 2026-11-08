@@ -41,9 +41,12 @@ public:
   void OnIdle() override;
   void OnReset() override;
   void ProcessBlock(sample** inputs, sample** outputs, int nFrames) override;
-  // Audio thread, once per incoming MIDI event before the block's ProcessBlock (also while bypassed):
-  // feeds the heard ring and queues the note for thru. Replaces iPlug2's default, which forwards every
-  // message to the output unmanaged; the base is never called. See "MIDI in" in ChordLab.mm.
+  // Once per incoming MIDI event, before the block's ProcessBlock (also while bypassed). VST3 and the
+  // standalone APP call it on the audio thread: it runs HandleMidiIn directly. AUv2 calls it on the host's
+  // MIDIEvent thread (IPlugAU.cpp DoMIDIEvent): it only queues the raw message, tagged with mInputEpoch,
+  // into mRawMidiIn, which ProcessBlock drains (DrainRawMidiIn); while bypassed it queues nothing (the AU
+  // wrapper resets on both bypass edges and never calls ProcessBlock in between). Replaces iPlug2's
+  // default, which forwards every message to the output unmanaged; the base is never called.
   void ProcessMidiMsg(const IMidiMsg& msg) override;
   bool OnMessage(int msgTag, int ctrlTag, int dataSize, const void* pData) override;
   // Keys the host delivers through the plug-in API (VST3 onKeyDown): forwarded to the Swift editor's
@@ -90,6 +93,18 @@ private:
   // next block with frames (Scheduler::releaseThru, which keeps the queue). Called at the top of
   // ProcessBlock and before a callback's first pushThru, always after ApplyPendingReset.
   void ApplyPendingBypassRelease() noexcept;
+  // Audio thread: the body of the MIDI-in path (pending reset, the heard push, the thru push) for one
+  // message whose offset is within the block about to be processed. Never called from another thread.
+  void HandleMidiIn(const IMidiMsg& msg) noexcept;
+#if defined(AU_API)
+  // Audio thread, first thing in ProcessBlock: hands every message the host delivered since the last
+  // block to HandleMidiIn in order, through chordlab::drainRawMidi (at most 256 per block; messages
+  // queued before the last OnReset are skipped, that epoch is forgotten). An overflowed ring (more than
+  // 256 messages between two blocks) forgets instead: the listener gets an in-band Reset, the scheduler
+  // drops its queued thru notes and releases the sounding ones (a lost note-off must never stick one),
+  // and mDroppedRaw counts it for the status line.
+  void DrainRawMidiIn() noexcept;
+#endif
   // Main thread: pushes {"schema":1,"ppq":ppq,"playing":playing} (the playhead) to the editor.
   void PushTransport(double ppq, bool playing);
   // Main thread: exports the document (chordlab::exportMidi under mModelMutex, with its meter), writes it as a format 0 MIDI file under a unique, never-reused
@@ -161,6 +176,7 @@ private:
                 std::atomic<uint32_t>::is_always_lock_free && std::atomic<uint64_t>::is_always_lock_free,
                 "the audio thread must never lock on these");
   std::atomic<bool> mResetPending{false};
+  std::atomic<uint32_t> mInputEpoch{0};                        // bumped by OnReset; tags raw AU input so the drain can skip what preceded a reset
   std::atomic<double> mResetSampleRate{44100.0};
   std::atomic<bool> mPanicPending{false};
   std::atomic<uint32_t> mIncompleteBlocks{0};                  // blocks whose process() returned false
@@ -176,6 +192,10 @@ private:
   std::atomic<bool> mBlockRefused{false};                      // a thru push was refused in the block being gathered
   std::atomic<bool> mBypassSeen{false};                        // MIDI arrived while bypassed: the thru notes are released after it
   uint32_t mDroppedHeard = 0;                                  // main thread: heard-ring overflows seen
+#if defined(AU_API)
+  chordlab::RawMidiRing mRawMidiIn;                            // producer: the host's MIDIEvent thread; consumer: ProcessBlock
+  std::atomic<uint32_t> mDroppedRaw{0};                        // overflows of mRawMidiIn; OnIdle folds them into droppedHeard
+#endif
   uint32_t mReportedDroppedHeard = 0;                          // main thread: last value pushed to the UI
   chordlab::Listener mListener;                                // main thread only (it may allocate)
   std::chrono::steady_clock::time_point mLastHeardTick{};      // main thread: the last mListener.advance
