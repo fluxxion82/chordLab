@@ -28,7 +28,8 @@ def main():
   CFBundleVersion = config['FULL_VER_STR']
   CFBundlePackageType = "BNDL"
   CSResourcesFileMapped = True
-  LSMinimumSystemVersion = "11.0" #xcconfig['DEPLOYMENT_TARGET']
+  # Xcode exports the target's deployment target to run-script phases; ChordLab-mac.xcconfig sets it to 15.0.
+  LSMinimumSystemVersion = os.environ.get("MACOSX_DEPLOYMENT_TARGET", "15.0")
 
   print("Copying resources ...")
 
@@ -151,7 +152,7 @@ def main():
   auv3['CFBundleName'] = config['BUNDLE_NAME']
   auv3['CFBundleVersion'] = CFBundleVersion
   auv3['CFBundleShortVersionString'] = CFBundleVersion
-  auv3['LSMinimumSystemVersion'] = "11.0.0"
+  auv3['LSMinimumSystemVersion'] = LSMinimumSystemVersion
   auv3['CFBundlePackageType'] = "XPC!"
   auv3['NSExtension'] = dict(
   NSExtensionAttributes = dict(
@@ -217,5 +218,22 @@ def main():
 
   with open(plistpath, 'wb') as fp:
     plistlib.dump(macOSapp, fp)
+
+  check_plists(LSMinimumSystemVersion)
+
+def check_plists(min_version, au_type=None):
+  """Fails the build when a written plist disagrees with config.h or the deployment target."""
+  resources = os.path.join(projectpath, "resources")
+  for name in ["ChordLab-VST3-Info.plist", "ChordLab-macOS-Info.plist", "ChordLab-AU-Info.plist"]:
+    with open(os.path.join(resources, name), 'rb') as fp:
+      plist = plistlib.load(fp)
+    if plist.get('LSMinimumSystemVersion') != min_version:
+      sys.exit("prepare_resources-mac.py: %s has LSMinimumSystemVersion %r, expected %r" % (name, plist.get('LSMinimumSystemVersion'), min_version))
+  if au_type is not None:
+    with open(os.path.join(resources, "ChordLab-AU-Info.plist"), 'rb') as fp:
+      au = plistlib.load(fp)
+    if au['AudioComponents'][0]['type'] != au_type:
+      sys.exit("prepare_resources-mac.py: the AU plist type is %r, expected %r" % (au['AudioComponents'][0]['type'], au_type))
+
 if __name__ == '__main__':
   main()

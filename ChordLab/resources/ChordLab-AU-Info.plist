@@ -48,7 +48,7 @@
 	<key>CSResourcesFileMapped</key>
 	<true/>
 	<key>LSMinimumSystemVersion</key>
-	<string>11.0</string>
+	<string>15.0</string>
 	<key>NSPrincipalClass</key>
 	<string>ChordLab_View</string>
 </dict>
