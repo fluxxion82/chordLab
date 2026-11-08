@@ -7,12 +7,13 @@
 #   scripts/release.sh build [--rehearsal] [--skip-notarize] [--skip-auval]
 #       Release build of every format into dist/stage, signed with the Developer ID given on the xcodebuild
 #       command line; signature checks; auval on the AU; three component pkgs; one signed product pkg,
-#       notarized and stapled; .sha256 and .provenance.txt beside it.
+#       notarized (notarytool --wait --timeout 2h) and stapled; .sha256 and .provenance.txt beside it.
 #       --rehearsal allows an untagged HEAD and dirty trees and names the pkg with the commit (never publishable);
 #       --skip-notarize leaves it unstapled and named -unnotarized; --skip-auval records the AU as unvalidated.
 #   scripts/release.sh publish
-#       gh release create v<version> with the pkg, its hash and the provenance, after checking that they belong
-#       to HEAD, which must be the tag, already pushed.
+#       gh release create v<version> --draft with the pkg, its hash and the provenance, then --draft=false once
+#       all three assets are listed, after checking that they belong to HEAD, which must carry the annotated
+#       tag, already pushed.
 #
 # The Xcode project stays ad-hoc signed; nothing here changes it. The script writes dist/ (stage, pkgs, logs and
 # xcodebuild's intermediates: SYMROOT and OBJROOT point into it, so every build is cold) and, from Task 10, the AU
@@ -51,9 +52,15 @@ version_hex() { sed -n 's/^#define PLUG_VERSION_HEX 0x\([0-9A-Fa-f]*\).*/\1/p' "
 hex_to_str()  { local h=$((16#$1)); echo "$(( (h >> 16) & 0xFFFF )).$(( (h >> 8) & 0xFF )).$(( h & 0xFF ))"; }
 au_subtype()  { sed -n "s/^#define PLUG_UNIQUE_ID '\(.*\)'.*/\1/p" "$CONFIG_H"; }
 au_mfr()      { sed -n "s/^#define PLUG_MFR_ID '\(.*\)'.*/\1/p" "$CONFIG_H"; }
-head_tag()    { git describe --exact-match --tags HEAD 2>/dev/null || true; }
-tree_dirty()  {  # 0 dirty, 1 clean, 2 not a git work tree (never "clean")
-    git -C "${1:-.}" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 2
+head_tag()    { git describe --exact-match --tags HEAD 2>/dev/null || true; }   # informational rows only
+annotated_tag() {  # HEAD carries v$1: 0 an annotated tag, 1 not on HEAD, 2 a lightweight tag
+    local tags; tags=$(git tag --points-at HEAD 2>/dev/null || true)   # captured: an early grep exit cannot fail a pipe
+    grep -qx "v$1" <<<"$tags" || return 1
+    [ "$(git cat-file -t "v$1" 2>/dev/null || true)" = tag ] || return 2
+}
+work_tree()   { git -C "${1:-.}" rev-parse --is-inside-work-tree >/dev/null 2>&1; }
+tree_dirty()  {  # 0 dirty, 1 clean, 2 not a git work tree (never "clean": callers test ! tree_clean)
+    work_tree "${1:-.}" || return 2
     [ -n "$(git -C "${1:-.}" status --porcelain 2>/dev/null)" ]
 }
 tree_clean()  { local rc=0; tree_dirty "$1" || rc=$?; [ "$rc" -eq 1 ]; }
@@ -66,7 +73,7 @@ title_of()  { case "$1" in vst3) echo "VST3 plug-in (Ableton Live and other VST3
 
 REPORT=0 REHEARSAL=0 SKIP_NOTARIZE=0 SKIP_AUVAL=0
 PRE_FAILED=0
-VER="" PKG="" PROV="" AUVAL_RESULT="n/a"
+VER="" PKG="" PROV="" AUVAL_RESULT="n/a" BUILD_HEAD="" BUILD_IPLUG2_HEAD=""
 
 # ---------------------------------------------------------------------------------------------------------
 # preflight
@@ -85,7 +92,7 @@ versions_agree()    { local hex; hex=$(version_hex); [ -n "$hex" ] && [ "$(hex_t
 notary_profile_ok() { "$TIMEOUT_CMD" 30 xcrun notarytool history --keychain-profile "$NOTARY_PROFILE"; }
 
 preflight() {
-    local ver tool tag
+    local ver tool tag tag_rc
     ver=$(version_str)
     echo "release.sh preflight (ChordLab $ver)"
     for tool in xcodebuild codesign pkgbuild productbuild pkgutil auval lipo shasum python3 gh ditto; do
@@ -111,8 +118,13 @@ preflight() {
     else
         check "clean tree" "$(probe test -z "$(git status --porcelain)")" "$(git status --porcelain | wc -l | tr -d ' ') changed paths"
         check "iPlug2 tree clean" "$(probe tree_clean "$IPLUG2_ROOT")" "the provenance file must name a commit that is the code ($IPLUG2_ROOT, a git work tree)"
-        tag=$(head_tag)
-        check "HEAD tagged v$ver" "$(probe test "$tag" = "v$ver")" "${tag:-no tag on HEAD} (--rehearsal for a rehearsal)"
+        tag_rc=0; annotated_tag "$ver" || tag_rc=$?
+        case "$tag_rc" in
+            0) check "HEAD tagged v$ver" 0 "annotated tag v$ver" ;;
+            2) check "HEAD tagged v$ver" 1 "v$ver is a lightweight tag; the release notes come from an annotated one (git tag -a)" ;;
+            *) tag=$(git tag --points-at HEAD 2>/dev/null | tr '\n' ' ' | sed 's/ $//' || true)
+               check "HEAD tagged v$ver" 1 "${tag:-no tag on HEAD} (--rehearsal for a rehearsal)" ;;
+        esac
     fi
     check "gh logged in" "$(probe "$TIMEOUT_CMD" 30 gh auth status)" "$("$TIMEOUT_CMD" 30 gh auth status 2>&1 | sed -n 's/.*Logged in to \(.*\)/\1/p' | head -1)"
     if [ "$PRE_FAILED" -ne 0 ]; then
@@ -228,7 +240,7 @@ package() {
     write_distribution "$DIST/Distribution.xml"
     if [ "$REHEARSAL" -eq 1 ]; then
         suffix="-$(git rev-parse --short HEAD)"
-        if tree_dirty . || tree_dirty "$IPLUG2_ROOT"; then suffix="$suffix-dirty"; fi
+        if ! tree_clean . || ! tree_clean "$IPLUG2_ROOT"; then suffix="$suffix-dirty"; fi
     fi
     [ "$SKIP_NOTARIZE" -eq 0 ] || suffix="$suffix-unnotarized"
     PKG="$DIST/ChordLab-$VER$suffix.pkg"
@@ -236,33 +248,51 @@ package() {
         --sign "$PKG_IDENTITY" --timestamp "$PKG" >>"$LOGS/productbuild.log" 2>&1 || { tail -n 20 "$LOGS/productbuild.log" >&2; die "productbuild failed"; }
     # Captured first so an early grep exit cannot fail the pipeline.
     sig=$(pkgutil --check-signature "$PKG" 2>&1) || die "$PKG: pkgutil --check-signature failed"
-    grep -q "Developer ID Installer" <<<"$sig" || die "$PKG: not signed with the Developer ID Installer identity"
+    grep -qF "Status: signed by a developer certificate issued by Apple for distribution" <<<"$sig" \
+        || die "$PKG: pkgutil does not report a Developer ID distribution signature (see pkgutil --check-signature)"
+    grep -qF "Signed with a trusted timestamp" <<<"$sig" || die "$PKG: the installer signature has no trusted timestamp"
+    grep -qF "$PKG_IDENTITY" <<<"$sig" || die "$PKG: not signed with $PKG_IDENTITY"
     note "product package $(basename "$PKG")"
 }
 
 notarize() {
-    local submit id status
+    local submit rc=0 id status py_rc=0
     if [ "$SKIP_NOTARIZE" -eq 1 ]; then note "notarization skipped (--skip-notarize): $(basename "$PKG") is not stapled"; return; fi
-    note "notarizing $(basename "$PKG") with profile $NOTARY_PROFILE (usually a few minutes)"
-    if ! submit=$(xcrun notarytool submit "$PKG" --keychain-profile "$NOTARY_PROFILE" --wait --output-format json 2>>"$LOGS/notarytool.err"); then
-        die "notarytool submit failed (see $LOGS/notarytool.err)"
-    fi
-    echo "$submit" >"$LOGS/notarytool-submit.json"
-    id=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' <<<"$submit")
-    status=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])' <<<"$submit")
-    xcrun notarytool log "$id" --keychain-profile "$NOTARY_PROFILE" "$LOGS/notarytool-log.json" >>"$LOGS/notarytool.err" 2>&1 || die "notarytool log $id failed (see $LOGS/notarytool.err)"
-    if ! python3 - "$LOGS/notarytool-log.json" <<'PY'
+    note "notarizing $(basename "$PKG") with profile $NOTARY_PROFILE (usually a few minutes; gives up waiting after 2 h)"
+    # Never die before the submission id and the raw answer are saved: a lost id is a lost log.
+    submit=$(xcrun notarytool submit "$PKG" --keychain-profile "$NOTARY_PROFILE" --wait --timeout 2h \
+             --output-format json 2>>"$LOGS/notarytool.err") || rc=$?
+    printf '%s\n' "$submit" >"$LOGS/notarytool-submit.json"
+    read -r id status < <(python3 -c 'import json,sys
+try: d=json.loads(sys.stdin.read().strip().splitlines()[-1])
+except Exception: d={}
+if not isinstance(d, dict): d={}
+print(d.get("id") or "-", str(d.get("status") or "-").replace(" ","_"))' <<<"$submit") || true
+    [ "${id:--}" != "-" ] || die "notarytool submit failed (rc $rc, no submission id; see $LOGS/notarytool.err and $LOGS/notarytool-submit.json)"
+    note "notarization submission $id: status ${status:--} (notarytool rc $rc)"
+    case "${status:--}" in
+        Accepted|Invalid|Rejected) ;;
+        *) die "notarization of submission $id did not finish (status ${status:--}, rc $rc); check later with: xcrun notarytool info $id --keychain-profile $NOTARY_PROFILE" ;;
+    esac
+    xcrun notarytool log "$id" --keychain-profile "$NOTARY_PROFILE" "$LOGS/notarytool-log.json" >>"$LOGS/notarytool.err" 2>&1 \
+        || die "notarytool log $id failed (status $status; see $LOGS/notarytool.err)"
+    # Every issue is printed; errors stop the run, warnings do not (design D18 as relaxed after review).
+    python3 - "$LOGS/notarytool-log.json" <<'PY' || py_rc=$?
 import json, sys
-log = json.load(open(sys.argv[1]))
-issues = log.get("issues") or []
+try:
+    log = json.load(open(sys.argv[1]))
+    issues = log.get("issues") or []
+except Exception as e:
+    print("  could not read the notarization log: %s" % e)
+    sys.exit(2)
 for issue in issues:
     print("  %s: %s (%s)" % (issue.get("severity"), issue.get("message"), issue.get("path")))
-sys.exit(1 if issues else 0)
+sys.exit(1 if any(str(issue.get("severity")).lower() == "error" for issue in issues) else 0)
 PY
-    then
-        die "the notarization log has issues (status $status; see $LOGS/notarytool-log.json)"
-    fi
-    [ "$status" = "Accepted" ] || die "notarization status: $status (see $LOGS/notarytool-log.json)"
+    [ "$py_rc" -ne 2 ] || die "the notarization log of submission $id is unreadable (status $status; see $LOGS/notarytool-log.json)"
+    [ "$py_rc" -eq 0 ] || die "the notarization log of submission $id has errors (status $status; see $LOGS/notarytool-log.json)"
+    [ "$status" = "Accepted" ] || die "notarization of submission $id: status $status (see $LOGS/notarytool-log.json)"
+    [ "$rc" -eq 0 ] || die "notarytool submit exited $rc although submission $id is Accepted (see $LOGS/notarytool.err)"
     xcrun stapler staple "$PKG" >>"$LOGS/stapler.log" 2>&1 || die "stapler staple failed (see $LOGS/stapler.log)"
     xcrun stapler validate "$PKG" >>"$LOGS/stapler.log" 2>&1 || die "stapler validate failed (see $LOGS/stapler.log)"
     spctl --assess --type install -vv "$PKG" >>"$LOGS/spctl.log" 2>&1 || die "spctl refuses the pkg (see $LOGS/spctl.log)"
@@ -275,6 +305,12 @@ dep_version() {  # file regex-with-one-group; empty (the provenance says "unknow
 
 provenance() {
     PROV="${PKG%.pkg}.provenance.txt"
+    if [ "$REHEARSAL" -eq 0 ]; then  # the provenance must name the code that was built
+        [ "$(git rev-parse HEAD)" = "$BUILD_HEAD" ] \
+            && [ "$(git -C "$IPLUG2_ROOT" rev-parse HEAD 2>/dev/null || echo -)" = "$BUILD_IPLUG2_HEAD" ] \
+            && tree_clean . && tree_clean "$IPLUG2_ROOT" \
+            || die "the tree changed during the build; rebuild"
+    fi
     (cd "$DIST" && shasum -a 256 "$(basename "$PKG")" >"$(basename "$PKG").sha256")
     local vst3 rta rtm nl json=engine/third_party/nlohmann/json.hpp
     vst3=$(dep_version "$IPLUG2_ROOT/Dependencies/IPlug/VST3_SDK/pluginterfaces/vst/vsttypes.h" '^#define kVstVersionString[[:space:]]*"VST \([^"]*\)".*')
@@ -286,9 +322,14 @@ provenance() {
         echo "ChordLab $VER"
         echo "pkg:            $(basename "$PKG")"
         echo "sha256:         $(cut -d' ' -f1 "$PKG.sha256")"
-        echo "chordlab:       $(git rev-parse HEAD) ($(git describe --tags --always)) https://github.com/fluxxion82/chordLab"
-        echo "iplug2:         $(git -C "$IPLUG2_ROOT" rev-parse HEAD) ($(git -C "$IPLUG2_ROOT" describe --tags --always)) $(git -C "$IPLUG2_ROOT" remote get-url origin 2>/dev/null || echo "$IPLUG2_ROOT")"
-        if tree_dirty "$IPLUG2_ROOT"; then echo "WARNING:        the iPlug2 working tree was dirty when this was built (rehearsal only)"; fi
+        echo "chordlab:       $(git rev-parse HEAD) ($(git describe --tags --always --dirty)) https://github.com/fluxxion82/chordLab"
+        if ! tree_clean .; then echo "WARNING:        the ChordLab working tree was dirty when this was built (rehearsal only)"; fi
+        if work_tree "$IPLUG2_ROOT"; then
+            echo "iplug2:         $(git -C "$IPLUG2_ROOT" rev-parse HEAD) ($(git -C "$IPLUG2_ROOT" describe --tags --always --dirty)) $(git -C "$IPLUG2_ROOT" remote get-url origin 2>/dev/null || echo "$IPLUG2_ROOT")"
+        else
+            echo "iplug2:         not a git work tree ($IPLUG2_ROOT)"
+        fi
+        if ! tree_clean "$IPLUG2_ROOT"; then echo "WARNING:        the iPlug2 tree was not a clean git work tree when this was built (rehearsal only)"; fi
         echo "vst3sdk:        ${vst3:-unknown} https://github.com/steinbergmedia/vst3sdk (GPLv3 branch)"
         echo "rtaudio:        ${rta:-unknown} https://github.com/thestk/rtaudio"
         echo "rtmidi:         ${rtm:-unknown} https://github.com/thestk/rtmidi"
@@ -309,8 +350,10 @@ prov_field() { sed -n "s/^$1: *//p" "$PROV"; }
 publish() {
     VER=$(version_str)
     PKG="$DIST/ChordLab-$VER.pkg"; PROV="${PKG%.pkg}.provenance.txt"
-    local remote_sha local_sha
-    [ "$(head_tag)" = "v$VER" ] || die "HEAD is not tagged v$VER"
+    local remote_sha local_sha tag_rc=0 assets f
+    annotated_tag "$VER" || tag_rc=$?
+    [ "$tag_rc" -ne 1 ] || die "HEAD is not tagged v$VER"
+    [ "$tag_rc" -ne 2 ] || die "v$VER is a lightweight tag; the release notes come from an annotated one (git tag -a)"
     [ -f "$PKG" ] && [ -f "$PKG.sha256" ] && [ -f "$PROV" ] || die "run 'scripts/release.sh build' on the tag first ($PKG missing)"
     (cd "$DIST" && shasum -a 256 -c "$(basename "$PKG").sha256" >/dev/null 2>&1) || die "$PKG does not match its .sha256"
     [ "$(prov_field chordlab | cut -d' ' -f1)" = "$(git rev-parse HEAD)" ] || die "the provenance names another commit than HEAD; rebuild on the tag"
@@ -323,13 +366,23 @@ publish() {
     local_sha=$(git rev-parse "v$VER")
     [ -n "$remote_sha" ] || die "tag v$VER is not on origin yet: git push origin main v$VER"
     [ "$remote_sha" = "$local_sha" ] || die "origin's v$VER ($remote_sha) is not the local tag ($local_sha)"
-    gh release create "v$VER" "$PKG" "$PKG.sha256" "$PROV" --title "ChordLab $VER" --notes-from-tag --verify-tag || die "gh release create v$VER failed"
+    # A draft first, published only once every asset is there: a half-uploaded release is never public.
+    gh release create "v$VER" "$PKG" "$PKG.sha256" "$PROV" --draft --title "ChordLab $VER" --notes-from-tag --verify-tag \
+        || die "gh release create v$VER --draft failed (a draft may be left: gh release view v$VER)"
+    assets=$(gh release view "v$VER" --json assets --jq '.assets[].name') || die "gh release view v$VER failed; the release is still a draft"
+    for f in "$PKG" "$PKG.sha256" "$PROV"; do
+        grep -qxF "$(basename "$f")" <<<"$assets" \
+            || die "the draft release v$VER lacks $(basename "$f"): gh release upload v$VER $f --clobber, then gh release edit v$VER --draft=false"
+    done
+    gh release edit "v$VER" --draft=false >/dev/null || die "gh release edit v$VER --draft=false failed; the draft has all three assets, run it by hand"
     note "published https://github.com/fluxxion82/chordLab/releases/tag/v$VER"
 }
 
 build() {
     VER=$(version_str)
     REPORT=0; preflight
+    BUILD_HEAD=$(git rev-parse HEAD)
+    BUILD_IPLUG2_HEAD=$(git -C "$IPLUG2_ROOT" rev-parse HEAD 2>/dev/null || echo -)
     rm -rf "$DIST"; mkdir -p "$STAGE" "$PKGS" "$LOGS"
     local fmt
     for fmt in "${FORMATS[@]}"; do build_format "$fmt"; done

@@ -1,14 +1,12 @@
 ChordLab is installed.
 
-Ableton Live: rescan plug-ins (Settings > Plug-Ins > Rescan) or restart Live, then find ChordLab under
-Plug-Ins > VST3. Put it on a MIDI track and route a second track's MIDI From to "ChordLab" (the plug-in's
-output), with Monitor set to In. The user guide has the full setup.
+Ableton Live: rescan plug-ins (Settings > Plug-Ins > Rescan) or restart Live, then find ChordLab under Plug-Ins > VST3. Put it on a MIDI track and route a second track's MIDI From to "ChordLab" (the plug-in's output), with Monitor set to In. The user guide has the full setup.
 
-Logic Pro: on a software-instrument track, open the MIDI FX slot and choose Audio Units > SterlingAlbury >
-ChordLab. If it is missing, open Logic Pro > Settings > Plug-in Manager and click Full Audio Unit Reset,
-then quit and reopen Logic.
+Logic Pro: on a software-instrument track, open the MIDI FX slot and choose Audio Units > SterlingAlbury > ChordLab. If it is missing, open Logic Pro > Settings > Plug-in Manager and click Full Audio Unit Reset, then quit and reopen Logic.
 
 The app is in /Applications/ChordLab.app.
 
-To uninstall, remove /Library/Audio/Plug-Ins/VST3/ChordLab.vst3, /Library/Audio/Plug-Ins/Components/
-ChordLab.component and /Applications/ChordLab.app.
+To uninstall, remove:
+  /Library/Audio/Plug-Ins/VST3/ChordLab.vst3
+  /Library/Audio/Plug-Ins/Components/ChordLab.component
+  /Applications/ChordLab.app
