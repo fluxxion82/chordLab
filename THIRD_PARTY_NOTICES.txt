@@ -1,4 +1,4 @@
-ChordLab ships with the following third-party software. Each section reproduces that project's own licence or notice.
+ChordLab ships with the following third-party software. Each section reproduces that project's own licence or notice, or, for the VST 3 SDK, names the licence it is used under.
 
 ================ iPlug2 and Cockos WDL (zlib-style) ================
 
@@ -39,6 +39,7 @@ iPlug2 WebView Library
 
 NOTE: iPlug2 WebView Library is licensed under the MIT License. See LICENSE.txt in the IPlug/Extras/WebView folder for more information. 
 You must include the original copyright notice in any redistribution.
+
 ================ RtAudio 5.1.0 (compiled into the standalone app) ================
 
     RtAudio: realtime audio i/o C++ classes

@@ -519,7 +519,6 @@
 		4FC3EFEE2086CE5600BD11FA /* uid.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = uid.h; sourceTree = "<group>"; };
 		4FC46E57231440B4000045E7 /* web */ = {isa = PBXFileReference; lastKnownFileType = folder; name = web; path = ../resources/web; sourceTree = "<group>"; };
 		4FC82B4520BD522B00722133 /* img */ = {isa = PBXFileReference; lastKnownFileType = folder; name = img; path = ../resources/img; sourceTree = "<group>"; };
-		4FC82B4620BD522B00722133 /* fonts */ = {isa = PBXFileReference; lastKnownFileType = folder; name = fonts; path = ../resources/fonts; sourceTree = "<group>"; };
 		4FD16A0913B63081001D0217 /* ChordLab.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ChordLab.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		4FD16D0213B63489001D0217 /* swell-menugen.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = "swell-menugen.h"; path = "../../../iPlug2/WDL/swell/swell-menugen.h"; sourceTree = SOURCE_ROOT; };
 		4FD16D0313B63494001D0217 /* swell-dlggen.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = "swell-dlggen.h"; path = "../../../iPlug2/WDL/swell/swell-dlggen.h"; sourceTree = SOURCE_ROOT; };
@@ -677,7 +676,6 @@
 		089C167CFE841241C02AAC07 /* Resources */ = {
 			isa = PBXGroup;
 			children = (
-				4FC82B4620BD522B00722133 /* fonts */,
 				4FC82B4520BD522B00722133 /* img */,
 				4FA61F9922E8A96300A92C58 /* tex */,
 				4FC46E57231440B4000045E7 /* web */,
