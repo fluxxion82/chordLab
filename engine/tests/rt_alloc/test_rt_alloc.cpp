@@ -318,6 +318,18 @@ TEST_CASE("rt alloc: the triple buffer allocates nothing on the producer or the 
     CHECK(wrongGeneration == 0);
 }
 
+TEST_CASE("rt alloc: the raw MIDI ring allocates nothing on push, pop or an overflow") {
+    const auto ring = std::make_unique<chordlab::RawMidiRing>();  // off the stack, before the probe
+    AllocationProbe probe;
+    for (int round = 0; round < 100; ++round) {
+        for (int i = 0; i < 300; ++i) ring->push(chordlab::RawMidi{0x90, std::uint8_t(i % 128), 100, 0, i});  // 44 refusals per round
+        (void) ring->takeOverflow();
+        chordlab::RawMidi m{};
+        while (ring->pop(m)) {}
+    }
+    CHECK(probe.count() == 0);
+}
+
 TEST_CASE("rt alloc: handing over full 4096-event performed snapshots allocates nothing on the audio thread") {
     // 64 one-bar four-note chords, Subdivided: 64 x 8 hits x 4 notes x 2 = 4096 performed events, the most a
     // snapshot holds. Two such progressions (G7 and Dm7, strummed and humanised differently) are published in

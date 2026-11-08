@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 using namespace chordlab;
@@ -364,4 +365,89 @@ TEST_CASE("HeardRing: across threads an overrun is reported once and the stream 
     joiner.join();  // join first: no assertion below may throw while the producer is still running
     CHECK(expected == kBurst + kAfter);
     CHECK(broken == 0);
+}
+
+namespace {
+RawMidi rawNote(std::uint64_t seq, std::uint32_t epoch = 0) {
+    return RawMidi{0x90, std::uint8_t(seq % 128), 100, epoch, int(seq)};
+}
+bool intactRaw(const RawMidi& m, std::uint64_t seq) {
+    return m.status == 0x90 && m.data1 == seq % 128 && m.data2 == 100 && m.sampleOffset == int(seq);
+}
+}  // namespace
+
+TEST_CASE("RawMidiRing: messages come out in the order they went in, bytes, epoch and offset intact") {
+    RawMidiRing ring;
+    for (int i = 0; i < 10; ++i) {
+        CHECK(ring.push(RawMidi{0x90, std::uint8_t(60 + i), 100, 3, i * 7}));
+    }
+    for (int i = 0; i < 10; ++i) {
+        RawMidi m{};
+        REQUIRE(ring.pop(m));
+        CHECK(m.status == 0x90);
+        CHECK(m.data1 == 60 + i);
+        CHECK(m.data2 == 100);
+        CHECK(m.epoch == 3);
+        CHECK(m.sampleOffset == i * 7);
+    }
+    RawMidi m{};
+    CHECK_FALSE(ring.pop(m));
+}
+
+TEST_CASE("RawMidiRing: 256 fit, the 257th is refused and the overflow reads true once") {
+    RawMidiRing ring;
+    static_assert(RawMidiRing::kCapacity == 256);
+    for (int i = 0; i < 256; ++i) {
+        REQUIRE(ring.push(rawNote(i)));
+    }
+    CHECK_FALSE(ring.takeOverflow());
+    CHECK_FALSE(ring.push(rawNote(999)));
+    CHECK(ring.takeOverflow());
+    CHECK_FALSE(ring.takeOverflow());
+    for (int i = 0; i < 256; ++i) {
+        RawMidi m{};
+        REQUIRE(ring.pop(m));
+        CHECK(intactRaw(m, i));
+    }
+    CHECK(ring.push(rawNote(0)));  // space again
+    CHECK_FALSE(ring.takeOverflow());
+}
+
+TEST_CASE("RawMidiRing: a producer thread's 10 000 messages arrive in order and intact") {
+    constexpr std::uint64_t kEvents = 10000;
+    RawMidiRing ring;
+    const auto deadline = std::chrono::steady_clock::now() + kThreadedBudget;
+    std::atomic<bool> stop{false};
+    std::thread producer([&] {
+        for (std::uint64_t seq = 0; seq < kEvents;) {
+            if (ring.push(rawNote(seq))) {
+                ++seq;
+            } else if (stop) {
+                return;
+            } else {
+                std::this_thread::yield();
+            }
+        }
+    });
+    ProducerJoiner joiner{producer, stop};
+    std::uint64_t expected = 0;
+    std::uint64_t broken = 0;
+    while (expected < kEvents && std::chrono::steady_clock::now() <= deadline) {
+        RawMidi m{};
+        if (!ring.pop(m)) {
+            std::this_thread::yield();
+            continue;
+        }
+        if (!intactRaw(m, expected)) ++broken;
+        ++expected;
+    }
+    joiner.join();
+    CHECK(expected == kEvents);
+    CHECK(broken == 0);
+}
+
+TEST_CASE("SpscRing: the heard ring is the same template") {
+    static_assert(std::is_same_v<HeardRing, SpscRing<HeardEvent, 256>>);
+    static_assert(std::is_trivially_copyable_v<RawMidi>);
+    CHECK(HeardRing::kCapacity == RawMidiRing::kCapacity);
 }
