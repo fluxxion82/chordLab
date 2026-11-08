@@ -21,6 +21,7 @@
 set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
+SELF="$(cd "$(dirname "$0")" && pwd -P)/$(basename "$0")"   # for --help after the cd
 cd "$ROOT" || exit 2
 
 DEFAULT_TIMEOUT=300
@@ -38,7 +39,7 @@ for arg in "$@"; do
         --plugin) want_plugin=1 ;;
         --release) want_release=1 ;;
         --all) want_ubsan=1 want_asan=1 want_tsan=1 want_swift=1 want_bridge=1 want_plugin=1 want_release=1 ;;
-        -h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,20p' "$SELF" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "check.sh: unknown option '$arg' (try --help)" >&2; exit 2 ;;
     esac
 done

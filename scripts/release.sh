@@ -14,11 +14,14 @@
 #       gh release create v<version> with the pkg, its hash and the provenance, after checking that they belong
 #       to HEAD, which must be the tag, already pushed.
 #
-# The Xcode project stays ad-hoc signed; nothing here changes it. The only write outside dist/ is the AU copy
-# that auval validates (~/Library/Audio/Plug-Ins/Components/ChordLab.component, see au_validate).
+# The Xcode project stays ad-hoc signed; nothing here changes it. The script writes dist/ (stage, pkgs, logs and
+# xcodebuild's intermediates: SYMROOT and OBJROOT point into it, so every build is cold) and, from Task 10, the AU
+# copy that auval validates (~/Library/Audio/Plug-Ins/Components/ChordLab.component, see au_validate); nothing
+# else (Xcode's own shared module cache and logs under ~/Library/Developer aside).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
+SELF="$(cd "$(dirname "$0")" && pwd -P)/$(basename "$0")"   # for usage after the cd
 cd "$ROOT"
 
 PROJECT=ChordLab/projects/ChordLab-macOS.xcodeproj
@@ -33,7 +36,8 @@ PKGS="$DIST/pkgs"
 LOGS="$DIST/log"
 FORMATS=(vst3 app)                       # Task 10 adds au
 # IPLUG2_ROOT in ChordLab-mac.xcconfig is relative to ChordLab/projects (../../../iPlug2).
-IPLUG2_ROOT="$( (cd ChordLab/projects && cd "$(sed -n 's/^IPLUG2_ROOT *= *//p' ../config/ChordLab-mac.xcconfig)" && pwd -P) 2>/dev/null || true)"
+IPLUG2_ROOT="$( (cd ChordLab/projects && rel="$(sed -n 's/^IPLUG2_ROOT *= *//p' ../config/ChordLab-mac.xcconfig)" \
+    && [ -n "$rel" ] && cd "$rel" && pwd -P) 2>/dev/null || true)"
 
 if command -v timeout >/dev/null 2>&1; then TIMEOUT_CMD=timeout
 elif command -v gtimeout >/dev/null 2>&1; then TIMEOUT_CMD=gtimeout
@@ -48,7 +52,11 @@ hex_to_str()  { local h=$((16#$1)); echo "$(( (h >> 16) & 0xFFFF )).$(( (h >> 8)
 au_subtype()  { sed -n "s/^#define PLUG_UNIQUE_ID '\(.*\)'.*/\1/p" "$CONFIG_H"; }
 au_mfr()      { sed -n "s/^#define PLUG_MFR_ID '\(.*\)'.*/\1/p" "$CONFIG_H"; }
 head_tag()    { git describe --exact-match --tags HEAD 2>/dev/null || true; }
-tree_dirty()  { [ -n "$(git -C "${1:-.}" status --porcelain 2>/dev/null)" ]; }
+tree_dirty()  {  # 0 dirty, 1 clean, 2 not a git work tree (never "clean")
+    git -C "${1:-.}" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 2
+    [ -n "$(git -C "${1:-.}" status --porcelain 2>/dev/null)" ]
+}
+tree_clean()  { local rc=0; tree_dirty "$1" || rc=$?; [ "$rc" -eq 1 ]; }
 
 scheme_of() { case "$1" in vst3) echo macOS-VST3 ;; au) echo macOS-AUv2 ;; app) echo macOS-APP ;; *) die "unknown format $1" ;; esac; }
 bundle_of() { case "$1" in vst3) echo ChordLab.vst3 ;; au) echo ChordLab.component ;; app) echo ChordLab.app ;; esac; }
@@ -72,7 +80,7 @@ check() {  # name ok(0|1) detail [hard]: under --report only a hard check fails 
     if [ "$REPORT" -eq 0 ] || [ "$hard" -eq 1 ]; then PRE_FAILED=1; fi
 }
 
-has_identity()      { security find-identity -v -p "$1" 2>/dev/null | grep -qF "\"$2\""; }
+has_identity()      { local out; out=$(security find-identity -v -p "$1" 2>/dev/null) || return 1; grep -qF "\"$2\"" <<<"$out"; }
 versions_agree()    { local hex; hex=$(version_hex); [ -n "$hex" ] && [ "$(hex_to_str "$hex")" = "$(version_str)" ]; }
 notary_profile_ok() { "$TIMEOUT_CMD" 30 xcrun notarytool history --keychain-profile "$NOTARY_PROFILE"; }
 
@@ -102,11 +110,11 @@ preflight() {
         row skip "HEAD tagged v$ver" "--rehearsal: ${tag:-no tag}; the pkg name carries $(git rev-parse --short HEAD)"
     else
         check "clean tree" "$(probe test -z "$(git status --porcelain)")" "$(git status --porcelain | wc -l | tr -d ' ') changed paths"
-        check "iPlug2 tree clean" "$(probe test -z "$(git -C "$IPLUG2_ROOT" status --porcelain 2>/dev/null)")" "the provenance file must name a commit that is the code ($IPLUG2_ROOT)"
+        check "iPlug2 tree clean" "$(probe tree_clean "$IPLUG2_ROOT")" "the provenance file must name a commit that is the code ($IPLUG2_ROOT, a git work tree)"
         tag=$(head_tag)
         check "HEAD tagged v$ver" "$(probe test "$tag" = "v$ver")" "${tag:-no tag on HEAD} (--rehearsal for a rehearsal)"
     fi
-    check "gh logged in" "$(probe gh auth status)" "$(gh auth status 2>&1 | sed -n 's/.*Logged in to \(.*\)/\1/p' | head -1)"
+    check "gh logged in" "$(probe "$TIMEOUT_CMD" 30 gh auth status)" "$("$TIMEOUT_CMD" 30 gh auth status 2>&1 | sed -n 's/.*Logged in to \(.*\)/\1/p' | head -1)"
     if [ "$PRE_FAILED" -ne 0 ]; then
         [ "$REPORT" -eq 1 ] && die "preflight: the repository itself is wrong (see MISSING above)"
         die "preflight failed (see MISSING above)"
@@ -125,8 +133,10 @@ build_format() {
     # The project already has DEPLOYMENT_LOCATION=YES, INSTALL_PATH=/ and SKIP_INSTALL=NO: DSTROOT alone moves
     # the install from ~/Library ($(VST3_PATH), $(AU_PATH), $(APP_PATH)) to the stage.
     # CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO: Xcode otherwise adds get-task-allow to the app, which notarization refuses.
+    # SYMROOT/OBJROOT: the project pins SYMROOT to ChordLab/build-mac (the developer's intermediates); building into
+    # dist/build instead makes every release build cold (build() wipes dist/), so the pkg is this commit's code.
     if ! xcodebuild -project "$PROJECT" -scheme "$scheme" -configuration Release \
-            DSTROOT="$out" \
+            DSTROOT="$out" SYMROOT="$DIST/build" OBJROOT="$DIST/build/obj" \
             CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY="$APP_IDENTITY" DEVELOPMENT_TEAM="$TEAM" \
             PROVISIONING_PROFILE_SPECIFIER= OTHER_CODE_SIGN_FLAGS=--timestamp ENABLE_HARDENED_RUNTIME=YES \
             CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO \
@@ -145,7 +155,8 @@ verify_bundle() {
     codesign --verify --deep --strict --verbose=2 "$b" >>"$LOGS/codesign.log" 2>&1 || die "$b: codesign --verify failed (see $LOGS/codesign.log)"
     info=$(codesign -dvv "$b" 2>&1)
     grep -q '^Timestamp=' <<<"$info"              || die "$b: no secure timestamp"
-    grep -q 'flags=0x10000(runtime)' <<<"$info"   || die "$b: hardened runtime is off, or the signature is ad-hoc"
+    grep -Eq 'flags=0x[0-9a-f]+\([^)]*runtime' <<<"$info" || die "$b: hardened runtime is off"
+    ! grep -q 'adhoc' <<<"$info"                  || die "$b: the signature is ad-hoc"
     grep -qF "Authority=$APP_IDENTITY" <<<"$info" || die "$b: not signed by $APP_IDENTITY"
     archs=$(lipo -archs "$exe")
     case "$archs" in *arm64*x86_64*|*x86_64*arm64*) ;; *) die "$b: not universal ($archs)" ;; esac
@@ -170,7 +181,7 @@ build() {
 
 # ---------------------------------------------------------------------------------------------------------
 
-usage() { sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,/^set -euo/p' "$SELF" | sed '$d' | sed 's/^# \{0,1\}//'; exit 2; }
 
 [ $# -ge 1 ] || usage
 cmd=$1; shift
