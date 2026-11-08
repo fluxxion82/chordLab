@@ -167,6 +167,166 @@ verify_bundle() {
     note "verified $(basename "$b"): Developer ID, hardened runtime, timestamp, $archs, notices, no get-task-allow"
 }
 
+component_pkg() {
+    local fmt=$1 root plist out
+    root="$STAGE/$fmt"; plist="$PKGS/$fmt-component.plist"; out="$PKGS/ChordLab-$fmt.pkg"
+    pkgbuild --analyze --root "$root" "$plist" >>"$LOGS/pkgbuild.log" 2>&1 || die "pkgbuild --analyze $fmt failed (see $LOGS/pkgbuild.log)"
+    # Never "update" a stray copy elsewhere, never skip an install over a newer build (design D16).
+    python3 - "$plist" <<'PY' || die "could not edit $plist"
+import plistlib, sys
+path = sys.argv[1]
+with open(path, 'rb') as fp:
+    items = plistlib.load(fp)
+for item in items:
+    item['BundleIsRelocatable'] = False
+    item['BundleIsVersionChecked'] = False
+with open(path, 'wb') as fp:
+    plistlib.dump(items, fp)
+PY
+    pkgbuild --root "$root" --component-plist "$plist" --identifier "$(pkgid_of "$fmt")" --version "$VER" \
+        --install-location "$(dest_of "$fmt")" "$out" >>"$LOGS/pkgbuild.log" 2>&1 || die "pkgbuild $fmt failed (see $LOGS/pkgbuild.log)"
+    note "component package $(basename "$out") for $(dest_of "$fmt")"
+}
+
+write_distribution() {
+    local xml=$1 fmt
+    {
+        echo '<?xml version="1.0" encoding="utf-8"?>'
+        echo '<installer-gui-script minSpecVersion="2">'
+        echo "    <title>ChordLab $VER</title>"
+        echo '    <welcome file="welcome.txt" mime-type="text/plain"/>'
+        echo '    <readme file="THIRD_PARTY_NOTICES.txt" mime-type="text/plain"/>'
+        echo '    <license file="LICENSE" mime-type="text/plain"/>'
+        echo '    <conclusion file="conclusion.txt" mime-type="text/plain"/>'
+        echo '    <options customize="always" require-scripts="false" hostArchitectures="arm64,x86_64"/>'
+        echo '    <domains enable_localSystem="true" enable_currentUserHome="false" enable_anywhere="false"/>'
+        echo '    <volume-check>'
+        echo '        <allowed-os-versions>'
+        echo '            <os-version min="15.0"/>'
+        echo '        </allowed-os-versions>'
+        echo '    </volume-check>'
+        echo '    <choices-outline>'
+        for fmt in "${FORMATS[@]}"; do echo "        <line choice=\"$fmt\"/>"; done
+        echo '    </choices-outline>'
+        for fmt in "${FORMATS[@]}"; do
+            echo "    <choice id=\"$fmt\" title=\"$(title_of "$fmt")\" description=\"Installs to $(dest_of "$fmt").\">"
+            echo "        <pkg-ref id=\"$(pkgid_of "$fmt")\"/>"
+            echo '    </choice>'
+        done
+        for fmt in "${FORMATS[@]}"; do
+            echo "    <pkg-ref id=\"$(pkgid_of "$fmt")\" version=\"$VER\">ChordLab-$fmt.pkg</pkg-ref>"
+        done
+        echo '</installer-gui-script>'
+    } >"$xml"
+}
+
+package() {
+    local fmt resources suffix="" sig
+    for fmt in "${FORMATS[@]}"; do component_pkg "$fmt"; done
+    resources="$DIST/resources"; rm -rf "$resources"; mkdir -p "$resources"
+    cp scripts/release/resources/welcome.txt scripts/release/resources/conclusion.txt LICENSE THIRD_PARTY_NOTICES.txt "$resources/"
+    write_distribution "$DIST/Distribution.xml"
+    if [ "$REHEARSAL" -eq 1 ]; then
+        suffix="-$(git rev-parse --short HEAD)"
+        if tree_dirty . || tree_dirty "$IPLUG2_ROOT"; then suffix="$suffix-dirty"; fi
+    fi
+    [ "$SKIP_NOTARIZE" -eq 0 ] || suffix="$suffix-unnotarized"
+    PKG="$DIST/ChordLab-$VER$suffix.pkg"
+    productbuild --distribution "$DIST/Distribution.xml" --package-path "$PKGS" --resources "$resources" \
+        --sign "$PKG_IDENTITY" --timestamp "$PKG" >>"$LOGS/productbuild.log" 2>&1 || { tail -n 20 "$LOGS/productbuild.log" >&2; die "productbuild failed"; }
+    # Captured first so an early grep exit cannot fail the pipeline.
+    sig=$(pkgutil --check-signature "$PKG" 2>&1) || die "$PKG: pkgutil --check-signature failed"
+    grep -q "Developer ID Installer" <<<"$sig" || die "$PKG: not signed with the Developer ID Installer identity"
+    note "product package $(basename "$PKG")"
+}
+
+notarize() {
+    local submit id status
+    if [ "$SKIP_NOTARIZE" -eq 1 ]; then note "notarization skipped (--skip-notarize): $(basename "$PKG") is not stapled"; return; fi
+    note "notarizing $(basename "$PKG") with profile $NOTARY_PROFILE (usually a few minutes)"
+    if ! submit=$(xcrun notarytool submit "$PKG" --keychain-profile "$NOTARY_PROFILE" --wait --output-format json 2>>"$LOGS/notarytool.err"); then
+        die "notarytool submit failed (see $LOGS/notarytool.err)"
+    fi
+    echo "$submit" >"$LOGS/notarytool-submit.json"
+    id=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' <<<"$submit")
+    status=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])' <<<"$submit")
+    xcrun notarytool log "$id" --keychain-profile "$NOTARY_PROFILE" "$LOGS/notarytool-log.json" >>"$LOGS/notarytool.err" 2>&1 || die "notarytool log $id failed (see $LOGS/notarytool.err)"
+    if ! python3 - "$LOGS/notarytool-log.json" <<'PY'
+import json, sys
+log = json.load(open(sys.argv[1]))
+issues = log.get("issues") or []
+for issue in issues:
+    print("  %s: %s (%s)" % (issue.get("severity"), issue.get("message"), issue.get("path")))
+sys.exit(1 if issues else 0)
+PY
+    then
+        die "the notarization log has issues (status $status; see $LOGS/notarytool-log.json)"
+    fi
+    [ "$status" = "Accepted" ] || die "notarization status: $status (see $LOGS/notarytool-log.json)"
+    xcrun stapler staple "$PKG" >>"$LOGS/stapler.log" 2>&1 || die "stapler staple failed (see $LOGS/stapler.log)"
+    xcrun stapler validate "$PKG" >>"$LOGS/stapler.log" 2>&1 || die "stapler validate failed (see $LOGS/stapler.log)"
+    spctl --assess --type install -vv "$PKG" >>"$LOGS/spctl.log" 2>&1 || die "spctl refuses the pkg (see $LOGS/spctl.log)"
+    note "notarized and stapled (submission $id)"
+}
+
+dep_version() {  # file regex-with-one-group; empty (the provenance says "unknown") if the file or line is missing
+    sed -n "s/$2/\1/p" "$1" 2>/dev/null | head -1 || true
+}
+
+provenance() {
+    PROV="${PKG%.pkg}.provenance.txt"
+    (cd "$DIST" && shasum -a 256 "$(basename "$PKG")" >"$(basename "$PKG").sha256")
+    local vst3 rta rtm nl json=engine/third_party/nlohmann/json.hpp
+    vst3=$(dep_version "$IPLUG2_ROOT/Dependencies/IPlug/VST3_SDK/pluginterfaces/vst/vsttypes.h" '^#define kVstVersionString[[:space:]]*"VST \([^"]*\)".*')
+    rta=$(dep_version "$IPLUG2_ROOT/Dependencies/IPlug/RTAudio/RtAudio.h" '^#define RTAUDIO_VERSION[[:space:]]*"\([^"]*\)".*')
+    rtm=$(dep_version "$IPLUG2_ROOT/Dependencies/IPlug/RTMidi/RtMidi.h" '^#define RTMIDI_VERSION[[:space:]]*"\([^"]*\)".*')
+    nl="$(dep_version "$json" '^#define NLOHMANN_JSON_VERSION_MAJOR[[:space:]][[:space:]]*\([0-9][0-9]*\).*').$(dep_version "$json" '^#define NLOHMANN_JSON_VERSION_MINOR[[:space:]][[:space:]]*\([0-9][0-9]*\).*').$(dep_version "$json" '^#define NLOHMANN_JSON_VERSION_PATCH[[:space:]][[:space:]]*\([0-9][0-9]*\).*')"
+    [ "$nl" != ".." ] || nl=""
+    {
+        echo "ChordLab $VER"
+        echo "pkg:            $(basename "$PKG")"
+        echo "sha256:         $(cut -d' ' -f1 "$PKG.sha256")"
+        echo "chordlab:       $(git rev-parse HEAD) ($(git describe --tags --always)) https://github.com/fluxxion82/chordLab"
+        echo "iplug2:         $(git -C "$IPLUG2_ROOT" rev-parse HEAD) ($(git -C "$IPLUG2_ROOT" describe --tags --always)) $(git -C "$IPLUG2_ROOT" remote get-url origin 2>/dev/null || echo "$IPLUG2_ROOT")"
+        if tree_dirty "$IPLUG2_ROOT"; then echo "WARNING:        the iPlug2 working tree was dirty when this was built (rehearsal only)"; fi
+        echo "vst3sdk:        ${vst3:-unknown} https://github.com/steinbergmedia/vst3sdk (GPLv3 branch)"
+        echo "rtaudio:        ${rta:-unknown} https://github.com/thestk/rtaudio"
+        echo "rtmidi:         ${rtm:-unknown} https://github.com/thestk/rtmidi"
+        echo "nlohmann-json:  ${nl:-unknown} https://github.com/nlohmann/json"
+        echo "xcode:          $(xcodebuild -version | tr '\n' ' ')"
+        echo "macos:          $(sw_vers -productVersion) ($(uname -m))"
+        echo "formats:        ${FORMATS[*]}"
+        echo "auval:          $AUVAL_RESULT"
+        echo "notarized:      $([ "$SKIP_NOTARIZE" -eq 1 ] && echo no || echo yes)"
+        echo "rehearsal:      $([ "$REHEARSAL" -eq 1 ] && echo yes || echo no)"
+        echo "built:          $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    } >"$PROV"
+    note "wrote $(basename "$PROV") and $(basename "$PKG").sha256"
+}
+
+prov_field() { sed -n "s/^$1: *//p" "$PROV"; }
+
+publish() {
+    VER=$(version_str)
+    PKG="$DIST/ChordLab-$VER.pkg"; PROV="${PKG%.pkg}.provenance.txt"
+    local remote_sha local_sha
+    [ "$(head_tag)" = "v$VER" ] || die "HEAD is not tagged v$VER"
+    [ -f "$PKG" ] && [ -f "$PKG.sha256" ] && [ -f "$PROV" ] || die "run 'scripts/release.sh build' on the tag first ($PKG missing)"
+    (cd "$DIST" && shasum -a 256 -c "$(basename "$PKG").sha256" >/dev/null 2>&1) || die "$PKG does not match its .sha256"
+    [ "$(prov_field chordlab | cut -d' ' -f1)" = "$(git rev-parse HEAD)" ] || die "the provenance names another commit than HEAD; rebuild on the tag"
+    [ "$(prov_field rehearsal)" = "no" ] || die "a rehearsal build is not publishable"
+    [ "$(prov_field notarized)" = "yes" ] || die "an unnotarized build is not publishable"
+    [ "$(prov_field auval)" = "yes" ] || die "the AU was not validated (auval: $(prov_field auval)); rebuild without --skip-auval"
+    [ "$(prov_field formats)" = "${FORMATS[*]}" ] || die "the pkg has formats '$(prov_field formats)', expected '${FORMATS[*]}'"
+    xcrun stapler validate "$PKG" >/dev/null 2>&1 || die "$PKG is not stapled"
+    remote_sha=$(git ls-remote origin "refs/tags/v$VER" | awk -v r="refs/tags/v$VER" '$2 == r {print $1}') || die "git ls-remote origin failed"
+    local_sha=$(git rev-parse "v$VER")
+    [ -n "$remote_sha" ] || die "tag v$VER is not on origin yet: git push origin main v$VER"
+    [ "$remote_sha" = "$local_sha" ] || die "origin's v$VER ($remote_sha) is not the local tag ($local_sha)"
+    gh release create "v$VER" "$PKG" "$PKG.sha256" "$PROV" --title "ChordLab $VER" --notes-from-tag --verify-tag || die "gh release create v$VER failed"
+    note "published https://github.com/fluxxion82/chordLab/releases/tag/v$VER"
+}
+
 build() {
     VER=$(version_str)
     REPORT=0; preflight
@@ -175,7 +335,7 @@ build() {
     for fmt in "${FORMATS[@]}"; do build_format "$fmt"; done
     for fmt in "${FORMATS[@]}"; do verify_bundle "$STAGE/$fmt/$(bundle_of "$fmt")"; done
     # Task 10: au_validate
-    # Task 4: package; notarize; provenance
+    package; notarize; provenance
     note "build done: $STAGE"
 }
 
@@ -197,6 +357,6 @@ done
 case "$cmd" in
     preflight) preflight ;;
     build) build ;;
-    publish) die "publish: not implemented yet (Task 4)" ;;
+    publish) publish ;;
     *) usage ;;
 esac
