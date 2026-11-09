@@ -457,7 +457,9 @@ TEST_CASE("drainRawMidi: handles the queued messages in order and empties the ri
     RawMidiRing ring;
     for (int i = 0; i < 5; ++i) REQUIRE(ring.push(rawNote(i, 7)));
     std::vector<int> seen;
-    CHECK(drainRawMidi(ring, 7, [&](const RawMidi& m) { seen.push_back(m.sampleOffset); }) == RawDrain::Handled);
+    std::uint32_t applied = 7;
+    CHECK(drainRawMidi(ring, applied, 7, [] {}, [&](const RawMidi& m) { seen.push_back(m.sampleOffset); }) ==
+          RawDrain::Handled);
     CHECK(seen == std::vector<int>{0, 1, 2, 3, 4});
     RawMidi m{};
     CHECK_FALSE(ring.pop(m));
@@ -470,8 +472,13 @@ TEST_CASE("drainRawMidi: messages queued before the current epoch are skipped, t
     REQUIRE(ring.push(rawNote(2, 2)));
     REQUIRE(ring.push(rawNote(3, 1)));  // a straggler of the old epoch: the host's thread raced the reset
     std::vector<int> seen;
-    CHECK(drainRawMidi(ring, 2, [&](const RawMidi& m) { seen.push_back(m.sampleOffset); }) == RawDrain::Handled);
+    std::uint32_t applied = 0;
+    int resets = 0;
+    CHECK(drainRawMidi(ring, applied, 2, [&] { ++resets; }, [&](const RawMidi& m) { seen.push_back(m.sampleOffset); }) ==
+          RawDrain::Handled);
     CHECK(seen == std::vector<int>{2});
+    CHECK(resets == 1);  // applied 0 -> 2 with one epoch-2 message: one reset, before it
+    CHECK(applied == 2);
     RawMidi m{};
     CHECK_FALSE(ring.pop(m));
 }
@@ -481,12 +488,13 @@ TEST_CASE("drainRawMidi: an overflow discards everything unread and reports Forg
     for (int i = 0; i < 256; ++i) REQUIRE(ring.push(rawNote(i)));
     CHECK_FALSE(ring.push(rawNote(256)));
     int handled = 0;
-    CHECK(drainRawMidi(ring, 0, [&](const RawMidi&) { ++handled; }) == RawDrain::Forgot);
+    std::uint32_t applied = 0;
+    CHECK(drainRawMidi(ring, applied, 0, [] {}, [&](const RawMidi&) { ++handled; }) == RawDrain::Forgot);
     CHECK(handled == 0);
     RawMidi m{};
     CHECK_FALSE(ring.pop(m));
     REQUIRE(ring.push(rawNote(300)));
-    CHECK(drainRawMidi(ring, 0, [&](const RawMidi&) { ++handled; }) == RawDrain::Handled);
+    CHECK(drainRawMidi(ring, applied, 0, [] {}, [&](const RawMidi&) { ++handled; }) == RawDrain::Handled);
     CHECK(handled == 1);
 }
 
@@ -515,9 +523,10 @@ TEST_CASE("drainRawMidi: order and integrity hold while a producer keeps pushing
     ProducerJoiner joiner{producer, stop};
     std::uint64_t expected = 0;
     std::uint64_t broken = 0;
+    std::uint32_t applied = 0;
     while (expected < kEvents && std::chrono::steady_clock::now() <= deadline) {
         std::size_t thisCall = 0;
-        const RawDrain r = drainRawMidi(ring, 0, [&](const RawMidi& m) {
+        const RawDrain r = drainRawMidi(ring, applied, 0, [] {}, [&](const RawMidi& m) {
             if (!intactRaw(m, expected)) ++broken;
             ++expected;
             ++thisCall;
@@ -538,7 +547,8 @@ TEST_CASE("drainRawMidi: one call pops at most the capacity even when the handle
     for (int i = 0; i < 256; ++i) REQUIRE(ring.push(rawNote(i)));
     int handled = 0;
     int next = 256;
-    const RawDrain r = drainRawMidi(ring, 0, [&](const RawMidi&) {
+    std::uint32_t applied = 0;
+    const RawDrain r = drainRawMidi(ring, applied, 0, [] {}, [&](const RawMidi&) {
         ++handled;
         if (handled < 1000) CHECK(ring.push(rawNote(next++)));  // a broken bound fails here instead of looping forever
     });
@@ -548,4 +558,123 @@ TEST_CASE("drainRawMidi: one call pops at most the capacity even when the handle
     int left = 0;
     while (ring.pop(m)) ++left;
     CHECK(left == 256);
+}
+
+namespace {
+// Drains `ring` recording the order of resets (-1) and handled sample offsets.
+struct DrainLog {
+    std::vector<int> order;
+    int resets = 0;
+    RawDrain drain(RawMidiRing& ring, std::uint32_t& applied, std::uint32_t current) {
+        return drainRawMidi(
+            ring, applied, current,
+            [&] {
+                ++resets;
+                order.push_back(-1);
+            },
+            [&](const RawMidi& m) { order.push_back(m.sampleOffset); });
+    }
+};
+}  // namespace
+
+TEST_CASE("drainRawMidi: a message newer than current is handled after exactly one reset") {
+    RawMidiRing ring;
+    REQUIRE(ring.push(rawNote(0, 1)));
+    std::uint32_t applied = 0;
+    DrainLog log;
+    CHECK(log.drain(ring, applied, 0) == RawDrain::Handled);
+    CHECK(log.order == std::vector<int>{-1, 0});
+    CHECK(log.resets == 1);
+    CHECK(applied == 1);
+}
+
+TEST_CASE("drainRawMidi: messages older than current are skipped and the reset still lands once") {
+    RawMidiRing ring;
+    REQUIRE(ring.push(rawNote(0, 0)));
+    REQUIRE(ring.push(rawNote(1, 0)));
+    std::uint32_t applied = 0;
+    DrainLog log;
+    CHECK(log.drain(ring, applied, 1) == RawDrain::Handled);
+    CHECK(log.order == std::vector<int>{-1});
+    CHECK(log.resets == 1);
+    CHECK(applied == 1);
+}
+
+TEST_CASE("drainRawMidi: a reset with an empty ring fires once, and not again next block") {
+    RawMidiRing ring;
+    std::uint32_t applied = 0;
+    DrainLog log;
+    CHECK(log.drain(ring, applied, 1) == RawDrain::Handled);
+    CHECK(log.resets == 1);
+    CHECK(applied == 1);
+    CHECK(log.drain(ring, applied, 1) == RawDrain::Handled);
+    CHECK(log.resets == 1);
+    CHECK(applied == 1);
+}
+
+TEST_CASE("drainRawMidi: two bumps between blocks produce one reset") {
+    RawMidiRing ring;
+    REQUIRE(ring.push(rawNote(5, 2)));
+    std::uint32_t applied = 0;
+    DrainLog log;
+    CHECK(log.drain(ring, applied, 2) == RawDrain::Handled);
+    CHECK(log.order == std::vector<int>{-1, 5});
+    CHECK(log.resets == 1);
+    CHECK(applied == 2);
+}
+
+TEST_CASE("drainRawMidi: mixed epochs in one drain: stale skipped, the reset lands before the first fresh message") {
+    RawMidiRing ring;
+    REQUIRE(ring.push(rawNote(0, 0)));
+    REQUIRE(ring.push(rawNote(1, 0)));
+    REQUIRE(ring.push(rawNote(2, 1)));
+    REQUIRE(ring.push(rawNote(3, 1)));
+    std::uint32_t applied = 0;
+    DrainLog log;
+    CHECK(log.drain(ring, applied, 1) == RawDrain::Handled);
+    CHECK(log.order == std::vector<int>{-1, 2, 3});
+    CHECK(log.resets == 1);
+    CHECK(applied == 1);
+}
+
+TEST_CASE("drainRawMidi: the reset lands in FIFO position when the bump happened mid-drain") {
+    // current was loaded as 0; the host reset (epoch 1) and a fresh message followed before the pop.
+    RawMidiRing ring;
+    REQUIRE(ring.push(rawNote(0, 0)));
+    REQUIRE(ring.push(rawNote(1, 0)));
+    REQUIRE(ring.push(rawNote(2, 1)));
+    std::uint32_t applied = 0;
+    DrainLog log;
+    CHECK(log.drain(ring, applied, 0) == RawDrain::Handled);
+    CHECK(log.order == std::vector<int>{0, 1, -1, 2});
+    CHECK(log.resets == 1);
+    CHECK(applied == 1);
+}
+
+TEST_CASE("drainRawMidi: an overflow sets applied to current without calling onReset") {
+    RawMidiRing ring;
+    for (int i = 0; i < 256; ++i) REQUIRE(ring.push(rawNote(i)));
+    CHECK_FALSE(ring.push(rawNote(256)));
+    std::uint32_t applied = 0;
+    DrainLog log;
+    CHECK(log.drain(ring, applied, 3) == RawDrain::Forgot);
+    CHECK(log.resets == 0);
+    CHECK(log.order.empty());
+    CHECK(applied == 3);
+    RawMidi m{};
+    CHECK_FALSE(ring.pop(m));
+}
+
+TEST_CASE("drainRawMidi: epochs wrap") {
+    CHECK(newerEpoch(0, 0xFFFFFFFFu));
+    CHECK_FALSE(newerEpoch(0xFFFFFFFFu, 0));
+    CHECK_FALSE(newerEpoch(5, 5));
+    RawMidiRing ring;
+    REQUIRE(ring.push(rawNote(0, 0)));
+    std::uint32_t applied = 0xFFFFFFFFu;
+    DrainLog log;
+    CHECK(log.drain(ring, applied, 0) == RawDrain::Handled);
+    CHECK(log.order == std::vector<int>{-1, 0});
+    CHECK(log.resets == 1);
+    CHECK(applied == 0);
 }

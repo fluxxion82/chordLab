@@ -46,27 +46,49 @@ using RawMidiRing = SpscRing<RawMidi, 256>;
 /// What the drain of the raw ring did (Release design D13).
 enum class RawDrain { Handled, Forgot };
 
-/// The render thread's policy for the raw ring, once per block, before anything else touches the scheduler:
-/// pops at most `RawMidiRing::kCapacity` messages (a producer that keeps pushing cannot make the loop
-/// endless; what it adds meanwhile waits for the next block), skips the messages whose `epoch` is not
-/// `epoch` (they were queued before the host's last reset, which forgets everything, this included), and
-/// calls `handle(const RawMidi&)` for the rest, in order. The overflow flag is taken first, as the heard
-/// ring's rule says: when it reads true, messages were lost, so everything still queued is discarded unread
-/// (bounded the same way) and `Forgot` is returned; the caller then forgets (heard `Reset`, `dropThru`) and
-/// counts the loss. `handle` must not allocate, block or throw (the drain is `noexcept`); it runs on the
+/// Epochs compare modulo 2^32: `a` is newer than `b` when `int32_t(a - b) > 0`.
+inline bool newerEpoch(std::uint32_t a, std::uint32_t b) noexcept { return static_cast<std::int32_t>(a - b) > 0; }
+
+/// The render thread's policy for the raw ring, once per block, before anything else touches the scheduler.
+/// `applied` is the render thread's record of the last epoch whose reset it performed; `current` is the
+/// shell's epoch loaded once at the top of the block. Pops at most `RawMidiRing::kCapacity` messages (a
+/// producer that keeps pushing cannot make the loop endless; what it adds meanwhile waits for the next
+/// block). For each popped message, in order: a message whose epoch is older than `current` was queued
+/// before the host's last reset and is skipped (the reset forgets it); otherwise, if its epoch is not
+/// `applied`, `onReset()` runs first and `applied` becomes that epoch (the reset lands in FIFO position
+/// before the first message that followed it, even when the bump happened after `current` was loaded);
+/// then `handle(const RawMidi&)`. Epochs are monotone in push order (the one producer loads the epoch, then
+/// pushes), so a message that is neither older than `current` nor `applied` carries `current` or newer.
+/// After the loop, if `current` is newer than `applied`, `onReset()` runs and `applied` becomes `current`
+/// (a reset with no message after it still lands this block). The overflow flag is taken first, as the
+/// heard ring's rule says: when it reads true, messages were lost, so everything still queued is discarded
+/// unread (bounded the same way), `applied` becomes `current`, `onReset` is NOT called (the caller performs
+/// its own, larger forget: heard `Reset`, `dropThru`, and counts the loss) and `Forgot` is returned.
+/// `onReset` and `handle` must not allocate, block or throw (the drain is `noexcept`); they run on the
 /// render thread.
-template <typename Handle>
-RawDrain drainRawMidi(RawMidiRing& ring, std::uint32_t epoch, Handle&& handle) noexcept {
+template <typename OnReset, typename Handle>
+RawDrain drainRawMidi(RawMidiRing& ring, std::uint32_t& applied, std::uint32_t current, OnReset&& onReset,
+                      Handle&& handle) noexcept {
     RawMidi m{};
     if (ring.takeOverflow()) {
         for (std::size_t n = 0; n < RawMidiRing::kCapacity && ring.pop(m); ++n) {
         }
+        applied = current;
         return RawDrain::Forgot;
     }
     for (std::size_t n = 0; n < RawMidiRing::kCapacity && ring.pop(m); ++n) {
-        if (m.epoch == epoch) {
-            handle(m);
+        if (newerEpoch(current, m.epoch)) {
+            continue;  // queued before the last reset: forgotten
         }
+        if (m.epoch != applied) {
+            onReset();
+            applied = m.epoch;
+        }
+        handle(m);
+    }
+    if (newerEpoch(current, applied)) {
+        onReset();
+        applied = current;
     }
     return RawDrain::Handled;
 }

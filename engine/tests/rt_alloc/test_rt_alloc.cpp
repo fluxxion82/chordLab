@@ -321,18 +321,23 @@ TEST_CASE("rt alloc: the triple buffer allocates nothing on the producer or the 
 
 TEST_CASE("rt alloc: the raw MIDI ring allocates nothing on push, pop or an overflow") {
     const auto ring = std::make_unique<chordlab::RawMidiRing>();  // off the stack, before the probe
+    std::uint32_t applied = 0;
+    std::uint32_t current = 0;
+    int resets = 0;
     AllocationProbe probe;
     for (int round = 0; round < 100; ++round) {
-        for (int i = 0; i < 300; ++i) ring->push(chordlab::RawMidi{0x90, std::uint8_t(i % 128), 100, 0, i});  // 44 refusals per round
+        for (int i = 0; i < 300; ++i) ring->push(chordlab::RawMidi{0x90, std::uint8_t(i % 128), 100, current, i});  // 44 refusals per round
         (void) ring->takeOverflow();
         chordlab::RawMidi m{};
         while (ring->pop(m)) {}
-        for (int i = 0; i < 300; ++i) ring->push(chordlab::RawMidi{0x90, std::uint8_t(i % 128), 100, 0, i});  // refused again
-        (void) chordlab::drainRawMidi(*ring, 0, [](const chordlab::RawMidi&) {});  // overflowed: Forgot
-        for (int i = 0; i < 10; ++i) ring->push(chordlab::RawMidi{0x90, std::uint8_t(i), 100, 0, i});
-        (void) chordlab::drainRawMidi(*ring, 0, [](const chordlab::RawMidi&) {});  // normal: Handled
+        for (int i = 0; i < 300; ++i) ring->push(chordlab::RawMidi{0x90, std::uint8_t(i % 128), 100, current, i});  // refused again
+        (void) chordlab::drainRawMidi(*ring, applied, current, [&] { ++resets; }, [](const chordlab::RawMidi&) {});  // overflowed: Forgot
+        if (round % 4 == 0) ++current;  // a host reset: the stale messages below are skipped and the reset path runs
+        for (int i = 0; i < 10; ++i) ring->push(chordlab::RawMidi{0x90, std::uint8_t(i), 100, current - (i < 5 ? 1u : 0u), i});
+        (void) chordlab::drainRawMidi(*ring, applied, current, [&] { ++resets; }, [](const chordlab::RawMidi&) {});  // normal: Handled
     }
     CHECK(probe.count() == 0);
+    CHECK(resets == 25);  // one per bump
 }
 
 TEST_CASE("rt alloc: handing over full 4096-event performed snapshots allocates nothing on the audio thread") {
