@@ -67,7 +67,8 @@ constexpr int kMaxJsonDepth = 64;
 ///  "projectKey":<key>, "browsedKey":<key>, "projectKeyName":"C Ionian", "browsedKeyName":"G Ionian",
 ///  "progressionLoop":true, "followHost":true, "autoVoiceLead":false,
 ///  "transposeWithKey":false, "keyHintSeen":false, "midiThru":true, "endBeat":4.0,
-///  "feel":{"rhythm":"block","strum":"off","strumSpeed":"medium","humanise":"off"},
+///  "feel":{"rhythm":"block","strum":"off","strumSpeed":"medium","humanise":"off",
+///          "arpPattern":"up","arpRate":"subdivision","arpRange":"one"},
 ///  "meter":{"num":4,"den":4}, "feelLimited":false,
 ///  "selectedEventId":2|null,
 ///  "modes":["Ionian","Dorian","Phrygian","Lydian","Mixolydian","Aeolian","Locrian","HarmonicMinor",
@@ -163,9 +164,13 @@ constexpr int kMaxJsonDepth = 64;
 ///   sequence) and `Document::keyHintSeen` (the one-time hint has shown); live state, false by default.
 /// - `midiThru`: `Document::midiThru` (the plug-in passes the MIDI it hears to its output); live state,
 ///   true by default. With it the snapshot has 27 top-level keys.
-/// - `feel`, `meter`: `Document::feel` as four wire-name strings (`rhythm` block|pulse|subdivided|offbeats|
-///   lowThenUpper|arpUp|arpUpDown, `strum` off|down|up|downUp, `strumSpeed` tight|medium|loose, `humanise`
-///   off|light|medium|heavy) and `Document::meter` as `{num, den}`; 4/4 and block chords by default.
+/// - `feel`, `meter`: `Document::feel` as seven wire-name strings (`rhythm` block|pulse|subdivided|offbeats|
+///   lowThenUpper|arpeggio, `strum` off|down|up|downUp, `strumSpeed` tight|medium|loose, `humanise`
+///   off|light|medium|heavy, `arpPattern` up|down|upDown|downUp|upAndDown|downAndUp|converge|diverge|
+///   conAndDiverge|pinkyUp|pinkyUpDown|thumbUp|thumbUpDown|alberti|rootFirst|chord|random, `arpRate`
+///   pulse|subdivision|half, `arpRange` one|two; the last three are heard only under `arpeggio` but always
+///   written) and `Document::meter` as `{num, den}`; 4/4 and block chords by default. The snapshot never
+///   writes the old rhythm names `arpUp` / `arpUpDown`.
 /// - `feelLimited`: `performDocument(doc).feelLimited`: the feel performs but is over budget, so playback and
 ///   export use block chords instead (false for a feel that does not perform).
 /// - `sections`: `Document::sections` in order, each `{id, name, colourIndex, firstEventIndex}`; empty
@@ -289,7 +294,10 @@ std::string heardJson(const Listener& listener, const Key& projectKey);
 /// - `setAutoVoiceLead {on}`: `setAutoVoiceLead`, undoable.
 /// - `setTransposeWithKey {on}`, `setKeyHintSeen {on}`, `setMidiThru {on}`: the matching live-state setter
 ///   (never history, kept across undo and redo, persisted by `stateJson`).
-/// - `setFeel {rhythm,strum,strumSpeed,humanise}`: all four required strings (names as in the snapshot);
+/// - `setFeel {rhythm,strum,strumSpeed,humanise[,arpPattern,arpRate,arpRange]}`: the first four required strings
+///   (names as in the snapshot), the arpeggio three optional (up, subdivision, one when missing; a present one
+///   must be a valid name or the message is rejected). `rhythm` also accepts the legacy `arpUp` and `arpUpDown`
+///   (builds before the patterns): `arpeggio` with pattern up / upDown unless `arpPattern` is given;
 ///   `setMeter {num,den}`: JSON integers (3.0 and "3" are rejected like any integer field), `num` 1..16, `den`
 ///   2, 4 or 8. Both are undoable (`DocumentStore::setFeel` / `setMeter`); an equal value pushes no history.
 /// - `transposeFromKey {fromTonicPc}` (0..11): `transposeFromKey`, every chord moved from that tonic to the
@@ -344,7 +352,8 @@ bool applyCommandJson(DocumentStore& store, std::string_view json, std::string& 
 /// ```
 /// {"schema":1, "projectKey":<key>, "browsedKey":<key>, "progressionLoop":true, "followHost":true,
 ///  "autoVoiceLead":false, "transposeWithKey":false, "keyHintSeen":false, "midiThru":true, "relationMode":"blend",
-///  "feel":{"rhythm":"block","strum":"off","strumSpeed":"medium","humanise":"off"}, "meter":{"num":4,"den":4},
+///  "feel":{"rhythm":"block","strum":"off","strumSpeed":"medium","humanise":"off","arpPattern":"up",
+///          "arpRate":"subdivision","arpRange":"one"}, "meter":{"num":4,"den":4},
 ///  "events":[{"id":1,"root":0,"type":"maj","lengthBeats":4.0,"velocity":100,
 ///             "inversion":0,"octave":0,"manualVoicing":false}, ...],
 ///  "sections":[{"id":1,"name":"Verse","colourIndex":0,"firstEventIndex":0}, ...],
@@ -379,7 +388,8 @@ std::string stateJson(const DocumentStore& store, int editorWidth = kDefaultEdit
 /// Lengths, velocities, inversions, octaves and section colours are clamped to the store's ranges
 /// rather than rejected (a mistyped value is still rejected). Optional, with their defaults: `editor`
 /// (`kDefaultEditorWidth` x `kDefaultEditorHeight`), the events' `inversion` (0), `octave` (0) and
-/// `manualVoicing` (false), `feel` (block chords) and `meter` (4/4; when given, valid as in `setFeel` /
+/// `manualVoicing` (false), `feel` (block chords; its `arpPattern`, `arpRate` and `arpRange` optional too, and the legacy `arpUp` /
+/// `arpUpDown` rhythm names accepted) and `meter` (4/4; when given, valid as in `setFeel` /
 /// `setMeter`, else the whole state is rejected), `autoVoiceLead` (false), `transposeWithKey` and
 /// `keyHintSeen` (false; when given, booleans), `midiThru` (true; when given, a boolean), `relationMode`
 /// ("blend"; when given, one of the five `relationModeName` strings, anything else rejecting the state),

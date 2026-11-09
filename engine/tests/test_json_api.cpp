@@ -1221,6 +1221,15 @@ json feelCmd(json rhythm, json strum, json speed, json humanise) {
 
 const json kBlockFeelCmd = feelCmd("block", "off", "medium", "off");
 
+/// `setFeel` with the arpeggio fields too.
+json arpCmd(const char* pattern, const char* rate, const char* range, const char* rhythm = "arpeggio") {
+    json c = feelCmd(rhythm, "off", "medium", "off");
+    c["arpPattern"] = pattern;
+    c["arpRate"] = rate;
+    c["arpRange"] = range;
+    return c;
+}
+
 }  // namespace
 
 TEST_CASE("setFeel: every option of every field is accepted and lands in the document") {
@@ -1229,8 +1238,7 @@ TEST_CASE("setFeel: every option of every field is accepted and lands in the doc
                                                       {"subdivided", Rhythm::Subdivided},
                                                       {"offbeats", Rhythm::Offbeats},
                                                       {"lowThenUpper", Rhythm::LowThenUpper},
-                                                      {"arpUp", Rhythm::ArpUp},
-                                                      {"arpUpDown", Rhythm::ArpUpDown}};
+                                                      {"arpeggio", Rhythm::Arpeggio}};
     const std::pair<const char*, Strum> strums[] = {
         {"off", Strum::Off}, {"down", Strum::Down}, {"up", Strum::Up}, {"downUp", Strum::DownUp}};
     const std::pair<const char*, StrumSpeed> speeds[] = {
@@ -1243,32 +1251,123 @@ TEST_CASE("setFeel: every option of every field is accepted and lands in the doc
         applyOk(store, feelCmd(r.first, "up", "loose", "heavy"));
         CHECK(store.doc().feel == Feel{r.second, Strum::Up, StrumSpeed::Loose, Humanise::Heavy});
     }
+    {
+        DocumentStore store = threeChords();
+        applyOk(store, feelCmd("arpUp", "up", "loose", "heavy"));
+        CHECK(store.doc().feel == Feel{Rhythm::Arpeggio, Strum::Up, StrumSpeed::Loose, Humanise::Heavy, ArpPattern::Up});
+        applyOk(store, feelCmd("arpUpDown", "up", "loose", "heavy"));
+        CHECK(store.doc().feel == Feel{Rhythm::Arpeggio, Strum::Up, StrumSpeed::Loose, Humanise::Heavy, ArpPattern::UpDown});
+    }
     for (const auto& st : strums) {
         DocumentStore store = threeChords();
         applyOk(store, feelCmd("arpUp", st.first, "loose", "heavy"));
-        CHECK(store.doc().feel == Feel{Rhythm::ArpUp, st.second, StrumSpeed::Loose, Humanise::Heavy});
+        CHECK(store.doc().feel == Feel{Rhythm::Arpeggio, st.second, StrumSpeed::Loose, Humanise::Heavy});
     }
     for (const auto& sp : speeds) {
         DocumentStore store = threeChords();
         applyOk(store, feelCmd("arpUp", "up", sp.first, "heavy"));
-        CHECK(store.doc().feel == Feel{Rhythm::ArpUp, Strum::Up, sp.second, Humanise::Heavy});
+        CHECK(store.doc().feel == Feel{Rhythm::Arpeggio, Strum::Up, sp.second, Humanise::Heavy});
     }
     for (const auto& h : humanises) {
         DocumentStore store = threeChords();
         applyOk(store, feelCmd("arpUp", "up", "loose", h.first));
-        CHECK(store.doc().feel == Feel{Rhythm::ArpUp, Strum::Up, StrumSpeed::Loose, h.second});
+        CHECK(store.doc().feel == Feel{Rhythm::Arpeggio, Strum::Up, StrumSpeed::Loose, h.second});
     }
 }
 
-TEST_CASE("setFeel: reads back in the snapshot as four strings") {
+TEST_CASE("setFeel: every arpeggio pattern, rate and range is accepted") {
+    const std::pair<const char*, ArpPattern> patterns[] = {
+        {"up", ArpPattern::Up}, {"down", ArpPattern::Down}, {"upDown", ArpPattern::UpDown}, {"downUp", ArpPattern::DownUp},
+        {"upAndDown", ArpPattern::UpAndDown}, {"downAndUp", ArpPattern::DownAndUp}, {"converge", ArpPattern::Converge},
+        {"diverge", ArpPattern::Diverge}, {"conAndDiverge", ArpPattern::ConAndDiverge}, {"pinkyUp", ArpPattern::PinkyUp},
+        {"pinkyUpDown", ArpPattern::PinkyUpDown}, {"thumbUp", ArpPattern::ThumbUp}, {"thumbUpDown", ArpPattern::ThumbUpDown},
+        {"alberti", ArpPattern::Alberti}, {"rootFirst", ArpPattern::RootFirst}, {"chord", ArpPattern::Chord},
+        {"random", ArpPattern::Random}};
+    static_assert(sizeof(patterns) / sizeof(patterns[0]) == kArpPatternCount, "every pattern has a wire name");
+    const std::pair<const char*, ArpRate> rates[] = {
+        {"pulse", ArpRate::Pulse}, {"subdivision", ArpRate::Subdivision}, {"half", ArpRate::Half}};
+    const std::pair<const char*, ArpRange> ranges[] = {{"one", ArpRange::One}, {"two", ArpRange::Two}};
+    for (const auto& p : patterns) {
+        DocumentStore store = threeChords();
+        applyOk(store, arpCmd(p.first, "half", "two"));
+        Feel expected{Rhythm::Arpeggio};
+        expected.pattern = p.second; expected.rate = ArpRate::Half; expected.range = ArpRange::Two;
+        CHECK(store.doc().feel == expected);
+    }
+    for (const auto& r : rates) {
+        DocumentStore store = threeChords();
+        applyOk(store, arpCmd("alberti", r.first, "two"));
+        CHECK(store.doc().feel.rate == r.second);
+    }
+    for (const auto& g : ranges) {
+        DocumentStore store = threeChords();
+        applyOk(store, arpCmd("alberti", "half", g.first));
+        CHECK(store.doc().feel.range == g.second);
+    }
+}
+
+TEST_CASE("setFeel: the arpeggio fields are optional and default; present means valid") {
     DocumentStore store = threeChords();
-    CHECK(snapshot(store).at("feel") == json({{"rhythm", "block"}, {"strum", "off"}, {"strumSpeed", "medium"}, {"humanise", "off"}}));
-    applyOk(store, feelCmd("lowThenUpper", "downUp", "tight", "light"));
-    CHECK(snapshot(store).at("feel") ==
-          json({{"rhythm", "lowThenUpper"}, {"strum", "downUp"}, {"strumSpeed", "tight"}, {"humanise", "light"}}));
-    applyOk(store, feelCmd("arpUpDown", "up", "loose", "medium"));
-    CHECK(snapshot(store).at("feel") ==
-          json({{"rhythm", "arpUpDown"}, {"strum", "up"}, {"strumSpeed", "loose"}, {"humanise", "medium"}}));
+    applyOk(store, feelCmd("arpeggio", "off", "medium", "off"));
+    CHECK(store.doc().feel == Feel{Rhythm::Arpeggio});  // up, subdivision, one
+    // Kept under another rhythm too (they ride along, unheard).
+    applyOk(store, arpCmd("random", "half", "two", "pulse"));
+    Feel expected{Rhythm::Pulse};
+    expected.pattern = ArpPattern::Random; expected.rate = ArpRate::Half; expected.range = ArpRange::Two;
+    CHECK(store.doc().feel == expected);
+    // One field at a time: the others keep their defaults.
+    {
+        DocumentStore s2 = threeChords();
+        json c = feelCmd("arpeggio", "off", "medium", "off");
+        c["arpRate"] = "half";
+        applyOk(s2, c);
+        Feel e2{Rhythm::Arpeggio};
+        e2.rate = ArpRate::Half;
+        CHECK(s2.doc().feel == e2);
+    }
+    // Unknown or mistyped values reject the whole message; nothing changes, no history.
+    for (const char* field : {"arpPattern", "arpRate", "arpRange"}) {
+        for (const json& wrong : {json("sideways"), json(nullptr), json(3), json(true), json::object(), json::array(), json("")}) {
+            json c = arpCmd("up", "pulse", "one");
+            c[field] = wrong;
+            checkRejectedKeepsHistory(store, c);
+        }
+    }
+    std::string error;
+    CHECK_FALSE(apply(store, arpCmd("sideways", "pulse", "one"), error));
+    CHECK(error.find("arpPattern") != std::string::npos);
+}
+
+TEST_CASE("setFeel: legacy rhythm names map to the arpeggio; a named pattern wins; partial fields combine") {
+    DocumentStore store = threeChords();
+    applyOk(store, feelCmd("arpUp", "down", "tight", "light"));
+    CHECK(store.doc().feel == Feel{Rhythm::Arpeggio, Strum::Down, StrumSpeed::Tight, Humanise::Light, ArpPattern::Up});
+    applyOk(store, feelCmd("arpUpDown", "down", "tight", "light"));
+    CHECK(store.doc().feel == Feel{Rhythm::Arpeggio, Strum::Down, StrumSpeed::Tight, Humanise::Light, ArpPattern::UpDown});
+    applyOk(store, arpCmd("alberti", "pulse", "two", "arpUpDown"));
+    Feel expected{Rhythm::Arpeggio};
+    expected.pattern = ArpPattern::Alberti; expected.rate = ArpRate::Pulse; expected.range = ArpRange::Two;
+    CHECK(store.doc().feel == expected);
+    // Legacy name plus only a rate: the legacy pattern and the given rate.
+    json partial = feelCmd("arpUpDown", "off", "medium", "off");
+    partial["arpRate"] = "half";
+    applyOk(store, partial);
+    Feel e2{Rhythm::Arpeggio};
+    e2.pattern = ArpPattern::UpDown; e2.rate = ArpRate::Half;
+    CHECK(store.doc().feel == e2);
+    // The snapshot never writes the legacy names.
+    CHECK(snapshot(store).at("feel").at("rhythm") == "arpeggio");
+}
+
+TEST_CASE("setFeel: reads back in the snapshot as seven strings") {
+    DocumentStore store = threeChords();
+    CHECK(snapshot(store).at("feel") == json({{"rhythm", "block"}, {"strum", "off"}, {"strumSpeed", "medium"},
+                                              {"humanise", "off"}, {"arpPattern", "up"}, {"arpRate", "subdivision"},
+                                              {"arpRange", "one"}}));
+    applyOk(store, arpCmd("thumbUpDown", "half", "two"));
+    CHECK(snapshot(store).at("feel") == json({{"rhythm", "arpeggio"}, {"strum", "off"}, {"strumSpeed", "medium"},
+                                              {"humanise", "off"}, {"arpPattern", "thumbUpDown"}, {"arpRate", "half"},
+                                              {"arpRange", "two"}}));
 }
 
 TEST_CASE("setFeel: rejected messages leave the document and the undo history untouched") {
@@ -1513,7 +1612,8 @@ TEST_CASE("state: feel and meter are saved and restored, non-default values incl
 
     const json saved = json::parse(stateJson(store));
     CHECK(saved.at("feel") ==
-          json({{"rhythm", "offbeats"}, {"strum", "downUp"}, {"strumSpeed", "tight"}, {"humanise", "medium"}}));
+          json({{"rhythm", "offbeats"}, {"strum", "downUp"}, {"strumSpeed", "tight"}, {"humanise", "medium"},
+                {"arpPattern", "up"}, {"arpRate", "subdivision"}, {"arpRange", "one"}}));
     CHECK(saved.at("meter") == json({{"num", 7}, {"den", 8}}));
 
     DocumentStore loaded;
@@ -1527,7 +1627,8 @@ TEST_CASE("state: feel and meter are saved and restored, non-default values incl
 
     // The default state writes the default feel and meter.
     const json def = json::parse(stateJson(threeChords()));
-    CHECK(def.at("feel") == json({{"rhythm", "block"}, {"strum", "off"}, {"strumSpeed", "medium"}, {"humanise", "off"}}));
+    CHECK(def.at("feel") == json({{"rhythm", "block"}, {"strum", "off"}, {"strumSpeed", "medium"}, {"humanise", "off"},
+                                  {"arpPattern", "up"}, {"arpRate", "subdivision"}, {"arpRange", "one"}}));
     CHECK(def.at("meter") == json({{"num", 4}, {"den", 4}}));
 }
 
@@ -1551,7 +1652,7 @@ TEST_CASE("state: a state without feel and meter loads block chords in 4/4") {
     onlyFeel["feel"] = {{"rhythm", "arpUp"}, {"strum", "off"}, {"strumSpeed", "medium"}, {"humanise", "off"}};
     onlyFeel.erase("meter");
     REQUIRE_MESSAGE(loadStateJson(store, onlyFeel.dump(), error), error);
-    CHECK(store.doc().feel.rhythm == Rhythm::ArpUp);
+    CHECK(store.doc().feel.rhythm == Rhythm::Arpeggio);
     CHECK(store.doc().meter.num == 4);
     json onlyMeter = json::parse(stateJson(source));
     onlyMeter["meter"] = {{"num", 6}, {"den", 8}};
@@ -1610,6 +1711,25 @@ TEST_CASE("state: a present but invalid feel or meter rejects the whole state, h
         CHECK(error.find("meter") != std::string::npos);
         CHECK(store.doc() == before);
         CHECK(historyDepth(store) == depth);
+    }
+}
+
+TEST_CASE("state: malformed arpeggio fields inside a saved feel reject the whole state") {
+    DocumentStore store = threeChords();
+    store.setVelocity(1, 70);
+    const Document before = store.doc();
+    const std::pair<int, int> depth = historyDepth(store);
+    const json good = json::parse(stateJson(threeChords()));
+    for (const char* field : {"arpPattern", "arpRate", "arpRange"}) {
+        for (const json& wrong : {json("sideways"), json(nullptr), json(3)}) {
+            json state = good;
+            state["feel"][field] = wrong;
+            std::string error;
+            CHECK_FALSE(loadStateJson(store, state.dump(), error));
+            CHECK(error.find(field) != std::string::npos);
+            CHECK(store.doc() == before);
+            CHECK(historyDepth(store) == depth);
+        }
     }
 }
 
@@ -2739,7 +2859,7 @@ DocumentStore worstCaseStore() {
 /// `stateJson` of `worstCaseStore()` at the default editor size, measured; pinned so that a change to the
 /// state's shape shows up here against `kMaxJsonBytes` (1 MiB) before it shows up as a state that will
 /// not load.
-constexpr std::size_t kWorstCaseStateBytes = 76966;
+constexpr std::size_t kWorstCaseStateBytes = 77025;
 
 }  // namespace
 

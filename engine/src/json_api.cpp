@@ -647,7 +647,13 @@ bool parseProgressionLoadField(Fields& fields, ProgressionLoad& out) {
 // --- Feel and meter wire names ---------------------------------------------------------
 
 /// Wire names of the feel enums, each in enum order (`feel.h`).
-constexpr const char* kRhythmNames[] = {"block", "pulse", "subdivided", "offbeats", "lowThenUpper", "arpUp", "arpUpDown"};
+constexpr const char* kRhythmNames[] = {"block", "pulse", "subdivided", "offbeats", "lowThenUpper", "arpeggio"};
+constexpr const char* kArpPatternNames[] = {"up",       "down",        "upDown",        "downUp",  "upAndDown",   "downAndUp",
+                                            "converge", "diverge",     "conAndDiverge", "pinkyUp", "pinkyUpDown",
+                                            "thumbUp",  "thumbUpDown", "alberti",       "rootFirst", "chord",     "random"};
+static_assert(sizeof(kArpPatternNames) / sizeof(kArpPatternNames[0]) == kArpPatternCount, "one name per pattern");
+constexpr const char* kArpRateNames[] = {"pulse", "subdivision", "half"};
+constexpr const char* kArpRangeNames[] = {"one", "two"};
 constexpr const char* kStrumNames[] = {"off", "down", "up", "downUp"};
 constexpr const char* kStrumSpeedNames[] = {"tight", "medium", "loose"};
 constexpr const char* kHumaniseNames[] = {"off", "light", "medium", "heavy"};
@@ -683,14 +689,34 @@ bool parseNameField(Fields& fields, const char* name, const char* const (&names)
     return fields.fail(name, expected + " (got \"" + text + "\")");
 }
 
-/// The four string fields of a feel, in `fields` (a `setFeel` message or a state's `feel` object); all required.
-/// Parsed into a local first, so a failure leaves `out` as it was.
+/// A feel in `fields` (a `setFeel` message or a state's `feel` object): `rhythm`, `strum`, `strumSpeed` and
+/// `humanise` required; `arpPattern`, `arpRate` and `arpRange` optional (the defaults up, subdivision, one when
+/// missing; present means valid, or the whole message / state is rejected). `rhythm` also accepts `arpUp` and
+/// `arpUpDown`, the names of builds before the patterns: the Arpeggio rhythm with pattern up / upDown unless
+/// `arpPattern` is given. Parsed into a local first, so a failure leaves `out` as it was.
 bool parseFeelFields(Fields& fields, Feel& out) {
     Feel feel;
-    if (!parseNameField(fields, "rhythm", kRhythmNames, feel.rhythm) ||
-        !parseNameField(fields, "strum", kStrumNames, feel.strum) ||
+    const json* rhythm = fields.find("rhythm");
+    const bool legacyUp = rhythm != nullptr && rhythm->is_string() && *rhythm == "arpUp";
+    const bool legacyUpDown = rhythm != nullptr && rhythm->is_string() && *rhythm == "arpUpDown";
+    if (legacyUp || legacyUpDown) {
+        feel.rhythm = Rhythm::Arpeggio;
+        feel.pattern = legacyUpDown ? ArpPattern::UpDown : ArpPattern::Up;
+    } else if (!parseNameField(fields, "rhythm", kRhythmNames, feel.rhythm)) {
+        return false;
+    }
+    if (!parseNameField(fields, "strum", kStrumNames, feel.strum) ||
         !parseNameField(fields, "strumSpeed", kStrumSpeedNames, feel.speed) ||
         !parseNameField(fields, "humanise", kHumaniseNames, feel.humanise)) {
+        return false;
+    }
+    if (fields.has("arpPattern") && !parseNameField(fields, "arpPattern", kArpPatternNames, feel.pattern)) {
+        return false;
+    }
+    if (fields.has("arpRate") && !parseNameField(fields, "arpRate", kArpRateNames, feel.rate)) {
+        return false;
+    }
+    if (fields.has("arpRange") && !parseNameField(fields, "arpRange", kArpRangeNames, feel.range)) {
         return false;
     }
     out = feel;
@@ -715,7 +741,10 @@ json feelToJson(const Feel& feel) {
     return {{"rhythm", kRhythmNames[static_cast<int>(feel.rhythm)]},
             {"strum", kStrumNames[static_cast<int>(feel.strum)]},
             {"strumSpeed", kStrumSpeedNames[static_cast<int>(feel.speed)]},
-            {"humanise", kHumaniseNames[static_cast<int>(feel.humanise)]}};
+            {"humanise", kHumaniseNames[static_cast<int>(feel.humanise)]},
+            {"arpPattern", kArpPatternNames[static_cast<int>(feel.pattern)]},
+            {"arpRate", kArpRateNames[static_cast<int>(feel.rate)]},
+            {"arpRange", kArpRangeNames[static_cast<int>(feel.range)]}};
 }
 
 json meterToJson(const Meter& meter) {
@@ -892,7 +921,7 @@ bool parseToggle(Fields& fields, Command::Kind kind, Command& out) {
     return fields.getBool("on", out.on);
 }
 
-/// `setFeel {rhythm, strum, strumSpeed, humanise}`.
+/// `setFeel {rhythm, strum, strumSpeed, humanise[, arpPattern, arpRate, arpRange]}`.
 bool parseSetFeel(Fields& fields, Command& out) {
     out.kind = Command::Kind::SetFeel;
     return parseFeelFields(fields, out.feel);

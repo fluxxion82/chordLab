@@ -16,15 +16,6 @@ namespace {
 
 int clampVelocity(int v) { return std::min(127, std::max(1, v)); }
 
-// Which indices of an n-note voicing the k-th arpeggio hit plays (D5).
-int arpIndex(Rhythm rhythm, int k, int n) {
-    if (n <= 1) return 0;
-    if (rhythm == Rhythm::ArpUp) return k % n;
-    const int period = 2 * (n - 1);
-    const int m = k % period;
-    return m < n ? m : period - m;
-}
-
 std::vector<int> allNotes(int n) {
     std::vector<int> notes(static_cast<size_t>(n));
     for (int i = 0; i < n; ++i) notes[static_cast<size_t>(i)] = i;
@@ -33,7 +24,93 @@ std::vector<int> allNotes(int n) {
 
 }  // namespace
 
-std::vector<Hit> rhythmHits(Rhythm rhythm, Meter meter, int s, int e, int noteCount, int velocity) {
+int arpIndex(ArpPattern pattern, int k, int n) {
+    assert(k >= 0 && n >= 1);
+    assert(pattern != ArpPattern::Chord && pattern != ArpPattern::Random);
+    if (n == 1) return 0;
+    // Up then down over `count` notes without repeating the ends: period 2 * count - 2, m in [0, period).
+    const auto upDown = [](int m, int count) { return m < count ? m : 2 * count - 2 - m; };
+    // The j-th note of the converge order over n notes: 0, n-1, 1, n-2, ...
+    const auto converge = [n](int j) { return j % 2 == 0 ? j / 2 : n - 1 - (j - 1) / 2; };
+    const int bounce = 2 * n - 2;  // UpDown's period
+    switch (pattern) {
+        case ArpPattern::Up:
+        case ArpPattern::RootFirst: return k % n;
+        case ArpPattern::Down: return n - 1 - k % n;
+        case ArpPattern::UpDown: return upDown(k % bounce, n);
+        case ArpPattern::DownUp: return n - 1 - upDown(k % bounce, n);
+        case ArpPattern::UpAndDown: {
+            const int m = k % (2 * n);
+            return m < n ? m : 2 * n - 1 - m;
+        }
+        case ArpPattern::DownAndUp: {
+            const int m = k % (2 * n);
+            return n - 1 - (m < n ? m : 2 * n - 1 - m);
+        }
+        case ArpPattern::Converge: return converge(k % n);
+        case ArpPattern::Diverge: return converge(n - 1 - k % n);
+        case ArpPattern::ConAndDiverge: return converge(upDown(k % bounce, n));
+        case ArpPattern::PinkyUp: return k % 2 == 1 ? n - 1 : (k / 2) % (n - 1);
+        case ArpPattern::PinkyUpDown:
+            if (k % 2 == 1) return n - 1;
+            if (n == 2) return 0;
+            return upDown((k / 2) % (2 * (n - 1) - 2), n - 1);  // the lower n-1 notes, up and down
+        case ArpPattern::ThumbUp: return k % 2 == 0 ? 0 : 1 + (k / 2) % (n - 1);
+        case ArpPattern::ThumbUpDown:
+            if (k % 2 == 0) return 0;
+            if (n == 2) return 1;
+            return 1 + upDown((k / 2) % (2 * (n - 1) - 2), n - 1);  // the upper n-1 notes, up and down
+        case ArpPattern::Alberti:
+            switch (k % 4) {
+                case 0: return 0;
+                case 2: return (n - 1) / 2;
+                default: return n - 1;
+            }
+        case ArpPattern::Chord:
+        case ArpPattern::Random: break;
+    }
+    return 0;
+}
+
+int arpStepTicks(ArpRate rate, Meter meter) {
+    switch (rate) {
+        case ArpRate::Pulse: return pulseTicks(meter);
+        case ArpRate::Subdivision: return subdivisionTicks(meter);
+        case ArpRate::Half: return subdivisionTicks(meter) / 2;
+    }
+    return subdivisionTicks(meter);
+}
+
+std::vector<int> arpeggioNotes(const Chord& chord, const std::vector<int>& voicing, ArpPattern pattern,
+                               ArpRange range) {
+    std::vector<int> octave(voicing);
+    const bool rootFirst = pattern == ArpPattern::RootFirst && chord.type != nullptr;
+    if (rootFirst) {
+        const std::vector<int>& intervals = chord.type->intervals;
+        const auto tone = [&](int pitch) {
+            const int pc = ((pitch - chord.root) % 12 + 12) % 12;
+            for (std::size_t i = 0; i < intervals.size(); ++i) {
+                if (intervals[i] % 12 == pc) return static_cast<int>(i);
+            }
+            return static_cast<int>(intervals.size());
+        };
+        std::stable_sort(octave.begin(), octave.end(), [&](int a, int b) { return tone(a) < tone(b); });
+    }
+    std::vector<int> notes;
+    const int octaves = range == ArpRange::Two ? 2 : 1;
+    for (int o = 0; o < octaves; ++o) {
+        for (int pitch : octave) {
+            const int p = pitch + 12 * o;
+            if (p <= 127) notes.push_back(p);
+        }
+    }
+    // Pitch order across both octaves (a ninth's D5 sits above the octave's C5); root first keeps its own order.
+    if (!rootFirst) std::sort(notes.begin(), notes.end());
+    return notes;
+}
+
+std::vector<Hit> rhythmHits(const Feel& feel, Meter meter, int s, int e, int noteCount, int velocity, int id) {
+    const Rhythm rhythm = feel.rhythm;
     std::vector<Hit> hits;
     if (e <= s || noteCount < 1) return hits;
 
@@ -51,9 +128,10 @@ std::vector<Hit> rhythmHits(Rhythm rhythm, Meter meter, int s, int e, int noteCo
             for (int t : gridPointsInside(s, e, pulse)) starts.push_back(t);
             break;
         case Rhythm::Subdivided:
-        case Rhythm::ArpUp:
-        case Rhythm::ArpUpDown:
             for (int t : gridPointsInside(s, e, sub)) starts.push_back(t);
+            break;
+        case Rhythm::Arpeggio:
+            for (int t : gridPointsInside(s, e, arpStepTicks(feel.rate, meter))) starts.push_back(t);
             break;
         case Rhythm::Offbeats:
             for (int t : gridPointsInside(s, e, sub))
@@ -66,6 +144,7 @@ std::vector<Hit> rhythmHits(Rhythm rhythm, Meter meter, int s, int e, int noteCo
         return hits;
     }
 
+    int previousRandom = -1;
     for (size_t i = 0; i < starts.size(); ++i) {
         const int t = starts[i];
         const int next = i + 1 < starts.size() ? starts[i + 1] : e;
@@ -92,8 +171,15 @@ std::vector<Hit> rhythmHits(Rhythm rhythm, Meter meter, int s, int e, int noteCo
                 notes = {0};
             else
                 for (int k = 1; k < noteCount; ++k) notes.push_back(k);
-        } else if (rhythm == Rhythm::ArpUp || rhythm == Rhythm::ArpUpDown) {
-            notes = {arpIndex(rhythm, static_cast<int>(i), noteCount)};
+        } else if (rhythm == Rhythm::Arpeggio) {
+            if (feel.pattern == ArpPattern::Chord) {
+                notes = allNotes(noteCount);
+            } else if (feel.pattern == ArpPattern::Random) {
+                previousRandom = arpRandomIndex(id, static_cast<int>(i), noteCount, previousRandom);
+                notes = {previousRandom};
+            } else {
+                notes = {arpIndex(feel.pattern, static_cast<int>(i), noteCount)};
+            }
         } else {
             notes = allNotes(noteCount);
         }
@@ -210,14 +296,15 @@ void performChord(const Document& doc, std::size_t index, const std::vector<int>
                   std::vector<Note>& notes) {
     const ChordEvent& event = doc.events[index];
     const Feel& feel = doc.feel;
-    const bool arp = feel.rhythm == Rhythm::ArpUp || feel.rhythm == Rhythm::ArpUpDown;
+    const bool arp = feel.rhythm == Rhythm::Arpeggio;
     const Strum strum = arp ? Strum::Off : feel.strum;  // arpeggios ignore the strum
     const Amounts amounts = amountsOf(feel.humanise);
     const bool humanise = feel.humanise != Humanise::Off;
     const int chord = static_cast<int>(index);
 
+    const std::vector<int> notesList = arp ? arpeggioNotes(event.chord, voicing, feel.pattern, feel.range) : voicing;
     const std::vector<Hit> hits =
-        rhythmHits(feel.rhythm, doc.meter, s, e, static_cast<int>(voicing.size()), event.velocity);
+        rhythmHits(feel, doc.meter, s, e, static_cast<int>(notesList.size()), event.velocity, event.id);
     for (std::size_t k = 0; k < hits.size(); ++k) {
         const Hit& hit = hits[k];
         const int hitIndex = static_cast<int>(k);
@@ -254,7 +341,7 @@ void performChord(const Document& doc, std::size_t index, const std::vector<int>
             const int clampedOn = std::min(std::max(on, s), e - kMinNoteTicks);
             const int clampedOff = std::min(off, e);
             if (clampedOff - clampedOn < kMinNoteTicks) continue;
-            notes.push_back(Note{clampedOn, clampedOff, voicing[static_cast<std::size_t>(noteIndex)], velocity, chord,
+            notes.push_back(Note{clampedOn, clampedOff, notesList[static_cast<std::size_t>(noteIndex)], velocity, chord,
                                  hitIndex});
         }
     }
@@ -323,6 +410,15 @@ Performance performDocument(const Document& doc) {
         performance.feelLimited = true;
     }
     return performance;
+}
+
+int arpRandomIndex(int id, int k, int n, int previous) {
+    assert(k >= 0 && n >= 1);
+    if (n == 1) return 0;
+    const std::uint64_t key = feelKey(id, k, 0, kFeelSaltArp);
+    if (previous < 0) return static_cast<int>(key % static_cast<std::uint64_t>(n));
+    const int r = static_cast<int>(key % static_cast<std::uint64_t>(n - 1));
+    return r < previous ? r : r + 1;
 }
 
 }  // namespace chordlab

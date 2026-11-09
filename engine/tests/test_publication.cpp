@@ -5,6 +5,7 @@
 #include "chordlab/publication.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <vector>
 
@@ -297,15 +298,15 @@ TEST_CASE("publication: a feel change bumps the generation only when it changes 
     CHECK_FALSE(fillSlot(store.doc(), *slot, last));
     CHECK(last.generation == 1);
 
-    store.setFeel(Feel{Rhythm::ArpUp, Strum::Down, StrumSpeed::Medium, Humanise::Off});
+    store.setFeel(Feel{Rhythm::Arpeggio, Strum::Down, StrumSpeed::Medium, Humanise::Off});
     REQUIRE(fillSlot(store.doc(), *slot, last));
     CHECK(last.generation == 2);
     const std::vector<NoteEvent> arp = eventsOf(*slot);
 
     // Arpeggios ignore the strum: neither its speed nor its direction changes an event.
-    store.setFeel(Feel{Rhythm::ArpUp, Strum::Down, StrumSpeed::Loose, Humanise::Off});
+    store.setFeel(Feel{Rhythm::Arpeggio, Strum::Down, StrumSpeed::Loose, Humanise::Off});
     CHECK_FALSE(fillSlot(store.doc(), *slot, last));
-    store.setFeel(Feel{Rhythm::ArpUp, Strum::Up, StrumSpeed::Tight, Humanise::Off});
+    store.setFeel(Feel{Rhythm::Arpeggio, Strum::Up, StrumSpeed::Tight, Humanise::Off});
     CHECK_FALSE(fillSlot(store.doc(), *slot, last));
     CHECK(last.generation == 2);
     CHECK(eventsOf(*slot) == arp);
@@ -314,10 +315,10 @@ TEST_CASE("publication: a feel change bumps the generation only when it changes 
     CHECK_FALSE(fillSlot(store.doc(), *slot, last));
 
     // A rhythm or a humanise that moves notes is content.
-    store.setFeel(Feel{Rhythm::ArpUpDown, Strum::Up, StrumSpeed::Tight, Humanise::Off});
+    store.setFeel(Feel{Rhythm::Arpeggio, Strum::Up, StrumSpeed::Tight, Humanise::Off, ArpPattern::UpDown});
     REQUIRE(fillSlot(store.doc(), *slot, last));
     CHECK(last.generation == 3);
-    store.setFeel(Feel{Rhythm::ArpUpDown, Strum::Up, StrumSpeed::Tight, Humanise::Light});
+    store.setFeel(Feel{Rhythm::Arpeggio, Strum::Up, StrumSpeed::Tight, Humanise::Light, ArpPattern::UpDown});
     REQUIRE(fillSlot(store.doc(), *slot, last));
     CHECK(last.generation == 4);
     CHECK(eventsOf(*slot) == compile(store.doc()).events);
@@ -327,6 +328,59 @@ TEST_CASE("publication: a feel change bumps the generation only when it changes 
     REQUIRE(fillSlot(store.doc(), *slot, last));
     CHECK(last.generation == 5);
     CHECK(slot->count == 12);
+}
+
+TEST_CASE("publication: a pattern change publishes under the arpeggio and not under pulse") {
+    DocumentStore store;
+    store.appendChord(chord(0, "maj"), 4.0, 100);
+    Publication last;
+    auto slot = newSlot();
+    REQUIRE(fillSlot(store.doc(), *slot, last));
+
+    Feel feel{Rhythm::Pulse};
+    store.setFeel(feel);
+    REQUIRE(fillSlot(store.doc(), *slot, last));
+    const std::uint32_t pulseGeneration = last.generation;
+    const std::vector<NoteEvent> pulse = eventsOf(*slot);
+
+    // The arpeggio fields are not heard under another rhythm: same events, nothing published.
+    feel.pattern = ArpPattern::Random;
+    store.setFeel(feel);
+    CHECK_FALSE(fillSlot(store.doc(), *slot, last));
+    feel.rate = ArpRate::Half;
+    store.setFeel(feel);
+    CHECK_FALSE(fillSlot(store.doc(), *slot, last));
+    feel.range = ArpRange::Two;
+    store.setFeel(feel);
+    CHECK_FALSE(fillSlot(store.doc(), *slot, last));
+    CHECK(last.generation == pulseGeneration);
+    CHECK(eventsOf(*slot) == pulse);
+
+    // Switching to the arpeggio is content.
+    feel = Feel{Rhythm::Arpeggio};
+    store.setFeel(feel);
+    REQUIRE(fillSlot(store.doc(), *slot, last));
+    CHECK(last.generation == pulseGeneration + 1);
+
+    // Each of the pattern, the rate and the range changes the events and bumps the generation once.
+    feel.pattern = ArpPattern::Down;
+    store.setFeel(feel);
+    REQUIRE(fillSlot(store.doc(), *slot, last));
+    CHECK(last.generation == pulseGeneration + 2);
+    feel.rate = ArpRate::Pulse;
+    store.setFeel(feel);
+    REQUIRE(fillSlot(store.doc(), *slot, last));
+    CHECK(last.generation == pulseGeneration + 3);
+    feel.range = ArpRange::Two;
+    store.setFeel(feel);
+    REQUIRE(fillSlot(store.doc(), *slot, last));
+    CHECK(last.generation == pulseGeneration + 4);
+    CHECK(eventsOf(*slot) == compile(store.doc()).events);
+
+    // The same feel again publishes nothing.
+    store.setFeel(feel);
+    CHECK_FALSE(fillSlot(store.doc(), *slot, last));
+    CHECK(last.generation == pulseGeneration + 4);
 }
 
 TEST_CASE("publication: an over-budget feel publishes block chords") {

@@ -188,13 +188,20 @@ struct PresetJSON: Codable, Equatable, Identifiable {
   let fits: Bool
 }
 
-/// The snapshot's `feel`: the engine's four feel settings by their JSON names (`rhythm`, `strum`,
-/// `strumSpeed`, `humanise`); see `FeelOptions` for the accepted values.
+/// The snapshot's `feel`: the engine's feel settings by their JSON names (`rhythm`, `strum`, `strumSpeed`,
+/// `humanise`, and for the arpeggio `arpPattern`, `arpRate`, `arpRange`); see `FeelOptions` for the accepted
+/// values. The three arpeggio fields are optional so that a four-key feel (a plug-in built before them) still
+/// decodes; the engine of this build always writes all seven and never the old `arpUp` / `arpUpDown` names
+/// (it normalises them on load), so `FeelOptions` reads the three with the engine's defaults and needs no
+/// legacy mapping.
 struct FeelJSON: Codable, Equatable {
   let rhythm: String
   let strum: String
   let strumSpeed: String
   let humanise: String
+  var arpPattern: String? = nil
+  var arpRate: String? = nil
+  var arpRange: String? = nil
 }
 
 /// The snapshot's `meter`: the document's time signature, `num` 1..16 over `den` 2, 4 or 8.

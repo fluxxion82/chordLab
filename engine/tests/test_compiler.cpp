@@ -988,7 +988,7 @@ TEST_CASE("feel: every range is the whole performance's events of its chords, re
                               1 + static_cast<int>(rng() % 127));
         }
         store.setAutoVoiceLead(rng() % 2 == 0);
-        store.setFeel(Feel{static_cast<Rhythm>(rng() % 7), static_cast<Strum>(rng() % 4),
+        store.setFeel(Feel{static_cast<Rhythm>(rng() % 6), static_cast<Strum>(rng() % 4),
                            static_cast<StrumSpeed>(rng() % 3), static_cast<Humanise>(rng() % 4)});
         const Meter meters[] = {{4, 4}, {3, 4}, {6, 8}, {7, 8}};
         store.setMeter(meters[rng() % 4]);

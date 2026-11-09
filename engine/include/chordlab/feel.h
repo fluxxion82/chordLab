@@ -1,5 +1,6 @@
 #pragma once
 
+#include "chordlab/chord.h"
 #include "chordlab/meter.h"
 
 #include <cstdint>
@@ -9,8 +10,22 @@ namespace chordlab {
 
 struct Document;
 
-/// How a chord's notes are spread over its span (see the feel plan, D4-D7).
-enum class Rhythm { Block, Pulse, Subdivided, Offbeats, LowThenUpper, ArpUp, ArpUpDown };
+/// How a chord's notes are spread over its span (see the feel plan, D4-D7, and the arpeggio design, D1).
+enum class Rhythm { Block, Pulse, Subdivided, Offbeats, LowThenUpper, Arpeggio };
+
+/// The order an arpeggio visits its notes (arpeggio design D2). Live's Arpeggiator styles, plus Alberti; Live's
+/// "Play Order" slot is `RootFirst` (chord tones from the root), its "Chord Trigger" is `Chord`.
+enum class ArpPattern {
+    Up, Down, UpDown, DownUp, UpAndDown, DownAndUp, Converge, Diverge, ConAndDiverge,
+    PinkyUp, PinkyUpDown, ThumbUp, ThumbUpDown, Alberti, RootFirst, Chord, Random
+};
+constexpr int kArpPatternCount = 17;
+
+/// The grid an arpeggio steps on (D3): the meter's pulse, its subdivision, or half the subdivision.
+enum class ArpRate { Pulse, Subdivision, Half };
+
+/// How many octaves an arpeggio spans (D4): the voicing, or the voicing and the same an octave up.
+enum class ArpRange { One, Two };
 
 /// Direction of the strum that staggers a hit's note onsets.
 enum class Strum { Off, Down, Up, DownUp };
@@ -21,16 +36,21 @@ enum class StrumSpeed { Tight, Medium, Loose };
 /// Amount of random timing and velocity variation.
 enum class Humanise { Off, Light, Medium, Heavy };
 
-/// The playing feel of the whole progression. Defaults: block chords, no strum, medium speed, no humanise.
+/// The playing feel of the whole progression. Defaults: block chords, no strum, medium speed, no humanise;
+/// the arpeggio fields (heard only while `rhythm == Arpeggio`) default to up, the subdivision, one octave.
 struct Feel {
     Rhythm rhythm = Rhythm::Block;
     Strum strum = Strum::Off;
     StrumSpeed speed = StrumSpeed::Medium;
     Humanise humanise = Humanise::Off;
+    ArpPattern pattern = ArpPattern::Up;
+    ArpRate rate = ArpRate::Subdivision;
+    ArpRange range = ArpRange::One;
 };
 
 inline bool operator==(const Feel& a, const Feel& b) {
-    return a.rhythm == b.rhythm && a.strum == b.strum && a.speed == b.speed && a.humanise == b.humanise;
+    return a.rhythm == b.rhythm && a.strum == b.strum && a.speed == b.speed && a.humanise == b.humanise &&
+           a.pattern == b.pattern && a.rate == b.rate && a.range == b.range;
 }
 
 inline bool operator!=(const Feel& a, const Feel& b) { return !(a == b); }
@@ -38,7 +58,8 @@ inline bool operator!=(const Feel& a, const Feel& b) { return !(a == b); }
 /// Shortest gated note, in ticks (D6).
 constexpr int kMinNoteTicks = 5;
 
-/// One hit: tick span after the gate, the voicing indices it plays (ascending pitch order), its velocity
+/// One hit: tick span after the gate, the indices it plays into the chord's note list (the voicing, ascending;
+/// for an arpeggio the arpeggio note list), its velocity
 /// before humanise, and whether it is on a pulse or the chord's start (for the down-up strum).
 struct Hit {
     int start;
@@ -48,9 +69,48 @@ struct Hit {
     bool strong;
 };
 
-/// The hits of a chord spanning ticks [s, e) of the whole progression (D4-D7). Bars count from tick 0 of the
-/// progression. Empty when the span or `noteCount` is empty.
-std::vector<Hit> rhythmHits(Rhythm rhythm, Meter meter, int s, int e, int noteCount, int velocity);
+/// Which index of an `n`-note arpeggio list the `k`-th hit plays (arpeggio design D2), for the index
+/// patterns: everything but `Chord` (every note plays) and `Random` (`arpRandomIndex`). `k >= 0`, `n >= 1`;
+/// `n == 1` is always 0. `RootFirst` is `Up` (the list itself is ordered by chord tone, `arpeggioNotes`).
+int arpIndex(ArpPattern pattern, int k, int n);
+
+/// Ticks between arpeggio hits at `rate` in `meter` (D3): the pulse, the subdivision, or half of it (4/4: 960, 480, 240; 6/8: 1440, 480, 240; 7/8: 480, 240, 120).
+int arpStepTicks(ArpRate rate, Meter meter);
+
+/// The `Random` pattern's index for hit `k` of an `n`-note list (D2): hit 0 (`previous < 0`) plays
+/// `feelKey(id, 0, 0, kFeelSaltArp) % n`; a later hit plays the r-th of the n - 1 indices other than `previous`,
+/// `r = feelKey(id, k, 0, kFeelSaltArp) % (n - 1)`, so no note repeats immediately in the generated hit order
+/// (humanise may still move two hits' notes around each other). `n == 1` is always 0. Pure in the chord's event
+/// id: playback equals export, undo keeps the order, moving the chord keeps it, re-adding a preset re-rolls.
+/// Pinned sequences (independent Python splitmix64, test_feel.cpp): id 1, n 4: 2 1 3 0 3 0 3 0; id 1, n 3:
+/// 1 0 2 0 2 0 1 2.
+int arpRandomIndex(int id, int k, int n, int previous);
+
+/// The pitches an arpeggio of `chord` plays, from its `voicing` (ascending MIDI notes, as `voicings` gives
+/// them; D4): the voicing, plus for `ArpRange::Two` the voicing an octave up, the whole list sorted ascending
+/// (a ninth spans 14 semitones, so its D5 sits above the octave's C5: C9 gives 60 64 67 70 72 74 76 79 82 86);
+/// for `RootFirst` instead each octave is ordered by chord tone (the index of `(pitch - root) mod 12` among the
+/// type's intervals reduced mod 12, ties by pitch) and the second octave follows the first. A pitch above 127
+/// is dropped (never with the dictionary: voicings top out at 112). Dictionary voicings have distinct pitch
+/// classes, so the octave never repeats a pitch.
+std::vector<int> arpeggioNotes(const Chord& chord, const std::vector<int>& voicing, ArpPattern pattern,
+                               ArpRange range);
+
+/// The hits of a chord spanning ticks [s, e) of the whole progression (D4-D7 of the feel plan). Bars count
+/// from tick 0 of the progression. Empty when the span or `noteCount` is empty. For an arpeggio, `noteCount`
+/// is the size of the chord's arpeggio note list (`arpeggioNotes`) and each hit's `notes` index that list;
+/// `id` is the chord's event id, read by `ArpPattern::Random` only.
+std::vector<Hit> rhythmHits(const Feel& feel, Meter meter, int s, int e, int noteCount, int velocity, int id = 0);
+
+/// `rhythmHits(Feel{rhythm}, ...)`: the rhythm with the default feel (an arpeggio plays up, on the
+/// subdivision, over one octave).
+inline std::vector<Hit> rhythmHits(Rhythm rhythm, Meter meter, int s, int e, int noteCount, int velocity) {
+    return rhythmHits(Feel{rhythm}, meter, s, e, noteCount, velocity, 0);
+}
+
+inline bool operator==(const Hit& a, const Hit& b) {
+    return a.start == b.start && a.end == b.end && a.notes == b.notes && a.velocity == b.velocity && a.strong == b.strong;
+}
 
 // --- Humanise hash (D9) ----------------------------------------------------------------------------------
 //
@@ -63,6 +123,7 @@ std::vector<Hit> rhythmHits(Rhythm rhythm, Meter meter, int s, int e, int noteCo
 constexpr int kFeelSaltHitTiming = 1;   // a whole hit, in ticks; `note` is 0
 constexpr int kFeelSaltNoteTiming = 2;  // one note of a hit, in ticks (strum off only); `note` is its voicing index
 constexpr int kFeelSaltVelocity = 3;    // one note's velocity; `note` is its voicing index
+constexpr int kFeelSaltArp = 4;         // the Random pattern's note choice; `note` is 0
 
 /// splitmix64's output function for state `x`: `x += 0x9E3779B97F4A7C15; x = (x ^ x >> 30) *
 /// 0xBF58476D1CE4E5B9; x = (x ^ x >> 27) * 0x94D049BB133111EB; return x ^ x >> 31;`, all modulo 2^64.
@@ -132,7 +193,7 @@ bool feelPerforms(const Feel& feel);
 
 /// Performs the whole of `doc` with `doc.feel` and `doc.meter`:
 /// - each chord `i` spans ticks [s, e) = [chordTicks[i], chordTicks[i + 1]) and is played with the voicing
-///   `voicings(doc)` gives it (auto voice-leading respected) and its velocity, as `rhythmHits` says (D5-D7);
+///   `voicings(doc)` gives it (auto voice-leading respected) and its velocity, as `rhythmHits` says (D5-D7) and, for an arpeggio, the arpeggio design D2-D4;
 /// - strum (D8): `down` plays the hit's notes lowest first, `up` highest first, `downUp` down on a strong hit
 ///   (a pulse or the chord's start) and up otherwise, `step` ticks apart (tight 10, medium 20, loose 40),
 ///   `step = min(step, (len / 2) / (n - 1))` for a hit of gated length `len` and `n` notes; arpeggios ignore

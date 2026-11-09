@@ -532,14 +532,16 @@ final class SnapshotTests: XCTestCase {
 
   func testFeelFixtureDecodesTheFeelFields() throws {
     let snapshot = try snapshotFixture("snapshot-feel.json")
-    XCTAssertEqual(snapshot.feel, FeelJSON(rhythm: "arpUpDown", strum: "downUp", strumSpeed: "tight", humanise: "light"))
+    XCTAssertEqual(snapshot.feel, FeelJSON(rhythm: "arpeggio", strum: "downUp", strumSpeed: "tight", humanise: "light",
+                      arpPattern: "pinkyUpDown", arpRate: "half", arpRange: "two"))
     XCTAssertEqual(snapshot.meter, MeterJSON(num: 6, den: 8))
     XCTAssertEqual(snapshot.feelLimited, false)
   }
 
   func testHomeFixtureDecodesTheDefaultFeel() throws {
     let snapshot = try snapshotFixture("snapshot-home-progression.json")
-    XCTAssertEqual(snapshot.feel, FeelJSON(rhythm: "block", strum: "off", strumSpeed: "medium", humanise: "off"))
+    XCTAssertEqual(snapshot.feel, FeelJSON(rhythm: "block", strum: "off", strumSpeed: "medium", humanise: "off",
+                                           arpPattern: "up", arpRate: "subdivision", arpRange: "one"))
     XCTAssertEqual(snapshot.meter, MeterJSON(num: 4, den: 4))
     XCTAssertEqual(snapshot.feelLimited, false)
   }
@@ -552,6 +554,22 @@ final class SnapshotTests: XCTestCase {
     XCTAssertEqual(snapshot.feel, FeelJSON(rhythm: "pulse", strum: "up", strumSpeed: "loose", humanise: "heavy"))
     XCTAssertEqual(snapshot.meter, MeterJSON(num: 7, den: 8))
     XCTAssertEqual(snapshot.feelLimited, true)
+  }
+
+  func testAFourKeyFeelDecodesWithoutTheArpeggioFields() throws {
+    let json = #"{"rhythm":"arpUpDown","strum":"off","strumSpeed":"medium","humanise":"off"}"#
+    let feel = try Self.decode(FeelJSON.self, json)
+    XCTAssertEqual(feel, FeelJSON(rhythm: "arpUpDown", strum: "off", strumSpeed: "medium", humanise: "off"))
+    XCTAssertNil(feel.arpPattern)
+    XCTAssertNil(feel.arpRate)
+    XCTAssertNil(feel.arpRange)
+  }
+
+  func testASevenKeyFeelRoundTrips() throws {
+    let feel = FeelJSON(rhythm: "arpeggio", strum: "off", strumSpeed: "medium", humanise: "off",
+                        arpPattern: "thumbUpDown", arpRate: "half", arpRange: "two")
+    let data = try JSONEncoder().encode(feel)
+    XCTAssertEqual(try JSONDecoder().decode(FeelJSON.self, from: data), feel)
   }
 
   func testSnapshotsWithoutFeelFieldsStillDecode() throws {

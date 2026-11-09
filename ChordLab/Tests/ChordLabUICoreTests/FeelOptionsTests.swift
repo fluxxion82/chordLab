@@ -2,7 +2,14 @@ import XCTest
 @testable import ChordLabUICore
 
 final class FeelOptionsTests: XCTestCase {
-  private func feel(_ r: String = "block", _ s: String = "off", _ sp: String = "medium", _ h: String = "off") -> FeelJSON {
+  /// A feel with every field explicit (the shape the engine of this build always writes).
+  private func feel(_ r: String = "block", _ s: String = "off", _ sp: String = "medium", _ h: String = "off",
+                    _ p: String = "up", _ ra: String = "subdivision", _ rg: String = "one") -> FeelJSON {
+    FeelJSON(rhythm: r, strum: s, strumSpeed: sp, humanise: h, arpPattern: p, arpRate: ra, arpRange: rg)
+  }
+
+  /// A four-key feel: what a plug-in built before the arpeggio fields would send.
+  private func legacyFeel(_ r: String, _ s: String = "off", _ sp: String = "medium", _ h: String = "off") -> FeelJSON {
     FeelJSON(rhythm: r, strum: s, strumSpeed: sp, humanise: h)
   }
 
@@ -10,7 +17,7 @@ final class FeelOptionsTests: XCTestCase {
 
   func testOptionIdsAreTheEnginesStrings() {
     XCTAssertEqual(FeelOptions.rhythms(num: 4, den: 4).map(\.id),
-                   ["block", "pulse", "subdivided", "offbeats", "lowThenUpper", "arpUp", "arpUpDown"])
+                   ["block", "pulse", "subdivided", "offbeats", "lowThenUpper", "arpeggio"])
     XCTAssertEqual(FeelOptions.strums.map(\.id), ["off", "down", "up", "downUp"])
     XCTAssertEqual(FeelOptions.strumSpeeds.map(\.id), ["tight", "medium", "loose"])
     XCTAssertEqual(FeelOptions.humanises.map(\.id), ["off", "light", "medium", "heavy"])
@@ -28,7 +35,7 @@ final class FeelOptionsTests: XCTestCase {
 
   func testRhythmTitlesInFourFour() {
     XCTAssertEqual(titles(4, 4), ["Block", "Pulse", "Subdivided (eighths)", "Offbeats", "Low note, then chord",
-                                  "Arpeggio up", "Arpeggio up and down"])
+                                  "Arpeggio"])
   }
 
   func testSubdividedUnitFollowsTheMeter() {
@@ -63,7 +70,7 @@ final class FeelOptionsTests: XCTestCase {
 
   func testSetFeelCommandIsTheEnginesMessage() {
     let c = FeelOptions.command(feel("lowThenUpper", "downUp", "loose", "heavy"))
-    XCTAssertEqual(c.count, 5)
+    XCTAssertEqual(c.count, 8)
     XCTAssertEqual(c["cmd"] as? String, "setFeel")
     XCTAssertEqual(c["rhythm"] as? String, "lowThenUpper")
     XCTAssertEqual(c["strum"] as? String, "downUp")
@@ -96,6 +103,83 @@ final class FeelOptionsTests: XCTestCase {
     }
   }
 
+  // MARK: - arpeggio lists
+
+  func testArpeggioPatternsAreTheEnginesNamesInFiveGroups() {
+    XCTAssertEqual(FeelOptions.arpPatterns.map { $0.map(\.id) },
+                   [["up", "down", "upDown", "downUp", "upAndDown", "downAndUp"],
+                    ["converge", "diverge", "conAndDiverge"],
+                    ["pinkyUp", "pinkyUpDown", "thumbUp", "thumbUpDown"],
+                    ["alberti", "rootFirst", "chord"],
+                    ["random"]])
+    XCTAssertEqual(FeelOptions.arpPatterns.flatMap { $0.map(\.title) },
+                   ["Up", "Down", "Up-down", "Down-up", "Up & down", "Down & up", "Converge", "Diverge", "Con & diverge",
+                    "Pinky up", "Pinky up-down", "Thumb up", "Thumb up-down", "Alberti", "Root first", "Chord", "Random"])
+    XCTAssertEqual(FeelOptions.arpPatterns.flatMap { $0 }.count, 17)
+    XCTAssertEqual(FeelOptions.arpRanges.map(\.id), ["one", "two"])
+    XCTAssertEqual(FeelOptions.arpRanges.map(\.title), ["1 oct", "2 oct"])
+  }
+
+  func testArpeggioRatesAreNamedForTheMeter() {
+    func rates(_ n: Int, _ d: Int) -> [String] { FeelOptions.arpRates(num: n, den: d).map(\.title) }
+    XCTAssertEqual(FeelOptions.arpRates(num: 4, den: 4).map(\.id), ["pulse", "subdivision", "half"])
+    XCTAssertEqual(rates(4, 4), ["Quarters", "Eighths", "Sixteenths"])
+    XCTAssertEqual(rates(3, 4), ["Quarters", "Eighths", "Sixteenths"])
+    XCTAssertEqual(rates(6, 8), ["Dotted quarters", "Eighths", "Sixteenths"])
+    XCTAssertEqual(rates(12, 8), ["Dotted quarters", "Eighths", "Sixteenths"])
+    XCTAssertEqual(rates(7, 8), ["Eighths", "Sixteenths", "Thirty-seconds"])
+    XCTAssertEqual(rates(3, 8), ["Eighths", "Sixteenths", "Thirty-seconds"])
+    XCTAssertEqual(rates(4, 2), ["Half notes", "Quarters", "Eighths"])
+  }
+
+  func testPulseTicksMatchTheEngineGrid() {
+    XCTAssertEqual(FeelOptions.pulseTicks(num: 4, den: 4), 960)
+    XCTAssertEqual(FeelOptions.pulseTicks(num: 6, den: 8), 1440)
+    XCTAssertEqual(FeelOptions.pulseTicks(num: 7, den: 8), 480)
+    XCTAssertEqual(FeelOptions.pulseTicks(num: 3, den: 2), 1920)
+  }
+
+  func testArpeggioFieldsReadWithTheEnginesDefaults() {
+    XCTAssertEqual(FeelOptions.arpPattern(nil), "up")
+    XCTAssertEqual(FeelOptions.arpRate(legacyFeel("arpeggio")), "subdivision")
+    XCTAssertEqual(FeelOptions.arpRange(legacyFeel("arpeggio")), "one")
+    let full = feel("arpeggio", "off", "medium", "off", "alberti", "half", "two")
+    XCTAssertEqual(FeelOptions.arpPattern(full), "alberti")
+    XCTAssertEqual(FeelOptions.arpRate(full), "half")
+    XCTAssertEqual(FeelOptions.arpRange(full), "two")
+    XCTAssertTrue(FeelOptions.isArpeggio(feel("arpeggio")))
+    XCTAssertFalse(FeelOptions.isArpeggio(feel("pulse")))
+    XCTAssertFalse(FeelOptions.isArpeggio(nil))
+  }
+
+  func testSetFeelCommandCarriesAllSevenStrings() throws {
+    let c = FeelOptions.command(feel("arpeggio", "off", "medium", "light", "thumbUp", "half", "two"))
+    XCTAssertEqual(c.count, 8)
+    XCTAssertEqual(c["arpPattern"] as? String, "thumbUp")
+    XCTAssertEqual(c["arpRate"] as? String, "half")
+    XCTAssertEqual(c["arpRange"] as? String, "two")
+    // A four-key feel sends the defaults, so the engine's "present means valid" always holds.
+    let d = FeelOptions.command(legacyFeel("pulse"))
+    XCTAssertEqual(d["arpPattern"] as? String, "up")
+    XCTAssertEqual(d["arpRate"] as? String, "subdivision")
+    XCTAssertEqual(d["arpRange"] as? String, "one")
+    let data = try JSONSerialization.data(withJSONObject: d, options: [.sortedKeys])
+    XCTAssertEqual(String(data: data, encoding: .utf8),
+                   #"{"arpPattern":"up","arpRange":"one","arpRate":"subdivision","cmd":"setFeel","humanise":"off","rhythm":"pulse","strum":"off","strumSpeed":"medium"}"#)
+  }
+
+  func testChangingAnArpeggioFieldKeepsTheOthers() {
+    let current = feel("arpeggio", "off", "medium", "off", "converge", "pulse", "two")
+    XCTAssertEqual(FeelOptions.changed(current, arpPattern: "random"), feel("arpeggio", "off", "medium", "off", "random", "pulse", "two"))
+    XCTAssertEqual(FeelOptions.changed(current, arpRate: "half"), feel("arpeggio", "off", "medium", "off", "converge", "half", "two"))
+    XCTAssertEqual(FeelOptions.changed(current, arpRange: "one"), feel("arpeggio", "off", "medium", "off", "converge", "pulse", "one"))
+    XCTAssertEqual(FeelOptions.changed(current, rhythm: "pulse"), feel("pulse", "off", "medium", "off", "converge", "pulse", "two"))
+    XCTAssertEqual(FeelOptions.changed(current, humanise: "heavy"), feel("arpeggio", "off", "medium", "heavy", "converge", "pulse", "two"))
+    // From a four-key feel the defaults are filled in.
+    XCTAssertEqual(FeelOptions.changed(legacyFeel("pulse"), arpPattern: "alberti"), feel("pulse", "off", "medium", "off", "alberti", "subdivision", "one"))
+    XCTAssertEqual(FeelOptions.changed(nil, strum: "downUp"), feel("block", "downUp", "medium", "off"))
+  }
+
   // MARK: - isDefault
 
   func testIsDefaultMatchesTheEnginesDefaultFeel() {
@@ -123,7 +207,7 @@ final class FeelOptionsTests: XCTestCase {
 
   func testChangingOneFieldKeepsTheOtherThree() {
     let current = feel("pulse", "down", "loose", "light")
-    XCTAssertEqual(FeelOptions.changed(current, rhythm: "arpUp"), feel("arpUp", "down", "loose", "light"))
+    XCTAssertEqual(FeelOptions.changed(current, rhythm: "arpeggio"), feel("arpeggio", "down", "loose", "light"))
     XCTAssertEqual(FeelOptions.changed(current, strum: "up"), feel("pulse", "up", "loose", "light"))
     XCTAssertEqual(FeelOptions.changed(current, strumSpeed: "tight"), feel("pulse", "down", "tight", "light"))
     XCTAssertEqual(FeelOptions.changed(current, humanise: "heavy"), feel("pulse", "down", "loose", "heavy"))
@@ -137,7 +221,7 @@ final class FeelOptionsTests: XCTestCase {
     let c = FeelOptions.command(FeelOptions.changed(feel("subdivided", "off", "medium", "medium"), humanise: "off"))
     let data = try JSONSerialization.data(withJSONObject: c, options: [.sortedKeys])
     XCTAssertEqual(String(data: data, encoding: .utf8),
-                   #"{"cmd":"setFeel","humanise":"off","rhythm":"subdivided","strum":"off","strumSpeed":"medium"}"#)
+                   #"{"arpPattern":"up","arpRange":"one","arpRate":"subdivision","cmd":"setFeel","humanise":"off","rhythm":"subdivided","strum":"off","strumSpeed":"medium"}"#)
   }
 
   // MARK: - which controls apply
@@ -148,8 +232,7 @@ final class FeelOptionsTests: XCTestCase {
     XCTAssertTrue(FeelOptions.strumApplies(feel("subdivided")))
     XCTAssertTrue(FeelOptions.strumApplies(feel("offbeats")))
     XCTAssertTrue(FeelOptions.strumApplies(feel("lowThenUpper")))
-    XCTAssertFalse(FeelOptions.strumApplies(feel("arpUp")))
-    XCTAssertFalse(FeelOptions.strumApplies(feel("arpUpDown")))
+    XCTAssertFalse(FeelOptions.strumApplies(feel("arpeggio")))
     XCTAssertTrue(FeelOptions.strumApplies(nil))
   }
 
@@ -157,8 +240,7 @@ final class FeelOptionsTests: XCTestCase {
     XCTAssertFalse(FeelOptions.speedApplies(feel("block", "off")))
     XCTAssertTrue(FeelOptions.speedApplies(feel("block", "down")))
     XCTAssertTrue(FeelOptions.speedApplies(feel("pulse", "downUp")))
-    XCTAssertFalse(FeelOptions.speedApplies(feel("arpUp", "down")))
-    XCTAssertFalse(FeelOptions.speedApplies(feel("arpUpDown", "up")))
+    XCTAssertFalse(FeelOptions.speedApplies(feel("arpeggio", "down")))
     XCTAssertFalse(FeelOptions.speedApplies(nil))
   }
 

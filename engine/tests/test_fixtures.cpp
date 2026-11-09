@@ -6,7 +6,8 @@
 //     CHORDLAB_UPDATE_FIXTURES=1 build/engine_tests -tc="golden fixtures*"
 // (the test rewrites the files, still passes, and a second run without the variable proves equality).
 //
-// The two *-legacy-phase1.json files are hand-written Phase 1 shapes; they are never rewritten.
+// The two *-legacy-phase1.json files are hand-written Phase 1 shapes and state-legacy-feel.json a pre-arpeggio
+// feel; they are never rewritten.
 
 #include "doctest.h"
 
@@ -149,11 +150,12 @@ std::string stateProgression() {
     return stateJson(progressionStore(nullptr), 900, 600);
 }
 
-/// The progression fixture with a non-default feel (arpeggio up and down, down-up strum, tight, light
-/// humanise) in 6/8.
+/// The progression fixture with a non-default value in every feel field (arpeggio, pinky up-down, half rate, two
+/// octaves, down-up strum, tight, light humanise) in 6/8.
 DocumentStore feelStore() {
     DocumentStore store = progressionStore(nullptr);
-    store.setFeel(Feel{Rhythm::ArpUpDown, Strum::DownUp, StrumSpeed::Tight, Humanise::Light});
+    store.setFeel(Feel{Rhythm::Arpeggio, Strum::DownUp, StrumSpeed::Tight, Humanise::Light, ArpPattern::PinkyUpDown,
+                       ArpRate::Half, ArpRange::Two});
     store.setMeter(Meter{6, 8});
     return store;
 }
@@ -227,7 +229,8 @@ TEST_CASE("golden fixtures: generated snapshots carry the documented top-level k
 TEST_CASE("golden fixtures: the feel and meter fixtures carry non-default values") {
     const json snap = json::parse(snapshotFeel());
     CHECK(snap.at("feel") ==
-          json({{"rhythm", "arpUpDown"}, {"strum", "downUp"}, {"strumSpeed", "tight"}, {"humanise", "light"}}));
+          json({{"rhythm", "arpeggio"}, {"strum", "downUp"}, {"strumSpeed", "tight"}, {"humanise", "light"},
+                {"arpPattern", "pinkyUpDown"}, {"arpRate", "half"}, {"arpRange", "two"}}));
     CHECK(snap.at("meter") == json({{"num", 6}, {"den", 8}}));
     CHECK(snap.at("feelLimited") == false);
     const json state = json::parse(stateFeel());
@@ -236,7 +239,8 @@ TEST_CASE("golden fixtures: the feel and meter fixtures carry non-default values
 
     const json home = json::parse(homeProgression());
     CHECK(home.at("feel") ==
-          json({{"rhythm", "block"}, {"strum", "off"}, {"strumSpeed", "medium"}, {"humanise", "off"}}));
+          json({{"rhythm", "block"}, {"strum", "off"}, {"strumSpeed", "medium"}, {"humanise", "off"},
+                {"arpPattern", "up"}, {"arpRate", "subdivision"}, {"arpRange", "one"}}));
     CHECK(home.at("meter") == json({{"num", 4}, {"den", 4}}));
     CHECK(home.at("feelLimited") == false);
 
@@ -260,6 +264,29 @@ TEST_CASE("golden fixtures: the state fixture round-trips") {
     CHECK(loaded.nextId() == original.nextId());
     CHECK(loaded.nextSectionId() == original.nextSectionId());
     CHECK(stateJson(loaded, 900, 600) == stateProgression());
+}
+
+TEST_CASE("legacy fixture: state-legacy-feel.json is a state saved before the arpeggio fields") {
+    // Hand-kept, never regenerated: its feel is {"rhythm":"arpUpDown", ...} with no arpPattern/arpRate/arpRange.
+    std::string text;
+    REQUIRE_MESSAGE(readFile("state-legacy-feel.json", text), "state-legacy-feel.json missing");
+    const json j = json::parse(text);
+    CHECK(j.at("feel").at("rhythm") == "arpUpDown");
+    CHECK_FALSE(j.at("feel").contains("arpPattern"));
+    DocumentStore store;
+    std::string error;
+    REQUIRE_MESSAGE(loadStateJson(store, text, error), error);
+    CHECK(store.doc().feel == Feel{Rhythm::Arpeggio, Strum::DownUp, StrumSpeed::Tight, Humanise::Light, ArpPattern::UpDown});
+    // Saved again, it carries the new names and the defaults for the fields it never had.
+    const json saved = json::parse(stateJson(store));
+    CHECK(saved.at("feel").at("rhythm") == "arpeggio");
+    CHECK(saved.at("feel").at("arpPattern") == "upDown");
+    CHECK(saved.at("feel").at("arpRate") == "subdivision");
+    CHECK(saved.at("feel").at("arpRange") == "one");
+    // And loads back equal.
+    DocumentStore again;
+    REQUIRE_MESSAGE(loadStateJson(again, saved.dump(), error), error);
+    CHECK(again.doc() == store.doc());
 }
 
 // ---- Phase 1 legacy documents (hand-written, never regenerated) ----
