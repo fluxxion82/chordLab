@@ -65,7 +65,7 @@ enum FeelOptions {
     }
   }
 
-  /// The rhythm menu for a meter, in the engine's order. Arpeggios also run on the subdivision.
+  /// The rhythm menu for a meter, in the engine's order. The arpeggio's own grid is the Rate row.
   static func rhythms(num: Int, den: Int) -> [FeelOption] {
     [
       FeelOption(id: "block", title: "Block"),
@@ -73,15 +73,76 @@ enum FeelOptions {
       FeelOption(id: "subdivided", title: "Subdivided (\(subdivisionName(num: num, den: den)))"),
       FeelOption(id: "offbeats", title: "Offbeats"),
       FeelOption(id: "lowThenUpper", title: "Low note, then chord"),
-      FeelOption(id: "arpUp", title: "Arpeggio up"),
-      FeelOption(id: "arpUpDown", title: "Arpeggio up and down"),
+      FeelOption(id: "arpeggio", title: "Arpeggio"),
     ]
   }
 
-  /// `setFeel`: all four strings, as the engine requires.
+  /// The arpeggio patterns (arpeggio design D2), in the engine's order, grouped as the menu shows them:
+  /// directions, the converge family, Live's pinky and thumb styles, Alberti / Root first / Chord, Random.
+  /// Aliases for the help text: Thumb up is a pedal bass, Converge is outside-in.
+  static let arpPatterns: [[FeelOption]] = [
+    [FeelOption(id: "up", title: "Up"), FeelOption(id: "down", title: "Down"),
+     FeelOption(id: "upDown", title: "Up-down"), FeelOption(id: "downUp", title: "Down-up"),
+     FeelOption(id: "upAndDown", title: "Up & down"), FeelOption(id: "downAndUp", title: "Down & up")],
+    [FeelOption(id: "converge", title: "Converge"), FeelOption(id: "diverge", title: "Diverge"),
+     FeelOption(id: "conAndDiverge", title: "Con & diverge")],
+    [FeelOption(id: "pinkyUp", title: "Pinky up"), FeelOption(id: "pinkyUpDown", title: "Pinky up-down"),
+     FeelOption(id: "thumbUp", title: "Thumb up"), FeelOption(id: "thumbUpDown", title: "Thumb up-down")],
+    [FeelOption(id: "alberti", title: "Alberti"), FeelOption(id: "rootFirst", title: "Root first"),
+     FeelOption(id: "chord", title: "Chord")],
+    [FeelOption(id: "random", title: "Random")],
+  ]
+
+  static let arpRanges: [FeelOption] = [FeelOption(id: "one", title: "1 oct"), FeelOption(id: "two", title: "2 oct")]
+
+  static let defaultArpPattern = "up"
+  static let defaultArpRate = "subdivision"
+  static let defaultArpRange = "one"
+
+  /// Ticks in one pulse of the meter, the engine's `pulseTicks`: 1440 when compound, else 3840 / den.
+  static func pulseTicks(num: Int, den: Int) -> Int {
+    guard den > 0 else { return 0 }
+    return RulerMarks.isCompound(num: num, den: den) ? 1440 : 3840 / den
+  }
+
+  /// The note value of a grid step, by its length in ticks (960 a beat).
+  static func noteValueName(ticks: Int) -> String {
+    switch ticks {
+    case 1920: return "Half notes"
+    case 1440: return "Dotted quarters"
+    case 960: return "Quarters"
+    case 480: return "Eighths"
+    case 240: return "Sixteenths"
+    case 120: return "Thirty-seconds"
+    default: return "\(ticks) ticks"
+    }
+  }
+
+  /// The arpeggio rate menu for a meter (D3): the pulse, the subdivision and half of it, each named for its
+  /// note value in that meter (4/4: quarters, eighths, sixteenths; 6/8: dotted quarters, eighths, sixteenths;
+  /// 7/8: eighths, sixteenths, thirty-seconds).
+  static func arpRates(num: Int, den: Int) -> [FeelOption] {
+    let sub = subdivisionTicks(num: num, den: den)
+    return [
+      FeelOption(id: "pulse", title: noteValueName(ticks: pulseTicks(num: num, den: den))),
+      FeelOption(id: "subdivision", title: noteValueName(ticks: sub)),
+      FeelOption(id: "half", title: noteValueName(ticks: sub / 2)),
+    ]
+  }
+
+  /// Whether the rhythm is the arpeggio (the Pattern and Rate rows show, Strum and Speed do not).
+  static func isArpeggio(_ feel: FeelJSON?) -> Bool { (feel ?? defaultFeel).rhythm == "arpeggio" }
+
+  /// The arpeggio fields, the engine's defaults when the snapshot lacks them (a plug-in built before them).
+  static func arpPattern(_ feel: FeelJSON?) -> String { feel?.arpPattern ?? defaultArpPattern }
+  static func arpRate(_ feel: FeelJSON?) -> String { feel?.arpRate ?? defaultArpRate }
+  static func arpRange(_ feel: FeelJSON?) -> String { feel?.arpRange ?? defaultArpRange }
+
+  /// `setFeel`: all seven strings, as the engine requires (the arpeggio fields default when the feel lacks them).
   static func command(_ feel: FeelJSON) -> [String: Any] {
     ["cmd": "setFeel", "rhythm": feel.rhythm, "strum": feel.strum,
-     "strumSpeed": feel.strumSpeed, "humanise": feel.humanise]
+     "strumSpeed": feel.strumSpeed, "humanise": feel.humanise,
+     "arpPattern": arpPattern(feel), "arpRate": arpRate(feel), "arpRange": arpRange(feel)]
   }
 
   /// `setMeter`: `num` and `den` are JSON integers.
@@ -99,22 +160,24 @@ enum FeelOptions {
   }
 
   /// The engine's default feel (`Feel{}`): block, strum off at medium speed, humanise off.
-  static let defaultFeel = FeelJSON(rhythm: "block", strum: "off", strumSpeed: "medium", humanise: "off")
+  static let defaultFeel = FeelJSON(rhythm: "block", strum: "off", strumSpeed: "medium", humanise: "off",
+                                    arpPattern: "up", arpRate: "subdivision", arpRange: "one")
 
-  /// `feel` (the default when the snapshot has none) with the given fields replaced: what one control of
-  /// the popover sends, all four fields as `setFeel` requires.
+  /// what one control of
+  /// the popover sends, all seven fields (the arpeggio ones defaulted) as `setFeel` requires.
   static func changed(_ feel: FeelJSON?, rhythm: String? = nil, strum: String? = nil, strumSpeed: String? = nil,
-                      humanise: String? = nil) -> FeelJSON {
+                      humanise: String? = nil, arpPattern: String? = nil, arpRate: String? = nil,
+                      arpRange: String? = nil) -> FeelJSON {
     let base = feel ?? defaultFeel
     return FeelJSON(rhythm: rhythm ?? base.rhythm, strum: strum ?? base.strum,
-                    strumSpeed: strumSpeed ?? base.strumSpeed, humanise: humanise ?? base.humanise)
+                    strumSpeed: strumSpeed ?? base.strumSpeed, humanise: humanise ?? base.humanise,
+                    arpPattern: arpPattern ?? Self.arpPattern(base), arpRate: arpRate ?? Self.arpRate(base),
+                    arpRange: arpRange ?? Self.arpRange(base))
   }
 
-  /// Whether the strum is heard: arpeggios play one note per hit and ignore it (D8).
-  static func strumApplies(_ feel: FeelJSON?) -> Bool {
-    let rhythm = (feel ?? defaultFeel).rhythm
-    return rhythm != "arpUp" && rhythm != "arpUpDown"
-  }
+  /// Whether the strum is heard: the Pattern row replaces the Strum row under the arpeggio; the engine
+  /// still ignores a strum there (feel plan D8).
+  static func strumApplies(_ feel: FeelJSON?) -> Bool { !isArpeggio(feel) }
 
   /// Whether the strum speed is heard: only while a strum plays (not off, not under an arpeggio).
   static func speedApplies(_ feel: FeelJSON?) -> Bool {
