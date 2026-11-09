@@ -81,6 +81,34 @@ int arpStepTicks(ArpRate rate, Meter meter) {
     return subdivisionTicks(meter);
 }
 
+std::vector<int> arpeggioNotes(const Chord& chord, const std::vector<int>& voicing, ArpPattern pattern,
+                               ArpRange range) {
+    std::vector<int> octave(voicing);
+    const bool rootFirst = pattern == ArpPattern::RootFirst && chord.type != nullptr;
+    if (rootFirst) {
+        const std::vector<int>& intervals = chord.type->intervals;
+        const auto tone = [&](int pitch) {
+            const int pc = ((pitch - chord.root) % 12 + 12) % 12;
+            for (std::size_t i = 0; i < intervals.size(); ++i) {
+                if (intervals[i] % 12 == pc) return static_cast<int>(i);
+            }
+            return static_cast<int>(intervals.size());
+        };
+        std::stable_sort(octave.begin(), octave.end(), [&](int a, int b) { return tone(a) < tone(b); });
+    }
+    std::vector<int> notes;
+    const int octaves = range == ArpRange::Two ? 2 : 1;
+    for (int o = 0; o < octaves; ++o) {
+        for (int pitch : octave) {
+            const int p = pitch + 12 * o;
+            if (p <= 127) notes.push_back(p);
+        }
+    }
+    // Pitch order across both octaves (a ninth's D5 sits above the octave's C5); root first keeps its own order.
+    if (!rootFirst) std::sort(notes.begin(), notes.end());
+    return notes;
+}
+
 std::vector<Hit> rhythmHits(const Feel& feel, Meter meter, int s, int e, int noteCount, int velocity, int id) {
     const Rhythm rhythm = feel.rhythm;
     std::vector<Hit> hits;
@@ -274,8 +302,9 @@ void performChord(const Document& doc, std::size_t index, const std::vector<int>
     const bool humanise = feel.humanise != Humanise::Off;
     const int chord = static_cast<int>(index);
 
+    const std::vector<int> notesList = arp ? arpeggioNotes(event.chord, voicing, feel.pattern, feel.range) : voicing;
     const std::vector<Hit> hits =
-        rhythmHits(feel, doc.meter, s, e, static_cast<int>(voicing.size()), event.velocity, event.id);
+        rhythmHits(feel, doc.meter, s, e, static_cast<int>(notesList.size()), event.velocity, event.id);
     for (std::size_t k = 0; k < hits.size(); ++k) {
         const Hit& hit = hits[k];
         const int hitIndex = static_cast<int>(k);
@@ -312,7 +341,7 @@ void performChord(const Document& doc, std::size_t index, const std::vector<int>
             const int clampedOn = std::min(std::max(on, s), e - kMinNoteTicks);
             const int clampedOff = std::min(off, e);
             if (clampedOff - clampedOn < kMinNoteTicks) continue;
-            notes.push_back(Note{clampedOn, clampedOff, voicing[static_cast<std::size_t>(noteIndex)], velocity, chord,
+            notes.push_back(Note{clampedOn, clampedOff, notesList[static_cast<std::size_t>(noteIndex)], velocity, chord,
                                  hitIndex});
         }
     }

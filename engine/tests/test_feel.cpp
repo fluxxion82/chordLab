@@ -759,10 +759,15 @@ TEST_CASE("humanise: a chord's first hit never starts before the chord; strum or
                   static_cast<StrumSpeed>(rng() % 3), static_cast<Humanise>(1 + rng() % 3)};
         feel.pattern = static_cast<ArpPattern>(rng() % kArpPatternCount);
         feel.rate = static_cast<ArpRate>(rng() % 3);
+        feel.range = static_cast<ArpRange>(rng() % 2);
         const Meter meters[] = {{4, 4}, {3, 4}, {6, 8}, {7, 8}, {5, 4}};
         const Document doc = docOf(events, feel, meters[rng() % 5]);
         const Performance p = performDocument(doc);
-        REQUIRE_FALSE(p.feelLimited);
+        if (p.feelLimited) {
+            // Only an arpeggio can now exceed a budget (Chord at the half rate; the eight-note cluster type too).
+            CHECK(feel.rhythm == Rhythm::Arpeggio);
+            continue;
+        }
         checkSafety(doc, p);
         const std::vector<std::vector<int>> v = voicings(doc);
         // Group the ons by (chord, hit).
@@ -968,11 +973,16 @@ TEST_CASE("safety: random documents and feels keep every note paired, inside its
                   static_cast<StrumSpeed>(rng() % 3), static_cast<Humanise>(rng() % 4)};
         feel.pattern = static_cast<ArpPattern>(rng() % kArpPatternCount);
         feel.rate = static_cast<ArpRate>(rng() % 3);
+        feel.range = static_cast<ArpRange>(rng() % 2);
         const Meter meters[] = {{4, 4}, {3, 4}, {2, 4}, {6, 8}, {7, 8}, {9, 8}, {12, 8}, {3, 8}, {5, 4}, {2, 2}};
         Document doc = docOf(events, feel, meters[rng() % 10]);
         doc.autoVoiceLead = rng() % 2 == 0;
         const Performance p = performDocument(doc);
-        REQUIRE_FALSE(p.feelLimited);
+        if (p.feelLimited) {
+            // Only an arpeggio can now exceed a budget (Chord at the half rate; the eight-note cluster type too).
+            CHECK(feel.rhythm == Rhythm::Arpeggio);
+            continue;
+        }
         checkSafety(doc, p);
     }
 }
@@ -1034,4 +1044,133 @@ TEST_CASE("budgets: a beat holding more than 96 events falls back; exactly 96 fi
         CHECK(p.events.size() == 2048);
         CHECK(densestBeat(p.events, p.endTick()) == 16);
     }
+}
+
+TEST_CASE("arpeggioNotes: one and two octaves, ascending, a ninth interleaves") {
+    const Chord c = chordOf(0, "maj");
+    CHECK(arpeggioNotes(c, {60, 64, 67}, ArpPattern::Up, ArpRange::One) == Ints{60, 64, 67});
+    CHECK(arpeggioNotes(c, {60, 64, 67}, ArpPattern::Up, ArpRange::Two) == Ints{60, 64, 67, 72, 76, 79});
+    CHECK(arpeggioNotes(c, {60}, ArpPattern::Alberti, ArpRange::Two) == Ints{60, 72});
+    CHECK(arpeggioNotes(c, {}, ArpPattern::Up, ArpRange::Two).empty());
+    // C9 (60 64 67 70 74) spans 14 semitones: the second octave's C5 72 sits under the ninth D5 74.
+    CHECK(arpeggioNotes(chordOf(0, "9"), {60, 64, 67, 70, 74}, ArpPattern::Up, ArpRange::Two) ==
+          Ints{60, 64, 67, 70, 72, 74, 76, 79, 82, 86});
+    CHECK(arpeggioNotes(chordOf(0, "9"), {60, 64, 67, 70, 74}, ArpPattern::Down, ArpRange::Two) ==
+          Ints{60, 64, 67, 70, 72, 74, 76, 79, 82, 86});  // the list is the same; the pattern walks it
+    // Above 127: dropped (not reachable with the dictionary).
+    CHECK(arpeggioNotes(c, {120, 124}, ArpPattern::Up, ArpRange::Two) == Ints{120, 124});
+}
+
+TEST_CASE("arpeggioNotes: root first orders by chord tone whatever the inversion, per octave") {
+    // C/E: voicing E G C; chord tones root, third, fifth -> C E G, then the octave above.
+    const Chord c = chordOf(0, "maj");
+    CHECK(arpeggioNotes(c, {64, 67, 72}, ArpPattern::RootFirst, ArpRange::One) == Ints{72, 64, 67});
+    CHECK(arpeggioNotes(c, {64, 67, 72}, ArpPattern::RootFirst, ArpRange::Two) == Ints{72, 64, 67, 84, 76, 79});
+    // G7 in third inversion (F G B D): root G, third B, fifth D, seventh F.
+    CHECK(arpeggioNotes(chordOf(7, "7"), {65, 67, 71, 74}, ArpPattern::RootFirst, ArpRange::One) == Ints{67, 71, 74, 65});
+    // A ninth in root position: the ninth (interval 14, pitch class 2) is the fifth chord tone.
+    CHECK(arpeggioNotes(chordOf(0, "9"), {60, 64, 67, 70, 74}, ArpPattern::RootFirst, ArpRange::Two) ==
+          Ints{60, 64, 67, 70, 74, 72, 76, 79, 82, 86});
+    // Root position is unchanged; one and two notes; other patterns never reorder.
+    CHECK(arpeggioNotes(c, {60, 64, 67}, ArpPattern::RootFirst, ArpRange::One) == Ints{60, 64, 67});
+    CHECK(arpeggioNotes(c, {67}, ArpPattern::RootFirst, ArpRange::One) == Ints{67});
+    CHECK(arpeggioNotes(chordOf(0, "5"), {67, 72}, ArpPattern::RootFirst, ArpRange::One) == Ints{72, 67});
+    CHECK(arpeggioNotes(c, {64, 67, 72}, ArpPattern::Up, ArpRange::One) == Ints{64, 67, 72});
+}
+
+TEST_CASE("perform: an arpeggio over two octaves plays the octave above, root first leads with the root") {
+    // C major 4/4 [0, 3840), up, two octaves: 60 64 67 72 76 79 then 60 64 again.
+    Document doc = docOf({chordEvent(1, chordOf(0, "maj"), 4.0)}, arp(ArpPattern::Up, ArpRate::Subdivision, ArpRange::Two));
+    std::vector<Ev> ons;
+    for (const Ev& e : plain(performDocument(doc))) if (e.on) ons.push_back(e);
+    REQUIRE(ons.size() == 8);
+    const Ints pitches{60, 64, 67, 72, 76, 79, 60, 64};
+    for (std::size_t i = 0; i < 8; ++i) {
+        CAPTURE(i);
+        CHECK(ons[i].tick == 480 * static_cast<int>(i));
+        CHECK(ons[i].pitch == pitches[i]);
+    }
+    // Chord over two octaves: six notes per hit.
+    doc = docOf({chordEvent(1, chordOf(0, "maj"), 1.0)}, arp(ArpPattern::Chord, ArpRate::Pulse, ArpRange::Two));
+    expectEvents(performDocument(doc), {on(0, 60, 100), on(0, 64, 100), on(0, 67, 100), on(0, 72, 100), on(0, 76, 100),
+                                        on(0, 79, 100), off(864, 60), off(864, 64), off(864, 67), off(864, 72),
+                                        off(864, 76), off(864, 79)});
+    // Root first on C/E (manual first inversion): C E G, not E G C.
+    ChordEvent inverted = chordEvent(1, chordOf(0, "maj"), 1.5);
+    inverted.inversion = 1;
+    inverted.manualVoicing = true;
+    doc = docOf({inverted}, arp(ArpPattern::RootFirst));
+    ons.clear();
+    for (const Ev& e : plain(performDocument(doc))) if (e.on) ons.push_back(e);
+    REQUIRE(ons.size() == 3);
+    CHECK(ons[0].pitch % 12 == 0);
+    CHECK(ons[1].pitch % 12 == 4);
+    CHECK(ons[2].pitch % 12 == 7);
+}
+
+TEST_CASE("perform: humanise keys an arpeggio's note by its index in the arpeggio list") {
+    // C major, up, two octaves, heavy, 4/4 one bar, id 1: hit k plays list index k % 6; its on moves by the hit
+    // offset (late for hit 0) plus the note offset keyed with that index, its velocity by the velocity offset
+    // keyed with that index. The keys themselves are pinned in the hash test.
+    Feel feel = arp(ArpPattern::Up, ArpRate::Subdivision, ArpRange::Two);
+    feel.humanise = Humanise::Heavy;
+    const Document doc = docOf({chordEvent(1, chordOf(0, "maj"), 4.0)}, feel);
+    const Ints list{60, 64, 67, 72, 76, 79};
+    std::vector<Ev> ons;
+    for (const Ev& e : plain(performDocument(doc))) if (e.on) ons.push_back(e);
+    REQUIRE(ons.size() == 8);
+    for (int k = 0; k < 8; ++k) {
+        const int index = k % 6;
+        const int hit = k == 0 ? feelLateOffset(feelKey(1, 0, 0, kFeelSaltHitTiming), 20)
+                               : feelOffset(feelKey(1, k, 0, kFeelSaltHitTiming), 20);
+        const int note = feelOffset(feelKey(1, k, index, kFeelSaltNoteTiming), 4);
+        const int vel = feelOffset(feelKey(1, k, index, kFeelSaltVelocity), 12);
+        // Hits are 480 apart, offsets at most 24, so the k-th on by tick is hit k.
+        CAPTURE(k);
+        CHECK(ons[static_cast<std::size_t>(k)].pitch == list[static_cast<std::size_t>(index)]);
+        CHECK(ons[static_cast<std::size_t>(k)].tick == std::max(0, 480 * k + hit + note));
+        const int accent = k == 0 ? 100 : (k % 2 == 0 ? 90 : 80);
+        CHECK(ons[static_cast<std::size_t>(k)].velocity == std::min(127, std::max(1, accent + vel)));
+    }
+}
+
+TEST_CASE("perform: the arpeggio fields change nothing under another rhythm") {
+    const Document pulse = docOf({chordEvent(1, chordOf(0, "maj"), 4.0)}, Feel{Rhythm::Pulse});
+    Feel decorated{Rhythm::Pulse};
+    decorated.pattern = ArpPattern::Random;
+    decorated.rate = ArpRate::Half;
+    decorated.range = ArpRange::Two;
+    const Document same = docOf({chordEvent(1, chordOf(0, "maj"), 4.0)}, decorated);
+    CHECK(plain(performDocument(pulse)) == plain(performDocument(same)));
+}
+
+TEST_CASE("budgets: dictionary chords can now reach the per-beat and the total cap") {
+    // 7/8, half rate (120 ticks: eight hits a beat), Chord, two octaves. Triads: 6 notes x 8 hits x on+off = 96
+    // events in a beat, exactly the cap, allowed. Sevenths: 128, over it. Ninths: 160.
+    const Feel dense = arp(ArpPattern::Chord, ArpRate::Half, ArpRange::Two);
+    const Document triads = docOf({chordEvent(1, chordOf(0, "maj"), 3.5), chordEvent(2, chordOf(5, "maj"), 3.5)}, dense, {7, 8});
+    Performance p = performDocument(triads);
+    CHECK_FALSE(p.feelLimited);
+    CHECK(densestBeat(p.events, p.endTick()) == 96);
+    const Document sevenths = docOf({chordEvent(1, chordOf(0, "maj7"), 3.5), chordEvent(2, chordOf(5, "7"), 3.5)}, dense, {7, 8});
+    p = performDocument(sevenths);
+    CHECK(p.feelLimited);
+    CHECK(p.events.empty());
+    // Through compile: the whole document plays as block chords, and a section exports the same.
+    const Compiled c = compile(sevenths);
+    CHECK(c.feelLimited);
+    CHECK(c.events.size() == 16);  // two block chords of four notes, on and off
+    // 4/4, half rate, Chord, two octaves, one-bar sevenths: 16 hits x 8 notes x 2 = 256 events a bar.
+    // Sixteen bars: 4096, the total cap, allowed. Seventeen: over it.
+    std::vector<ChordEvent> bars;
+    for (int i = 0; i < 16; ++i) bars.push_back(chordEvent(i + 1, chordOf(i % 12, "maj7"), 4.0));
+    p = performDocument(docOf(bars, dense));
+    CHECK_FALSE(p.feelLimited);
+    CHECK(p.events.size() == 4096);
+    bars.push_back(chordEvent(17, chordOf(4, "maj7"), 4.0));
+    p = performDocument(docOf(bars, dense));
+    CHECK(p.feelLimited);
+    // One octave at the same settings stays well inside both caps.
+    p = performDocument(docOf(bars, arp(ArpPattern::Chord, ArpRate::Half, ArpRange::One)));
+    CHECK_FALSE(p.feelLimited);
 }

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "chordlab/chord.h"
 #include "chordlab/meter.h"
 
 #include <cstdint>
@@ -84,6 +85,16 @@ int arpStepTicks(ArpRate rate, Meter meter);
 /// Pinned sequences (independent Python splitmix64, test_feel.cpp): id 1, n 4: 2 1 3 0 3 0 3 0; id 1, n 3:
 /// 1 0 2 0 2 0 1 2.
 int arpRandomIndex(int id, int k, int n, int previous);
+
+/// The pitches an arpeggio of `chord` plays, from its `voicing` (ascending MIDI notes, as `voicings` gives
+/// them; D4): the voicing, plus for `ArpRange::Two` the voicing an octave up, the whole list sorted ascending
+/// (a ninth spans 14 semitones, so its D5 sits above the octave's C5: C9 gives 60 64 67 70 72 74 76 79 82 86);
+/// for `RootFirst` instead each octave is ordered by chord tone (the index of `(pitch - root) mod 12` among the
+/// type's intervals reduced mod 12, ties by pitch) and the second octave follows the first. A pitch above 127
+/// is dropped (never with the dictionary: voicings top out at 112). Dictionary voicings have distinct pitch
+/// classes, so the octave never repeats a pitch.
+std::vector<int> arpeggioNotes(const Chord& chord, const std::vector<int>& voicing, ArpPattern pattern,
+                               ArpRange range);
 
 /// The hits of a chord spanning ticks [s, e) of the whole progression (D4-D7 of the feel plan). Bars count
 /// from tick 0 of the progression. Empty when the span or `noteCount` is empty. For an arpeggio, `noteCount`
