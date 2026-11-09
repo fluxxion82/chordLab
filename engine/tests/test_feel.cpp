@@ -224,6 +224,119 @@ TEST_CASE("rhythmHits: arp up-down with two notes, and one note always plays 0")
     expectHits(h, {0, 480, 960, 1440}, {432, 912, 1392, 1872}, {100, 80, 90, 80}, {{0}, {0}, {0}, {0}});
 }
 
+/// `arpIndex` over the first `count` hits.
+Ints indices(ArpPattern pattern, int n, int count) {
+    Ints out;
+    for (int k = 0; k < count; ++k) out.push_back(arpIndex(pattern, k, n));
+    return out;
+}
+
+TEST_CASE("arpIndex: every index pattern over four notes, one period and one more") {
+    // Design D2, literal. Four notes 0 1 2 3; each row is one full period plus the next hit.
+    CHECK(indices(ArpPattern::Up, 4, 5) == Ints{0, 1, 2, 3, 0});
+    CHECK(indices(ArpPattern::Down, 4, 5) == Ints{3, 2, 1, 0, 3});
+    CHECK(indices(ArpPattern::UpDown, 4, 7) == Ints{0, 1, 2, 3, 2, 1, 0});
+    CHECK(indices(ArpPattern::DownUp, 4, 7) == Ints{3, 2, 1, 0, 1, 2, 3});
+    CHECK(indices(ArpPattern::UpAndDown, 4, 9) == Ints{0, 1, 2, 3, 3, 2, 1, 0, 0});
+    CHECK(indices(ArpPattern::DownAndUp, 4, 9) == Ints{3, 2, 1, 0, 0, 1, 2, 3, 3});
+    CHECK(indices(ArpPattern::Converge, 4, 5) == Ints{0, 3, 1, 2, 0});
+    CHECK(indices(ArpPattern::Diverge, 4, 5) == Ints{2, 1, 3, 0, 2});
+    CHECK(indices(ArpPattern::ConAndDiverge, 4, 7) == Ints{0, 3, 1, 2, 1, 3, 0});
+    CHECK(indices(ArpPattern::PinkyUp, 4, 7) == Ints{0, 3, 1, 3, 2, 3, 0});
+    CHECK(indices(ArpPattern::PinkyUpDown, 4, 9) == Ints{0, 3, 1, 3, 2, 3, 1, 3, 0});
+    CHECK(indices(ArpPattern::ThumbUp, 4, 7) == Ints{0, 1, 0, 2, 0, 3, 0});
+    CHECK(indices(ArpPattern::ThumbUpDown, 4, 9) == Ints{0, 1, 0, 2, 0, 3, 0, 2, 0});
+    CHECK(indices(ArpPattern::Alberti, 4, 5) == Ints{0, 3, 1, 3, 0});
+    CHECK(indices(ArpPattern::RootFirst, 4, 5) == Ints{0, 1, 2, 3, 0});
+}
+
+TEST_CASE("arpIndex: three and five notes") {
+    CHECK(indices(ArpPattern::Up, 3, 4) == Ints{0, 1, 2, 0});
+    CHECK(indices(ArpPattern::Down, 3, 4) == Ints{2, 1, 0, 2});
+    CHECK(indices(ArpPattern::UpDown, 3, 5) == Ints{0, 1, 2, 1, 0});
+    CHECK(indices(ArpPattern::DownUp, 3, 5) == Ints{2, 1, 0, 1, 2});
+    CHECK(indices(ArpPattern::UpAndDown, 3, 7) == Ints{0, 1, 2, 2, 1, 0, 0});
+    CHECK(indices(ArpPattern::DownAndUp, 3, 7) == Ints{2, 1, 0, 0, 1, 2, 2});
+    CHECK(indices(ArpPattern::Converge, 3, 4) == Ints{0, 2, 1, 0});
+    CHECK(indices(ArpPattern::Diverge, 3, 4) == Ints{1, 2, 0, 1});
+    CHECK(indices(ArpPattern::ConAndDiverge, 3, 5) == Ints{0, 2, 1, 2, 0});
+    CHECK(indices(ArpPattern::PinkyUp, 3, 5) == Ints{0, 2, 1, 2, 0});
+    CHECK(indices(ArpPattern::PinkyUpDown, 3, 5) == Ints{0, 2, 1, 2, 0});  // equals PinkyUp with three notes
+    CHECK(indices(ArpPattern::ThumbUp, 3, 5) == Ints{0, 1, 0, 2, 0});
+    CHECK(indices(ArpPattern::ThumbUpDown, 3, 5) == Ints{0, 1, 0, 2, 0});
+    CHECK(indices(ArpPattern::Alberti, 3, 5) == Ints{0, 2, 1, 2, 0});  // equals PinkyUp with three notes
+    CHECK(indices(ArpPattern::RootFirst, 3, 4) == Ints{0, 1, 2, 0});
+
+    CHECK(indices(ArpPattern::Up, 5, 6) == Ints{0, 1, 2, 3, 4, 0});
+    CHECK(indices(ArpPattern::Down, 5, 6) == Ints{4, 3, 2, 1, 0, 4});
+    CHECK(indices(ArpPattern::UpDown, 5, 9) == Ints{0, 1, 2, 3, 4, 3, 2, 1, 0});
+    CHECK(indices(ArpPattern::DownUp, 5, 9) == Ints{4, 3, 2, 1, 0, 1, 2, 3, 4});
+    CHECK(indices(ArpPattern::UpAndDown, 5, 11) == Ints{0, 1, 2, 3, 4, 4, 3, 2, 1, 0, 0});
+    CHECK(indices(ArpPattern::DownAndUp, 5, 11) == Ints{4, 3, 2, 1, 0, 0, 1, 2, 3, 4, 4});
+    CHECK(indices(ArpPattern::Converge, 5, 6) == Ints{0, 4, 1, 3, 2, 0});
+    CHECK(indices(ArpPattern::Diverge, 5, 6) == Ints{2, 3, 1, 4, 0, 2});
+    CHECK(indices(ArpPattern::ConAndDiverge, 5, 9) == Ints{0, 4, 1, 3, 2, 3, 1, 4, 0});
+    CHECK(indices(ArpPattern::PinkyUp, 5, 9) == Ints{0, 4, 1, 4, 2, 4, 3, 4, 0});
+    CHECK(indices(ArpPattern::PinkyUpDown, 5, 13) == Ints{0, 4, 1, 4, 2, 4, 3, 4, 2, 4, 1, 4, 0});
+    CHECK(indices(ArpPattern::ThumbUp, 5, 9) == Ints{0, 1, 0, 2, 0, 3, 0, 4, 0});
+    CHECK(indices(ArpPattern::ThumbUpDown, 5, 13) == Ints{0, 1, 0, 2, 0, 3, 0, 4, 0, 3, 0, 2, 0});
+    CHECK(indices(ArpPattern::Alberti, 5, 5) == Ints{0, 4, 2, 4, 0});
+    CHECK(indices(ArpPattern::RootFirst, 5, 6) == Ints{0, 1, 2, 3, 4, 0});
+}
+
+TEST_CASE("arpIndex: six notes (a triad over two octaves)") {
+    CHECK(indices(ArpPattern::Up, 6, 7) == Ints{0, 1, 2, 3, 4, 5, 0});
+    CHECK(indices(ArpPattern::Down, 6, 7) == Ints{5, 4, 3, 2, 1, 0, 5});
+    CHECK(indices(ArpPattern::UpDown, 6, 11) == Ints{0, 1, 2, 3, 4, 5, 4, 3, 2, 1, 0});
+    CHECK(indices(ArpPattern::DownUp, 6, 11) == Ints{5, 4, 3, 2, 1, 0, 1, 2, 3, 4, 5});
+    CHECK(indices(ArpPattern::UpAndDown, 6, 13) == Ints{0, 1, 2, 3, 4, 5, 5, 4, 3, 2, 1, 0, 0});
+    CHECK(indices(ArpPattern::DownAndUp, 6, 13) == Ints{5, 4, 3, 2, 1, 0, 0, 1, 2, 3, 4, 5, 5});
+    CHECK(indices(ArpPattern::Converge, 6, 7) == Ints{0, 5, 1, 4, 2, 3, 0});
+    CHECK(indices(ArpPattern::Diverge, 6, 7) == Ints{3, 2, 4, 1, 5, 0, 3});
+    CHECK(indices(ArpPattern::ConAndDiverge, 6, 11) == Ints{0, 5, 1, 4, 2, 3, 2, 4, 1, 5, 0});
+    CHECK(indices(ArpPattern::PinkyUp, 6, 11) == Ints{0, 5, 1, 5, 2, 5, 3, 5, 4, 5, 0});
+    CHECK(indices(ArpPattern::PinkyUpDown, 6, 17) == Ints{0, 5, 1, 5, 2, 5, 3, 5, 4, 5, 3, 5, 2, 5, 1, 5, 0});
+    CHECK(indices(ArpPattern::ThumbUp, 6, 11) == Ints{0, 1, 0, 2, 0, 3, 0, 4, 0, 5, 0});
+    CHECK(indices(ArpPattern::ThumbUpDown, 6, 17) == Ints{0, 1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 4, 0, 3, 0, 2, 0});
+    CHECK(indices(ArpPattern::Alberti, 6, 5) == Ints{0, 5, 2, 5, 0});
+    CHECK(indices(ArpPattern::RootFirst, 6, 7) == Ints{0, 1, 2, 3, 4, 5, 0});
+}
+
+TEST_CASE("arpIndex: two notes and one note") {
+    for (ArpPattern p : {ArpPattern::Up, ArpPattern::UpDown, ArpPattern::Converge, ArpPattern::ConAndDiverge,
+                         ArpPattern::PinkyUp, ArpPattern::PinkyUpDown, ArpPattern::ThumbUp, ArpPattern::ThumbUpDown,
+                         ArpPattern::Alberti, ArpPattern::RootFirst}) {
+        CAPTURE(static_cast<int>(p));
+        CHECK(indices(p, 2, 4) == Ints{0, 1, 0, 1});
+    }
+    CHECK(indices(ArpPattern::Down, 2, 4) == Ints{1, 0, 1, 0});
+    CHECK(indices(ArpPattern::DownUp, 2, 4) == Ints{1, 0, 1, 0});
+    CHECK(indices(ArpPattern::Diverge, 2, 4) == Ints{1, 0, 1, 0});
+    CHECK(indices(ArpPattern::UpAndDown, 2, 5) == Ints{0, 1, 1, 0, 0});
+    CHECK(indices(ArpPattern::DownAndUp, 2, 5) == Ints{1, 0, 0, 1, 1});
+    for (int p = 0; p < kArpPatternCount; ++p) {
+        const auto pattern = static_cast<ArpPattern>(p);
+        if (pattern == ArpPattern::Chord || pattern == ArpPattern::Random) continue;
+        CAPTURE(p);
+        CHECK(indices(pattern, 1, 3) == Ints{0, 0, 0});
+    }
+}
+
+TEST_CASE("arpIndex: every index pattern stays inside the list") {
+    for (int p = 0; p < kArpPatternCount; ++p) {
+        const auto pattern = static_cast<ArpPattern>(p);
+        if (pattern == ArpPattern::Chord || pattern == ArpPattern::Random) continue;
+        for (int n = 1; n <= 10; ++n) {
+            for (int k = 0; k < 100; ++k) {
+                const int i = arpIndex(pattern, k, n);
+                CAPTURE(p); CAPTURE(n); CAPTURE(k);
+                CHECK(i >= 0);
+                CHECK(i < n);
+            }
+        }
+    }
+}
+
 TEST_CASE("rhythmHits: accents round half up and clamp to 1..127") {
     // v 127: pulse (127*9+5)/10 = 114, off-pulse (127*8+5)/10 = 102.
     auto h = rhythmHits(Rhythm::Subdivided, {4, 4}, 0, 1920, 3, 127);
@@ -612,7 +725,9 @@ TEST_CASE("humanise: a chord's first hit never starts before the chord; strum or
         }
         Feel feel{static_cast<Rhythm>(rng() % 6), static_cast<Strum>(rng() % 4),
                   static_cast<StrumSpeed>(rng() % 3), static_cast<Humanise>(1 + rng() % 3)};
-        feel.pattern = static_cast<ArpPattern>(rng() % 2);  // widened in Task 2
+        feel.pattern = static_cast<ArpPattern>(rng() % kArpPatternCount);
+        if (feel.pattern == ArpPattern::Chord || feel.pattern == ArpPattern::Random)
+            feel.pattern = ArpPattern::Up;  // dispatched from Task 3
         const Meter meters[] = {{4, 4}, {3, 4}, {6, 8}, {7, 8}, {5, 4}};
         const Document doc = docOf(events, feel, meters[rng() % 5]);
         const Performance p = performDocument(doc);
@@ -743,7 +858,9 @@ TEST_CASE("safety: random documents and feels keep every note paired, inside its
         }
         Feel feel{static_cast<Rhythm>(rng() % 6), static_cast<Strum>(rng() % 4),
                   static_cast<StrumSpeed>(rng() % 3), static_cast<Humanise>(rng() % 4)};
-        feel.pattern = static_cast<ArpPattern>(rng() % 2);  // widened in Task 2
+        feel.pattern = static_cast<ArpPattern>(rng() % kArpPatternCount);
+        if (feel.pattern == ArpPattern::Chord || feel.pattern == ArpPattern::Random)
+            feel.pattern = ArpPattern::Up;  // dispatched from Task 3
         const Meter meters[] = {{4, 4}, {3, 4}, {2, 4}, {6, 8}, {7, 8}, {9, 8}, {12, 8}, {3, 8}, {5, 4}, {2, 2}};
         Document doc = docOf(events, feel, meters[rng() % 10]);
         doc.autoVoiceLead = rng() % 2 == 0;
