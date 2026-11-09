@@ -24,7 +24,9 @@ constexpr int kArpPatternCount = 17;
 /// The grid an arpeggio steps on (D3): the meter's pulse, its subdivision, or half the subdivision.
 enum class ArpRate { Pulse, Subdivision, Half };
 
-/// How many octaves an arpeggio spans (D4): the voicing, or the voicing and the same an octave up.
+/// How many octaves an arpeggio spans (D4): the voicing, or the voicing and the same an octave up. Over two
+/// octaves the pattern runs on the voicing and each full cycle (`arpCycle`) alternates between the voicing and
+/// the same an octave up, as Live's Arpeggiator does with Steps 1 and Distance +12; Random draws from both.
 enum class ArpRange { One, Two };
 
 /// Direction of the strum that staggers a hit's note onsets.
@@ -59,7 +61,7 @@ inline bool operator!=(const Feel& a, const Feel& b) { return !(a == b); }
 constexpr int kMinNoteTicks = 5;
 
 /// One hit: tick span after the gate, the indices it plays into the chord's note list (the voicing, ascending;
-/// for an arpeggio the arpeggio note list), its velocity
+/// for an arpeggio the arpeggio note list, `arpeggioNotes`), its velocity
 /// before humanise, and whether it is on a pulse or the chord's start (for the down-up strum).
 struct Hit {
     int start;
@@ -69,10 +71,19 @@ struct Hit {
     bool strong;
 };
 
-/// Which index of an `n`-note arpeggio list the `k`-th hit plays (arpeggio design D2), for the index
-/// patterns: everything but `Chord` (every note plays) and `Random` (`arpRandomIndex`). `k >= 0`, `n >= 1`;
-/// `n == 1` is always 0. `RootFirst` is `Up` (the list itself is ordered by chord tone, `arpeggioNotes`).
+/// Which of `n` notes (one octave of the arpeggio list) the `k`-th hit plays (arpeggio design D2), for the
+/// index patterns: everything but `Chord` (every note plays) and `Random` (`arpRandomIndex`). `k >= 0`,
+/// `n >= 1`; `n == 1` is always 0. `RootFirst` is `Up` (the list itself is ordered by chord tone,
+/// `arpeggioNotes`). `Diverge` goes from the middle outwards, below first: n/2, n/2 - 1, n/2 + 1, ... (Live's
+/// order: E C G on a triad, D B F G on a seventh; recorded 2026-11-09).
 int arpIndex(ArpPattern pattern, int k, int n);
+
+/// How many hits one full cycle of `pattern` over `n` notes takes (`n >= 1`; 1 when `n == 1`): Up, Down, Root
+/// first, Converge, Diverge n; Up-down, Down-up, Con & diverge 2n - 2; Up & down, Down & up 2n; Pinky up, Thumb
+/// up 2(n - 1); Pinky up-down, Thumb up-down 4(n - 2) (2 when n == 2); Alberti 4; Chord 1. Over two octaves the
+/// arpeggio plays one cycle on the voicing, the next an octave up, and so on (Live's Arpeggiator with Steps 1,
+/// Distance +12; recorded 2026-11-09). Not for `Random`, which draws from both octaves at once.
+int arpCycle(ArpPattern pattern, int n);
 
 /// Ticks between arpeggio hits at `rate` in `meter` (D3): the pulse, the subdivision, or half of it (4/4: 960, 480, 240; 6/8: 1440, 480, 240; 7/8: 480, 240, 120).
 int arpStepTicks(ArpRate rate, Meter meter);
@@ -87,19 +98,21 @@ int arpStepTicks(ArpRate rate, Meter meter);
 int arpRandomIndex(int id, int k, int n, int previous);
 
 /// The pitches an arpeggio of `chord` plays, from its `voicing` (ascending MIDI notes, as `voicings` gives
-/// them; D4): the voicing, plus for `ArpRange::Two` the voicing an octave up, the whole list sorted ascending
-/// (a ninth spans 14 semitones, so its D5 sits above the octave's C5: C9 gives 60 64 67 70 72 74 76 79 82 86);
-/// for `RootFirst` instead each octave is ordered by chord tone (the index of `(pitch - root) mod 12` among the
-/// type's intervals reduced mod 12, ties by pitch) and the second octave follows the first. A pitch above 127
-/// is dropped (never with the dictionary: voicings top out at 112). Dictionary voicings have distinct pitch
-/// classes, so the octave never repeats a pitch.
+/// them; D4), octave by octave: the voicing, then for `ArpRange::Two` the same an octave up, so index i + n is
+/// note i an octave higher (C9 gives 60 64 67 70 74 72 76 79 82 86, its ninth D5 before the octave's C5). For
+/// `RootFirst` each octave is ordered by chord tone (the index of `(pitch - root) mod 12` among the type's
+/// intervals reduced mod 12, ties by pitch). A pitch above 127 stays in the list so the indices stay aligned;
+/// `performDocument` drops it (never with the dictionary: voicings top out at 112). Dictionary voicings have
+/// distinct pitch classes, so the octave never repeats a pitch.
 std::vector<int> arpeggioNotes(const Chord& chord, const std::vector<int>& voicing, ArpPattern pattern,
                                ArpRange range);
 
 /// The hits of a chord spanning ticks [s, e) of the whole progression (D4-D7 of the feel plan). Bars count
-/// from tick 0 of the progression. Empty when the span or `noteCount` is empty. For an arpeggio, `noteCount`
-/// is the size of the chord's arpeggio note list (`arpeggioNotes`) and each hit's `notes` index that list;
-/// `id` is the chord's event id, read by `ArpPattern::Random` only.
+/// from tick 0 of the progression. Empty when the span or `noteCount` is empty. `noteCount` is the size of the
+/// chord's voicing. For an arpeggio each hit's `notes` index the chord's arpeggio note list (`arpeggioNotes`,
+/// `noteCount` notes per octave): the pattern's index, plus `noteCount` on every other cycle (`arpCycle`) over
+/// two octaves; `Chord` plays a whole octave per hit, alternating; `Random` picks from all of the list. `id` is
+/// the chord's event id, read by `ArpPattern::Random` only.
 std::vector<Hit> rhythmHits(const Feel& feel, Meter meter, int s, int e, int noteCount, int velocity, int id = 0);
 
 /// `rhythmHits(Feel{rhythm}, ...)`: the rhythm with the default feel (an arpeggio plays up, on the
