@@ -231,7 +231,7 @@ from, all public upstream; "Build" above is the recipe. Together they are the co
 - Sanitizers: with Apple clang 17 (Xcode 16) ASan deadlocked before `main()` and TSan hung; since
   Apple clang 21 (Xcode 27.1) UBSan, ASan and TSan all run the engine suite cleanly
   (`scripts/check.sh --ubsan --asan --tsan`, each step under a hard timeout).
-- Not yet: piano roll, melody tracks, key detection (Phase 3); chords are contiguous; the ruler assumes
+- Not yet: piano roll, melody tracks (Phase 3); chords are contiguous; the ruler assumes
   4/4; one suggestion style (pop); macOS only (VST3, Audio Unit, app). The Xcode project still carries
   iPlug2's AUv3, AAX, VST2 and iOS targets and Windows project files from the template; they are not
   maintained or tested.
