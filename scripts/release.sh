@@ -149,11 +149,16 @@ preflight() {
     check "tool notarytool" "$(probe xcrun --find notarytool)" "$(xcrun --find notarytool 2>/dev/null || true)"
     check "tool stapler" "$(probe xcrun --find stapler)" "$(xcrun --find stapler 2>/dev/null || true)"
     check "versions agree" "$(probe versions_agree)" "PLUG_VERSION_STR $ver, PLUG_VERSION_HEX 0x$(version_hex)" 1
-    stale=$(plists_current 2>&1) && plists_rc=0 || plists_rc=1
-    if [ "$plists_rc" -eq 0 ]; then
-        check "Info.plists current" 0 "VST3, VST2, AU, macOS-AUv3, AAX, macOS plists: CFBundleVersion and CFBundleShortVersionString $ver; AU 'AudioUnit Version' 0x$(version_hex), AU and AUv3 component version $((16#$(version_hex)))" 1
+    if ! command -v python3 >/dev/null 2>&1; then  # the tool row above says so; a release (strict) needs it anyway
+        if [ "$REPORT" -eq 1 ]; then row skip "Info.plists current" "skipped: python3 missing"
+        else check "Info.plists current" 1 "skipped: python3 missing (it reads the plists)"; fi
     else
-        check "Info.plists current" 1 "${stale:-stale}: build once (scripts/check.sh --plugin) and commit the regenerated plists with the bump" 1
+        stale=$(plists_current 2>&1) && plists_rc=0 || plists_rc=1
+        if [ "$plists_rc" -eq 0 ]; then
+            check "Info.plists current" 0 "VST3, VST2, AU, macOS-AUv3, AAX, macOS plists: CFBundleVersion and CFBundleShortVersionString $ver; AU 'AudioUnit Version' 0x$(version_hex), AU and AUv3 component version $((16#$(version_hex)))" 1
+        else
+            check "Info.plists current" 1 "${stale:-stale}: build once (scripts/check.sh --plugin) and commit the regenerated plists with the bump" 1
+        fi
     fi
     check "iPlug2 checkout" "$(probe test -f "$IPLUG2_ROOT/common-mac.xcconfig")" "${IPLUG2_ROOT:-unresolved: ../../../iPlug2 from ChordLab/projects}" 1
     check "VST3 SDK" "$(probe test -d "$IPLUG2_ROOT/Dependencies/IPlug/VST3_SDK/pluginterfaces")" "$IPLUG2_ROOT/Dependencies/IPlug/VST3_SDK" 1
@@ -324,11 +329,36 @@ notarize() {
     submit=$(xcrun notarytool submit "$PKG" --keychain-profile "$NOTARY_PROFILE" --wait --timeout 2h \
              --output-format json 2>>"$LOGS/notarytool.err") || rc=$?
     printf '%s\n' "$submit" >"$LOGS/notarytool-submit.json"
-    read -r id status < <(python3 -c 'import json,sys
-try: d=json.loads(sys.stdin.read().strip().splitlines()[-1])
-except Exception: d={}
-if not isinstance(d, dict): d={}
-print(d.get("id") or "-", str(d.get("status") or "-").replace(" ","_"))' <<<"$submit") || true
+    # notarytool may print the JSON on one line or pretty-printed, after progress lines: the whole answer first,
+    # then the last line that parses, then everything from the first line that opens an object. Nothing printed
+    # (and a diagnostic on stderr) when none parses, so the "no submission id" die below fires.
+    read -r id status < <(python3 -I - "$LOGS/notarytool-submit.json" <<'PY'
+import json, sys
+raw = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+def obj(text):
+    try:
+        d = json.loads(text)
+    except Exception:
+        return None
+    return d if isinstance(d, dict) else None
+d = obj(raw)
+if d is None:
+    for line in raw.splitlines():
+        x = obj(line)
+        if x is not None:
+            d = x
+if d is None:
+    lines = raw.splitlines()
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith("{"):
+            d = obj("\n".join(lines[i:]))
+            break
+if d is None:
+    print("release.sh: no JSON object in the notarytool answer: %r" % raw[:200], file=sys.stderr)
+    sys.exit(1)
+print(d.get("id") or "-", str(d.get("status") or "-").replace(" ", "_"))
+PY
+) || true
     [ "${id:--}" != "-" ] || die "notarytool submit failed (rc $rc, no submission id; see $LOGS/notarytool.err and $LOGS/notarytool-submit.json; if it was submitted, find it with: xcrun notarytool history --keychain-profile $NOTARY_PROFILE)"
     note "notarization submission $id: status ${status:--} (notarytool rc $rc)"
     case "${status:--}" in
