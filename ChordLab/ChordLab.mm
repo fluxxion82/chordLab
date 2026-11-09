@@ -202,6 +202,8 @@ ChordLab::ChordLab(const InstanceInfo& info)
 
 ChordLab::~ChordLab()
 {
+  if (mEditorOpen.load())                                        // AUv2: a host that destroys the plug-in before
+    CloseWindow();                                               // releasing the view; the container is disarmed
   {
     std::lock_guard<std::mutex> guard(mLifeline->mutex);       // waits for a hop in flight; later hops do nothing
     mLifeline->alive = false;
@@ -214,6 +216,35 @@ ChordLab::~ChordLab()
       RemoveIfStale([NSString stringWithUTF8String:path.c_str()]);
   }
 }
+
+#if defined(AU_API)
+// The AUv2 view factory (IPlugAU_view_factory.mm) returns OpenWindow's view to the host and never calls
+// CloseWindow; the host takes the view out of its window and releases it. This container, returned in place
+// of the controller's view (which it holds as its one subview, autoresized with it), turns either event into
+// CloseWindow. A host that took the view out and put the same view back would get an empty container: the
+// editor closed on the removal.
+@interface ChordLabAUHostView : NSView
+@property (nonatomic, assign) ChordLab* plug;   // cleared by CloseWindow (also when ~ChordLab closes the editor)
+@end
+
+@implementation ChordLabAUHostView
+- (void) viewDidMoveToWindow
+{
+  [super viewDidMoveToWindow];
+  if (self.window == nil && self.plug)                           // taken out of the host's window: the editor is closing
+    self.plug->CloseWindow();                                    // clears self.plug and takes the controller's view out
+}
+- (void) dealloc
+{
+  if (ChordLab* plug = self.plug)                                // released without ever having been in a window
+  {
+    self.plug = nullptr;                                         // tells CloseWindow we are going (see there)
+    plug->CloseWindow();
+  }
+  [super dealloc];
+}
+@end
+#endif
 
 void* ChordLab::OpenWindow(void* pParent)
 {
@@ -233,13 +264,28 @@ void* ChordLab::OpenWindow(void* pParent)
   mEditorOpen.store(true);
   OnUIOpen();
   
+#if defined(AU_API)
+  if (pParent == nullptr)                                        // the AUv2 view factory; VST3 and the APP pass a parent
+  {
+    ChordLabAUHostView* host = [[[ChordLabAUHostView alloc] initWithFrame: vc.view.frame] autorelease];
+    host.autoresizesSubviews = YES;
+    vc.view.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    [host addSubview: vc.view];
+    host.plug = this;
+    mAUHostView = host;                                          // weak: the host owns it
+    return host;
+  }
+#endif
   return vc.view;
 }
 
 void ChordLab::CloseWindow()
 {
-  // Main thread. AUv2's view factory path has no close callback in iPlug2, so that lifecycle still
-  // leaks the controller (known; Phase 1 targets VST3).
+  // Main thread. Idempotent: VST3 and the APP call it from their close callbacks; AUv2's view factory has
+  // none in iPlug2, so there the container OpenWindow returned (ChordLabAUHostView) calls it when the host
+  // takes the view out of its window or releases it, and ~ChordLab calls it for an editor still open.
+  if (!mViewController)
+    return;
   id controller = (id) mViewController;                         // +1 from OpenWindow's alloc/init
   if (mOpenPreviewId >= 0)                                       // belt and braces: the UI's onDisappear sends this too
   {
@@ -250,7 +296,23 @@ void ChordLab::CloseWindow()
     mOpenPreviewId = -1;
   }
   CocoaEditorDelegate::CloseWindow();                            // forgets mViewController
-  mEditorOpen.store(false);
+  mEditorOpen.store(false);                                      // OnIdle and the pushes stop here
+#if defined(AU_API)
+  if (mAUHostView)
+  {
+    auto* host = (ChordLabAUHostView*) mAUHostView;
+    mAUHostView = nullptr;
+    // The container belongs to the host and outlives this call (its plug is null only inside its own dealloc,
+    // where [super dealloc] releases the subview). Disarm it and take the controller's view out of it, so the
+    // view goes with the controller below: NSViewController puts itself in its view's responder chain, and a
+    // view left in a container the host might show again would forward events to the freed controller.
+    if (host.plug)
+    {
+      host.plug = nullptr;
+      [((NSViewController*) controller).view removeFromSuperview];
+    }
+  }
+#endif
   [controller release];
 }
 
@@ -263,6 +325,13 @@ void ChordLab::OnParentWindowResize(int width, int height)
     std::lock_guard<std::mutex> lock(mModelMutex);
     SetEditorSize(width, height);
   }
+#if defined(AU_API)
+  // A host resize sizes the container and the autoresizing mask follows; a plug-in-initiated one (iPlug2's
+  // AUv2 has no caller today) must size the container too, keeping the origin the host placed it at. First,
+  // so the frame set below is the subview's final one rather than autoresized on top of it.
+  if (mAUHostView)
+    [(ChordLabAUHostView*) mAUHostView setFrameSize: NSMakeSize((CGFloat) width, (CGFloat) height)];
+#endif
   auto* vc = (ChordLabViewController*) mViewController;
   vc.view.frame = MAKERECT(0.f, 0.f, (float) width, (float) height);
 }
