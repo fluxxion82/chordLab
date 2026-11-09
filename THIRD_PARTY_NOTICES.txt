@@ -127,3 +127,30 @@ SOFTWARE.
 ================ Steinberg VST 3 SDK 3.7.14 ================
 
 Used under the GNU General Public License v3 (the SDK's open-source licence option); the SDK's source is at https://github.com/steinbergmedia/vst3sdk. The VST3 binary and ChordLab itself are therefore GPL-3.0 (see LICENSE).
+
+The SDK's pluginterfaces/ headers (except pluginterfaces/vst/ivsttestplugprovider.h) are under that dual VST3/GPLv3 licence. Its base/ and public.sdk/ sources, of which ChordLab compiles the VST 3 plug-in helpers (for example public.sdk/source/vst/vstcomponent.cpp, vstbus.cpp, vstaudioeffect.cpp, vsteditcontroller.cpp and the base/source string, stream and object classes), and pluginterfaces/vst/ivsttestplugprovider.h carry instead the following BSD-style notice in each file (individual files give years from 2019 to 2025; base/LICENSE.txt and public.sdk/LICENSE.txt give 2025), reproduced here as their binary-distribution condition requires:
+
+(c) 2025, Steinberg Media Technologies GmbH, All Rights Reserved
+-----------------------------------------------------------------------------
+Redistribution and use in source and binary forms, with or without modification,
+are permitted provided that the following conditions are met:
+
+  * Redistributions of source code must retain the above copyright notice,
+    this list of conditions and the following disclaimer.
+  * Redistributions in binary form must reproduce the above copyright notice,
+    this list of conditions and the following disclaimer in the documentation
+    and/or other materials provided with the distribution.
+  * Neither the name of the Steinberg Media Technologies nor the names of its
+    contributors may be used to endorse or promote products derived from this
+    software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT,
+INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE
+OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE  OF THIS SOFTWARE, EVEN IF ADVISED
+OF THE POSSIBILITY OF SUCH DAMAGE.

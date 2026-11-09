@@ -3,7 +3,8 @@
 #
 #   scripts/release.sh preflight [--report] [--rehearsal] [--skip-notarize]
 #       Checks only: tools, Developer ID identities, notary profile, iPlug2 checkout, versions, the six tracked
-#       Info.plists at that version, no ChordLab AU in /Library (auval would validate it instead), clean trees, tag.
+#       Info.plists at that version, no ChordLab AU in /Library (auval would validate it instead), clean trees,
+#       the iPlug2 commit on a branch of its origin, tag.
 #       --report prints every check and exits 0 unless the repository itself is wrong (a contributor's gate).
 #   scripts/release.sh build [--rehearsal] [--skip-notarize] [--skip-auval]
 #       Release build of every format into dist/stage, signed with the Developer ID given on the xcodebuild
@@ -139,8 +140,24 @@ sys.exit(1 if stale else 0)
 PY
 }
 
+iplug2_public() {  # prints the row's detail; 0 when a branch of origin, freshly fetched, contains iPlug2's HEAD
+    local url err rc=0 branch why="the GPL corresponding-source statement names this commit"
+    url=$(git -C "$IPLUG2_ROOT" remote get-url origin 2>/dev/null) || { echo "$IPLUG2_ROOT has no origin remote; $why"; return 1; }
+    err=$("$TIMEOUT_CMD" 60 git -C "$IPLUG2_ROOT" fetch -q origin 2>&1) || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        [ "$rc" -ne 124 ] || err="timed out after 60 s"
+        echo "git fetch origin ($url) failed (rc $rc): $(head -n 3 <<<"$err" | tr '\n' ' ' | tr -s ' ' | sed 's/ $//')"; return 1
+    fi
+    branch=$(git -C "$IPLUG2_ROOT" branch -r --contains HEAD --list 'origin/*' 2>/dev/null | grep -v -- ' -> ' | sed 's/^[* ]*//' | head -n 1 || true)
+    if [ -z "$branch" ]; then
+        echo "HEAD $(git -C "$IPLUG2_ROOT" rev-parse --short HEAD) is on no branch of origin ($url): push the iPlug2 commit (or point origin at the public fork that has it); $why"
+        return 1
+    fi
+    echo "$branch, $url"
+}
+
 preflight() {
-    local ver tool tag tag_rc stale plists_rc
+    local ver tool tag tag_rc stale plists_rc detail ok
     ver=$(version_str)
     echo "release.sh preflight (ChordLab $ver)"
     for tool in xcodebuild codesign pkgbuild productbuild pkgutil auval lipo shasum python3 gh ditto; do
@@ -179,11 +196,14 @@ preflight() {
     if [ "$REHEARSAL" -eq 1 ]; then
         row skip "clean tree" "--rehearsal ($(git status --porcelain | wc -l | tr -d ' ') changed paths)"
         row skip "iPlug2 tree clean" "--rehearsal"
+        row skip "iPlug2 commit public" "--rehearsal"
         tag=$(head_tag)
         row skip "HEAD tagged v$ver" "--rehearsal: ${tag:-no tag}; the pkg name carries $(git rev-parse --short HEAD)"
     else
         check "clean tree" "$(probe test -z "$(git status --porcelain)")" "$(git status --porcelain | wc -l | tr -d ' ') changed paths"
         check "iPlug2 tree clean" "$(probe tree_clean "$IPLUG2_ROOT")" "the provenance file must name a commit that is the code ($IPLUG2_ROOT, a git work tree)"
+        detail=$(iplug2_public) && ok=0 || ok=1
+        check "iPlug2 commit public" "$ok" "$detail"
         tag_rc=0; annotated_tag "$ver" || tag_rc=$?
         case "$tag_rc" in
             0) check "HEAD tagged v$ver" 0 "annotated tag v$ver" ;;
@@ -392,6 +412,22 @@ PY
     note "notarized and stapled (submission $id)"
 }
 
+VST3SDK_URL=https://github.com/steinbergmedia/vst3sdk
+vst3sdk_tree_sha256() {  # one hash over the vendored SDK sources (iPlug2's download-vst3-sdk.sh drops samples and .git)
+    local sdk="$IPLUG2_ROOT/Dependencies/IPlug/VST3_SDK" d dirs=() h=""
+    for d in base pluginterfaces public.sdk; do [ -d "$sdk/$d" ] && dirs+=("$d"); done
+    [ "${#dirs[@]}" -gt 0 ] || { echo unknown; return; }
+    h=$(cd "$sdk" && find "${dirs[@]}" \( -name .git -o -path public.sdk/samples \) -prune -o -type f ! -name .DS_Store -print0 \
+        | LC_ALL=C sort -z | xargs -0 shasum -a 256 | shasum -a 256 | cut -d' ' -f1) || h=""
+    echo "${h:-unknown}"
+}
+vst3sdk_tag() {  # Steinberg tags a release v<version>_build_<n>; the vendored tree carries only the version
+    local tags
+    [ -n "$1" ] || { echo unknown; return; }
+    tags=$("$TIMEOUT_CMD" 30 git ls-remote --tags --refs "$VST3SDK_URL" "refs/tags/v$1_build_*" 2>/dev/null | sed 's|.*refs/tags/||' | tr '\n' ' ' | sed 's/ $//' || true)
+    echo "${tags:-v$1_build_* (not resolved: git ls-remote $VST3SDK_URL failed or found none)}"
+}
+
 dep_version() {  # file regex-with-one-group; empty (the provenance says "unknown") if the file or line is missing
     sed -n "s/$2/\1/p" "$1" 2>/dev/null | head -1 || true
 }
@@ -423,7 +459,8 @@ provenance() {
             echo "iplug2:         not a git work tree ($IPLUG2_ROOT)"
         fi
         if ! tree_clean "$IPLUG2_ROOT"; then echo "WARNING:        the iPlug2 tree was not a clean git work tree when this was built (rehearsal only)"; fi
-        echo "vst3sdk:        ${vst3:-unknown} https://github.com/steinbergmedia/vst3sdk (GPLv3 branch)"
+        echo "vst3sdk:        ${vst3:-unknown} $VST3SDK_URL tag $(vst3sdk_tag "$vst3") (used under GPLv3; base and public.sdk BSD-style)"
+        echo "vst3sdk tree sha256: $(vst3sdk_tree_sha256) (base, pluginterfaces, public.sdk without samples: as iPlug2's Dependencies/IPlug/download-vst3-sdk.sh <tag> vendors them)"
         echo "rtaudio:        ${rta:-unknown} https://github.com/thestk/rtaudio"
         echo "rtmidi:         ${rtm:-unknown} https://github.com/thestk/rtmidi"
         echo "nlohmann-json:  ${nl:-unknown} https://github.com/nlohmann/json"

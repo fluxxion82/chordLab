@@ -215,12 +215,16 @@ copyright 2026 Sterling Albury. It is built on third-party code under its own te
 - [nlohmann/json](https://github.com/nlohmann/json) 3.11.2 (`engine/third_party/nlohmann`): MIT.
   [doctest](https://github.com/doctest/doctest) (MIT) is used by the tests only.
 - The Steinberg [VST 3 SDK](https://github.com/steinbergmedia/vst3sdk) 3.7.14: dual-licensed; ChordLab uses it under the
-  GPLv3 branch, which is why the VST3 binary and this repository are GPL.
+  GPLv3 option, which is why the VST3 binary and this repository are GPL. Its `base` and `public.sdk` sources carry
+  a BSD-style notice, reproduced in the notices file.
 - Apple SDKs and the Audio Unit headers: Apple's SDK terms.
 
-**Corresponding source.** A release's `.provenance.txt` names the ChordLab tag and commit, the iPlug2 commit
-(public at github.com/iPlug2/iPlug2), and the VST3 SDK, RtAudio, RtMidi and nlohmann/json versions it was built
-from, all public upstream; "Build" above is the recipe. Together they are the complete source of the binaries.
+**Corresponding source.** A release's `.provenance.txt` names the ChordLab commit and tag on GitHub, the iPlug2
+commit on its public remote (`release.sh` refuses a commit that no branch of that remote contains), the VST3 SDK
+version and its tag on Steinberg's GitHub with a hash of the vendored SDK tree (so a reader can confirm the SDK
+was unmodified), and the RtAudio, RtMidi and nlohmann/json versions; "Build" above is the recipe. Together they
+are the complete source of the binaries. A release built from a modified SDK or an unpublished iPlug2 commit
+must ship those sources alongside the pkg.
 
 ## Status
 
