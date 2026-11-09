@@ -72,6 +72,15 @@ int arpIndex(ArpPattern pattern, int k, int n) {
     return 0;
 }
 
+int arpStepTicks(ArpRate rate, Meter meter) {
+    switch (rate) {
+        case ArpRate::Pulse: return pulseTicks(meter);
+        case ArpRate::Subdivision: return subdivisionTicks(meter);
+        case ArpRate::Half: return subdivisionTicks(meter) / 2;
+    }
+    return subdivisionTicks(meter);
+}
+
 std::vector<Hit> rhythmHits(const Feel& feel, Meter meter, int s, int e, int noteCount, int velocity, int id) {
     const Rhythm rhythm = feel.rhythm;
     std::vector<Hit> hits;
@@ -91,8 +100,10 @@ std::vector<Hit> rhythmHits(const Feel& feel, Meter meter, int s, int e, int not
             for (int t : gridPointsInside(s, e, pulse)) starts.push_back(t);
             break;
         case Rhythm::Subdivided:
-        case Rhythm::Arpeggio:
             for (int t : gridPointsInside(s, e, sub)) starts.push_back(t);
+            break;
+        case Rhythm::Arpeggio:
+            for (int t : gridPointsInside(s, e, arpStepTicks(feel.rate, meter))) starts.push_back(t);
             break;
         case Rhythm::Offbeats:
             for (int t : gridPointsInside(s, e, sub))

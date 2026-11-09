@@ -73,6 +73,9 @@ struct Hit {
 /// `n == 1` is always 0. `RootFirst` is `Up` (the list itself is ordered by chord tone, `arpeggioNotes`).
 int arpIndex(ArpPattern pattern, int k, int n);
 
+/// Ticks between arpeggio hits at `rate` in `meter` (D3): the pulse, the subdivision, or half of it (4/4: 960, 480, 240; 6/8: 1440, 480, 240; 7/8: 480, 240, 120).
+int arpStepTicks(ArpRate rate, Meter meter);
+
 /// The `Random` pattern's index for hit `k` of an `n`-note list (D2): hit 0 (`previous < 0`) plays
 /// `feelKey(id, 0, 0, kFeelSaltArp) % n`; a later hit plays the r-th of the n - 1 indices other than `previous`,
 /// `r = feelKey(id, k, 0, kFeelSaltArp) % (n - 1)`, so no note repeats immediately in the generated hit order

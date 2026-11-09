@@ -337,6 +337,37 @@ TEST_CASE("arpIndex: every index pattern stays inside the list") {
     }
 }
 
+TEST_CASE("arpStepTicks: pulse, subdivision and half, per meter") {
+    CHECK(arpStepTicks(ArpRate::Pulse, {4, 4}) == 960);
+    CHECK(arpStepTicks(ArpRate::Subdivision, {4, 4}) == 480);
+    CHECK(arpStepTicks(ArpRate::Half, {4, 4}) == 240);
+    CHECK(arpStepTicks(ArpRate::Pulse, {6, 8}) == 1440);
+    CHECK(arpStepTicks(ArpRate::Subdivision, {6, 8}) == 480);
+    CHECK(arpStepTicks(ArpRate::Half, {6, 8}) == 240);
+    CHECK(arpStepTicks(ArpRate::Pulse, {7, 8}) == 480);
+    CHECK(arpStepTicks(ArpRate::Subdivision, {7, 8}) == 240);
+    CHECK(arpStepTicks(ArpRate::Half, {7, 8}) == 120);
+    CHECK(arpStepTicks(ArpRate::Half, {4, 2}) == 480);
+}
+
+TEST_CASE("rhythmHits: arpeggio at each rate") {
+    // 4/4 [0, 1920), three notes, up. Pulse: two hits with the pulse accents; half: eight hits, 216 gated.
+    auto h = rhythmHits(arp(ArpPattern::Up, ArpRate::Pulse), {4, 4}, 0, 1920, 3, 100);
+    expectHits(h, {0, 960}, {864, 1824}, {100, 90}, {{0}, {1}});
+    h = rhythmHits(arp(ArpPattern::Up, ArpRate::Half), {4, 4}, 0, 1920, 3, 100);
+    expectHits(h, {0, 240, 480, 720, 960, 1200, 1440, 1680}, {216, 456, 696, 936, 1176, 1416, 1656, 1896},
+               {100, 80, 80, 80, 90, 80, 80, 80}, {{0}, {1}, {2}, {0}, {1}, {2}, {0}, {1}});
+    // 7/8 half: 120-tick steps gate to 108 (well above kMinNoteTicks); a 240-tick chord gets two hits.
+    h = rhythmHits(arp(ArpPattern::Up, ArpRate::Half), {7, 8}, 0, 240, 3, 100);
+    expectHits(h, {0, 120}, {108, 228}, {100, 80}, {{0}, {1}});
+    // 6/8 pulse: dotted quarters.
+    h = rhythmHits(arp(ArpPattern::Down, ArpRate::Pulse), {6, 8}, 0, 2880, 3, 100);
+    expectHits(h, {0, 1440}, {1296, 2736}, {100, 90}, {{2}, {1}});
+    // The subdivision is today's behaviour: the same as the default.
+    CHECK(rhythmHits(arp(ArpPattern::Up, ArpRate::Subdivision), {4, 4}, 0, 1920, 4, 100) ==
+          rhythmHits(Rhythm::Arpeggio, {4, 4}, 0, 1920, 4, 100));
+}
+
 TEST_CASE("rhythmHits: accents round half up and clamp to 1..127") {
     // v 127: pulse (127*9+5)/10 = 114, off-pulse (127*8+5)/10 = 102.
     auto h = rhythmHits(Rhythm::Subdivided, {4, 4}, 0, 1920, 3, 127);
@@ -727,6 +758,7 @@ TEST_CASE("humanise: a chord's first hit never starts before the chord; strum or
         Feel feel{static_cast<Rhythm>(rng() % 6), static_cast<Strum>(rng() % 4),
                   static_cast<StrumSpeed>(rng() % 3), static_cast<Humanise>(1 + rng() % 3)};
         feel.pattern = static_cast<ArpPattern>(rng() % kArpPatternCount);
+        feel.rate = static_cast<ArpRate>(rng() % 3);
         const Meter meters[] = {{4, 4}, {3, 4}, {6, 8}, {7, 8}, {5, 4}};
         const Document doc = docOf(events, feel, meters[rng() % 5]);
         const Performance p = performDocument(doc);
@@ -935,6 +967,7 @@ TEST_CASE("safety: random documents and feels keep every note paired, inside its
         Feel feel{static_cast<Rhythm>(rng() % 6), static_cast<Strum>(rng() % 4),
                   static_cast<StrumSpeed>(rng() % 3), static_cast<Humanise>(rng() % 4)};
         feel.pattern = static_cast<ArpPattern>(rng() % kArpPatternCount);
+        feel.rate = static_cast<ArpRate>(rng() % 3);
         const Meter meters[] = {{4, 4}, {3, 4}, {2, 4}, {6, 8}, {7, 8}, {9, 8}, {12, 8}, {3, 8}, {5, 4}, {2, 2}};
         Document doc = docOf(events, feel, meters[rng() % 10]);
         doc.autoVoiceLead = rng() % 2 == 0;
