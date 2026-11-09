@@ -78,7 +78,8 @@ private:
   void RestoreEditorSize(int width, int height);
   // Main thread: parses a kMsgTagPreview payload and queues it for the scheduler.
   void HandlePreview(std::string_view json);
-  // Main thread: pushes {"schema":1,"incompleteBlocks":n,"droppedHeard":n} to the editor.
+  // Main thread: pushes {"schema":1,"incompleteBlocks":n,"droppedHeard":n} to the editor (droppedHeard:
+  // heard-ring overflows, plus raw MIDI ring overflows under AU).
   void PushStatus(uint32_t incompleteBlocks, uint32_t droppedHeard);
   // Pushes heardJson(mListener, projectKey) as kMsgTagHeard to an open editor and acknowledges the listener,
   // on the main thread (queued when called elsewhere); with no editor it does nothing and leaves `changed`
@@ -86,9 +87,12 @@ private:
   void PushHeard();
   // Audio thread: runs the scheduler reset OnReset flagged, if one is pending, then pushes a
   // HeardEvent::Reset into mHeardRing so the main-thread listener forgets in order. Called at the top of
-  // ProcessBlock and at the top of every ProcessMidiMsg (before its heard push and pushThru), so a reset
+  // ProcessBlock and at the top of every HandleMidiIn (before its heard push and pushThru: per message in
+  // VST3/APP; under AU_API the flag is never set and the drain applies resets by epoch), so a reset
   // never discards incoming notes of the block it precedes.
   void ApplyPendingReset() noexcept;
+  // Audio thread: the reset itself; VST3/APP reach it through the flag, the AU through the drain's epoch.
+  void ApplyReset() noexcept;
   // Audio thread: if MIDI arrived while bypassed, asks the scheduler to release every thru note on the
   // next block with frames (Scheduler::releaseThru, which keeps the queue). Called at the top of
   // ProcessBlock and before a callback's first pushThru, always after ApplyPendingReset.
@@ -97,12 +101,15 @@ private:
   // message whose offset is within the block about to be processed. Never called from another thread.
   void HandleMidiIn(const IMidiMsg& msg) noexcept;
 #if defined(AU_API)
-  // Audio thread, first thing in ProcessBlock: hands every message the host delivered since the last
-  // block to HandleMidiIn in order, through chordlab::drainRawMidi (at most 256 per block; messages
-  // queued before the last OnReset are skipped, that epoch is forgotten). An overflowed ring (more than
-  // 256 messages between two blocks) forgets instead: the listener gets an in-band Reset, the scheduler
-  // drops its queued thru notes and releases the sounding ones (a lost note-off must never stick one),
-  // and mDroppedRaw counts it for the status line.
+  // Audio thread, first thing in ProcessBlock: hands every message the host delivered since the last block to
+  // HandleMidiIn in order, through chordlab::drainRawMidi (at most 256 per block; messages queued before the
+  // last OnReset are skipped, that epoch is forgotten; each reset is applied, ApplyReset, right before the
+  // first message queued after it, or at the end of the drain). An overflowed ring (more than 256 messages
+  // between two blocks) forgets instead: the listener gets an in-band Reset, the scheduler drops its queued
+  // thru notes and releases the sounding ones (a lost note-off must never stick one), and mDroppedRaw counts
+  // it for the status line. The scheduler is reset (ApplyReset, whose heard Reset then stands for the
+  // listener's) only if a host reset was also queued (the epoch moved since the last drain); otherwise the
+  // progression plays on untouched.
   void DrainRawMidiIn() noexcept;
 #endif
   // Main thread: pushes {"schema":1,"ppq":ppq,"playing":playing} (the playhead) to the editor.
@@ -147,11 +154,11 @@ private:
   chordlab::TripleBuffer<chordlab::SnapshotSlot> mSnapshots;
   chordlab::Publication mPublication;
 
-  // The scheduler belongs to the audio thread (process, reset, panic, and pushThru from ProcessMidiMsg);
+  // The scheduler belongs to the audio thread (process, reset, panic, and pushThru from HandleMidiIn);
   // pushPreview is its one other-thread entry and is called from the main thread only (OnMessage,
   // CloseWindow). OnReset and panic requests are flagged here and consumed at the top of ProcessBlock; a
-  // pending reset is consumed earlier, by the callback's first ProcessMidiMsg, when MIDI arrives (bypassed
-  // or not).
+  // pending reset is consumed earlier, by the callback's first HandleMidiIn, when MIDI arrives (VST3:
+  // bypassed or not; AU: the first drained message).
   chordlab::Scheduler mScheduler;
   // Output capacity (listening design D16): iPlug2's VST3 output queue (IMidiQueue) is sized in
   // setupProcessing to the host's maxSamplesPerBlock rounded up to a 4 KiB page of 8-byte IMidiMsg, so at
@@ -175,26 +182,30 @@ private:
   static_assert(std::atomic<bool>::is_always_lock_free && std::atomic<double>::is_always_lock_free &&
                 std::atomic<uint32_t>::is_always_lock_free && std::atomic<uint64_t>::is_always_lock_free,
                 "the audio thread must never lock on these");
-  std::atomic<bool> mResetPending{false};
-  std::atomic<uint32_t> mInputEpoch{0};                        // bumped by OnReset; tags raw AU input so the drain can skip what preceded a reset
+  std::atomic<bool> mResetPending{false};                      // VST3/APP: OnReset's signal; never set under AU_API
+#if defined(AU_API)
+  std::atomic<uint32_t> mInputEpoch{0};                        // bumped by OnReset, the AU's only reset signal; tags raw input so the drain skips what preceded a reset and applies it in order
+#endif
   std::atomic<double> mResetSampleRate{44100.0};
   std::atomic<bool> mPanicPending{false};
   std::atomic<uint32_t> mIncompleteBlocks{0};                  // blocks whose process() returned false
   uint32_t mReportedIncompleteBlocks = 0;                      // main thread: last value pushed to the UI
 
-  // MIDI in (see "MIDI in" in ChordLab.mm). ProcessMidiMsg (the producer) pushes every note and pedal
-  // event into mHeardRing stamped on mSampleClock, which ProcessBlock advances by nFrames at the end of
-  // each block (a watermark: every stamp is at or before the published clock once its block is done);
+  // MIDI in (see "MIDI in" in ChordLab.mm). HandleMidiIn (the producer, always on the audio thread) pushes
+  // every note and pedal event into mHeardRing stamped on mSampleClock, which ProcessBlock advances by
+  // nFrames at the end of each block (a watermark: every stamp is at or before the published clock once its
+  // block is done);
   // OnIdle (the consumer) drains it into mListener and pushes kMsgTagHeard when its visible outputs change.
-  // ApplyPendingReset pushes an in-band HeardEvent::Reset (same producer thread) after a host reset.
+  // ApplyReset pushes an in-band HeardEvent::Reset (same producer thread) after a host reset.
   chordlab::HeardRing mHeardRing;
   std::atomic<uint64_t> mSampleClock{0};                       // processed samples since construction
   std::atomic<bool> mBlockRefused{false};                      // a thru push was refused in the block being gathered
   std::atomic<bool> mBypassSeen{false};                        // MIDI arrived while bypassed: the thru notes are released after it
-  uint32_t mDroppedHeard = 0;                                  // main thread: heard-ring overflows seen
+  uint32_t mDroppedHeard = 0;                                  // main thread: heard-ring overflows, plus raw MIDI ring overflows under AU
 #if defined(AU_API)
   chordlab::RawMidiRing mRawMidiIn;                            // producer: the host's MIDIEvent thread; consumer: ProcessBlock
   std::atomic<uint32_t> mDroppedRaw{0};                        // overflows of mRawMidiIn; OnIdle folds them into droppedHeard
+  uint32_t mAppliedEpoch = 0;                                  // render thread only: the last epoch whose reset the drain performed
 #endif
   uint32_t mReportedDroppedHeard = 0;                          // main thread: last value pushed to the UI
   chordlab::Listener mListener;                                // main thread only (it may allocate)

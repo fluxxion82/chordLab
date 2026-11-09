@@ -88,9 +88,10 @@ Audio Unit uses it (`push` on the host's MIDI delivery thread, which is also not
 ring, never from the audio thread. After construction none of these allocates, throws, locks or logs; the
 scheduler's only headers are `limits.h` and `note_event.h` plus `<array>`, `<atomic>`, `<cstddef>`,
 `<cstdint>`; `triple_buffer.h` adds `<type_traits>` and `spsc_ring.h` (`HeardRing`, `RawMidiRing`)
-nothing beyond those; `midi_in.h` also pulls in the main-thread `listener.h`, whose `<vector>` is used
-only off the audio thread. `engine_rt_alloc_test` checks it from the outside: a separate process whose
-global `operator new`/`delete` are replaced by counting versions runs the scheduler through ten thousand
+nothing beyond those; `midi_in.h` also pulls in the main-thread `listener.h`, whose `<vector>` and
+`<string>` (via `identify.h`, `pitch.h`) are used only off the audio thread. `engine_rt_alloc_test`
+checks it from the outside: a separate process whose global `operator new`/`delete` are replaced by
+counting versions runs the scheduler through ten thousand
 random blocks (starts, stops, seeks, tempo changes, previews, panics, resets, adopts) and both sides of
 the triple buffer, and the raw MIDI ring through pushes, refused pushes, `takeOverflow` and
 `drainRawMidi`, and asserts zero intercepted C++ allocations on the exercised paths. It cannot see a
