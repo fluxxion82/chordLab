@@ -73,7 +73,6 @@ int arpIndex(ArpPattern pattern, int k, int n) {
 }
 
 std::vector<Hit> rhythmHits(const Feel& feel, Meter meter, int s, int e, int noteCount, int velocity, int id) {
-    (void)id;  // read by Random (Task 3)
     const Rhythm rhythm = feel.rhythm;
     std::vector<Hit> hits;
     if (e <= s || noteCount < 1) return hits;
@@ -106,6 +105,7 @@ std::vector<Hit> rhythmHits(const Feel& feel, Meter meter, int s, int e, int not
         return hits;
     }
 
+    int previousRandom = -1;
     for (size_t i = 0; i < starts.size(); ++i) {
         const int t = starts[i];
         const int next = i + 1 < starts.size() ? starts[i + 1] : e;
@@ -133,7 +133,14 @@ std::vector<Hit> rhythmHits(const Feel& feel, Meter meter, int s, int e, int not
             else
                 for (int k = 1; k < noteCount; ++k) notes.push_back(k);
         } else if (rhythm == Rhythm::Arpeggio) {
-            notes = {arpIndex(feel.pattern, static_cast<int>(i), noteCount)};
+            if (feel.pattern == ArpPattern::Chord) {
+                notes = allNotes(noteCount);
+            } else if (feel.pattern == ArpPattern::Random) {
+                previousRandom = arpRandomIndex(id, static_cast<int>(i), noteCount, previousRandom);
+                notes = {previousRandom};
+            } else {
+                notes = {arpIndex(feel.pattern, static_cast<int>(i), noteCount)};
+            }
         } else {
             notes = allNotes(noteCount);
         }
@@ -363,6 +370,15 @@ Performance performDocument(const Document& doc) {
         performance.feelLimited = true;
     }
     return performance;
+}
+
+int arpRandomIndex(int id, int k, int n, int previous) {
+    assert(k >= 0 && n >= 1);
+    if (n == 1) return 0;
+    const std::uint64_t key = feelKey(id, k, 0, kFeelSaltArp);
+    if (previous < 0) return static_cast<int>(key % static_cast<std::uint64_t>(n));
+    const int r = static_cast<int>(key % static_cast<std::uint64_t>(n - 1));
+    return r < previous ? r : r + 1;
 }
 
 }  // namespace chordlab

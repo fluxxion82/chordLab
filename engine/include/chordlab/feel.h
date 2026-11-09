@@ -73,6 +73,15 @@ struct Hit {
 /// `n == 1` is always 0. `RootFirst` is `Up` (the list itself is ordered by chord tone, `arpeggioNotes`).
 int arpIndex(ArpPattern pattern, int k, int n);
 
+/// The `Random` pattern's index for hit `k` of an `n`-note list (D2): hit 0 (`previous < 0`) plays
+/// `feelKey(id, 0, 0, kFeelSaltArp) % n`; a later hit plays the r-th of the n - 1 indices other than `previous`,
+/// `r = feelKey(id, k, 0, kFeelSaltArp) % (n - 1)`, so no note repeats immediately in the generated hit order
+/// (humanise may still move two hits' notes around each other). `n == 1` is always 0. Pure in the chord's event
+/// id: playback equals export, undo keeps the order, moving the chord keeps it, re-adding a preset re-rolls.
+/// Pinned sequences (independent Python splitmix64, test_feel.cpp): id 1, n 4: 2 1 3 0 3 0 3 0; id 1, n 3:
+/// 1 0 2 0 2 0 1 2.
+int arpRandomIndex(int id, int k, int n, int previous);
+
 /// The hits of a chord spanning ticks [s, e) of the whole progression (D4-D7 of the feel plan). Bars count
 /// from tick 0 of the progression. Empty when the span or `noteCount` is empty. For an arpeggio, `noteCount`
 /// is the size of the chord's arpeggio note list (`arpeggioNotes`) and each hit's `notes` index that list;
@@ -100,6 +109,7 @@ inline bool operator==(const Hit& a, const Hit& b) {
 constexpr int kFeelSaltHitTiming = 1;   // a whole hit, in ticks; `note` is 0
 constexpr int kFeelSaltNoteTiming = 2;  // one note of a hit, in ticks (strum off only); `note` is its voicing index
 constexpr int kFeelSaltVelocity = 3;    // one note's velocity; `note` is its voicing index
+constexpr int kFeelSaltArp = 4;         // the Random pattern's note choice; `note` is 0
 
 /// splitmix64's output function for state `x`: `x += 0x9E3779B97F4A7C15; x = (x ^ x >> 30) *
 /// 0xBF58476D1CE4E5B9; x = (x ^ x >> 27) * 0x94D049BB133111EB; return x ^ x >> 31;`, all modulo 2^64.

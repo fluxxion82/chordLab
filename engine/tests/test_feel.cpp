@@ -473,6 +473,7 @@ TEST_CASE("feel hash: literal splitmix64 vectors from an independent implementat
     //   def key(i, h, n, s): return mix(mix(mix(mix(i & 0xFFFFFFFF) ^ h) ^ n) ^ s)
     //   def off(k, m): return k % (2 * m + 1) - m
     //   def late(k, m): return k % (m + 1)
+    // Salts: 1 hit timing, 2 note timing, 3 velocity, 4 the Random arpeggio pattern's note choice (kFeelSaltArp).
     CHECK(feelMix(0) == 0xE220A8397B1DCDAFull);  // splitmix64's first output for state 0
     CHECK(feelMix(1) == 0x910A2DEC89025CC1ull);
     CHECK(feelMix(0xFFFFFFFFFFFFFFFFull) == 0xE4D971771B652C20ull);
@@ -726,8 +727,6 @@ TEST_CASE("humanise: a chord's first hit never starts before the chord; strum or
         Feel feel{static_cast<Rhythm>(rng() % 6), static_cast<Strum>(rng() % 4),
                   static_cast<StrumSpeed>(rng() % 3), static_cast<Humanise>(1 + rng() % 3)};
         feel.pattern = static_cast<ArpPattern>(rng() % kArpPatternCount);
-        if (feel.pattern == ArpPattern::Chord || feel.pattern == ArpPattern::Random)
-            feel.pattern = ArpPattern::Up;  // dispatched from Task 3
         const Meter meters[] = {{4, 4}, {3, 4}, {6, 8}, {7, 8}, {5, 4}};
         const Document doc = docOf(events, feel, meters[rng() % 5]);
         const Performance p = performDocument(doc);
@@ -761,6 +760,83 @@ TEST_CASE("humanise: a chord's first hit never starts before the chord; strum or
             if (feel.strum == Strum::DownUp) CHECK((ascending || descending));
         }
     }
+}
+
+TEST_CASE("arpRandomIndex: pinned sequences from an independent implementation") {
+    // Computed with Python 3 (`python3 -I`), the same splitmix64 finaliser as the hash test, key(id, k, 0, 4):
+    //   def rnd(i,k,n,prev): kk=key(i,k,0,4); return 0 if n==1 else kk%n if prev<0 else (r if (r:=kk%(n-1))<prev else r+1)
+    // id 1, n 4 -> 2 1 3 0 3 0 3 0;  id 3, n 4 -> 0 3 2 3 2 1 0 3;  id 9, n 4 -> 2 1 2 3 0 3 1 3;  id 1, n 3 -> 1 0 2 0 2 0 1 2.
+    const auto run = [](int id, int n) {
+        Ints out;
+        int previous = -1;
+        for (int k = 0; k < 8; ++k) {
+            previous = arpRandomIndex(id, k, n, previous);
+            out.push_back(previous);
+        }
+        return out;
+    };
+    CHECK(run(1, 4) == Ints{2, 1, 3, 0, 3, 0, 3, 0});
+    CHECK(run(3, 4) == Ints{0, 3, 2, 3, 2, 1, 0, 3});
+    CHECK(run(9, 4) == Ints{2, 1, 2, 3, 0, 3, 1, 3});
+    CHECK(run(1, 3) == Ints{1, 0, 2, 0, 2, 0, 1, 2});
+}
+
+TEST_CASE("arpRandomIndex: in range, never the previous note, every note reached, one note is 0") {
+    for (int n = 2; n <= 6; ++n) {
+        int previous = -1;
+        std::vector<int> seen(static_cast<std::size_t>(n), 0);
+        for (int k = 0; k < 200; ++k) {
+            const int i = arpRandomIndex(7, k, n, previous);
+            CAPTURE(n); CAPTURE(k);
+            CHECK(i >= 0);
+            CHECK(i < n);
+            CHECK(i != previous);
+            ++seen[static_cast<std::size_t>(i)];
+            previous = i;
+        }
+        for (int count : seen) CHECK(count > 0);
+    }
+    CHECK(arpRandomIndex(7, 0, 1, -1) == 0);
+    CHECK(arpRandomIndex(7, 5, 1, 0) == 0);
+    // n == 2 alternates.
+    CHECK(arpRandomIndex(7, 1, 2, 0) == 1);
+    CHECK(arpRandomIndex(7, 1, 2, 1) == 0);
+}
+
+TEST_CASE("rhythmHits: chord plays every note on every hit; random follows arpRandomIndex, aligned and off-grid") {
+    auto h = rhythmHits(arp(ArpPattern::Chord), {4, 4}, 0, 1920, 3, 100, 9);
+    expectHits(h, {0, 480, 960, 1440}, {432, 912, 1392, 1872}, {100, 80, 90, 80}, {kAll3, kAll3, kAll3, kAll3});
+    h = rhythmHits(arp(ArpPattern::Random), {4, 4}, 0, 3840, 4, 100, 1);
+    REQUIRE(h.size() == 8);
+    const Ints pinned{2, 1, 3, 0, 3, 0, 3, 0};
+    for (std::size_t k = 0; k < h.size(); ++k) CHECK(h[k].notes == Ints{pinned[k]});
+    // Off-grid start 240: hit 0 is the chord's start, then 480, 960; the hit numbers still run 0, 1, 2.
+    h = rhythmHits(arp(ArpPattern::Random), {4, 4}, 240, 1200, 4, 100, 1);
+    REQUIRE(h.size() == 3);
+    CHECK(h[0].start == 240);
+    for (std::size_t k = 0; k < 3; ++k) CHECK(h[k].notes == Ints{pinned[k]});
+}
+
+TEST_CASE("perform: random is the same every time, survives a move, and matches the export path") {
+    const Document doc = docOf({chordEvent(3, chordOf(0, "maj7"), 4.0)}, arp(ArpPattern::Random));
+    CHECK(plain(performDocument(doc)) == plain(performDocument(doc)));
+    // The same chord id after another chord: the same note order, shifted by the other chord's length (a whole
+    // bar, so the bar and pulse accents line up).
+    const Document moved = docOf({chordEvent(4, chordOf(5, "maj"), 4.0), chordEvent(3, chordOf(0, "maj7"), 4.0)},
+                                 arp(ArpPattern::Random));
+    std::vector<Ev> first = plain(performDocument(doc));
+    std::vector<Ev> second;
+    for (const Ev& e : plain(performDocument(moved))) if (e.tick >= 3840) second.push_back(Ev{e.tick - 3840, e.on, e.pitch, e.velocity});
+    CHECK(first == second);
+    // compile() (the export and playback path) carries the same pitches in the same order as performDocument.
+    const Compiled c = compile(doc);
+    std::vector<Ev> ons;
+    for (const Ev& e : first) if (e.on) ons.push_back(e);
+    std::vector<int> compiledOns;
+    for (const NoteEvent& e : c.events) if (e.on) compiledOns.push_back(e.pitch);
+    REQUIRE(compiledOns.size() == 8);
+    REQUIRE(ons.size() == 8);
+    for (std::size_t i = 0; i < 8; ++i) CHECK(compiledOns[i] == ons[i].pitch);
 }
 
 TEST_CASE("humanise: chord A's offsets do not depend on chord B's id") {
@@ -859,8 +935,6 @@ TEST_CASE("safety: random documents and feels keep every note paired, inside its
         Feel feel{static_cast<Rhythm>(rng() % 6), static_cast<Strum>(rng() % 4),
                   static_cast<StrumSpeed>(rng() % 3), static_cast<Humanise>(rng() % 4)};
         feel.pattern = static_cast<ArpPattern>(rng() % kArpPatternCount);
-        if (feel.pattern == ArpPattern::Chord || feel.pattern == ArpPattern::Random)
-            feel.pattern = ArpPattern::Up;  // dispatched from Task 3
         const Meter meters[] = {{4, 4}, {3, 4}, {2, 4}, {6, 8}, {7, 8}, {9, 8}, {12, 8}, {3, 8}, {5, 4}, {2, 2}};
         Document doc = docOf(events, feel, meters[rng() % 10]);
         doc.autoVoiceLead = rng() % 2 == 0;
