@@ -133,7 +133,6 @@
 		4FC145F926A60AF500DA8929 /* ChordLab-Shared.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = "ChordLab-Shared.h"; path = "../ChordLab-Shared.h"; sourceTree = "<group>"; };
 		4FC46E58231440C8000045E7 /* web */ = {isa = PBXFileReference; lastKnownFileType = folder; name = web; path = ../resources/web; sourceTree = "<group>"; };
 		4FC82B4720BD524700722133 /* img */ = {isa = PBXFileReference; lastKnownFileType = folder; name = img; path = ../resources/img; sourceTree = "<group>"; };
-		4FC82B4820BD524700722133 /* fonts */ = {isa = PBXFileReference; lastKnownFileType = folder; name = fonts; path = ../resources/fonts; sourceTree = "<group>"; };
 		4FDA600520B5868D00C49ABA /* ChordLab-ios.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = "ChordLab-ios.xcconfig"; path = "../config/ChordLab-ios.xcconfig"; sourceTree = "<group>"; };
 		4FDCA0BF268E305F007C8124 /* ChordLab-Bridging-Header.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = "ChordLab-Bridging-Header.h"; path = "../ChordLab-Bridging-Header.h"; sourceTree = "<group>"; };
 		4FDCA0C2268E3316007C8124 /* ISender.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = ISender.h; path = ../../../iPlug2/IPlug/ISender.h; sourceTree = "<group>"; };
@@ -266,7 +265,6 @@
 		4F8BF48D20A12D2E0081DF0A /* Resources */ = {
 			isa = PBXGroup;
 			children = (
-				4FC82B4820BD524700722133 /* fonts */,
 				4FC82B4720BD524700722133 /* img */,
 				4F2602DB2269F79200C7E97E /* tex */,
 				4FC46E58231440C8000045E7 /* web */,

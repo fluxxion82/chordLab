@@ -1,0 +1,5 @@
+ChordLab is a chord-progression plug-in for macOS: pick a key, audition chords from a palette, drag them into a sequence, and let the plug-in play the progression as MIDI in time with the host or drop it onto a track as a clip.
+
+Choose what to install on the next screen. The VST3 is for Ableton Live (and other VST3 hosts), the Audio Unit is for Logic Pro's MIDI FX slot, and the app shows the same window without a host.
+
+Requires macOS 15 or later. Free software under the GNU GPL v3; source at github.com/fluxxion82/chordLab.

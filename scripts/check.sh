@@ -11,6 +11,7 @@
 #   scripts/check.sh --bridge   ... plus the Obj-C++ bridge tests (when ChordLab/bridge/tests/CMakeLists.txt exists)
 #   scripts/check.sh --plugin   ... plus both Xcode schemes (macOS-VST3, macOS-APP), no signing
 #   scripts/check.sh --all      everything
+#   scripts/check.sh --release  ... plus the release script's preflight, in report mode
 # Flags combine; section 1 always runs first.
 #
 # Sanitizers: UBSan, ASan and TSan each get their own build directory. On Apple clang 17 (Xcode 16) ASan
@@ -20,13 +21,14 @@
 set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
+SELF="$(cd "$(dirname "$0")" && pwd -P)/$(basename "$0")"   # for --help after the cd
 cd "$ROOT" || exit 2
 
 DEFAULT_TIMEOUT=300
 UBSAN_TIMEOUT=600
 PLUGIN_TIMEOUT=600   # a cold xcodebuild of the plug-in exceeds the default
 
-want_ubsan=0 want_asan=0 want_tsan=0 want_swift=0 want_bridge=0 want_plugin=0
+want_ubsan=0 want_asan=0 want_tsan=0 want_swift=0 want_bridge=0 want_plugin=0 want_release=0
 for arg in "$@"; do
     case "$arg" in
         --ubsan) want_ubsan=1 ;;
@@ -35,8 +37,9 @@ for arg in "$@"; do
         --swift) want_swift=1 ;;
         --bridge) want_bridge=1 ;;
         --plugin) want_plugin=1 ;;
-        --all) want_ubsan=1 want_asan=1 want_tsan=1 want_swift=1 want_bridge=1 want_plugin=1 ;;
-        -h|--help) sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --release) want_release=1 ;;
+        --all) want_ubsan=1 want_asan=1 want_tsan=1 want_swift=1 want_bridge=1 want_plugin=1 want_release=1 ;;
+        -h|--help) sed -n '2,20p' "$SELF" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "check.sh: unknown option '$arg' (try --help)" >&2; exit 2 ;;
     esac
 done
@@ -182,6 +185,10 @@ plugin_builds() {
     plugin_scheme macOS-APP || return 1
 }
 
+release_preflight() {
+    step "$DEFAULT_TIMEOUT" scripts/release.sh preflight --report || return 1
+}
+
 # ---------------------------------------------------------------------------------------------------------
 
 print_summary() {
@@ -234,6 +241,10 @@ fi
 
 if [ "$FAILED" -eq 0 ] && [ "$want_plugin" -eq 1 ]; then
     section "5 plugin (xcodebuild)" plugin_builds
+fi
+
+if [ "$FAILED" -eq 0 ] && [ "$want_release" -eq 1 ]; then
+    section "6 release preflight" release_preflight
 fi
 
 print_summary

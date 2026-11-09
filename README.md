@@ -2,10 +2,12 @@
 
 ChordLab is a chord-progression plug-in for macOS in the style of Klimper 2: pick a key, audition
 chords from a palette, drag them into a sequence, and let the plug-in play the progression as MIDI in
-time with the host or drop it onto a track as a clip. It is a VST3 instrument that outputs silence and
-MIDI, built for Ableton Live. Under the hood it is an iPlug2 Objective-C++ shell (`ChordLab/`), a
-host-independent C++17 engine that owns all the theory (`engine/`), and a SwiftUI editor
-(`ChordLab/UI/`) that draws what the engine's JSON snapshot tells it and computes no theory of its own.
+time with the host or drop it onto a track as a clip. It ships as a VST3 instrument for Ableton Live, an
+Audio Unit MIDI FX for Logic Pro and a standalone app; the plug-ins output MIDI and no audio (the VST3
+carries a silent stereo bus because Live wants one). Under the hood it is an iPlug2 Objective-C++
+shell (`ChordLab/`), a host-independent C++17 engine that owns all the theory (`engine/`), and a SwiftUI
+editor (`ChordLab/UI/`) that draws what the engine's JSON snapshot tells it and computes no theory of its
+own.
 
 ## Features
 
@@ -56,6 +58,25 @@ Phase 3, so far:
 - An Applied view of the palette: the browsed key's secondary dominants (V7/x) and leading-tone sevenths
   (vii°7/x), each above the chord it leads to, previewable and draggable like palette cells.
 
+## Install
+
+Download `ChordLab-<version>.pkg` from the [latest release](https://github.com/fluxxion82/chordLab/releases/latest)
+and open it. It is signed and notarized; pick the formats you want:
+
+- **VST3** → `/Library/Audio/Plug-Ins/VST3/ChordLab.vst3` (Ableton Live: rescan in Settings → Plug-Ins, or restart Live).
+- **Audio Unit** → `/Library/Audio/Plug-Ins/Components/ChordLab.component` (Logic Pro: MIDI FX slot → Audio Units →
+  SterlingAlbury → ChordLab; if it is missing, Plug-in Manager → Full Audio Unit Reset, then reopen Logic)
+  (validated with `auval`; Logic Pro itself not yet verified, see Status).
+- **App** → `/Applications/ChordLab.app`.
+
+macOS 15 or later, Apple silicon or Intel. The `.sha256` beside the pkg verifies the download, and the VST3 SDK
+source tarball if you take it too (`shasum -a 256 -c --ignore-missing ChordLab-<version>.pkg.sha256`); the
+`.provenance.txt` names the commits and dependency versions it was built from (see Licence). If you also build from
+source, a development copy in `~/Library` carries the same identifiers; keep one or the other installed.
+
+Uninstall: remove the three paths above and the receipts
+(`sudo pkgutil --forget com.SterlingAlbury.chordlab.vst3`, `….au`, `….app`).
+
 ## Requirements
 
 - macOS 15 or later (the deployment target; the UI uses current SwiftUI APIs).
@@ -88,8 +109,8 @@ The plug-in, from the repository root:
 xcodebuild -project ChordLab/projects/ChordLab-macOS.xcodeproj -scheme macOS-VST3 -configuration Debug build
 ```
 
-The build installs the bundle to `~/Library/Audio/Plug-Ins/VST3/ChordLab.vst3`; rescan plug-ins in Live
-(or restart it) to pick up a new build.
+The build installs the bundle to `~/Library/Audio/Plug-Ins/VST3/ChordLab.vst3` (a development copy; the
+release pkg installs to `/Library`); rescan plug-ins in Live (or restart it) to pick up a new build.
 
 The standalone app, handy for working on the UI without a host:
 
@@ -98,9 +119,13 @@ xcodebuild -project ChordLab/projects/ChordLab-macOS.xcodeproj -scheme macOS-APP
   CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM= PROVISIONING_PROFILE_SPECIFIER= CODE_SIGN_ENTITLEMENTS= build
 ```
 
-The signing overrides are needed because the iPlug2 project template has its own development team ID
-baked into the APP target; they switch it to ad-hoc signing with no entitlements. The app lands in
-`~/Applications/ChordLab.app`. The same overrides are harmless on the VST3 scheme.
+The signing overrides are no longer needed (every target is ad-hoc signed with no team since the release
+milestone) and stay harmless; the plain `-scheme macOS-APP … build` works too. The app lands in
+`~/Applications/ChordLab.app`. In a git worktree, `IPLUG2_ROOT = ../../../iPlug2` must still resolve: link the
+iPlug2 checkout next to the worktrees (`.claude/worktrees/iPlug2` exists for that).
+
+The Audio Unit (`macOS-AUv2` scheme) builds the same way and installs to `~/Library/Audio/Plug-Ins/Components`;
+`auval -strict -v aumi pozR Ster` validates it.
 
 ## Testing
 
@@ -108,10 +133,11 @@ One script runs every suite; with no flags it runs the engine's Debug build and 
 
 ```
 scripts/check.sh            # engine (Debug) build + ctest
-scripts/check.sh --all      # + UBSan, ASan and TSan builds, Swift tests, bridge tests, both Xcode schemes
+scripts/check.sh --all      # + UBSan, ASan and TSan builds, Swift tests, bridge tests, both Xcode schemes, release preflight
 ```
 
-Flags combine (`--ubsan`, `--asan`, `--tsan`, `--swift`, `--bridge`, `--plugin`). The script stops at
+Flags combine (`--ubsan`, `--asan`, `--tsan`, `--swift`, `--bridge`, `--plugin`, `--release`: the release
+script's preflight in report mode). The script stops at
 the first failure and prints a PASS/FAIL table. Every sanitizer step runs under a hard timeout because
 older Apple clang releases hung under ASan and TSan (see "Status").
 
@@ -142,23 +168,77 @@ prints the iteration and the escaped input, so it reproduces exactly.
 A new pure UI file belongs in `ChordLab/UI/Core/` so the package tests see it; a new pure plug-in helper
 belongs in `ChordLab/bridge/` with a case in `ChordLab/bridge/tests/`.
 
+## Release
+
+`scripts/release.sh` turns a clean, tagged checkout into the pkg on the Releases page. Once, on the signing
+Mac: store the notary credentials (`xcrun notarytool store-credentials chordlab --apple-id <id> --team-id
+GPX68LJ584 --password <app-specific password>`). Per release: bump `PLUG_VERSION_STR`/`PLUG_VERSION_HEX` in
+`ChordLab/config.h`, build once (`scripts/check.sh --plugin`) so the six tracked Info.plists in `ChordLab/resources`
+carry the new version, commit the bump with all six regenerated plists, merge to `main`, then
+
+```
+scripts/release.sh preflight --rehearsal   # tools, identities, profile, versions, plists current (before the tag exists)
+git tag -a v<version> -m "ChordLab <version>: ..."   # the message becomes the release notes
+scripts/release.sh preflight               # now strict: clean trees (ChordLab and iPlug2), iPlug2 commit public on GitHub, HEAD is the tag
+scripts/release.sh build                   # Release build of VST3, AU and app into dist/stage, signed, auval, pkgs, notarized, stapled, SDK source tarball
+sudo installer -pkg dist/ChordLab-<version>.pkg -target /    # the smoke test with the dev copies moved aside, then uninstall (see Install)
+git push origin main v<version>            # publish needs the tag on GitHub
+scripts/release.sh publish                 # checks the pkg belongs to HEAD and the tag, then gh release create with four assets
+```
+
+`publish` uploads four assets: the pkg, its `.sha256`, the `.provenance.txt` and the VST3 SDK source tarball.
+`build --rehearsal --skip-notarize` rehearses on a dirty or untagged tree (never publishable). The Xcode project
+itself stays ad-hoc signed; the Developer ID is injected by the script, so building from source needs no certificate.
+`build` starts cold (it wipes `dist/`), takes several minutes per format, and installs the staged Audio Unit into
+`~/Library/Audio/Plug-Ins/Components` for `auval`, replacing whatever copy was there. Preflight refuses a build while
+`/Library/Audio/Plug-Ins/Components/ChordLab.component` exists (`auval` names no path, so it could validate that
+copy instead of the staged one): move it aside first, and uninstall after the smoke test. Install Rosetta on the
+signing Mac (`softwareupdate --install-rosetta --agree-to-license`) so `auval` also validates the Intel slice and
+the provenance records `auval: yes` rather than `yes (arm64 only)`, which `publish` accepts with a warning. The
+first `productbuild --sign` may raise a keychain prompt for the Developer ID Installer key, and the build waits
+until it is answered: click "Always Allow".
+
 ## Documentation
 
 - [engine/README.md](engine/README.md): the engine's own notes (layout, JSON surface, error handling,
   real-time rules, threading contract); [engine/include/chordlab/json_api.h](engine/include/chordlab/json_api.h)
   is the engine ↔ UI contract.
 
+## Licence
+
+ChordLab is free software under the [GNU General Public License v3.0](LICENSE) (GPL-3.0-only),
+copyright 2026 Sterling Albury. It is built on third-party code under its own terms, reproduced in
+[THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt), which ships inside every bundle:
+
+- [iPlug2](https://github.com/iPlug2/iPlug2) and Cockos WDL: zlib-style licence.
+- [RtAudio](https://github.com/thestk/rtaudio) 5.1.0 and [RtMidi](https://github.com/thestk/rtmidi) 4.0.0 (the
+  standalone app's audio and MIDI I/O): MIT-style.
+- [nlohmann/json](https://github.com/nlohmann/json) 3.11.2 (`engine/third_party/nlohmann`): MIT.
+  [doctest](https://github.com/doctest/doctest) (MIT) is used by the tests only.
+- The Steinberg [VST 3 SDK](https://github.com/steinbergmedia/vst3sdk) 3.7.14: dual-licensed; ChordLab uses it under the
+  GPLv3 option, which is why the VST3 binary and this repository are GPL. Its `base` and `public.sdk` sources carry
+  a BSD-style notice, reproduced in the notices file.
+- Apple SDKs and the Audio Unit headers: Apple's SDK terms.
+
+**Corresponding source.** Each release ships the vendored VST3 SDK's source as
+`ChordLab-<version>-vst3sdk-source.tar.gz` beside the pkg. Its `.provenance.txt` names the ChordLab commit and tag
+on GitHub, the iPlug2 commit on its public GitHub (`release.sh` refuses a commit GitHub cannot show), the VST3 SDK
+version, its tag on Steinberg's GitHub, a hash of the vendored SDK tree and the tarball's digest, and the RtAudio,
+RtMidi and nlohmann/json versions; "Build" above is the recipe. Together they are the complete source of the
+binaries.
+
 ## Status
 
-- **Live verification is pending.** The engine is covered by tests and both the VST3 and the standalone
-  app build cleanly, but the window has not yet been checked end to end inside Live (routing, transport
-  follow, drag-out, keyboard shortcuts).
+- **Verified in Live** through Test 11 (`docs/testing/`, 2026-11-06); the Logic check (Test 12) waits for a
+  Logic install. The Audio Unit passes `auval -strict` (arm64; the x86_64 slice is validated only on a Mac
+  with Rosetta), which proves it loads, publishes its properties and view and round-trips its state, not
+  that MIDI flows through it in Logic.
 - Sanitizers: with Apple clang 17 (Xcode 16) ASan deadlocked before `main()` and TSan hung; since
   Apple clang 21 (Xcode 27.1) UBSan, ASan and TSan all run the engine suite cleanly
   (`scripts/check.sh --ubsan --asan --tsan`, each step under a hard timeout).
-- Not yet: piano roll, melody tracks, key detection (Phase 3); chords are contiguous; the ruler assumes
-  4/4; one suggestion style (pop); macOS and VST3 only. The Xcode project still carries iPlug2's other
-  targets (AU, AUv3, AAX, VST2, iOS) and Windows project files from the template; they are not
+- Not yet: piano roll, melody tracks (Phase 3); chords are contiguous; the ruler assumes
+  4/4; one suggestion style (pop); macOS only (VST3, Audio Unit, app). The Xcode project still carries
+  iPlug2's AUv3, AAX, VST2 and iOS targets and Windows project files from the template; they are not
   maintained or tested.
 
 ## Repository layout
@@ -179,4 +259,8 @@ ChordLab/                   the iPlug2 plug-in
   projects/                 Xcode projects (ChordLab-macOS.xcodeproj)
   resources/                Info.plists, icons, fonts
 scripts/check.sh            runs every suite (see Testing)
+scripts/release.sh          signs, notarizes and packages a release (see Release)
+scripts/release/resources/  installer panes
+LICENSE                     GPL-3.0 text
+THIRD_PARTY_NOTICES.txt     third-party notices, shipped in every bundle (see Licence)
 ```

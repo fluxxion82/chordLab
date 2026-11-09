@@ -28,7 +28,8 @@ def main():
   CFBundleVersion = config['FULL_VER_STR']
   CFBundlePackageType = "BNDL"
   CSResourcesFileMapped = True
-  LSMinimumSystemVersion = "11.0" #xcconfig['DEPLOYMENT_TARGET']
+  # Xcode exports the target's deployment target to run-script phases; ChordLab-mac.xcconfig sets it to 15.0.
+  LSMinimumSystemVersion = os.environ.get("MACOSX_DEPLOYMENT_TARGET", "15.0")
 
   print("Copying resources ...")
 
@@ -51,6 +52,12 @@ def main():
     for font in fonts:
       print("copying " + font + " to " + dst)
       shutil.copy(projectpath + "/resources/fonts/" + font, dst)
+
+  # The licence and the third-party notices travel with every copy (GPL-3.0 and the MIT-style notices ask for it).
+  repo = os.path.abspath(os.path.join(projectpath, os.pardir))
+  for legal in ["LICENSE", "THIRD_PARTY_NOTICES.txt"]:
+    print("copying " + legal + " to " + dst)
+    shutil.copy(os.path.join(repo, legal), dst)
 
   print("Processing Info.plist files...")
 
@@ -123,7 +130,8 @@ def main():
   auv2['AudioComponents'][0]['manufacturer'] = config['PLUG_MFR_ID']
   auv2['AudioComponents'][0]['name'] = config['PLUG_MFR'] + ": " + config['PLUG_NAME']
   auv2['AudioComponents'][0]['subtype'] = config['PLUG_UNIQUE_ID']
-  auv2['AudioComponents'][0]['type'] = COMPONENT_TYPE
+  # ChordLab: the AUv2 is always a MIDI processor (Release design D12), whichever PLUG_TYPE line the parser read.
+  auv2['AudioComponents'][0]['type'] = kAudioUnitType_MIDIProcessor
   auv2['AudioComponents'][0]['version'] = config['PLUG_VERSION_INT']
   auv2['AudioComponents'][0]['sandboxSafe'] = True
 
@@ -145,7 +153,7 @@ def main():
   auv3['CFBundleName'] = config['BUNDLE_NAME']
   auv3['CFBundleVersion'] = CFBundleVersion
   auv3['CFBundleShortVersionString'] = CFBundleVersion
-  auv3['LSMinimumSystemVersion'] = "11.0.0"
+  auv3['LSMinimumSystemVersion'] = LSMinimumSystemVersion
   auv3['CFBundlePackageType'] = "XPC!"
   auv3['NSExtension'] = dict(
   NSExtensionAttributes = dict(
@@ -211,5 +219,22 @@ def main():
 
   with open(plistpath, 'wb') as fp:
     plistlib.dump(macOSapp, fp)
+
+  check_plists(LSMinimumSystemVersion, au_type=kAudioUnitType_MIDIProcessor)
+
+def check_plists(min_version, au_type=None):
+  """Fails the build when a written plist disagrees with config.h or the deployment target."""
+  resources = os.path.join(projectpath, "resources")
+  for name in ["ChordLab-VST3-Info.plist", "ChordLab-macOS-Info.plist", "ChordLab-AU-Info.plist"]:
+    with open(os.path.join(resources, name), 'rb') as fp:
+      plist = plistlib.load(fp)
+    if plist.get('LSMinimumSystemVersion') != min_version:
+      sys.exit("prepare_resources-mac.py: %s has LSMinimumSystemVersion %r, expected %r" % (name, plist.get('LSMinimumSystemVersion'), min_version))
+  if au_type is not None:
+    with open(os.path.join(resources, "ChordLab-AU-Info.plist"), 'rb') as fp:
+      au = plistlib.load(fp)
+    if au['AudioComponents'][0]['type'] != au_type:
+      sys.exit("prepare_resources-mac.py: the AU plist type is %r, expected %r" % (au['AudioComponents'][0]['type'], au_type))
+
 if __name__ == '__main__':
   main()

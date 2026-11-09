@@ -2,13 +2,11 @@
 
 #include "chordlab/listener.h"
 #include "chordlab/scheduler.h"
+#include "chordlab/spsc_ring.h"
 
-#include <array>
-#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
-#include <type_traits>
 
 namespace chordlab {
 
@@ -27,54 +25,72 @@ std::optional<HeardEvent> heardEventOf(std::uint8_t status, std::uint8_t data1, 
 std::optional<ThruEvent> thruEventOf(std::uint8_t status, std::uint8_t data1, std::uint8_t data2,
                                      int sampleOffset) noexcept;
 
-/// A single-producer single-consumer ring of `HeardEvent` (design D1): the audio thread pushes, the main
-/// thread pops. Lock-free (two atomic counters, acquire/release), allocation-free after construction.
-///
-/// Capacity: exactly `kCapacity` (256) events fit; the 257th push is refused. The two counters run freely
-/// (they are never reduced modulo the capacity, only their low bits index the storage), so the ring is
-/// full when `head - tail == kCapacity` and empty when `head == tail`, and no slot is wasted. Unsigned
-/// wrap-around of the 32-bit counters is harmless because the capacity divides 2^32.
-///
-/// Overflow: `push` on a full ring returns false, drops the event and sets a sticky flag; `takeOverflow`
-/// returns the flag and clears it, so the consumer can resynchronise (the listener forgets, design D1).
-/// The consumer must call `takeOverflow()` *before* draining and, when it returns true, pop and discard
-/// everything then resynchronise. The flag's release store and the exchange's acquire make every event
-/// pushed before the refusal visible to those pops; draining first and taking the flag afterwards could
-/// feed the listener a pre-drop note-on whose note-off was the refused event.
-///
-/// Threads: `push` belongs to the one producer thread, `pop` and `takeOverflow` to the one consumer
-/// thread.
-class HeardRing {
-public:
-    /// How many events fit.
-    static constexpr std::size_t kCapacity = 256;
+/// The heard ring (Listening design D1): the audio thread pushes, the main thread pops; 256 events.
+using HeardRing = SpscRing<HeardEvent, 256>;
 
-    HeardRing() noexcept = default;
-    HeardRing(const HeardRing&) = delete;
-    HeardRing& operator=(const HeardRing&) = delete;
-
-    /// Producer. Appends `event`; returns false (and sets the overflow flag) when the ring already holds
-    /// `kCapacity` events, dropping `event`.
-    bool push(const HeardEvent& event) noexcept;
-
-    /// Consumer. Moves the oldest event into `out` and returns true, or returns false (leaving `out`
-    /// untouched) when the ring is empty.
-    bool pop(HeardEvent& out) noexcept;
-
-    /// Consumer. Whether any push was refused since the last call; clears the flag.
-    bool takeOverflow() noexcept;
-
-private:
-    static_assert((kCapacity & (kCapacity - 1)) == 0 && 0x100000000ull % kCapacity == 0,
-                  "the capacity must be a power of two so the 32-bit counters wrap cleanly");
-    static_assert(std::atomic<std::uint32_t>::is_always_lock_free, "the ring must never lock");
-    static_assert(std::atomic<bool>::is_always_lock_free, "the ring must never lock");
-    static_assert(std::is_trivially_copyable_v<HeardEvent>, "slots are copied while the other thread may read others");
-
-    std::array<HeardEvent, kCapacity> slots_{};
-    alignas(64) std::atomic<std::uint32_t> head_{0};  // next slot to write; written by the producer
-    alignas(64) std::atomic<std::uint32_t> tail_{0};  // next slot to read; written by the consumer
-    std::atomic<bool> overflow_{false};
+/// One MIDI message as a host hands it over, before any interpretation: status byte with channel, two data
+/// bytes, the shell's reset epoch when it was queued (opaque here; see `drainRawMidi`), and the sample
+/// offset within the block it belongs to (Release design D13). The Audio Unit's shell queues these from
+/// the host's MIDIEvent thread and drains them on the render thread.
+struct RawMidi {
+    std::uint8_t status;
+    std::uint8_t data1;
+    std::uint8_t data2;
+    std::uint32_t epoch;
+    int sampleOffset;
 };
+
+/// Producer: the host's MIDI delivery thread; consumer: the render thread (the AU shell's ProcessBlock).
+using RawMidiRing = SpscRing<RawMidi, 256>;
+
+/// What the drain of the raw ring did (Release design D13).
+enum class RawDrain { Handled, Forgot };
+
+/// Epochs compare modulo 2^32: `a` is newer than `b` when `int32_t(a - b) > 0`.
+inline bool newerEpoch(std::uint32_t a, std::uint32_t b) noexcept { return static_cast<std::int32_t>(a - b) > 0; }
+
+/// The render thread's policy for the raw ring, once per block, before anything else touches the scheduler.
+/// `applied` is the render thread's record of the last epoch whose reset it performed; `current` is the
+/// shell's epoch loaded once at the top of the block. Pops at most `RawMidiRing::kCapacity` messages (a
+/// producer that keeps pushing cannot make the loop endless; what it adds meanwhile waits for the next
+/// block). For each popped message, in order: a message whose epoch is older than `current` was queued
+/// before the host's last reset and is skipped (the reset forgets it); otherwise, if its epoch is not
+/// `applied`, `onReset()` runs first and `applied` becomes that epoch (the reset lands in FIFO position
+/// before the first message that followed it, even when the bump happened after `current` was loaded);
+/// then `handle(const RawMidi&)`. Epochs are monotone in push order (the one producer loads the epoch, then
+/// pushes), so a message that is neither older than `current` nor equal to `applied` carries `current` or newer.
+/// After the loop, if `current` is newer than `applied`, `onReset()` runs and `applied` becomes `current`
+/// (a reset with no message after it still lands this block). The overflow flag is taken first, as the
+/// heard ring's rule says: when it reads true, messages were lost, so everything still queued is discarded
+/// unread (bounded the same way), `applied` becomes `current`, `onReset` is NOT called (the caller performs
+/// its own, larger forget: heard `Reset`, `dropThru`, and counts the loss) and `Forgot` is returned.
+/// `onReset` and `handle` must not allocate, block or throw (the drain is `noexcept`); they run on the
+/// render thread.
+template <typename OnReset, typename Handle>
+RawDrain drainRawMidi(RawMidiRing& ring, std::uint32_t& applied, std::uint32_t current, OnReset&& onReset,
+                      Handle&& handle) noexcept {
+    RawMidi m{};
+    if (ring.takeOverflow()) {
+        for (std::size_t n = 0; n < RawMidiRing::kCapacity && ring.pop(m); ++n) {
+        }
+        applied = current;
+        return RawDrain::Forgot;
+    }
+    for (std::size_t n = 0; n < RawMidiRing::kCapacity && ring.pop(m); ++n) {
+        if (newerEpoch(current, m.epoch)) {
+            continue;  // queued before the last reset: forgotten
+        }
+        if (m.epoch != applied) {
+            onReset();
+            applied = m.epoch;
+        }
+        handle(m);
+    }
+    if (newerEpoch(current, applied)) {
+        onReset();
+        applied = current;
+    }
+    return RawDrain::Handled;
+}
 
 }  // namespace chordlab

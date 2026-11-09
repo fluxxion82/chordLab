@@ -15,10 +15,22 @@
 
 #define SHARED_RESOURCES_SUBPATH "ChordLab"
 
+// Live needs an instrument with an audio bus and MIDI output (VST3 "Instrument|Tools", "0-2" so the bus
+// exists; ChordLab writes silence). Logic's MIDI FX slot needs a MIDI processor ('aumi') and iPlug2's AU
+// render neither attaches nor zeroes audio buffers for one (IPlugAU.cpp, IsMidiEffect), so the AU has no
+// buses, like iPlug2's IPlugMidiEffect example. The AU target defines AU_API (iPlug2's AU_DEFS); its Rez pass
+// gets the same define through OTHER_REZFLAGS. Both PLUG_TYPE lines stay at column 0: iPlug2's parse_config.py
+// reads the last "#define PLUG_TYPE" textually for the plists, and prepare_resources-mac.py writes the AU
+// plist's type as aumi whatever it read (Release design D12).
+#if defined(AU_API)
+#define PLUG_CHANNEL_IO "0-0"
+#define PLUG_TYPE 2
+#else
 #define PLUG_CHANNEL_IO "0-2"
+#define PLUG_TYPE 1
+#endif
 
 #define PLUG_LATENCY 0
-#define PLUG_TYPE 1
 #define PLUG_DOES_MIDI_IN 1
 #define PLUG_DOES_MIDI_OUT 1
 #define PLUG_DOES_MPE 0
@@ -54,5 +66,3 @@
 #define APP_MULT 1
 #define APP_COPY_AUV3 0
 #define APP_SIGNAL_VECTOR_SIZE 64
-
-#define ROBOTO_FN "Roboto-Regular.ttf"

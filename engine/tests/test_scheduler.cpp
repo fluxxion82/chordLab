@@ -2653,6 +2653,64 @@ TEST_CASE("scheduler thru: releaseThru with nothing held writes nothing") {
     CHECK(host.lastOk);
 }
 
+TEST_CASE("scheduler thru: dropThru forgets the queued input and releases thru notes on the next block") {
+    Host host;
+    CHECK(host.pushThru(true, 60, 90, 0));
+    REQUIRE(host.run(0.0, 512, false) == std::vector<Ev>{on(0, 60, 90)});
+    CHECK(host.pushThru(true, 62, 80, 5));  // queued before the drop: its note-off may be among what was lost
+    host.scheduler.dropThru();
+    CHECK(host.pushThru(true, 64, 70, 9));  // queued after it: new input, plays after the release-all
+    const std::vector<Ev> events = host.run(0.0, 512, false);
+    CAPTURE(describe(events));
+    CHECK(events == std::vector<Ev>{off(0, 60), on(9, 64, 70)});
+    CHECK(host.lastOk);
+    CHECK(host.owners(60) == 0);
+    CHECK(host.owners(62) == 0);
+    CHECK(host.owners(64) == kOwnerThru);
+}
+
+TEST_CASE("scheduler thru: dropThru survives an empty block and releases on the next one with frames") {
+    Host host;
+    CHECK(host.pushThru(true, 60, 90, 0));
+    REQUIRE(host.run(0.0, 512, false) == std::vector<Ev>{on(0, 60, 90)});
+    host.scheduler.dropThru();
+    CHECK(host.run(0.0, 0, false).empty());
+    const std::vector<Ev> events = host.run(0.0, 512, false);
+    CAPTURE(describe(events));
+    CHECK(events == std::vector<Ev>{off(0, 60)});
+    CHECK_FALSE(host.scheduler.sounding(60));
+}
+
+TEST_CASE("scheduler thru: dropThru with a backlog beyond one block's share forgets all of it") {
+    Host host;
+    for (int i = 0; i < 100; ++i) {
+        CHECK(host.pushThru(true, 20 + i, 90, 0));
+    }
+    host.scheduler.dropThru();
+    const std::vector<Ev> events = host.run(0.0, 512, false);
+    CAPTURE(describe(events));
+    CHECK(events.empty());  // nothing was sounding, nothing queued survives, no release-all is written for silence
+    CHECK(host.lastOk);     // and the block is complete: a forgotten backlog is not "left for later"
+}
+
+TEST_CASE("scheduler thru: dropThru leaves previews and the progression alone") {
+    Host host;
+    host.adopt(snapshotOf(cFour()));
+    REQUIRE(host.run(0.0, 512, true) == std::vector<Ev>{on(0, 60), on(0, 64), on(0, 67)});
+    CHECK(host.pushThru(true, 60, 80, 5));
+    REQUIRE(host.run(512.0 / kSamplesPerBeat, 512, true) == std::vector<Ev>{off(5, 60), on(5, 60, 80)});
+    REQUIRE(host.owners(60) == (kOwnerProgression | kOwnerThru));
+    host.scheduler.dropThru();
+    const std::vector<Ev> events = host.run(1024.0 / kSamplesPerBeat, 512, true);
+    CAPTURE(describe(events));
+    CHECK(events == kNone);  // no physical off: the progression still holds 60, and is not flushed
+    CHECK(host.lastOk);
+    CHECK(host.owners(60) == kOwnerProgression);
+    CHECK(host.scheduler.sounding(60));
+    CHECK(host.scheduler.sounding(64));
+    CHECK(host.scheduler.sounding(67));
+}
+
 TEST_CASE("scheduler: a worst-case block fits the plug-in's output capacity") {
     // The modelled burst, not every possible block. The densest progression (the throughput test's fixture
     // above: eight-note chords at 96 events per beat, 300 bpm, 44.1 kHz, 4096-frame blocks) with eight

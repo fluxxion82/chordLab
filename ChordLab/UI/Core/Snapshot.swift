@@ -287,8 +287,8 @@ struct ErrorJSON: Codable {
 }
 
 /// `kMsgTagStatus` payload: `{"schema":1,"incompleteBlocks":n,"droppedHeard":m}`, audio blocks the
-/// scheduler could not complete and heard-ring overflows (debug aids; the counts only grow). Only
-/// `incompleteBlocks` is decoded here.
+/// scheduler could not complete and heard-ring overflows, plus raw MIDI ring overflows under AU (debug
+/// aids; the counts only grow). Only `incompleteBlocks` is decoded here.
 struct StatusJSON: Codable {
   let schema: Int
   let incompleteBlocks: Int
