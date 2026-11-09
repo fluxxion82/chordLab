@@ -2,7 +2,8 @@
 # ChordLab release: from a clean, tagged checkout to a notarized pkg (design: docs/plans/2026-11-06-release-design.md).
 #
 #   scripts/release.sh preflight [--report] [--rehearsal] [--skip-notarize]
-#       Checks only: tools, Developer ID identities, notary profile, iPlug2 checkout, versions, clean trees, tag.
+#       Checks only: tools, Developer ID identities, notary profile, iPlug2 checkout, versions, the six tracked
+#       Info.plists at that version, no ChordLab AU in /Library (auval would validate it instead), clean trees, tag.
 #       --report prints every check and exits 0 unless the repository itself is wrong (a contributor's gate).
 #   scripts/release.sh build [--rehearsal] [--skip-notarize] [--skip-auval]
 #       Release build of every format into dist/stage, signed with the Developer ID given on the xcodebuild
@@ -18,7 +19,9 @@
 # The Xcode project stays ad-hoc signed; nothing here changes it. The script writes dist/ (stage, pkgs, logs and
 # xcodebuild's intermediates: SYMROOT and OBJROOT point into it, so every build is cold) and the AU
 # copy that auval validates (~/Library/Audio/Plug-Ins/Components/ChordLab.component, see au_validate); nothing
-# else (Xcode's own shared module cache and logs under ~/Library/Developer aside).
+# else (Xcode's own shared module cache and logs under ~/Library/Developer aside; and the AU target's
+# clear_audiounit_caches.command build phase, which deletes the AU caches under ~/Library/Caches/AudioUnitCache
+# and AU Lab's component cache and kills AudioComponentRegistrar).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
@@ -36,6 +39,9 @@ STAGE="$DIST/stage"
 PKGS="$DIST/pkgs"
 LOGS="$DIST/log"
 FORMATS=(vst3 au app)
+# auval names no component path, so a /Library copy (an earlier pkg install) could be validated instead of this build.
+LIBRARY_AU=/Library/Audio/Plug-Ins/Components/ChordLab.component
+LIBRARY_AU_FIX="move it aside (sudo mv it to ~/chordlab-dev-aside/) so auval validates this build, then rerun"
 # IPLUG2_ROOT in ChordLab-mac.xcconfig is relative to ChordLab/projects (../../../iPlug2).
 IPLUG2_ROOT="$( (cd ChordLab/projects && rel="$(sed -n 's/^IPLUG2_ROOT *= *//p' ../config/ChordLab-mac.xcconfig)" \
     && [ -n "$rel" ] && cd "$rel" && pwd -P) 2>/dev/null || true)"
@@ -97,30 +103,37 @@ has_identity()      { local out; out=$(security find-identity -v -p "$1" 2>/dev/
 versions_agree()    { local hex; hex=$(version_hex); [ -n "$hex" ] && [ "$(hex_to_str "$hex")" = "$(version_str)" ]; }
 notary_profile_ok() { "$TIMEOUT_CMD" 30 xcrun notarytool history --keychain-profile "$NOTARY_PROFILE"; }
 plists_current() {  # prints what is stale; 0 when the tracked plists carry PLUG_VERSION_STR and PLUG_VERSION_HEX
-    # A version bump regenerates these plists during the first build after it, which would dirty the tree mid-build.
-    python3 -I - "$(version_str)" "$(version_hex)" ChordLab/resources/ChordLab-{VST3,AU,macOS}-Info.plist <<'PY'
+    # prepare_resources-mac.py rewrites these six on every build, so a version bump left uncommitted in any of
+    # them would dirty the tree mid-build (and only the final guard, after notarization, would notice).
+    python3 -I - "$(version_str)" "$(version_hex)" ChordLab/resources/ChordLab-{VST3,VST2,AU,macOS-AUv3,AAX,macOS}-Info.plist <<'PY'
 import plistlib, sys
 ver, hexv, paths = sys.argv[1], sys.argv[2], sys.argv[3:]
 try:
-    want_au = int(hexv, 16)
+    want_int = int(hexv, 16)
 except ValueError:
-    want_au = None
+    want_int = None
+want_hex = '0x' + hexv  # prepare_resources writes PLUG_VERSION_HEX as config.h spells it
 stale = []
 for path in paths:
     name = path.rsplit('/', 1)[-1]
     try:
         with open(path, 'rb') as fp:
             plist = plistlib.load(fp)
+        for key in ('CFBundleVersion', 'CFBundleShortVersionString'):
+            if plist.get(key) != ver:
+                stale.append('%s %s %s' % (name, key, plist.get(key)))
+        if name.endswith('-AU-Info.plist'):
+            if plist.get('AudioUnit Version') != want_hex:
+                stale.append('%s AudioUnit Version %s, expected %s' % (name, plist.get('AudioUnit Version'), want_hex))
+            got = plist['AudioComponents'][0]['version']
+            if want_int is None or got != want_int:
+                stale.append('%s AudioComponents[0].version %s, expected %s' % (name, got, want_int))
+        if name.endswith('-macOS-AUv3-Info.plist'):
+            got = plist['NSExtension']['NSExtensionAttributes']['AudioComponents'][0]['version']
+            if want_int is None or got != want_int:
+                stale.append('%s NSExtension AudioComponents[0].version %s, expected %s' % (name, got, want_int))
     except Exception as e:
-        stale.append('%s unreadable (%s)' % (name, e))
-        continue
-    if plist.get('CFBundleVersion') != ver:
-        stale.append('%s CFBundleVersion %s' % (name, plist.get('CFBundleVersion')))
-    if name.endswith('-AU-Info.plist'):
-        comps = plist.get('AudioComponents') or [{}]
-        got = comps[0].get('version') if isinstance(comps[0], dict) else None
-        if want_au is None or got != want_au:
-            stale.append('%s AudioComponents[0].version %s, expected %s' % (name, got, want_au))
+        stale.append('%s: %s' % (name, ' '.join(('%s: %s' % (type(e).__name__, e)).split())))
 print('; '.join(stale))
 sys.exit(1 if stale else 0)
 PY
@@ -138,7 +151,7 @@ preflight() {
     check "versions agree" "$(probe versions_agree)" "PLUG_VERSION_STR $ver, PLUG_VERSION_HEX 0x$(version_hex)" 1
     stale=$(plists_current 2>&1) && plists_rc=0 || plists_rc=1
     if [ "$plists_rc" -eq 0 ]; then
-        check "Info.plists current" 0 "CFBundleVersion $ver in the VST3, AU and macOS plists, AU version 0x$(version_hex)" 1
+        check "Info.plists current" 0 "VST3, VST2, AU, macOS-AUv3, AAX, macOS plists: CFBundleVersion and CFBundleShortVersionString $ver; AU 'AudioUnit Version' 0x$(version_hex), AU and AUv3 component version $((16#$(version_hex)))" 1
     else
         check "Info.plists current" 1 "${stale:-stale}: build once (scripts/check.sh --plugin) and commit the regenerated plists with the bump" 1
     fi
@@ -146,6 +159,13 @@ preflight() {
     check "VST3 SDK" "$(probe test -d "$IPLUG2_ROOT/Dependencies/IPlug/VST3_SDK/pluginterfaces")" "$IPLUG2_ROOT/Dependencies/IPlug/VST3_SDK" 1
     check "Developer ID Application" "$(probe has_identity codesigning "$APP_IDENTITY")" "$APP_IDENTITY"
     check "Developer ID Installer" "$(probe has_identity basic "$PKG_IDENTITY")" "$PKG_IDENTITY"
+    if [ "$SKIP_AUVAL" -eq 1 ]; then
+        row skip "no /Library AU" "--skip-auval"
+    elif [ -e "$LIBRARY_AU" ]; then
+        check "no /Library AU" 1 "$LIBRARY_AU exists: $LIBRARY_AU_FIX"
+    else
+        check "no /Library AU" 0 "$LIBRARY_AU absent (auval sees only the staged build)"
+    fi
     if [ "$SKIP_NOTARIZE" -eq 1 ]; then
         row skip "notary profile" "--skip-notarize"
     else
@@ -382,6 +402,7 @@ provenance() {
         echo "formats:        ${FORMATS[*]}"
         echo "auval:          $AUVAL_RESULT"
         if [ "$AUVAL_RESULT" = "$AUVAL_ARM64_ONLY" ]; then echo "WARNING:        auval ran on arm64 only (no Rosetta on the build Mac); the AU's x86_64 slice was not validated"; fi
+        if [ "$AUVAL_RESULT" = "$AUVAL_X86_64_ONLY" ]; then echo "WARNING:        auval ran on x86_64 only (an Intel build Mac); the AU's arm64 slice was not validated"; fi
         echo "notarized:      $([ "$SKIP_NOTARIZE" -eq 1 ] && echo no || echo yes)"
         echo "rehearsal:      $([ "$REHEARSAL" -eq 1 ] && echo yes || echo no)"
         echo "built:          $(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -406,6 +427,7 @@ publish() {
     case "$(prov_field auval)" in
         yes) ;;
         "$AUVAL_ARM64_ONLY") note "WARNING: the AU's x86_64 slice was not validated (auval: $AUVAL_ARM64_ONLY)" ;;
+        "$AUVAL_X86_64_ONLY") note "WARNING: the AU's arm64 slice was not validated (auval: $AUVAL_X86_64_ONLY)" ;;
         *) die "the AU was not validated (auval: $(prov_field auval)); rebuild without --skip-auval" ;;
     esac
     [ "$(prov_field formats)" = "${FORMATS[*]}" ] || die "the pkg has formats '$(prov_field formats)', expected '${FORMATS[*]}'"
@@ -429,12 +451,14 @@ publish() {
     note "published https://github.com/fluxxion82/chordLab/releases/tag/v$VER"
 }
 
-# auval: AUVAL_RESULT is "yes" (both slices), "yes (arm64 only)" (no Rosetta on this Mac: the x86_64 slice is not
-# validated, and the provenance says so) or "skipped"; publish accepts the first two.
+# auval: AUVAL_RESULT is "yes" (both slices), "yes (arm64 only)" (Apple silicon without Rosetta), "yes (x86_64 only)"
+# (an Intel Mac) or "skipped"; the provenance says which slice went unvalidated; publish accepts all but "skipped".
 AUVAL_ARM64_ONLY="yes (arm64 only)"
+AUVAL_X86_64_ONLY="yes (x86_64 only)"
 au_validate() {
-    local dst="$HOME/Library/Audio/Plug-Ins/Components/ChordLab.component" subtype mfr built_type
+    local dst="$HOME/Library/Audio/Plug-Ins/Components/ChordLab.component" subtype mfr built_type host
     if [ "$SKIP_AUVAL" -eq 1 ]; then AUVAL_RESULT=skipped; note "auval skipped (--skip-auval): not publishable"; return; fi
+    [ ! -e "$LIBRARY_AU" ] || die "$LIBRARY_AU exists: $LIBRARY_AU_FIX"   # again: the build may run long after preflight
     subtype=$(au_subtype); mfr=$(au_mfr)
     [ -n "$subtype" ] && [ -n "$mfr" ] || die "could not read PLUG_UNIQUE_ID / PLUG_MFR_ID from $CONFIG_H"
     # Xcode copies the Info.plist in parallel with the script that regenerates it, so the first build after a plist
@@ -446,15 +470,20 @@ au_validate() {
     killall -9 AudioComponentRegistrar 2>/dev/null || true
     auval -strict -v aumi "$subtype" "$mfr" >"$LOGS/auval.log" 2>&1 || { tail -n 40 "$LOGS/auval.log" >&2; die "auval failed (see $LOGS/auval.log)"; }
     grep -q "AU VALIDATION SUCCEEDED" "$LOGS/auval.log" || die "auval: no success line in $LOGS/auval.log"
-    if arch -x86_64 /usr/bin/true 2>/dev/null; then
+    host=$(uname -m)
+    if [ "$host" = arm64 ] && arch -x86_64 /usr/bin/true 2>/dev/null; then  # on Intel, arch -x86_64 is native
         arch -x86_64 auval -strict -v aumi "$subtype" "$mfr" >"$LOGS/auval-x86_64.log" 2>&1 || { tail -n 40 "$LOGS/auval-x86_64.log" >&2; die "auval (x86_64 slice) failed (see $LOGS/auval-x86_64.log)"; }
         grep -q "AU VALIDATION SUCCEEDED" "$LOGS/auval-x86_64.log" || die "auval (x86_64 slice): no success line in $LOGS/auval-x86_64.log"
         AUVAL_RESULT=yes
         note "auval passed for arm64 and x86_64 (aumi $subtype $mfr)"
-    else
+    elif [ "$host" = arm64 ]; then
         AUVAL_RESULT=$AUVAL_ARM64_ONLY
         note "auval passed for arm64 (aumi $subtype $mfr)"
         note "WARNING: Rosetta is not installed; the x86_64 slice was not validated (softwareupdate --install-rosetta)"
+    else
+        AUVAL_RESULT=$AUVAL_X86_64_ONLY
+        note "auval passed for $host (aumi $subtype $mfr)"
+        note "WARNING: this Mac is $host; the arm64 slice was not validated (only an Apple silicon Mac can run it)"
     fi
 }
 
