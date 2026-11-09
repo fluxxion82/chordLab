@@ -41,6 +41,16 @@ void expectHits(const std::vector<Hit>& hits, const Ints& starts, const Ints& en
 
 const Ints kAll3{0, 1, 2};
 
+/// An arpeggio feel: strum off, humanise off.
+Feel arp(ArpPattern pattern, ArpRate rate = ArpRate::Subdivision, ArpRange range = ArpRange::One) {
+    Feel feel;
+    feel.rhythm = Rhythm::Arpeggio;
+    feel.pattern = pattern;
+    feel.rate = rate;
+    feel.range = range;
+    return feel;
+}
+
 }  // namespace
 
 TEST_CASE("feel: kMinNoteTicks") { CHECK(kMinNoteTicks == 5); }
@@ -171,9 +181,9 @@ TEST_CASE("rhythmHits: low then upper with two notes and one note") {
 }
 
 TEST_CASE("rhythmHits: arp up") {
-    auto h = rhythmHits(Rhythm::ArpUp, {4, 4}, 0, 1920, 4, 100);
+    auto h = rhythmHits(arp(ArpPattern::Up), {4, 4}, 0, 1920, 4, 100);
     expectHits(h, {0, 480, 960, 1440}, {432, 912, 1392, 1872}, {100, 80, 90, 80}, {{0}, {1}, {2}, {3}});
-    h = rhythmHits(Rhythm::ArpUp, {4, 4}, 0, 3840, 3, 100);
+    h = rhythmHits(arp(ArpPattern::Up), {4, 4}, 0, 3840, 3, 100);
     REQUIRE(h.size() == 8);
     const Ints expected{0, 1, 2, 0, 1, 2, 0, 1};
     for (size_t i = 0; i < h.size(); ++i) {
@@ -184,19 +194,19 @@ TEST_CASE("rhythmHits: arp up") {
 
 TEST_CASE("rhythmHits: arp up counts from the chord's own first hit") {
     // Chord start 240 is hit 0; then 480, 960.
-    auto h = rhythmHits(Rhythm::ArpUp, {4, 4}, 240, 1200, 3, 100);
+    auto h = rhythmHits(arp(ArpPattern::Up), {4, 4}, 240, 1200, 3, 100);
     expectHits(h, {240, 480, 960}, {456, 912, 1176}, {100, 80, 90}, {{0}, {1}, {2}});
 }
 
 TEST_CASE("rhythmHits: arp up-down does not repeat its ends") {
-    auto h = rhythmHits(Rhythm::ArpUpDown, {4, 4}, 0, 3840, 4, 100);
+    auto h = rhythmHits(arp(ArpPattern::UpDown), {4, 4}, 0, 3840, 4, 100);
     REQUIRE(h.size() == 8);
     const Ints four{0, 1, 2, 3, 2, 1, 0, 1};
     for (size_t i = 0; i < h.size(); ++i) {
         INFO("hit " << i);
         CHECK(h[i].notes == Ints{four[i]});
     }
-    h = rhythmHits(Rhythm::ArpUpDown, {4, 4}, 0, 3840, 5, 100);
+    h = rhythmHits(arp(ArpPattern::UpDown), {4, 4}, 0, 3840, 5, 100);
     REQUIRE(h.size() == 8);
     const Ints five{0, 1, 2, 3, 4, 3, 2, 1};
     for (size_t i = 0; i < h.size(); ++i) {
@@ -206,11 +216,11 @@ TEST_CASE("rhythmHits: arp up-down does not repeat its ends") {
 }
 
 TEST_CASE("rhythmHits: arp up-down with two notes, and one note always plays 0") {
-    auto h = rhythmHits(Rhythm::ArpUpDown, {4, 4}, 0, 1920, 2, 100);
+    auto h = rhythmHits(arp(ArpPattern::UpDown), {4, 4}, 0, 1920, 2, 100);
     expectHits(h, {0, 480, 960, 1440}, {432, 912, 1392, 1872}, {100, 80, 90, 80}, {{0}, {1}, {0}, {1}});
-    h = rhythmHits(Rhythm::ArpUpDown, {4, 4}, 0, 1920, 1, 100);
+    h = rhythmHits(arp(ArpPattern::UpDown), {4, 4}, 0, 1920, 1, 100);
     expectHits(h, {0, 480, 960, 1440}, {432, 912, 1392, 1872}, {100, 80, 90, 80}, {{0}, {0}, {0}, {0}});
-    h = rhythmHits(Rhythm::ArpUp, {4, 4}, 0, 1920, 1, 100);
+    h = rhythmHits(arp(ArpPattern::Up), {4, 4}, 0, 1920, 1, 100);
     expectHits(h, {0, 480, 960, 1440}, {432, 912, 1392, 1872}, {100, 80, 90, 80}, {{0}, {0}, {0}, {0}});
 }
 
@@ -526,10 +536,10 @@ TEST_CASE("strum: low-then-upper strums the upper notes; arpeggios ignore the st
         docOf({chordEvent(1, chordOf(0, "maj"), 2.0)}, Feel{Rhythm::LowThenUpper, Strum::Down, StrumSpeed::Medium});
     expectEvents(performDocument(low), {on(0, 60, 100), off(864, 60), on(960, 64, 90), on(980, 67, 90),
                                         off(1824, 64), off(1824, 67)});
-    for (Rhythm arp : {Rhythm::ArpUp, Rhythm::ArpUpDown}) {
+    for (ArpPattern p : {ArpPattern::Up, ArpPattern::UpDown}) {
         const Document strummed =
-            docOf({chordEvent(1, chordOf(0, "maj"), 2.0)}, Feel{arp, Strum::Up, StrumSpeed::Loose});
-        const Document plainArp = docOf({chordEvent(1, chordOf(0, "maj"), 2.0)}, Feel{arp});
+            docOf({chordEvent(1, chordOf(0, "maj"), 2.0)}, Feel{Rhythm::Arpeggio, Strum::Up, StrumSpeed::Loose, Humanise::Off, p});
+        const Document plainArp = docOf({chordEvent(1, chordOf(0, "maj"), 2.0)}, arp(p));
         CHECK(plain(performDocument(strummed)) == plain(performDocument(plainArp)));
     }
 }
@@ -558,7 +568,7 @@ TEST_CASE("humanise: literal ons and velocities for one heavy pulse chord") {
 
 TEST_CASE("humanise: off is exactly the unhumanised performance") {
     for (Rhythm r : {Rhythm::Block, Rhythm::Pulse, Rhythm::Subdivided, Rhythm::Offbeats, Rhythm::LowThenUpper,
-                     Rhythm::ArpUp, Rhythm::ArpUpDown}) {
+                     Rhythm::Arpeggio}) {
         CAPTURE(static_cast<int>(r));
         const Document doc = docOf({chordEvent(1, chordOf(0, "maj"), 4.0), chordEvent(2, chordOf(9, "m7"), 2.5, 77)},
                                    Feel{r, Strum::Off, StrumSpeed::Medium, Humanise::Off});
@@ -600,8 +610,9 @@ TEST_CASE("humanise: a chord's first hit never starts before the chord; strum or
                                         chordOf(static_cast<int>(rng() % 12), types[rng() % 5]), len,
                                         1 + static_cast<int>(rng() % 127)));
         }
-        const Feel feel{static_cast<Rhythm>(rng() % 7), static_cast<Strum>(rng() % 4),
-                        static_cast<StrumSpeed>(rng() % 3), static_cast<Humanise>(1 + rng() % 3)};
+        Feel feel{static_cast<Rhythm>(rng() % 6), static_cast<Strum>(rng() % 4),
+                  static_cast<StrumSpeed>(rng() % 3), static_cast<Humanise>(1 + rng() % 3)};
+        feel.pattern = static_cast<ArpPattern>(rng() % 2);  // widened in Task 2
         const Meter meters[] = {{4, 4}, {3, 4}, {6, 8}, {7, 8}, {5, 4}};
         const Document doc = docOf(events, feel, meters[rng() % 5]);
         const Performance p = performDocument(doc);
@@ -613,11 +624,11 @@ TEST_CASE("humanise: a chord's first hit never starts before the chord; strum or
         for (const PerformedEvent& e : p.events) {
             if (e.on) hits[{e.chord, e.hit}].push_back(&e);
         }
-        const bool arp = feel.rhythm == Rhythm::ArpUp || feel.rhythm == Rhythm::ArpUpDown;
+        const bool isArp = feel.rhythm == Rhythm::Arpeggio;
         for (const auto& [where, ons] : hits) {
             const int s = p.chordTicks[static_cast<std::size_t>(where.first)];
             for (const PerformedEvent* e : ons) CHECK(e->tick >= s);
-            if (feel.strum == Strum::Off || arp) continue;
+            if (feel.strum == Strum::Off || isArp) continue;
             // Strum order: down = ascending voicing index, up = descending; down-up depends on the hit. The
             // ons in that order must have non-decreasing ticks; check whichever direction the hit used by
             // requiring the order to be monotone in pitch one way or the other, and the right way when fixed.
@@ -730,8 +741,9 @@ TEST_CASE("safety: random documents and feels keep every note paired, inside its
             events.push_back(chordEvent(i + 1, chordOf(static_cast<int>(rng() % 12), types[rng() % 7]), len,
                                         1 + static_cast<int>(rng() % 127)));
         }
-        const Feel feel{static_cast<Rhythm>(rng() % 7), static_cast<Strum>(rng() % 4),
-                        static_cast<StrumSpeed>(rng() % 3), static_cast<Humanise>(rng() % 4)};
+        Feel feel{static_cast<Rhythm>(rng() % 6), static_cast<Strum>(rng() % 4),
+                  static_cast<StrumSpeed>(rng() % 3), static_cast<Humanise>(rng() % 4)};
+        feel.pattern = static_cast<ArpPattern>(rng() % 2);  // widened in Task 2
         const Meter meters[] = {{4, 4}, {3, 4}, {2, 4}, {6, 8}, {7, 8}, {9, 8}, {12, 8}, {3, 8}, {5, 4}, {2, 2}};
         Document doc = docOf(events, feel, meters[rng() % 10]);
         doc.autoVoiceLead = rng() % 2 == 0;

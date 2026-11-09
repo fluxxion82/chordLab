@@ -731,6 +731,9 @@ TEST_CASE("Document: feel and meter default to block, off, medium, off and 4/4")
     CHECK(doc.feel.strum == Strum::Off);
     CHECK(doc.feel.speed == StrumSpeed::Medium);
     CHECK(doc.feel.humanise == Humanise::Off);
+    CHECK(doc.feel.pattern == ArpPattern::Up);
+    CHECK(doc.feel.rate == ArpRate::Subdivision);
+    CHECK(doc.feel.range == ArpRange::One);
     CHECK(doc.meter.num == 4);
     CHECK(doc.meter.den == 4);
 }
@@ -739,7 +742,16 @@ TEST_CASE("Document ==: each feel and meter field makes documents unequal") {
     Document a;
     Document b;
     CHECK(a == b);
-    b.feel.rhythm = Rhythm::ArpUpDown;
+    b.feel.rhythm = Rhythm::Arpeggio;
+    CHECK(a != b);
+    b = a;
+    b.feel.pattern = ArpPattern::Alberti;
+    CHECK(a != b);
+    b = a;
+    b.feel.rate = ArpRate::Half;
+    CHECK(a != b);
+    b = a;
+    b.feel.range = ArpRange::Two;
     CHECK(a != b);
     b = a;
     b.feel.strum = Strum::DownUp;
@@ -776,6 +788,33 @@ TEST_CASE("setFeel: one undo step, undo and redo restore, an equal value pushes 
     REQUIRE(store.redo());
     CHECK(store.doc().feel == feel);
     CHECK_FALSE(store.redo());
+}
+
+TEST_CASE("DocumentStore::setFeel: each arpeggio field alone is one undoable step") {
+    DocumentStore store;
+    const Feel start = store.doc().feel;
+    Feel f = start;
+    f.pattern = ArpPattern::Alberti;
+    store.setFeel(f);
+    f.rate = ArpRate::Half;
+    store.setFeel(f);
+    f.range = ArpRange::Two;
+    store.setFeel(f);
+    store.setFeel(f);  // equal: no step
+    CHECK(store.doc().feel == f);
+    store.undo();
+    CHECK(store.doc().feel.range == ArpRange::One);
+    CHECK(store.doc().feel.rate == ArpRate::Half);
+    store.undo();
+    CHECK(store.doc().feel.rate == ArpRate::Subdivision);
+    CHECK(store.doc().feel.pattern == ArpPattern::Alberti);
+    store.undo();
+    CHECK(store.doc().feel == start);
+    store.redo();
+    store.redo();
+    store.redo();
+    CHECK(store.doc().feel == f);
+    CHECK_FALSE(store.redo());  // the equal setFeel pushed nothing
 }
 
 TEST_CASE("setMeter: one undo step, undo and redo restore, an equal value pushes nothing") {

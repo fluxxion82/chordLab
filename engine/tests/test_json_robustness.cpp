@@ -204,9 +204,12 @@ std::string invariantProblem(const DocumentStore& store, bool snapshot = true) {
     if (!validMeter(d.meter)) {
         return "invalid meter " + std::to_string(d.meter.num) + "/" + std::to_string(d.meter.den);
     }
-    if (static_cast<int>(d.feel.rhythm) < 0 || d.feel.rhythm > Rhythm::ArpUpDown || static_cast<int>(d.feel.strum) < 0 ||
+    if (static_cast<int>(d.feel.rhythm) < 0 || d.feel.rhythm > Rhythm::Arpeggio || static_cast<int>(d.feel.strum) < 0 ||
         d.feel.strum > Strum::DownUp || static_cast<int>(d.feel.speed) < 0 || d.feel.speed > StrumSpeed::Loose ||
-        static_cast<int>(d.feel.humanise) < 0 || d.feel.humanise > Humanise::Heavy) {
+        static_cast<int>(d.feel.humanise) < 0 || d.feel.humanise > Humanise::Heavy ||
+        static_cast<int>(d.feel.pattern) < 0 || d.feel.pattern > ArpPattern::Random ||
+        static_cast<int>(d.feel.rate) < 0 || d.feel.rate > ArpRate::Half || static_cast<int>(d.feel.range) < 0 ||
+        d.feel.range > ArpRange::Two) {
         return "feel enum out of range";
     }
     std::set<int> ids;

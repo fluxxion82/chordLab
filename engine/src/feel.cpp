@@ -16,15 +16,6 @@ namespace {
 
 int clampVelocity(int v) { return std::min(127, std::max(1, v)); }
 
-// Which indices of an n-note voicing the k-th arpeggio hit plays (D5).
-int arpIndex(Rhythm rhythm, int k, int n) {
-    if (n <= 1) return 0;
-    if (rhythm == Rhythm::ArpUp) return k % n;
-    const int period = 2 * (n - 1);
-    const int m = k % period;
-    return m < n ? m : period - m;
-}
-
 std::vector<int> allNotes(int n) {
     std::vector<int> notes(static_cast<size_t>(n));
     for (int i = 0; i < n; ++i) notes[static_cast<size_t>(i)] = i;
@@ -33,7 +24,24 @@ std::vector<int> allNotes(int n) {
 
 }  // namespace
 
-std::vector<Hit> rhythmHits(Rhythm rhythm, Meter meter, int s, int e, int noteCount, int velocity) {
+int arpIndex(ArpPattern pattern, int k, int n) {
+    assert(k >= 0 && n >= 1);
+    assert(pattern != ArpPattern::Chord && pattern != ArpPattern::Random);
+    if (n == 1) return 0;
+    switch (pattern) {
+        case ArpPattern::UpDown: {
+            const int period = 2 * (n - 1);
+            const int m = k % period;
+            return m < n ? m : period - m;
+        }
+        default:  // Up; the other patterns follow in Task 2
+            return k % n;
+    }
+}
+
+std::vector<Hit> rhythmHits(const Feel& feel, Meter meter, int s, int e, int noteCount, int velocity, int id) {
+    (void)id;  // read by Random (Task 3)
+    const Rhythm rhythm = feel.rhythm;
     std::vector<Hit> hits;
     if (e <= s || noteCount < 1) return hits;
 
@@ -51,8 +59,7 @@ std::vector<Hit> rhythmHits(Rhythm rhythm, Meter meter, int s, int e, int noteCo
             for (int t : gridPointsInside(s, e, pulse)) starts.push_back(t);
             break;
         case Rhythm::Subdivided:
-        case Rhythm::ArpUp:
-        case Rhythm::ArpUpDown:
+        case Rhythm::Arpeggio:
             for (int t : gridPointsInside(s, e, sub)) starts.push_back(t);
             break;
         case Rhythm::Offbeats:
@@ -92,8 +99,8 @@ std::vector<Hit> rhythmHits(Rhythm rhythm, Meter meter, int s, int e, int noteCo
                 notes = {0};
             else
                 for (int k = 1; k < noteCount; ++k) notes.push_back(k);
-        } else if (rhythm == Rhythm::ArpUp || rhythm == Rhythm::ArpUpDown) {
-            notes = {arpIndex(rhythm, static_cast<int>(i), noteCount)};
+        } else if (rhythm == Rhythm::Arpeggio) {
+            notes = {arpIndex(feel.pattern, static_cast<int>(i), noteCount)};
         } else {
             notes = allNotes(noteCount);
         }
@@ -210,14 +217,14 @@ void performChord(const Document& doc, std::size_t index, const std::vector<int>
                   std::vector<Note>& notes) {
     const ChordEvent& event = doc.events[index];
     const Feel& feel = doc.feel;
-    const bool arp = feel.rhythm == Rhythm::ArpUp || feel.rhythm == Rhythm::ArpUpDown;
+    const bool arp = feel.rhythm == Rhythm::Arpeggio;
     const Strum strum = arp ? Strum::Off : feel.strum;  // arpeggios ignore the strum
     const Amounts amounts = amountsOf(feel.humanise);
     const bool humanise = feel.humanise != Humanise::Off;
     const int chord = static_cast<int>(index);
 
     const std::vector<Hit> hits =
-        rhythmHits(feel.rhythm, doc.meter, s, e, static_cast<int>(voicing.size()), event.velocity);
+        rhythmHits(feel, doc.meter, s, e, static_cast<int>(voicing.size()), event.velocity, event.id);
     for (std::size_t k = 0; k < hits.size(); ++k) {
         const Hit& hit = hits[k];
         const int hitIndex = static_cast<int>(k);

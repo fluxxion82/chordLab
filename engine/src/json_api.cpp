@@ -647,7 +647,7 @@ bool parseProgressionLoadField(Fields& fields, ProgressionLoad& out) {
 // --- Feel and meter wire names ---------------------------------------------------------
 
 /// Wire names of the feel enums, each in enum order (`feel.h`).
-constexpr const char* kRhythmNames[] = {"block", "pulse", "subdivided", "offbeats", "lowThenUpper", "arpUp", "arpUpDown"};
+constexpr const char* kRhythmNames[] = {"block", "pulse", "subdivided", "offbeats", "lowThenUpper", "arpeggio"};
 constexpr const char* kStrumNames[] = {"off", "down", "up", "downUp"};
 constexpr const char* kStrumSpeedNames[] = {"tight", "medium", "loose"};
 constexpr const char* kHumaniseNames[] = {"off", "light", "medium", "heavy"};
@@ -684,11 +684,21 @@ bool parseNameField(Fields& fields, const char* name, const char* const (&names)
 }
 
 /// The four string fields of a feel, in `fields` (a `setFeel` message or a state's `feel` object); all required.
-/// Parsed into a local first, so a failure leaves `out` as it was.
+/// `rhythm` also accepts the names of builds before the arpeggio patterns, `arpUp` and `arpUpDown`: the
+/// Arpeggio rhythm with pattern up or upDown (Task 6 adds the pattern, rate and range fields). Parsed into a
+/// local first, so a failure leaves `out` as it was.
 bool parseFeelFields(Fields& fields, Feel& out) {
     Feel feel;
-    if (!parseNameField(fields, "rhythm", kRhythmNames, feel.rhythm) ||
-        !parseNameField(fields, "strum", kStrumNames, feel.strum) ||
+    const json* rhythm = fields.find("rhythm");
+    const bool legacyUp = rhythm != nullptr && rhythm->is_string() && *rhythm == "arpUp";
+    const bool legacyUpDown = rhythm != nullptr && rhythm->is_string() && *rhythm == "arpUpDown";
+    if (legacyUp || legacyUpDown) {
+        feel.rhythm = Rhythm::Arpeggio;
+        feel.pattern = legacyUpDown ? ArpPattern::UpDown : ArpPattern::Up;
+    } else if (!parseNameField(fields, "rhythm", kRhythmNames, feel.rhythm)) {
+        return false;
+    }
+    if (!parseNameField(fields, "strum", kStrumNames, feel.strum) ||
         !parseNameField(fields, "strumSpeed", kStrumSpeedNames, feel.speed) ||
         !parseNameField(fields, "humanise", kHumaniseNames, feel.humanise)) {
         return false;
@@ -712,7 +722,11 @@ bool parseMeterFields(Fields& fields, Meter& out) {
 }
 
 json feelToJson(const Feel& feel) {
-    return {{"rhythm", kRhythmNames[static_cast<int>(feel.rhythm)]},
+    // Until Task 6 the wire keeps the old names: arpeggio up / up-down.
+    const char* rhythm = feel.rhythm == Rhythm::Arpeggio
+                             ? (feel.pattern == ArpPattern::UpDown ? "arpUpDown" : "arpUp")
+                             : kRhythmNames[static_cast<int>(feel.rhythm)];
+    return {{"rhythm", rhythm},
             {"strum", kStrumNames[static_cast<int>(feel.strum)]},
             {"strumSpeed", kStrumSpeedNames[static_cast<int>(feel.speed)]},
             {"humanise", kHumaniseNames[static_cast<int>(feel.humanise)]}};

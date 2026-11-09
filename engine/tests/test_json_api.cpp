@@ -1228,9 +1228,7 @@ TEST_CASE("setFeel: every option of every field is accepted and lands in the doc
                                                       {"pulse", Rhythm::Pulse},
                                                       {"subdivided", Rhythm::Subdivided},
                                                       {"offbeats", Rhythm::Offbeats},
-                                                      {"lowThenUpper", Rhythm::LowThenUpper},
-                                                      {"arpUp", Rhythm::ArpUp},
-                                                      {"arpUpDown", Rhythm::ArpUpDown}};
+                                                      {"lowThenUpper", Rhythm::LowThenUpper}};
     const std::pair<const char*, Strum> strums[] = {
         {"off", Strum::Off}, {"down", Strum::Down}, {"up", Strum::Up}, {"downUp", Strum::DownUp}};
     const std::pair<const char*, StrumSpeed> speeds[] = {
@@ -1243,20 +1241,27 @@ TEST_CASE("setFeel: every option of every field is accepted and lands in the doc
         applyOk(store, feelCmd(r.first, "up", "loose", "heavy"));
         CHECK(store.doc().feel == Feel{r.second, Strum::Up, StrumSpeed::Loose, Humanise::Heavy});
     }
+    {
+        DocumentStore store = threeChords();
+        applyOk(store, feelCmd("arpUp", "up", "loose", "heavy"));
+        CHECK(store.doc().feel == Feel{Rhythm::Arpeggio, Strum::Up, StrumSpeed::Loose, Humanise::Heavy, ArpPattern::Up});
+        applyOk(store, feelCmd("arpUpDown", "up", "loose", "heavy"));
+        CHECK(store.doc().feel == Feel{Rhythm::Arpeggio, Strum::Up, StrumSpeed::Loose, Humanise::Heavy, ArpPattern::UpDown});
+    }
     for (const auto& st : strums) {
         DocumentStore store = threeChords();
         applyOk(store, feelCmd("arpUp", st.first, "loose", "heavy"));
-        CHECK(store.doc().feel == Feel{Rhythm::ArpUp, st.second, StrumSpeed::Loose, Humanise::Heavy});
+        CHECK(store.doc().feel == Feel{Rhythm::Arpeggio, st.second, StrumSpeed::Loose, Humanise::Heavy});
     }
     for (const auto& sp : speeds) {
         DocumentStore store = threeChords();
         applyOk(store, feelCmd("arpUp", "up", sp.first, "heavy"));
-        CHECK(store.doc().feel == Feel{Rhythm::ArpUp, Strum::Up, sp.second, Humanise::Heavy});
+        CHECK(store.doc().feel == Feel{Rhythm::Arpeggio, Strum::Up, sp.second, Humanise::Heavy});
     }
     for (const auto& h : humanises) {
         DocumentStore store = threeChords();
         applyOk(store, feelCmd("arpUp", "up", "loose", h.first));
-        CHECK(store.doc().feel == Feel{Rhythm::ArpUp, Strum::Up, StrumSpeed::Loose, h.second});
+        CHECK(store.doc().feel == Feel{Rhythm::Arpeggio, Strum::Up, StrumSpeed::Loose, h.second});
     }
 }
 
@@ -1551,7 +1556,7 @@ TEST_CASE("state: a state without feel and meter loads block chords in 4/4") {
     onlyFeel["feel"] = {{"rhythm", "arpUp"}, {"strum", "off"}, {"strumSpeed", "medium"}, {"humanise", "off"}};
     onlyFeel.erase("meter");
     REQUIRE_MESSAGE(loadStateJson(store, onlyFeel.dump(), error), error);
-    CHECK(store.doc().feel.rhythm == Rhythm::ArpUp);
+    CHECK(store.doc().feel.rhythm == Rhythm::Arpeggio);
     CHECK(store.doc().meter.num == 4);
     json onlyMeter = json::parse(stateJson(source));
     onlyMeter["meter"] = {{"num", 6}, {"den", 8}};

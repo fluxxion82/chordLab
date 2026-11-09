@@ -153,7 +153,7 @@ std::string stateProgression() {
 /// humanise) in 6/8.
 DocumentStore feelStore() {
     DocumentStore store = progressionStore(nullptr);
-    store.setFeel(Feel{Rhythm::ArpUpDown, Strum::DownUp, StrumSpeed::Tight, Humanise::Light});
+    store.setFeel(Feel{Rhythm::Arpeggio, Strum::DownUp, StrumSpeed::Tight, Humanise::Light, ArpPattern::UpDown});
     store.setMeter(Meter{6, 8});
     return store;
 }

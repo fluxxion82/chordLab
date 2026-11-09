@@ -297,15 +297,15 @@ TEST_CASE("publication: a feel change bumps the generation only when it changes 
     CHECK_FALSE(fillSlot(store.doc(), *slot, last));
     CHECK(last.generation == 1);
 
-    store.setFeel(Feel{Rhythm::ArpUp, Strum::Down, StrumSpeed::Medium, Humanise::Off});
+    store.setFeel(Feel{Rhythm::Arpeggio, Strum::Down, StrumSpeed::Medium, Humanise::Off});
     REQUIRE(fillSlot(store.doc(), *slot, last));
     CHECK(last.generation == 2);
     const std::vector<NoteEvent> arp = eventsOf(*slot);
 
     // Arpeggios ignore the strum: neither its speed nor its direction changes an event.
-    store.setFeel(Feel{Rhythm::ArpUp, Strum::Down, StrumSpeed::Loose, Humanise::Off});
+    store.setFeel(Feel{Rhythm::Arpeggio, Strum::Down, StrumSpeed::Loose, Humanise::Off});
     CHECK_FALSE(fillSlot(store.doc(), *slot, last));
-    store.setFeel(Feel{Rhythm::ArpUp, Strum::Up, StrumSpeed::Tight, Humanise::Off});
+    store.setFeel(Feel{Rhythm::Arpeggio, Strum::Up, StrumSpeed::Tight, Humanise::Off});
     CHECK_FALSE(fillSlot(store.doc(), *slot, last));
     CHECK(last.generation == 2);
     CHECK(eventsOf(*slot) == arp);
@@ -314,10 +314,10 @@ TEST_CASE("publication: a feel change bumps the generation only when it changes 
     CHECK_FALSE(fillSlot(store.doc(), *slot, last));
 
     // A rhythm or a humanise that moves notes is content.
-    store.setFeel(Feel{Rhythm::ArpUpDown, Strum::Up, StrumSpeed::Tight, Humanise::Off});
+    store.setFeel(Feel{Rhythm::Arpeggio, Strum::Up, StrumSpeed::Tight, Humanise::Off, ArpPattern::UpDown});
     REQUIRE(fillSlot(store.doc(), *slot, last));
     CHECK(last.generation == 3);
-    store.setFeel(Feel{Rhythm::ArpUpDown, Strum::Up, StrumSpeed::Tight, Humanise::Light});
+    store.setFeel(Feel{Rhythm::Arpeggio, Strum::Up, StrumSpeed::Tight, Humanise::Light, ArpPattern::UpDown});
     REQUIRE(fillSlot(store.doc(), *slot, last));
     CHECK(last.generation == 4);
     CHECK(eventsOf(*slot) == compile(store.doc()).events);
