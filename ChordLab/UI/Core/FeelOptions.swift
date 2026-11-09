@@ -163,7 +163,7 @@ enum FeelOptions {
   static let defaultFeel = FeelJSON(rhythm: "block", strum: "off", strumSpeed: "medium", humanise: "off",
                                     arpPattern: "up", arpRate: "subdivision", arpRange: "one")
 
-  /// what one control of
+  /// `feel` (the default when the snapshot has none) with the given fields replaced: what one control of
   /// the popover sends, all seven fields (the arpeggio ones defaulted) as `setFeel` requires.
   static func changed(_ feel: FeelJSON?, rhythm: String? = nil, strum: String? = nil, strumSpeed: String? = nil,
                       humanise: String? = nil, arpPattern: String? = nil, arpRate: String? = nil,
