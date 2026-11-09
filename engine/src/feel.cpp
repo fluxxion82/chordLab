@@ -48,7 +48,13 @@ int arpIndex(ArpPattern pattern, int k, int n) {
             return n - 1 - (m < n ? m : 2 * n - 1 - m);
         }
         case ArpPattern::Converge: return converge(k % n);
-        case ArpPattern::Diverge: return converge(n - 1 - k % n);
+        case ArpPattern::Diverge: {
+            // From the middle outwards, below first: n/2, n/2 - 1, n/2 + 1, n/2 - 2, ... (Live's Diverge; for an
+            // even count this is Converge backwards, for an odd one it is not).
+            const int m = k % n;
+            const int step = (m + 1) / 2;
+            return m % 2 == 1 ? n / 2 - step : n / 2 + step;
+        }
         case ArpPattern::ConAndDiverge: return converge(upDown(k % bounce, n));
         case ArpPattern::PinkyUp: return k % 2 == 1 ? n - 1 : (k / 2) % (n - 1);
         case ArpPattern::PinkyUpDown:
@@ -70,6 +76,32 @@ int arpIndex(ArpPattern pattern, int k, int n) {
         case ArpPattern::Random: break;
     }
     return 0;
+}
+
+int arpCycle(ArpPattern pattern, int n) {
+    assert(n >= 1);
+    assert(pattern != ArpPattern::Random);
+    if (n == 1) return 1;
+    switch (pattern) {
+        case ArpPattern::Up:
+        case ArpPattern::Down:
+        case ArpPattern::RootFirst:
+        case ArpPattern::Converge:
+        case ArpPattern::Diverge: return n;
+        case ArpPattern::UpDown:
+        case ArpPattern::DownUp:
+        case ArpPattern::ConAndDiverge: return 2 * n - 2;
+        case ArpPattern::UpAndDown:
+        case ArpPattern::DownAndUp: return 2 * n;
+        case ArpPattern::PinkyUp:
+        case ArpPattern::ThumbUp: return 2 * (n - 1);
+        case ArpPattern::PinkyUpDown:
+        case ArpPattern::ThumbUpDown: return n == 2 ? 2 : 4 * (n - 2);
+        case ArpPattern::Alberti: return 4;
+        case ArpPattern::Chord: return 1;
+        case ArpPattern::Random: break;
+    }
+    return n;
 }
 
 int arpStepTicks(ArpRate rate, Meter meter) {
@@ -96,16 +128,14 @@ std::vector<int> arpeggioNotes(const Chord& chord, const std::vector<int>& voici
         };
         std::stable_sort(octave.begin(), octave.end(), [&](int a, int b) { return tone(a) < tone(b); });
     }
+    // Octave by octave: the voicing (in chord-tone order for root first), then the same an octave up, so index
+    // i + n is note i an octave higher whatever the chord's span. Pitches above 127 stay in the list to keep
+    // the indices aligned; performChord drops them.
     std::vector<int> notes;
     const int octaves = range == ArpRange::Two ? 2 : 1;
     for (int o = 0; o < octaves; ++o) {
-        for (int pitch : octave) {
-            const int p = pitch + 12 * o;
-            if (p <= 127) notes.push_back(p);
-        }
+        for (int pitch : octave) notes.push_back(pitch + 12 * o);
     }
-    // Pitch order across both octaves (a ninth's D5 sits above the octave's C5); root first keeps its own order.
-    if (!rootFirst) std::sort(notes.begin(), notes.end());
     return notes;
 }
 
@@ -144,6 +174,7 @@ std::vector<Hit> rhythmHits(const Feel& feel, Meter meter, int s, int e, int not
         return hits;
     }
 
+    const int octaves = feel.range == ArpRange::Two ? 2 : 1;
     int previousRandom = -1;
     for (size_t i = 0; i < starts.size(); ++i) {
         const int t = starts[i];
@@ -172,13 +203,19 @@ std::vector<Hit> rhythmHits(const Feel& feel, Meter meter, int s, int e, int not
             else
                 for (int k = 1; k < noteCount; ++k) notes.push_back(k);
         } else if (rhythm == Rhythm::Arpeggio) {
-            if (feel.pattern == ArpPattern::Chord) {
-                notes = allNotes(noteCount);
-            } else if (feel.pattern == ArpPattern::Random) {
-                previousRandom = arpRandomIndex(id, static_cast<int>(i), noteCount, previousRandom);
+            // `noteCount` notes per octave; the octave above starts at index noteCount (arpeggioNotes). Random
+            // draws from both octaves at once; every other pattern plays one cycle per octave, Live-style.
+            const int k = static_cast<int>(i);
+            if (feel.pattern == ArpPattern::Random) {
+                previousRandom = arpRandomIndex(id, k, noteCount * octaves, previousRandom);
                 notes = {previousRandom};
             } else {
-                notes = {arpIndex(feel.pattern, static_cast<int>(i), noteCount)};
+                const int octave = (k / arpCycle(feel.pattern, noteCount)) % octaves;
+                if (feel.pattern == ArpPattern::Chord) {
+                    for (int n = 0; n < noteCount; ++n) notes.push_back(octave * noteCount + n);
+                } else {
+                    notes = {octave * noteCount + arpIndex(feel.pattern, k, noteCount)};
+                }
             }
         } else {
             notes = allNotes(noteCount);
@@ -304,7 +341,7 @@ void performChord(const Document& doc, std::size_t index, const std::vector<int>
 
     const std::vector<int> notesList = arp ? arpeggioNotes(event.chord, voicing, feel.pattern, feel.range) : voicing;
     const std::vector<Hit> hits =
-        rhythmHits(feel, doc.meter, s, e, static_cast<int>(notesList.size()), event.velocity, event.id);
+        rhythmHits(feel, doc.meter, s, e, static_cast<int>(voicing.size()), event.velocity, event.id);
     for (std::size_t k = 0; k < hits.size(); ++k) {
         const Hit& hit = hits[k];
         const int hitIndex = static_cast<int>(k);
@@ -341,8 +378,9 @@ void performChord(const Document& doc, std::size_t index, const std::vector<int>
             const int clampedOn = std::min(std::max(on, s), e - kMinNoteTicks);
             const int clampedOff = std::min(off, e);
             if (clampedOff - clampedOn < kMinNoteTicks) continue;
-            notes.push_back(Note{clampedOn, clampedOff, notesList[static_cast<std::size_t>(noteIndex)], velocity, chord,
-                                 hitIndex});
+            const int pitch = notesList[static_cast<std::size_t>(noteIndex)];
+            if (pitch > 127) continue;  // an arpeggio's upper octave of a very high voicing (not with the dictionary)
+            notes.push_back(Note{clampedOn, clampedOff, pitch, velocity, chord, hitIndex});
         }
     }
 }

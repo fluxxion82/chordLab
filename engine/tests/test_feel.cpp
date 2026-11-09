@@ -258,7 +258,7 @@ TEST_CASE("arpIndex: three and five notes") {
     CHECK(indices(ArpPattern::UpAndDown, 3, 7) == Ints{0, 1, 2, 2, 1, 0, 0});
     CHECK(indices(ArpPattern::DownAndUp, 3, 7) == Ints{2, 1, 0, 0, 1, 2, 2});
     CHECK(indices(ArpPattern::Converge, 3, 4) == Ints{0, 2, 1, 0});
-    CHECK(indices(ArpPattern::Diverge, 3, 4) == Ints{1, 2, 0, 1});
+    CHECK(indices(ArpPattern::Diverge, 3, 4) == Ints{1, 0, 2, 1});  // Live: middle, below, above
     CHECK(indices(ArpPattern::ConAndDiverge, 3, 5) == Ints{0, 2, 1, 2, 0});
     CHECK(indices(ArpPattern::PinkyUp, 3, 5) == Ints{0, 2, 1, 2, 0});
     CHECK(indices(ArpPattern::PinkyUpDown, 3, 5) == Ints{0, 2, 1, 2, 0});  // equals PinkyUp with three notes
@@ -274,7 +274,7 @@ TEST_CASE("arpIndex: three and five notes") {
     CHECK(indices(ArpPattern::UpAndDown, 5, 11) == Ints{0, 1, 2, 3, 4, 4, 3, 2, 1, 0, 0});
     CHECK(indices(ArpPattern::DownAndUp, 5, 11) == Ints{4, 3, 2, 1, 0, 0, 1, 2, 3, 4, 4});
     CHECK(indices(ArpPattern::Converge, 5, 6) == Ints{0, 4, 1, 3, 2, 0});
-    CHECK(indices(ArpPattern::Diverge, 5, 6) == Ints{2, 3, 1, 4, 0, 2});
+    CHECK(indices(ArpPattern::Diverge, 5, 6) == Ints{2, 1, 3, 0, 4, 2});  // Live: middle, then down, up, down, up
     CHECK(indices(ArpPattern::ConAndDiverge, 5, 9) == Ints{0, 4, 1, 3, 2, 3, 1, 4, 0});
     CHECK(indices(ArpPattern::PinkyUp, 5, 9) == Ints{0, 4, 1, 4, 2, 4, 3, 4, 0});
     CHECK(indices(ArpPattern::PinkyUpDown, 5, 13) == Ints{0, 4, 1, 4, 2, 4, 3, 4, 2, 4, 1, 4, 0});
@@ -284,7 +284,7 @@ TEST_CASE("arpIndex: three and five notes") {
     CHECK(indices(ArpPattern::RootFirst, 5, 6) == Ints{0, 1, 2, 3, 4, 0});
 }
 
-TEST_CASE("arpIndex: six notes (a triad over two octaves)") {
+TEST_CASE("arpIndex: six notes") {
     CHECK(indices(ArpPattern::Up, 6, 7) == Ints{0, 1, 2, 3, 4, 5, 0});
     CHECK(indices(ArpPattern::Down, 6, 7) == Ints{5, 4, 3, 2, 1, 0, 5});
     CHECK(indices(ArpPattern::UpDown, 6, 11) == Ints{0, 1, 2, 3, 4, 5, 4, 3, 2, 1, 0});
@@ -332,6 +332,45 @@ TEST_CASE("arpIndex: every index pattern stays inside the list") {
                 CAPTURE(p); CAPTURE(n); CAPTURE(k);
                 CHECK(i >= 0);
                 CHECK(i < n);
+            }
+        }
+    }
+}
+
+TEST_CASE("arpCycle: the hits after which a pattern repeats, literal for two to five notes") {
+    struct Row {
+        ArpPattern pattern;
+        Ints cycles;  // for n = 2, 3, 4, 5
+    };
+    const Row rows[] = {
+        {ArpPattern::Up, {2, 3, 4, 5}},          {ArpPattern::Down, {2, 3, 4, 5}},
+        {ArpPattern::UpDown, {2, 4, 6, 8}},      {ArpPattern::DownUp, {2, 4, 6, 8}},
+        {ArpPattern::UpAndDown, {4, 6, 8, 10}},  {ArpPattern::DownAndUp, {4, 6, 8, 10}},
+        {ArpPattern::Converge, {2, 3, 4, 5}},    {ArpPattern::Diverge, {2, 3, 4, 5}},
+        {ArpPattern::ConAndDiverge, {2, 4, 6, 8}}, {ArpPattern::PinkyUp, {2, 4, 6, 8}},
+        {ArpPattern::PinkyUpDown, {2, 4, 8, 12}}, {ArpPattern::ThumbUp, {2, 4, 6, 8}},
+        {ArpPattern::ThumbUpDown, {2, 4, 8, 12}}, {ArpPattern::Alberti, {4, 4, 4, 4}},
+        {ArpPattern::RootFirst, {2, 3, 4, 5}},   {ArpPattern::Chord, {1, 1, 1, 1}},
+    };
+    for (const Row& row : rows) {
+        CAPTURE(static_cast<int>(row.pattern));
+        CHECK(arpCycle(row.pattern, 1) == 1);
+        for (int n = 2; n <= 5; ++n) {
+            CAPTURE(n);
+            CHECK(arpCycle(row.pattern, n) == row.cycles[static_cast<std::size_t>(n - 2)]);
+        }
+    }
+}
+
+TEST_CASE("arpCycle: every index pattern repeats after its cycle") {
+    for (int p = 0; p < kArpPatternCount; ++p) {
+        const auto pattern = static_cast<ArpPattern>(p);
+        if (pattern == ArpPattern::Chord || pattern == ArpPattern::Random) continue;
+        for (int n = 1; n <= 8; ++n) {
+            const int cycle = arpCycle(pattern, n);
+            for (int k = 0; k < 3 * cycle; ++k) {
+                CAPTURE(p); CAPTURE(n); CAPTURE(k);
+                CHECK(arpIndex(pattern, k + cycle, n) == arpIndex(pattern, k, n));
             }
         }
     }
@@ -1046,19 +1085,21 @@ TEST_CASE("budgets: a beat holding more than 96 events falls back; exactly 96 fi
     }
 }
 
-TEST_CASE("arpeggioNotes: one and two octaves, ascending, a ninth interleaves") {
+TEST_CASE("arpeggioNotes: one octave is the voicing; two octaves add the same an octave up, octave by octave") {
     const Chord c = chordOf(0, "maj");
     CHECK(arpeggioNotes(c, {60, 64, 67}, ArpPattern::Up, ArpRange::One) == Ints{60, 64, 67});
     CHECK(arpeggioNotes(c, {60, 64, 67}, ArpPattern::Up, ArpRange::Two) == Ints{60, 64, 67, 72, 76, 79});
     CHECK(arpeggioNotes(c, {60}, ArpPattern::Alberti, ArpRange::Two) == Ints{60, 72});
     CHECK(arpeggioNotes(c, {}, ArpPattern::Up, ArpRange::Two).empty());
-    // C9 (60 64 67 70 74) spans 14 semitones: the second octave's C5 72 sits under the ninth D5 74.
+    // C9 (60 64 67 70 74) spans 14 semitones: the upper octave still follows the whole lower one, as Live's
+    // Arpeggiator plays the cycle and then the same cycle an octave up.
     CHECK(arpeggioNotes(chordOf(0, "9"), {60, 64, 67, 70, 74}, ArpPattern::Up, ArpRange::Two) ==
-          Ints{60, 64, 67, 70, 72, 74, 76, 79, 82, 86});
+          Ints{60, 64, 67, 70, 74, 72, 76, 79, 82, 86});
     CHECK(arpeggioNotes(chordOf(0, "9"), {60, 64, 67, 70, 74}, ArpPattern::Down, ArpRange::Two) ==
-          Ints{60, 64, 67, 70, 72, 74, 76, 79, 82, 86});  // the list is the same; the pattern walks it
-    // Above 127: dropped (not reachable with the dictionary).
-    CHECK(arpeggioNotes(c, {120, 124}, ArpPattern::Up, ArpRange::Two) == Ints{120, 124});
+          Ints{60, 64, 67, 70, 74, 72, 76, 79, 82, 86});  // the list is the same; the pattern walks it
+    // Above 127: kept in the list, so indices stay aligned; performDocument drops such a note (never with the
+    // dictionary, whose voicings top out at 112).
+    CHECK(arpeggioNotes(c, {120, 124}, ArpPattern::Up, ArpRange::Two) == Ints{120, 124, 132, 136});
 }
 
 TEST_CASE("arpeggioNotes: root first orders by chord tone whatever the inversion, per octave") {
@@ -1090,11 +1131,21 @@ TEST_CASE("perform: an arpeggio over two octaves plays the octave above, root fi
         CHECK(ons[i].tick == 480 * static_cast<int>(i));
         CHECK(ons[i].pitch == pitches[i]);
     }
-    // Chord over two octaves: six notes per hit.
-    doc = docOf({chordEvent(1, chordOf(0, "maj"), 1.0)}, arp(ArpPattern::Chord, ArpRate::Pulse, ArpRange::Two));
-    expectEvents(performDocument(doc), {on(0, 60, 100), on(0, 64, 100), on(0, 67, 100), on(0, 72, 100), on(0, 76, 100),
-                                        on(0, 79, 100), off(864, 60), off(864, 64), off(864, 67), off(864, 72),
-                                        off(864, 76), off(864, 79)});
+    // Down over two octaves: the voicing downwards, then the same an octave up (Live: G E C, G' E' C').
+    doc = docOf({chordEvent(1, chordOf(0, "maj"), 4.0)}, arp(ArpPattern::Down, ArpRate::Subdivision, ArpRange::Two));
+    ons.clear();
+    for (const Ev& e : plain(performDocument(doc))) if (e.on) ons.push_back(e);
+    REQUIRE(ons.size() == 8);
+    const Ints down{67, 64, 60, 79, 76, 72, 67, 64};
+    for (std::size_t i = 0; i < 8; ++i) {
+        CAPTURE(i);
+        CHECK(ons[i].pitch == down[i]);
+    }
+    // Chord over two octaves: the voicing on one hit, the same an octave up on the next (Live's Chord Trigger).
+    doc = docOf({chordEvent(1, chordOf(0, "maj"), 2.0)}, arp(ArpPattern::Chord, ArpRate::Pulse, ArpRange::Two));
+    expectEvents(performDocument(doc), {on(0, 60, 100), on(0, 64, 100), on(0, 67, 100), off(864, 60), off(864, 64),
+                                        off(864, 67), on(960, 72, 90), on(960, 76, 90), on(960, 79, 90),
+                                        off(1824, 72), off(1824, 76), off(1824, 79)});
     // Root first on C/E (manual first inversion): C E G, not E G C.
     ChordEvent inverted = chordEvent(1, chordOf(0, "maj"), 1.5);
     inverted.inversion = 1;
@@ -1144,33 +1195,180 @@ TEST_CASE("perform: the arpeggio fields change nothing under another rhythm") {
     CHECK(plain(performDocument(pulse)) == plain(performDocument(same)));
 }
 
-TEST_CASE("budgets: dictionary chords can now reach the per-beat and the total cap") {
-    // 7/8, half rate (120 ticks: eight hits a beat), Chord, two octaves. Triads: 6 notes x 8 hits x on+off = 96
-    // events in a beat, exactly the cap, allowed. Sevenths: 128, over it. Ninths: 160.
+TEST_CASE("budgets: Chord over two octaves plays one octave a hit, so dictionary chords stay under the per-beat cap") {
+    // 7/8, half rate (120 ticks: eight hits a beat), Chord, two octaves: each hit is the voicing in one octave,
+    // alternating (Live's Chord Trigger with Steps 1). Ninths, the dictionary's largest type: 5 notes x 8 hits x
+    // on+off = 80 events in a beat, under the cap of 96.
     const Feel dense = arp(ArpPattern::Chord, ArpRate::Half, ArpRange::Two);
-    const Document triads = docOf({chordEvent(1, chordOf(0, "maj"), 3.5), chordEvent(2, chordOf(5, "maj"), 3.5)}, dense, {7, 8});
-    Performance p = performDocument(triads);
+    const Document ninths = docOf({chordEvent(1, chordOf(0, "9"), 3.5), chordEvent(2, chordOf(5, "9"), 3.5)}, dense, {7, 8});
+    Performance p = performDocument(ninths);
     CHECK_FALSE(p.feelLimited);
-    CHECK(densestBeat(p.events, p.endTick()) == 96);
-    const Document sevenths = docOf({chordEvent(1, chordOf(0, "maj7"), 3.5), chordEvent(2, chordOf(5, "7"), 3.5)}, dense, {7, 8});
-    p = performDocument(sevenths);
-    CHECK(p.feelLimited);
-    CHECK(p.events.empty());
-    // Through compile: the whole document plays as block chords, and a section exports the same.
-    const Compiled c = compile(sevenths);
-    CHECK(c.feelLimited);
-    CHECK(c.events.size() == 16);  // two block chords of four notes, on and off
-    // 4/4, half rate, Chord, two octaves, one-bar sevenths: 16 hits x 8 notes x 2 = 256 events a bar.
-    // Sixteen bars: 4096, the total cap, allowed. Seventeen: over it.
+    CHECK(densestBeat(p.events, p.endTick()) == 80);
+    // The total cap still applies. 4/4, half rate, Chord, two octaves, one-bar sevenths: 16 hits x 4 notes x 2 =
+    // 128 events a bar. Thirty-two bars: 4096, the total cap, allowed. Thirty-three: over it, and the whole
+    // document plays and exports as block chords.
     std::vector<ChordEvent> bars;
-    for (int i = 0; i < 16; ++i) bars.push_back(chordEvent(i + 1, chordOf(i % 12, "maj7"), 4.0));
+    for (int i = 0; i < 32; ++i) bars.push_back(chordEvent(i + 1, chordOf(i % 12, "maj7"), 4.0));
     p = performDocument(docOf(bars, dense));
     CHECK_FALSE(p.feelLimited);
     CHECK(p.events.size() == 4096);
-    bars.push_back(chordEvent(17, chordOf(4, "maj7"), 4.0));
-    p = performDocument(docOf(bars, dense));
+    bars.push_back(chordEvent(33, chordOf(4, "maj7"), 4.0));
+    const Document over = docOf(bars, dense);
+    p = performDocument(over);
     CHECK(p.feelLimited);
-    // One octave at the same settings stays well inside both caps.
+    CHECK(p.events.empty());
+    const Compiled c = compile(over);
+    CHECK(c.feelLimited);
+    CHECK(c.events.size() == 33 * 8);  // block chords of four notes, on and off
+    // One octave at the same settings: the same count (one octave per hit either way).
     p = performDocument(docOf(bars, arp(ArpPattern::Chord, ArpRate::Half, ArpRange::One)));
-    CHECK_FALSE(p.feelLimited);
+    CHECK(p.feelLimited);
+}
+
+TEST_CASE("rhythmHits: over two octaves the pattern runs on the voicing and each cycle steps an octave up") {
+    // noteCount is the voicing's size; the indices point into the arpeggio list (the voicing, then the same an
+    // octave up), so index i + n is note i an octave higher.
+    auto h = rhythmHits(arp(ArpPattern::Down, ArpRate::Subdivision, ArpRange::Two), {4, 4}, 0, 3840, 3, 100);
+    REQUIRE(h.size() == 8);
+    const std::vector<Ints> down{{2}, {1}, {0}, {5}, {4}, {3}, {2}, {1}};
+    for (std::size_t k = 0; k < 8; ++k) CHECK(h[k].notes == down[k]);
+    h = rhythmHits(arp(ArpPattern::UpDown, ArpRate::Subdivision, ArpRange::Two), {4, 4}, 0, 3840, 3, 100);
+    REQUIRE(h.size() == 8);
+    const std::vector<Ints> upDown{{0}, {1}, {2}, {1}, {3}, {4}, {5}, {4}};
+    for (std::size_t k = 0; k < 8; ++k) CHECK(h[k].notes == upDown[k]);
+    // Chord: the whole voicing per hit, alternating octaves.
+    h = rhythmHits(arp(ArpPattern::Chord, ArpRate::Pulse, ArpRange::Two), {4, 4}, 0, 3840, 3, 100);
+    expectHits(h, {0, 960, 1920, 2880}, {864, 1824, 2784, 3744}, {100, 90, 90, 90},
+               {kAll3, {3, 4, 5}, kAll3, {3, 4, 5}});
+    // Random draws from both octaves (no octave cycle): arpRandomIndex over 2n notes.
+    h = rhythmHits(arp(ArpPattern::Random, ArpRate::Subdivision, ArpRange::Two), {4, 4}, 0, 3840, 3, 100, 1);
+    REQUIRE(h.size() == 8);
+    int previous = -1;
+    for (std::size_t k = 0; k < 8; ++k) {
+        previous = arpRandomIndex(1, static_cast<int>(k), 6, previous);
+        CHECK(h[k].notes == Ints{previous});
+    }
+    // One octave: indices stay inside the voicing.
+    h = rhythmHits(arp(ArpPattern::Down), {4, 4}, 0, 3840, 3, 100);
+    for (const Hit& hit : h) CHECK(hit.notes[0] < 3);
+}
+
+namespace {
+
+struct LiveTake {
+    ArpPattern pattern;
+    Ints voicing;
+    Ints pitches;
+};
+
+// Generated from the Live recordings of 2026-11-09 (Session 18): Live 12's Arpeggiator, Rate 1/16,
+// Steps 1, Distance +12 st, Retrigger Note, on held chords; the first hits of each chord, one pitch per hit.
+const LiveTake kLiveTakes[] = {
+    {ArpPattern::Up, {60, 64, 67}, {60, 64, 67, 72, 76, 79, 60, 64, 67, 72, 76, 79, 60, 64, 67, 72}},
+    {ArpPattern::Up, {67, 71, 74, 77}, {67, 71, 74, 77, 79, 83, 86, 89, 67, 71, 74, 77, 79, 83, 86, 89}},
+    {ArpPattern::Down, {60, 64, 67}, {67, 64, 60, 79, 76, 72, 67, 64, 60, 79, 76, 72, 67, 64, 60, 79}},
+    {ArpPattern::Down, {67, 71, 74, 77}, {77, 74, 71, 67, 89, 86, 83, 79, 77, 74, 71, 67, 89, 86, 83, 79}},
+    {ArpPattern::UpDown, {60, 64, 67}, {60, 64, 67, 64, 72, 76, 79, 76, 60, 64, 67, 64, 72, 76, 79, 76}},
+    {ArpPattern::UpDown, {67, 71, 74, 77}, {67, 71, 74, 77, 74, 71, 79, 83, 86, 89, 86, 83, 67, 71, 74, 77}},
+    {ArpPattern::UpDown, {60, 64, 67, 70, 74}, {60, 64, 67, 70, 74, 70, 67, 64, 72, 76, 79, 82, 86, 82, 79, 76, 60, 64, 67, 70, 74, 70, 67, 64, 72, 76, 79, 82, 86, 82, 79, 76}},
+    {ArpPattern::UpDown, {60, 67}, {60, 67, 72, 79, 60, 67, 72, 79, 60, 67, 72, 79, 60, 67, 72, 79}},
+    {ArpPattern::DownUp, {60, 64, 67}, {67, 64, 60, 64, 79, 76, 72, 76, 67, 64, 60, 64, 79, 76, 72, 76}},
+    {ArpPattern::DownUp, {67, 71, 74, 77}, {77, 74, 71, 67, 71, 74, 89, 86, 83, 79, 83, 86, 77, 74, 71, 67}},
+    {ArpPattern::DownUp, {60, 64, 67, 70, 74}, {74, 70, 67, 64, 60, 64, 67, 70, 86, 82, 79, 76, 72, 76, 79, 82, 74, 70, 67, 64, 60, 64, 67, 70, 86, 82, 79, 76, 72, 76, 79, 82}},
+    {ArpPattern::DownUp, {60, 67}, {67, 60, 79, 72, 67, 60, 79, 72, 67, 60, 79, 72, 67, 60, 79, 72}},
+    {ArpPattern::UpAndDown, {60, 64, 67}, {60, 64, 67, 67, 64, 60, 72, 76, 79, 79, 76, 72, 60, 64, 67, 67}},
+    {ArpPattern::UpAndDown, {67, 71, 74, 77}, {67, 71, 74, 77, 77, 74, 71, 67, 79, 83, 86, 89, 89, 86, 83, 79}},
+    {ArpPattern::UpAndDown, {60, 64, 67, 70, 74}, {60, 64, 67, 70, 74, 74, 70, 67, 64, 60, 72, 76, 79, 82, 86, 86, 82, 79, 76, 72, 60, 64, 67, 70, 74, 74, 70, 67, 64, 60, 72, 76}},
+    {ArpPattern::UpAndDown, {60, 67}, {60, 67, 67, 60, 72, 79, 79, 72, 60, 67, 67, 60, 72, 79, 79, 72}},
+    {ArpPattern::DownAndUp, {60, 64, 67}, {67, 64, 60, 60, 64, 67, 79, 76, 72, 72, 76, 79, 67, 64, 60, 60}},
+    {ArpPattern::DownAndUp, {67, 71, 74, 77}, {77, 74, 71, 67, 67, 71, 74, 77, 89, 86, 83, 79, 79, 83, 86, 89}},
+    {ArpPattern::DownAndUp, {60, 64, 67, 70, 74}, {74, 70, 67, 64, 60, 60, 64, 67, 70, 74, 86, 82, 79, 76, 72, 72, 76, 79, 82, 86, 74, 70, 67, 64, 60, 60, 64, 67, 70, 74, 86, 82}},
+    {ArpPattern::DownAndUp, {60, 67}, {67, 60, 60, 67, 79, 72, 72, 79, 67, 60, 60, 67, 79, 72, 72, 79}},
+    {ArpPattern::Converge, {60, 64, 67}, {60, 67, 64, 72, 79, 76, 60, 67, 64, 72, 79, 76, 60, 67, 64, 72}},
+    {ArpPattern::Converge, {67, 71, 74, 77}, {67, 77, 71, 74, 79, 89, 83, 86, 67, 77, 71, 74, 79, 89, 83, 86}},
+    {ArpPattern::Converge, {60, 64, 67, 70, 74}, {60, 74, 64, 70, 67, 72, 86, 76, 82, 79, 60, 74, 64, 70, 67, 72, 86, 76, 82, 79, 60, 74, 64, 70, 67, 72, 86, 76, 82, 79, 60, 74}},
+    {ArpPattern::Converge, {60, 67}, {60, 67, 72, 79, 60, 67, 72, 79, 60, 67, 72, 79, 60, 67, 72, 79}},
+    {ArpPattern::Diverge, {60, 64, 67}, {64, 60, 67, 76, 72, 79, 64, 60, 67, 76, 72, 79, 64, 60, 67, 76}},
+    {ArpPattern::Diverge, {67, 71, 74, 77}, {74, 71, 77, 67, 86, 83, 89, 79, 74, 71, 77, 67, 86, 83, 89, 79}},
+    {ArpPattern::Diverge, {60, 64, 67, 70, 74}, {67, 64, 70, 60, 74, 79, 76, 82, 72, 86, 67, 64, 70, 60, 74, 79, 76, 82, 72, 86, 67, 64, 70, 60, 74, 79, 76, 82, 72, 86, 67, 64}},
+    {ArpPattern::Diverge, {60, 67}, {67, 60, 79, 72, 67, 60, 79, 72, 67, 60, 79, 72, 67, 60, 79, 72}},
+    {ArpPattern::ConAndDiverge, {60, 64, 67}, {60, 67, 64, 67, 72, 79, 76, 79, 60, 67, 64, 67, 72, 79, 76, 79}},
+    {ArpPattern::ConAndDiverge, {67, 71, 74, 77}, {67, 77, 71, 74, 71, 77, 79, 89, 83, 86, 83, 89, 67, 77, 71, 74}},
+    {ArpPattern::ConAndDiverge, {60, 64, 67, 70, 74}, {60, 74, 64, 70, 67, 70, 64, 74, 72, 86, 76, 82, 79, 82, 76, 86, 60, 74, 64, 70, 67, 70, 64, 74, 72, 86, 76, 82, 79, 82, 76, 86}},
+    {ArpPattern::ConAndDiverge, {60, 67}, {60, 67, 72, 79, 60, 67, 72, 79, 60, 67, 72, 79, 60, 67, 72, 79}},
+    {ArpPattern::PinkyUp, {60, 64, 67}, {60, 67, 64, 67, 72, 79, 76, 79, 60, 67, 64, 67, 72, 79, 76, 79}},
+    {ArpPattern::PinkyUp, {67, 71, 74, 77}, {67, 77, 71, 77, 74, 77, 79, 89, 83, 89, 86, 89, 67, 77, 71, 77}},
+    {ArpPattern::PinkyUp, {60, 64, 67, 70, 74}, {60, 74, 64, 74, 67, 74, 70, 74, 72, 86, 76, 86, 79, 86, 82, 86, 60, 74, 64, 74, 67, 74, 70, 74, 72, 86, 76, 86, 79, 86, 82, 86}},
+    {ArpPattern::PinkyUp, {60, 67}, {60, 67, 72, 79, 60, 67, 72, 79, 60, 67, 72, 79, 60, 67, 72, 79}},
+    {ArpPattern::PinkyUpDown, {60, 64, 67}, {60, 67, 64, 67, 72, 79, 76, 79, 60, 67, 64, 67, 72, 79, 76, 79}},
+    {ArpPattern::PinkyUpDown, {67, 71, 74, 77}, {67, 77, 71, 77, 74, 77, 71, 77, 79, 89, 83, 89, 86, 89, 83, 89}},
+    {ArpPattern::PinkyUpDown, {60, 64, 67, 70, 74}, {60, 74, 64, 74, 67, 74, 70, 74, 67, 74, 64, 74, 72, 86, 76, 86, 79, 86, 82, 86, 79, 86, 76, 86, 60, 74, 64, 74, 67, 74, 70, 74}},
+    {ArpPattern::PinkyUpDown, {60, 67}, {60, 67, 72, 79, 60, 67, 72, 79, 60, 67, 72, 79, 60, 67, 72, 79}},
+    {ArpPattern::ThumbUp, {60, 64, 67}, {60, 64, 60, 67, 72, 76, 72, 79, 60, 64, 60, 67, 72, 76, 72, 79}},
+    {ArpPattern::ThumbUp, {67, 71, 74, 77}, {67, 71, 67, 74, 67, 77, 79, 83, 79, 86, 79, 89, 67, 71, 67, 74}},
+    {ArpPattern::ThumbUp, {60, 64, 67, 70, 74}, {60, 64, 60, 67, 60, 70, 60, 74, 72, 76, 72, 79, 72, 82, 72, 86, 60, 64, 60, 67, 60, 70, 60, 74, 72, 76, 72, 79, 72, 82, 72, 86}},
+    {ArpPattern::ThumbUp, {60, 67}, {60, 67, 72, 79, 60, 67, 72, 79, 60, 67, 72, 79, 60, 67, 72, 79}},
+    {ArpPattern::ThumbUpDown, {60, 64, 67}, {60, 64, 60, 67, 72, 76, 72, 79, 60, 64, 60, 67, 72, 76, 72, 79}},
+    {ArpPattern::ThumbUpDown, {67, 71, 74, 77}, {67, 71, 67, 74, 67, 77, 67, 74, 79, 83, 79, 86, 79, 89, 79, 86}},
+    {ArpPattern::ThumbUpDown, {60, 64, 67, 70, 74}, {60, 64, 60, 67, 60, 70, 60, 74, 60, 70, 60, 67, 72, 76, 72, 79, 72, 82, 72, 86, 72, 82, 72, 79, 60, 64, 60, 67, 60, 70, 60, 74}},
+    {ArpPattern::ThumbUpDown, {60, 67}, {60, 67, 72, 79, 60, 67, 72, 79, 60, 67, 72, 79, 60, 67, 72, 79}},
+};
+
+}  // namespace
+
+TEST_CASE("arpeggio over two octaves plays what Live's Arpeggiator played (recorded 2026-11-09)") {
+    // 4/4, half rate (240 ticks, Live's 1/16), two octaves, from each chord's first hit.
+    for (const LiveTake& take : kLiveTakes) {
+        CAPTURE(static_cast<int>(take.pattern));
+        CAPTURE(take.voicing.size());
+        const int count = static_cast<int>(take.pitches.size());
+        const int n = static_cast<int>(take.voicing.size());
+        const std::vector<Hit> hits = rhythmHits(arp(take.pattern, ArpRate::Half, ArpRange::Two), {4, 4}, 0,
+                                                 240 * count, n, 100, 1);
+        const Ints list = arpeggioNotes(chordOf(0, "maj"), take.voicing, take.pattern, ArpRange::Two);
+        REQUIRE(static_cast<int>(hits.size()) == count);
+        Ints played;
+        for (const Hit& hit : hits) {
+            REQUIRE(hit.notes.size() == 1);
+            played.push_back(list[static_cast<std::size_t>(hit.notes[0])]);
+        }
+        CHECK(played == take.pitches);
+    }
+    // Chord Trigger: C9, C5 and C each alternate between the voicing and the voicing an octave up.
+    for (const Ints& voicing : {Ints{60, 64, 67, 70, 74}, Ints{60, 67}, Ints{60, 64, 67}}) {
+        const int n = static_cast<int>(voicing.size());
+        const std::vector<Hit> hits = rhythmHits(arp(ArpPattern::Chord, ArpRate::Half, ArpRange::Two), {4, 4}, 0, 960, n, 100);
+        const Ints list = arpeggioNotes(chordOf(0, "maj"), voicing, ArpPattern::Chord, ArpRange::Two);
+        REQUIRE(hits.size() == 4);
+        for (std::size_t k = 0; k < 4; ++k) {
+            Ints played;
+            for (int i : hits[k].notes) played.push_back(list[static_cast<std::size_t>(i)]);
+            Ints expected(voicing);
+            for (int& pitch : expected) pitch += k % 2 == 1 ? 12 : 0;
+            CHECK(played == expected);
+        }
+    }
+}
+
+TEST_CASE("arpeggio over two octaves: one note alternates octaves; each new chord starts low") {
+    // One note: the cycle is one hit, so the octaves alternate every hit.
+    const auto h = rhythmHits(arp(ArpPattern::Up, ArpRate::Subdivision, ArpRange::Two), {4, 4}, 0, 1920, 1, 100);
+    REQUIRE(h.size() == 4);
+    const std::vector<Ints> alternating{{0}, {1}, {0}, {1}};
+    for (std::size_t k = 0; k < 4; ++k) CHECK(h[k].notes == alternating[k]);
+    // C then F, Up over two octaves, 7 subdivision hits each (3.5 beats): C ends in its upper octave, and F still
+    // starts from its own lowest note in the lower octave (Live's Retrigger Note).
+    const Document doc = docOf({chordEvent(1, chordOf(0, "maj"), 3.5), chordEvent(2, chordOf(5, "maj"), 3.5)},
+                               arp(ArpPattern::Up, ArpRate::Subdivision, ArpRange::Two));
+    const std::vector<std::vector<int>> v = voicings(doc);
+    std::vector<Ev> ons;
+    for (const Ev& e : plain(performDocument(doc))) if (e.on) ons.push_back(e);
+    REQUIRE(ons.size() == 14);
+    for (std::size_t k = 0; k < 7; ++k) {
+        CAPTURE(k);
+        const std::size_t i = k % 3;
+        const int octave = static_cast<int>((k / 3) % 2);
+        CHECK(ons[k].pitch == v[0][i] + 12 * octave);
+        CHECK(ons[7 + k].pitch == v[1][i] + 12 * octave);
+    }
 }
