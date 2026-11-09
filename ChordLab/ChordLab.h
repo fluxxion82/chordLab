@@ -187,6 +187,7 @@ private:
   std::atomic<bool> mResetPending{false};                      // VST3/APP: OnReset's signal; never set under AU_API
 #if defined(AU_API)
   std::atomic<uint32_t> mInputEpoch{0};                        // bumped by OnReset, the AU's only reset signal; tags raw input so the drain skips what preceded a reset and applies it in order
+  std::atomic<bool> mAUBypassed{false};                        // the bypass snapshot the property thread publishes with the epoch (OnReset); the producer reads it instead of iPlug2's plain bool
 #endif
   std::atomic<double> mResetSampleRate{44100.0};
   std::atomic<bool> mPanicPending{false};

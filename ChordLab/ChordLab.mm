@@ -403,6 +403,9 @@ void ChordLab::OnReset()
 #if defined(AU_API)
   // One signal, applied in FIFO order by the drain (see "MIDI in"): raw input queued before this bump is
   // forgotten, and the reset lands before the first message queued after it. No mResetPending here.
+  // The wrapper calls OnReset right after SetBypassed on both bypass edges, on the same thread, so this read
+  // is not a race; the release bump below publishes the snapshot to ProcessMidiMsg.
+  mAUBypassed.store(GetBypassed(), std::memory_order_relaxed);
   mInputEpoch.fetch_add(1, std::memory_order_release);
 #else
   mResetPending.store(true, std::memory_order_release);
@@ -450,8 +453,9 @@ void ChordLab::ApplyPendingBypassRelease() noexcept
 //    OnReset only bumps mInputEpoch (no mResetPending under AU): the drain applies each reset in FIFO order
 //    with the queued messages, and a reset with no following MIDI lands at the top of the next block. The
 //    wrapper runs OnReset on both edges of a bypass (kAudioUnitProperty_BypassEffect) and does not call
-//    ProcessBlock while bypassed (PassThroughBuffers), so a bypass forgets: nothing is queued meanwhile, the
-//    Heard group goes quiet, and the progression chases back in afterwards (the user guide's Logic limits).
+//    ProcessBlock while bypassed (PassThroughBuffers), so a bypass forgets: nothing is queued or drained
+//    meanwhile and the display holds its last state; the reset waits in the epoch and lands on the first block
+//    after the bypass ends (Heard clears, the progression chases back in; the user guide's Logic limits).
 //  - A bypass end releases the thru notes through Scheduler::releaseThru, on the next block with frames,
 //    and keeps the queued notes (see "MIDI in").
 void ChordLab::ProcessMidiMsg(const IMidiMsg& msg)
@@ -459,14 +463,15 @@ void ChordLab::ProcessMidiMsg(const IMidiMsg& msg)
 #if defined(AU_API)
   // The host's MIDIEvent thread: only the ring (its one producer). A refusal is sticky; the drain resynchronises.
 
-  // GetBypassed() reads a plain bool iPlug2 writes on the property thread (its own render reads it the same
-  // way). A stale read is harmless: just before a bypass the push carries the pre-reset epoch and is skipped,
-  // or is handled and then released by the reset at the bypass end; just after one it at most drops a fresh
-  // message.
-  if (GetBypassed())                                             // a bypass is a reset in the AU wrapper: nothing to keep
+  // The bypass is read from mAUBypassed, the snapshot OnReset publishes with the epoch, never from iPlug2's
+  // plain bool (written on the property thread). The epoch is loaded first, with acquire, so the snapshot
+  // read after it is at least the one stored before that epoch's bump. A message that races a bypass edge is
+  // either tagged with the pre-reset epoch and skipped by the drain, or handled and then released by the
+  // reset at the bypass end; just after a bypass end it at most drops a fresh message.
+  const uint32_t epoch = mInputEpoch.load(std::memory_order_acquire);
+  if (mAUBypassed.load(std::memory_order_relaxed))               // a bypass is a reset in the AU wrapper: nothing to keep
     return;
-  mRawMidiIn.push(chordlab::RawMidi{msg.mStatus, msg.mData1, msg.mData2,
-                                    mInputEpoch.load(std::memory_order_acquire), msg.mOffset});
+  mRawMidiIn.push(chordlab::RawMidi{msg.mStatus, msg.mData1, msg.mData2, epoch, msg.mOffset});
 #else
   HandleMidiIn(msg);
 #endif
