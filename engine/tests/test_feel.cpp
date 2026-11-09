@@ -1349,3 +1349,26 @@ TEST_CASE("arpeggio over two octaves plays what Live's Arpeggiator played (recor
         }
     }
 }
+
+TEST_CASE("arpeggio over two octaves: one note alternates octaves; each new chord starts low") {
+    // One note: the cycle is one hit, so the octaves alternate every hit.
+    const auto h = rhythmHits(arp(ArpPattern::Up, ArpRate::Subdivision, ArpRange::Two), {4, 4}, 0, 1920, 1, 100);
+    REQUIRE(h.size() == 4);
+    const std::vector<Ints> alternating{{0}, {1}, {0}, {1}};
+    for (std::size_t k = 0; k < 4; ++k) CHECK(h[k].notes == alternating[k]);
+    // C then F, Up over two octaves, 7 subdivision hits each (3.5 beats): C ends in its upper octave, and F still
+    // starts from its own lowest note in the lower octave (Live's Retrigger Note).
+    const Document doc = docOf({chordEvent(1, chordOf(0, "maj"), 3.5), chordEvent(2, chordOf(5, "maj"), 3.5)},
+                               arp(ArpPattern::Up, ArpRate::Subdivision, ArpRange::Two));
+    const std::vector<std::vector<int>> v = voicings(doc);
+    std::vector<Ev> ons;
+    for (const Ev& e : plain(performDocument(doc))) if (e.on) ons.push_back(e);
+    REQUIRE(ons.size() == 14);
+    for (std::size_t k = 0; k < 7; ++k) {
+        CAPTURE(k);
+        const std::size_t i = k % 3;
+        const int octave = static_cast<int>((k / 3) % 2);
+        CHECK(ons[k].pitch == v[0][i] + 12 * octave);
+        CHECK(ons[7 + k].pitch == v[1][i] + 12 * octave);
+    }
+}
