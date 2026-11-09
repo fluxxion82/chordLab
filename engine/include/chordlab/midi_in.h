@@ -58,7 +58,7 @@ inline bool newerEpoch(std::uint32_t a, std::uint32_t b) noexcept { return stati
 /// `applied`, `onReset()` runs first and `applied` becomes that epoch (the reset lands in FIFO position
 /// before the first message that followed it, even when the bump happened after `current` was loaded);
 /// then `handle(const RawMidi&)`. Epochs are monotone in push order (the one producer loads the epoch, then
-/// pushes), so a message that is neither older than `current` nor `applied` carries `current` or newer.
+/// pushes), so a message that is neither older than `current` nor equal to `applied` carries `current` or newer.
 /// After the loop, if `current` is newer than `applied`, `onReset()` runs and `applied` becomes `current`
 /// (a reset with no message after it still lands this block). The overflow flag is taken first, as the
 /// heard ring's rule says: when it reads true, messages were lost, so everything still queued is discarded

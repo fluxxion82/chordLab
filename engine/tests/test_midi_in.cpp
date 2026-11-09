@@ -649,6 +649,25 @@ TEST_CASE("drainRawMidi: the reset lands in FIFO position when the bump happened
     CHECK(log.order == std::vector<int>{0, 1, -1, 2});
     CHECK(log.resets == 1);
     CHECK(applied == 1);
+    // Next block current has caught up with applied: no second reset.
+    REQUIRE(ring.push(rawNote(3, 1)));
+    CHECK(log.drain(ring, applied, 1) == RawDrain::Handled);
+    CHECK(log.order == std::vector<int>{0, 1, -1, 2, 3});
+    CHECK(log.resets == 1);
+    CHECK(applied == 1);
+}
+
+TEST_CASE("drainRawMidi: two bumps within one drain produce two resets, each in FIFO position") {
+    RawMidiRing ring;
+    REQUIRE(ring.push(rawNote(0, 0)));
+    REQUIRE(ring.push(rawNote(1, 1)));
+    REQUIRE(ring.push(rawNote(2, 2)));
+    std::uint32_t applied = 0;
+    DrainLog log;
+    CHECK(log.drain(ring, applied, 0) == RawDrain::Handled);
+    CHECK(log.order == std::vector<int>{0, -1, 1, -1, 2});
+    CHECK(log.resets == 2);
+    CHECK(applied == 2);
 }
 
 TEST_CASE("drainRawMidi: an overflow sets applied to current without calling onReset") {
@@ -675,6 +694,27 @@ TEST_CASE("drainRawMidi: epochs wrap") {
     DrainLog log;
     CHECK(log.drain(ring, applied, 0) == RawDrain::Handled);
     CHECK(log.order == std::vector<int>{-1, 0});
+    CHECK(log.resets == 1);
+    CHECK(applied == 0);
+}
+
+TEST_CASE("drainRawMidi: epochs wrap with an empty ring: the reset lands once") {
+    RawMidiRing ring;
+    std::uint32_t applied = 0xFFFFFFFFu;
+    DrainLog log;
+    CHECK(log.drain(ring, applied, 0) == RawDrain::Handled);  // a plain `current > applied` would miss it
+    CHECK(log.order == std::vector<int>{-1});
+    CHECK(log.resets == 1);
+    CHECK(applied == 0);
+}
+
+TEST_CASE("drainRawMidi: epochs wrap: a message from before the wrap is older than current and skipped") {
+    RawMidiRing ring;
+    REQUIRE(ring.push(rawNote(0, 0xFFFFFFFFu)));
+    std::uint32_t applied = 0xFFFFFFFFu;
+    DrainLog log;
+    CHECK(log.drain(ring, applied, 0) == RawDrain::Handled);  // a plain `m.epoch < current` would handle it
+    CHECK(log.order == std::vector<int>{-1});
     CHECK(log.resets == 1);
     CHECK(applied == 0);
 }

@@ -371,9 +371,11 @@ void ChordLab::ProcessMidiMsg(const IMidiMsg& msg)
 {
 #if defined(AU_API)
   // The host's MIDIEvent thread: only the ring (its one producer). A refusal is sticky; the drain resynchronises.
-  // a plain bool iPlug2 writes on the property thread (its own render reads it the same way); a stale read is
-  // harmless: just before a bypass the push carries the pre-reset epoch and is skipped, just after one it at
-  // most drops a fresh message
+
+  // GetBypassed() reads a plain bool iPlug2 writes on the property thread (its own render reads it the same
+  // way). A stale read is harmless: just before a bypass the push carries the pre-reset epoch and is skipped,
+  // or is handled and then released by the reset at the bypass end; just after one it at most drops a fresh
+  // message.
   if (GetBypassed())                                             // a bypass is a reset in the AU wrapper: nothing to keep
     return;
   mRawMidiIn.push(chordlab::RawMidi{msg.mStatus, msg.mData1, msg.mData2,

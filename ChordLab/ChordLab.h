@@ -102,14 +102,15 @@ private:
   void HandleMidiIn(const IMidiMsg& msg) noexcept;
 #if defined(AU_API)
   // Audio thread, first thing in ProcessBlock: hands every message the host delivered since the last block to
-  // HandleMidiIn in order, through chordlab::drainRawMidi (at most 256 per block; messages queued before the
-  // last OnReset are skipped, that epoch is forgotten; each reset is applied, ApplyReset, right before the
-  // first message queued after it, or at the end of the drain). An overflowed ring (more than 256 messages
-  // between two blocks) forgets instead: the listener gets an in-band Reset, the scheduler drops its queued
-  // thru notes and releases the sounding ones (a lost note-off must never stick one), and mDroppedRaw counts
-  // it for the status line. The scheduler is reset (ApplyReset, whose heard Reset then stands for the
-  // listener's) only if a host reset was also queued (the epoch moved since the last drain); otherwise the
-  // progression plays on untouched.
+  // HandleMidiIn in order, through chordlab::drainRawMidi (at most 256 per block; messages queued before a
+  // reset already seen at the top of the block are skipped, that epoch is forgotten; a reset that lands
+  // mid-drain is applied in order, after the messages that preceded it; each reset is applied, ApplyReset,
+  // right before the first message queued after it, or at the end of the drain). An overflowed ring (more
+  // than 256 messages between two blocks) forgets instead: the listener gets an in-band Reset, the scheduler
+  // drops its queued thru notes and releases the sounding ones (a lost note-off must never stick one), and
+  // mDroppedRaw counts it for the status line. The scheduler is reset (ApplyReset, whose heard Reset then
+  // stands for the listener's) only if a host reset was also queued (the epoch moved since the last drain);
+  // otherwise the progression plays on untouched.
   void DrainRawMidiIn() noexcept;
 #endif
   // Main thread: pushes {"schema":1,"ppq":ppq,"playing":playing} (the playhead) to the editor.
@@ -156,9 +157,10 @@ private:
 
   // The scheduler belongs to the audio thread (process, reset, panic, and pushThru from HandleMidiIn);
   // pushPreview is its one other-thread entry and is called from the main thread only (OnMessage,
-  // CloseWindow). OnReset and panic requests are flagged here and consumed at the top of ProcessBlock; a
-  // pending reset is consumed earlier, by the callback's first HandleMidiIn, when MIDI arrives (VST3:
-  // bypassed or not; AU: the first drained message).
+  // CloseWindow). OnReset and panic requests are flagged here and consumed at the top of ProcessBlock; under
+  // VST3 and the APP a pending reset is consumed earlier, by the callback's first HandleMidiIn, when MIDI
+  // arrives (bypassed or not). Under AU_API OnReset bumps mInputEpoch instead and DrainRawMidiIn applies the
+  // reset in FIFO order (before the first message queued after it, or at the end of the drain).
   chordlab::Scheduler mScheduler;
   // Output capacity (listening design D16): iPlug2's VST3 output queue (IMidiQueue) is sized in
   // setupProcessing to the host's maxSamplesPerBlock rounded up to a 4 KiB page of 8-byte IMidiMsg, so at
