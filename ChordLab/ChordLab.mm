@@ -202,8 +202,17 @@ ChordLab::ChordLab(const InstanceInfo& info)
 
 ChordLab::~ChordLab()
 {
-  if (mEditorOpen.load())                                        // AUv2: a host that destroys the plug-in before
-    CloseWindow();                                               // releasing the view; the container is disarmed
+#if defined(AU_API)
+  if (mEditorOpen.load())                                        // a host that destroys the plug-in before releasing
+  {                                                              // the view: close the editor and disarm the container
+#ifndef NDEBUG
+    // NSLog rather than DBGMSG (a printf to the host's stdout), so Test 12's Console filter shows it.
+    if (![NSThread isMainThread])
+      NSLog(@"ChordLab: AU disposed off the main thread with the editor open");
+#endif
+    CloseWindow();
+  }
+#endif
   {
     std::lock_guard<std::mutex> guard(mLifeline->mutex);       // waits for a hop in flight; later hops do nothing
     mLifeline->alive = false;
@@ -248,6 +257,10 @@ ChordLab::~ChordLab()
 
 void* ChordLab::OpenWindow(void* pParent)
 {
+#if defined(AU_API)
+  if (mViewController)                                           // the host asked for a new view before releasing the old one
+    CloseWindow();                                               // (Logic's Editor/Controls toggle): disarm and empty the old container first
+#endif
   PLATFORM_VIEW* platformParent = (PLATFORM_VIEW*) pParent;
   auto* vc = [[ChordLabViewController alloc] initWithEditorDelegateAndBundleID: this : GetBundleID()];
   mViewController = vc;
@@ -302,10 +315,12 @@ void ChordLab::CloseWindow()
   {
     auto* host = (ChordLabAUHostView*) mAUHostView;
     mAUHostView = nullptr;
-    // The container belongs to the host and outlives this call (its plug is null only inside its own dealloc,
-    // where [super dealloc] releases the subview). Disarm it and take the controller's view out of it, so the
-    // view goes with the controller below: NSViewController puts itself in its view's responder chain, and a
-    // view left in a container the host might show again would forward events to the freed controller.
+    // The container belongs to the host and outlives this call. Only one container is armed at a time
+    // (OpenWindow closes the previous editor first), so its plug is null here only when the call comes from
+    // its own dealloc, where [super dealloc] releases the subview. Otherwise disarm it and take the
+    // controller's view out of it, so the view goes with the controller below: NSViewController puts itself
+    // in its view's responder chain, and a view left in a container the host might show again would forward
+    // events to the freed controller.
     if (host.plug)
     {
       host.plug = nullptr;
