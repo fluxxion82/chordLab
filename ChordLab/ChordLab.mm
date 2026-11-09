@@ -310,6 +310,9 @@ void ChordLab::CloseWindow()
   }
   CocoaEditorDelegate::CloseWindow();                            // forgets mViewController
   mEditorOpen.store(false);                                      // OnIdle and the pushes stop here
+#ifndef NDEBUG
+  NSLog(@"ChordLab: editor closed");                             // Test 12 counts these in Console
+#endif
 #if defined(AU_API)
   if (mAUHostView)
   {
