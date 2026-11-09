@@ -69,10 +69,10 @@ and open it. It is signed and notarized; pick the formats you want:
   (validated with `auval`; Logic Pro itself not yet verified, see Status).
 - **App** → `/Applications/ChordLab.app`.
 
-macOS 15 or later, Apple silicon or Intel. The `.sha256` beside the pkg verifies the download
-(`shasum -a 256 -c ChordLab-<version>.pkg.sha256`); the `.provenance.txt` names the commits and dependency versions
-it was built from (see Licence). If you also build from source, a development copy in `~/Library` carries the same
-identifiers; keep one or the other installed.
+macOS 15 or later, Apple silicon or Intel. The `.sha256` beside the pkg verifies the download, and the VST3 SDK
+source tarball if you take it too (`shasum -a 256 -c --ignore-missing ChordLab-<version>.pkg.sha256`); the
+`.provenance.txt` names the commits and dependency versions it was built from (see Licence). If you also build from
+source, a development copy in `~/Library` carries the same identifiers; keep one or the other installed.
 
 Uninstall: remove the three paths above and the receipts
 (`sudo pkgutil --forget com.SterlingAlbury.chordlab.vst3`, `….au`, `….app`).
@@ -219,12 +219,12 @@ copyright 2026 Sterling Albury. It is built on third-party code under its own te
   a BSD-style notice, reproduced in the notices file.
 - Apple SDKs and the Audio Unit headers: Apple's SDK terms.
 
-**Corresponding source.** A release's `.provenance.txt` names the ChordLab commit and tag on GitHub, the iPlug2
-commit on its public remote (`release.sh` refuses a commit that no branch of that remote contains), the VST3 SDK
-version and its tag on Steinberg's GitHub with a hash of the vendored SDK tree (so a reader can confirm the SDK
-was unmodified), and the RtAudio, RtMidi and nlohmann/json versions; "Build" above is the recipe. Together they
-are the complete source of the binaries. A release built from a modified SDK or an unpublished iPlug2 commit
-must ship those sources alongside the pkg.
+**Corresponding source.** Each release ships the vendored VST3 SDK's source as
+`ChordLab-<version>-vst3sdk-source.tar.gz` beside the pkg. Its `.provenance.txt` names the ChordLab commit and tag
+on GitHub, the iPlug2 commit on its public GitHub (`release.sh` refuses a commit GitHub cannot show), the VST3 SDK
+version, its tag on Steinberg's GitHub, a hash of the vendored SDK tree and the tarball's digest, and the RtAudio,
+RtMidi and nlohmann/json versions; "Build" above is the recipe. Together they are the complete source of the
+binaries.
 
 ## Status
 

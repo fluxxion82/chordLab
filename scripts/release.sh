@@ -4,18 +4,19 @@
 #   scripts/release.sh preflight [--report] [--rehearsal] [--skip-notarize]
 #       Checks only: tools, Developer ID identities, notary profile, iPlug2 checkout, versions, the six tracked
 #       Info.plists at that version, no ChordLab AU in /Library (auval would validate it instead), clean trees,
-#       the iPlug2 commit on a branch of its origin, tag.
+#       the iPlug2 commit on a branch of its origin and publicly visible on GitHub, tag.
 #       --report prints every check and exits 0 unless the repository itself is wrong (a contributor's gate).
 #   scripts/release.sh build [--rehearsal] [--skip-notarize] [--skip-auval]
 #       Release build of every format into dist/stage, signed with the Developer ID given on the xcodebuild
 #       command line; signature checks; auval on the AU; three component pkgs; one signed product pkg,
-#       notarized (notarytool --wait --timeout 2h) and stapled; .sha256 and .provenance.txt beside it.
+#       notarized (notarytool --wait --timeout 2h) and stapled; beside it the vendored VST3 SDK's source
+#       (-vst3sdk-source.tar.gz), one .sha256 file for the pkg and the tarball, and .provenance.txt.
 #       --rehearsal allows an untagged HEAD and dirty trees and names the pkg with the commit (never publishable);
 #       --skip-notarize leaves it unstapled and named -unnotarized; --skip-auval records the AU as unvalidated.
 #   scripts/release.sh publish
-#       gh release create v<version> --draft with the pkg, its hash and the provenance, then --draft=false once
-#       all three assets are listed, after checking that they belong to HEAD, which must carry the annotated
-#       tag, already pushed.
+#       gh release create v<version> --draft with the pkg, the SDK source tarball, the .sha256 file and the
+#       provenance, then --draft=false once all four assets are listed, after checking that they belong to HEAD,
+#       which must carry the annotated tag, already pushed.
 #
 # The Xcode project stays ad-hoc signed; nothing here changes it. The script writes dist/ (stage, pkgs, logs and
 # xcodebuild's intermediates: SYMROOT and OBJROOT point into it, so every build is cold) and the AU
@@ -86,7 +87,7 @@ title_of()  { case "$1" in vst3) echo "VST3 plug-in (Ableton Live and other VST3
 
 REPORT=0 REHEARSAL=0 SKIP_NOTARIZE=0 SKIP_AUVAL=0
 PRE_FAILED=0
-VER="" PKG="" PROV="" AUVAL_RESULT="n/a" BUILD_HEAD="" BUILD_IPLUG2_HEAD=""
+VER="" PKG="" PROV="" SRC_TGZ="" AUVAL_RESULT="n/a" BUILD_HEAD="" BUILD_IPLUG2_HEAD=""
 
 # ---------------------------------------------------------------------------------------------------------
 # preflight
@@ -140,20 +141,41 @@ sys.exit(1 if stale else 0)
 PY
 }
 
-iplug2_public() {  # prints the row's detail; 0 when a branch of origin, freshly fetched, contains iPlug2's HEAD
-    local url err rc=0 branch why="the GPL corresponding-source statement names this commit"
+github_slug() {  # owner/repo of a github.com remote URL (https, ssh or scp-style, .git and a trailing / optional); else nothing
+    sed -E 's#/+$##' <<<"$1" | sed -nE 's#^(https://([^@/]*@)?|ssh://git@|git://|git@)github\.com[:/]([^/]+)/([^/]+)$#\3/\4#p' | sed 's/\.git$//'
+}
+github_commit_public() {  # owner/repo sha: 0 when GitHub's API shows the commit to an anonymous client
+    local json
+    json=$(curl -fsS -m 20 -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$1/commits/$2" 2>&1) || { echo "${json:0:200}" | tr '\n' ' '; return 1; }
+    grep -Eq "\"sha\": *\"$2\"" <<<"$json" || { echo "the answer has no \"sha\": \"$2\""; return 1; }
+}
+iplug2_public() {  # prints the row's detail; 0 when iPlug2's HEAD is on a branch of origin and GitHub shows it publicly
+    local url err rc=0 branches branch slug sha why="the GPL corresponding-source statement names this commit"
     url=$(git -C "$IPLUG2_ROOT" remote get-url origin 2>/dev/null) || { echo "$IPLUG2_ROOT has no origin remote; $why"; return 1; }
-    err=$("$TIMEOUT_CMD" 60 git -C "$IPLUG2_ROOT" fetch -q origin 2>&1) || rc=$?
+    # --prune: a branch deleted upstream must not pass through a cached origin/* ref.
+    err=$("$TIMEOUT_CMD" 60 git -C "$IPLUG2_ROOT" fetch -q --prune origin '+refs/heads/*:refs/remotes/origin/*' 2>&1) || rc=$?
     if [ "$rc" -ne 0 ]; then
         [ "$rc" -ne 124 ] || err="timed out after 60 s"
         echo "git fetch origin ($url) failed (rc $rc): $(head -n 3 <<<"$err" | tr '\n' ' ' | tr -s ' ' | sed 's/ $//')"; return 1
     fi
-    branch=$(git -C "$IPLUG2_ROOT" branch -r --contains HEAD --list 'origin/*' 2>/dev/null | grep -v -- ' -> ' | sed 's/^[* ]*//' | head -n 1 || true)
+    sha=$(git -C "$IPLUG2_ROOT" rev-parse HEAD)
+    branches=$(git -C "$IPLUG2_ROOT" branch -r --contains HEAD --list 'origin/*' 2>/dev/null | grep -v -- ' -> ' | sed 's/^[* ]*//' || true)
+    branch=$(grep -xE 'origin/(main|master)' <<<"$branches" | head -n 1 || true)   # the default branch reads best
+    [ -n "$branch" ] || branch=$(head -n 1 <<<"$branches")
     if [ -z "$branch" ]; then
-        echo "HEAD $(git -C "$IPLUG2_ROOT" rev-parse --short HEAD) is on no branch of origin ($url): push the iPlug2 commit (or point origin at the public fork that has it); $why"
+        echo "HEAD ${sha:0:9} is on no branch of origin ($url): push the iPlug2 commit (or point origin at the public fork that has it); $why"
         return 1
     fi
-    echo "$branch, $url"
+    slug=$(github_slug "$url")
+    if [ -z "$slug" ]; then
+        echo "origin $url is not github.com: cannot prove the commit is public; ship the iPlug2 sources with the release or use a public GitHub remote"
+        return 1
+    fi
+    if ! err=$(github_commit_public "$slug" "$sha"); then
+        echo "HEAD ${sha:0:9} is not publicly visible at github.com/$slug ($err): push it or point origin at the public fork; $why"
+        return 1
+    fi
+    echo "$branch, public at github.com/$slug/commit/${sha:0:9}"
 }
 
 preflight() {
@@ -341,6 +363,24 @@ package() {
     note "product package $(basename "$PKG")"
 }
 
+source_tarball() {  # the vendored VST3 SDK's corresponding source, named after the pkg
+    local sdk="$IPLUG2_ROOT/Dependencies/IPlug/VST3_SDK" list="$DIST/vst3sdk-source-files.txt" f
+    SRC_TGZ="${PKG%.pkg}-vst3sdk-source.tar.gz"
+    [ -d "$sdk/pluginterfaces" ] && [ -d "$sdk/base" ] && [ -d "$sdk/public.sdk" ] || die "the VST3 SDK sources are not all under $sdk"
+    # What iPlug2's download-vst3-sdk.sh vendors (no public.sdk/samples, no .git), plus the SDK's root licence and
+    # build files; an LC_ALL=C sorted list; COPYFILE_DISABLE keeps macOS AppleDouble (._*) entries out.
+    (cd "$sdk" && {
+        for f in LICENSE.txt README.md VERSION CMakeLists.txt; do [ -f "$f" ] && printf '%s\n' "$f"; done
+        find base pluginterfaces public.sdk \( -name '.git*' -o -name .DS_Store -o -name '._*' -o -path public.sdk/samples \
+            -o -type d \( -name build -o -name 'build-*' -o -name 'cmake-build-*' \) \) -prune -o -type f -print
+    } | LC_ALL=C sort) >"$list" || die "could not list the VST3 SDK sources"
+    (cd "$sdk" && COPYFILE_DISABLE=1 tar -czf "$SRC_TGZ" --options gzip:!timestamp --no-recursion \
+        --exclude .DS_Store --exclude '._*' --exclude '.git*' -s ",^,VST3_SDK/," -T "$list") \
+        || die "could not write $(basename "$SRC_TGZ")"
+    rm -f "$list"
+    note "VST3 SDK source $(basename "$SRC_TGZ") ($(du -h "$SRC_TGZ" | cut -f1 | tr -d ' '))"
+}
+
 notarize() {
     local submit rc=0 id status py_rc=0
     if [ "$SKIP_NOTARIZE" -eq 1 ]; then note "notarization skipped (--skip-notarize): $(basename "$PKG") is not stapled"; return; fi
@@ -440,7 +480,7 @@ provenance() {
             && tree_clean . && tree_clean "$IPLUG2_ROOT" \
             || die "the tree changed during the build; rebuild$(tree_excerpt)"
     fi
-    (cd "$DIST" && shasum -a 256 "$(basename "$PKG")" >"$(basename "$PKG").sha256")
+    (cd "$DIST" && shasum -a 256 "$(basename "$PKG")" "$(basename "$SRC_TGZ")" >"$(basename "$PKG").sha256")
     local vst3 rta rtm nl json=engine/third_party/nlohmann/json.hpp
     vst3=$(dep_version "$IPLUG2_ROOT/Dependencies/IPlug/VST3_SDK/pluginterfaces/vst/vsttypes.h" '^#define kVstVersionString[[:space:]]*"VST \([^"]*\)".*')
     rta=$(dep_version "$IPLUG2_ROOT/Dependencies/IPlug/RTAudio/RtAudio.h" '^#define RTAUDIO_VERSION[[:space:]]*"\([^"]*\)".*')
@@ -450,7 +490,7 @@ provenance() {
     {
         echo "ChordLab $VER"
         echo "pkg:            $(basename "$PKG")"
-        echo "sha256:         $(cut -d' ' -f1 "$PKG.sha256")"
+        echo "sha256:         $(digest_of "$PKG")"
         echo "chordlab:       $(git rev-parse HEAD) ($(git describe --tags --always --dirty)) https://github.com/fluxxion82/chordLab"
         if ! tree_clean .; then echo "WARNING:        the ChordLab working tree was dirty when this was built (rehearsal only)"; fi
         if work_tree "$IPLUG2_ROOT"; then
@@ -461,6 +501,8 @@ provenance() {
         if ! tree_clean "$IPLUG2_ROOT"; then echo "WARNING:        the iPlug2 tree was not a clean git work tree when this was built (rehearsal only)"; fi
         echo "vst3sdk:        ${vst3:-unknown} $VST3SDK_URL tag $(vst3sdk_tag "$vst3") (used under GPLv3; base and public.sdk BSD-style)"
         echo "vst3sdk tree sha256: $(vst3sdk_tree_sha256) (base, pluginterfaces, public.sdk without samples: as iPlug2's Dependencies/IPlug/download-vst3-sdk.sh <tag> vendors them)"
+        echo "vst3sdk source: $(basename "$SRC_TGZ") (corresponding source for the vendored VST3 SDK; iPlug2 is at the public commit above)"
+        echo "vst3sdk source sha256: $(digest_of "$SRC_TGZ")"
         echo "rtaudio:        ${rta:-unknown} https://github.com/thestk/rtaudio"
         echo "rtmidi:         ${rtm:-unknown} https://github.com/thestk/rtmidi"
         echo "nlohmann-json:  ${nl:-unknown} https://github.com/nlohmann/json"
@@ -477,29 +519,42 @@ provenance() {
     note "wrote $(basename "$PROV") and $(basename "$PKG").sha256"
 }
 
+digest_of()  { local out; out=$(shasum -a 256 "$1") || return 1; cut -d' ' -f1 <<<"$out"; }
 prov_field() { sed -n "s/^$1: *//p" "$PROV"; }
 
-pkg_digest_bound() {  # the pkg's bytes are the ones its .sha256 file (one entry, this name) and the provenance name
-    local d base prov_d entries
-    base=$(basename "$PKG")
-    d=$(shasum -a 256 "$PKG" | cut -d' ' -f1) || die "could not hash $PKG"
-    prov_d=$(prov_field sha256)
-    entries=$(grep -c . "$PKG.sha256" || true)
-    if [ -n "$d" ] && [ "$prov_d" = "$d" ] && [ "$entries" = 1 ] \
+asset_bound() {  # file field: its bytes are what the provenance's <field> and its one line in $PKG.sha256 say
+    local f=$1 field=$2 d base prov_d named
+    base=$(basename "$f")
+    d=$(digest_of "$f") || die "could not hash $f"
+    prov_d=$(prov_field "$field")
+    named=$(awk -v n="$base" 'substr($0, 66) == " " n || substr($0, 66) == "*" n {c++} END {print c + 0}' "$PKG.sha256")
+    if [ -n "$d" ] && [ "$prov_d" = "$d" ] && [ "$named" = 1 ] \
             && { grep -qxF "$d  $base" "$PKG.sha256" || grep -qxF "$d *$base" "$PKG.sha256"; }; then
         return 0
     fi
-    die "$base does not match its checksum file and provenance: the pkg hashes to $d; $base.sha256 lists ($entries entries) '$(tr '\n' ' ' <"$PKG.sha256" | sed 's/ $//')'; $(basename "$PROV") says sha256 '${prov_d:-none}'"
+    die "$base does not match its checksum file and provenance: it hashes to $d; $(basename "$PKG").sha256 lists '$(tr '\n' ' ' <"$PKG.sha256" | sed 's/ $//')'; $(basename "$PROV") says $field '${prov_d:-none}'"
+}
+
+pkg_digest_bound() {  # the .sha256 file has exactly the pkg and the SDK source tarball, and both match it and the provenance
+    local entries
+    entries=$(grep -c . "$PKG.sha256" || true)
+    [ "$entries" = 2 ] || die "$(basename "$PKG").sha256 lists $entries entries, expected 2 ($(basename "$PKG") and $(basename "$SRC_TGZ"))"
+    [ "$(prov_field 'vst3sdk source' | cut -d' ' -f1)" = "$(basename "$SRC_TGZ")" ] \
+        || die "the provenance names the SDK source '$(prov_field 'vst3sdk source' | cut -d' ' -f1)', expected $(basename "$SRC_TGZ")"
+    asset_bound "$PKG" sha256
+    asset_bound "$SRC_TGZ" "vst3sdk source sha256"
 }
 
 publish() {
     VER=$(version_str)
-    PKG="$DIST/ChordLab-$VER.pkg"; PROV="${PKG%.pkg}.provenance.txt"
+    PKG="$DIST/ChordLab-$VER.pkg"; PROV="${PKG%.pkg}.provenance.txt"; SRC_TGZ="${PKG%.pkg}-vst3sdk-source.tar.gz"
     local remote_sha local_sha tag_rc=0 view_rc=0 assets f
     annotated_tag "$VER" || tag_rc=$?
     [ "$tag_rc" -ne 1 ] || die "HEAD is not tagged v$VER"
     [ "$tag_rc" -ne 2 ] || die "v$VER is a lightweight tag; the release notes come from an annotated one (git tag -a)"
-    [ -f "$PKG" ] && [ -f "$PKG.sha256" ] && [ -f "$PROV" ] || die "run 'scripts/release.sh build' on the tag first ($PKG missing)"
+    for f in "$PKG" "$SRC_TGZ" "$PKG.sha256" "$PROV"; do
+        [ -f "$f" ] || die "run 'scripts/release.sh build' on the tag first ($f missing)"
+    done
     pkg_digest_bound
     [ "$(prov_field chordlab | cut -d' ' -f1)" = "$(git rev-parse HEAD)" ] || die "the provenance names another commit than HEAD; rebuild on the tag"
     [ "$(prov_field rehearsal)" = "no" ] || die "a rehearsal build is not publishable"
@@ -520,14 +575,14 @@ publish() {
     [ "$view_rc" -ne 0 ] || die "a release or draft v$VER already exists: finish it (gh release upload/edit) or delete it (gh release delete v$VER)"
     [ "$view_rc" -ne 124 ] || die "gh release view v$VER timed out after 30 s (network? gh auth status)"
     # A draft first, published only once every asset is there: a half-uploaded release is never public.
-    gh release create "v$VER" "$PKG" "$PKG.sha256" "$PROV" --draft --title "ChordLab $VER" --notes-from-tag --verify-tag \
+    gh release create "v$VER" "$PKG" "$SRC_TGZ" "$PKG.sha256" "$PROV" --draft --title "ChordLab $VER" --notes-from-tag --verify-tag \
         || die "gh release create v$VER --draft failed (a draft may be left: gh release view v$VER)"
     assets=$(gh release view "v$VER" --json assets --jq '.assets[].name') || die "gh release view v$VER failed; the release is still a draft"
-    for f in "$PKG" "$PKG.sha256" "$PROV"; do
+    for f in "$PKG" "$SRC_TGZ" "$PKG.sha256" "$PROV"; do
         grep -qxF "$(basename "$f")" <<<"$assets" \
             || die "the draft release v$VER lacks $(basename "$f"): gh release upload v$VER $f --clobber, then gh release edit v$VER --draft=false"
     done
-    gh release edit "v$VER" --draft=false >/dev/null || die "gh release edit v$VER --draft=false failed; the draft has all three assets, run it by hand"
+    gh release edit "v$VER" --draft=false >/dev/null || die "gh release edit v$VER --draft=false failed; the draft has all four assets, run it by hand"
     note "published https://github.com/fluxxion82/chordLab/releases/tag/v$VER"
 }
 
@@ -581,7 +636,7 @@ build() {
         die "the build changed the tree (commit the regenerated Info.plists with a version bump), then rebuild$(tree_excerpt)"
     fi
     for fmt in "${FORMATS[@]}"; do verify_bundle "$STAGE/$fmt/$(bundle_of "$fmt")"; done
-    au_validate; package; notarize; provenance
+    au_validate; package; source_tarball; notarize; provenance
     note "build done: $(basename "$PKG") (formats: ${FORMATS[*]}; auval: $AUVAL_RESULT; notarized: $([ "$SKIP_NOTARIZE" -eq 1 ] && echo no || echo yes))"
 }
 
