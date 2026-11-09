@@ -1,19 +1,20 @@
 import SwiftUI
 
 /// The feel and the meter (plan D1, D2), opened from the transport row's Feel button: a Rhythm menu (its
-/// "Subdivided" entry named for the meter's subdivision), Strum, Speed and Humanise segmented controls, a
-/// Meter menu, and short notes on what they apply to. Everything shown comes from the snapshot's `feel` and
-/// `meter` (the defaults, block chords in 4/4, from an older plug-in build); each control sends exactly one
-/// command when its value changes: `setFeel` with all four fields (the snapshot's, with the one changed) or
-/// `setMeter` (`FeelOptions`). The snapshot the plug-in answers with is what moves the controls, so they
-/// never drift from the document.
+/// "Subdivided" entry named for the meter's subdivision) beside a Meter menu; then Strum and Speed segmented
+/// controls, or, under the Arpeggio rhythm, a Pattern menu and the Rate and Range controls in their place;
+/// Humanise; and a short note. Everything shown comes from the snapshot's `feel` and `meter` (the defaults,
+/// block chords in 4/4, from an older plug-in build); each control sends exactly one command when its value
+/// changes: `setFeel` with all seven fields (the snapshot's, with the one changed) or `setMeter`
+/// (`FeelOptions`). The snapshot the plug-in answers with is what moves the controls, so they never drift
+/// from the document.
 ///
-/// Speed is disabled while no strum plays (strum off, or an arpeggio, which plays one note per hit), and
-/// Strum is disabled under an arpeggio; both keep their value for when it applies again.
+/// Speed is disabled while no strum plays (strum off); the Strum and Speed rows give way to Pattern and Rate
+/// under an arpeggio and keep their values for when the rhythm changes back.
 ///
-/// Short on purpose (four rows and a line of notes, the arpeggio note beside the speed): it opens beside the Feel button, to its left (the
-/// button ends the transport row, so a popover below it would run past the window's right edge at 700 pt),
-/// and stays inside the 700 × 568 minimum window.
+/// Short on purpose (the same four rows under every rhythm and a line of notes, so the popover keeps its
+/// height): it opens beside the Feel button, to its left (the button ends the transport row, so a popover
+/// below it would run past the window's right edge at 700 pt), and stays inside the 700 x 568 minimum window.
 struct FeelPopoverView: View {
   @EnvironmentObject var state: ChordLabState
 
@@ -26,6 +27,16 @@ struct FeelPopoverView: View {
     Binding(get: { feel[keyPath: field] },
             set: { value in
               guard value != feel[keyPath: field] else { return }
+              state.send(command: FeelOptions.command(change(feel, value)))
+            })
+  }
+
+  /// A binding for an arpeggio field: reads it through `FeelOptions` (the default when the snapshot lacks it).
+  private func arpBinding(_ read: @escaping (FeelJSON?) -> String,
+                          _ change: @escaping (FeelJSON, String) -> FeelJSON) -> Binding<String> {
+    Binding(get: { read(feel) },
+            set: { value in
+              guard value != read(feel) else { return }
               state.send(command: FeelOptions.command(change(feel, value)))
             })
   }
@@ -65,21 +76,41 @@ struct FeelPopoverView: View {
             .accessibilityLabel("Meter")
           }
         }
-        GridRow {
-          label("Strum")
-          segmented("Strum", FeelOptions.strums, feelBinding(\.strum) { FeelOptions.changed($0, strum: $1) })
-            .disabled(!FeelOptions.strumApplies(feel))
-        }
-        GridRow {
-          label("Speed")
-          HStack(spacing: 10) {
+        if FeelOptions.isArpeggio(feel) {
+          GridRow {
+            label("Pattern")
+            Picker("Pattern", selection: arpBinding(FeelOptions.arpPattern) { FeelOptions.changed($0, arpPattern: $1) }) {
+              ForEach(Array(FeelOptions.arpPatterns.enumerated()), id: \.offset) { index, group in
+                if index > 0 { Divider() }
+                ForEach(group) { Text($0.title).tag($0.id) }
+              }
+            }
+            .pickerStyle(.menu)
+            .labelsHidden()
+            .fixedSize()
+            .help("Thumb up is a pedal bass; Converge is outside-in; Chord plays every note each step; Random is fixed per chord")
+            .accessibilityLabel("Pattern")
+          }
+          GridRow {
+            label("Rate")
+            HStack(spacing: 10) {
+              segmented("Arpeggio rate", FeelOptions.arpRates(num: meter.num, den: meter.den),
+                        arpBinding(FeelOptions.arpRate) { FeelOptions.changed($0, arpRate: $1) })
+              Text("Range").foregroundStyle(.secondary).fixedSize()
+              segmented("Arpeggio range", FeelOptions.arpRanges,
+                        arpBinding(FeelOptions.arpRange) { FeelOptions.changed($0, arpRange: $1) })
+            }
+          }
+        } else {
+          GridRow {
+            label("Strum")
+            segmented("Strum", FeelOptions.strums, feelBinding(\.strum) { FeelOptions.changed($0, strum: $1) })
+          }
+          GridRow {
+            label("Speed")
             segmented("Strum speed", FeelOptions.strumSpeeds,
                       feelBinding(\.strumSpeed) { FeelOptions.changed($0, strumSpeed: $1) })
               .disabled(!FeelOptions.speedApplies(feel))
-            // Beside the speed, not a line of its own, so the popover keeps its height.
-            if !FeelOptions.strumApplies(feel) {
-              note("Arpeggios ignore the strum.")
-            }
           }
         }
         GridRow {
