@@ -179,13 +179,14 @@ carry the new version, commit the bump with all six regenerated plists, merge to
 ```
 scripts/release.sh preflight --rehearsal   # tools, identities, profile, versions, plists current (before the tag exists)
 git tag -a v<version> -m "ChordLab <version>: ..."   # the message becomes the release notes
-scripts/release.sh preflight               # now strict: clean trees (ChordLab and iPlug2), HEAD is the tag
-scripts/release.sh build                   # Release build of VST3, AU and app into dist/stage, signed, auval, pkgs, notarized, stapled
+scripts/release.sh preflight               # now strict: clean trees (ChordLab and iPlug2), iPlug2 commit public on GitHub, HEAD is the tag
+scripts/release.sh build                   # Release build of VST3, AU and app into dist/stage, signed, auval, pkgs, notarized, stapled, SDK source tarball
 sudo installer -pkg dist/ChordLab-<version>.pkg -target /    # the smoke test with the dev copies moved aside, then uninstall (see Install)
 git push origin main v<version>            # publish needs the tag on GitHub
-scripts/release.sh publish                 # checks the pkg belongs to HEAD and the tag, then gh release create
+scripts/release.sh publish                 # checks the pkg belongs to HEAD and the tag, then gh release create with four assets
 ```
 
+`publish` uploads four assets: the pkg, its `.sha256`, the `.provenance.txt` and the VST3 SDK source tarball.
 `build --rehearsal --skip-notarize` rehearses on a dirty or untagged tree (never publishable). The Xcode project
 itself stays ad-hoc signed; the Developer ID is injected by the script, so building from source needs no certificate.
 `build` starts cold (it wipes `dist/`), takes several minutes per format, and installs the staged Audio Unit into
