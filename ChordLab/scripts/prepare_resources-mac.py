@@ -208,7 +208,7 @@ def main():
   macOSapp['CFBundleVersion'] = CFBundleVersion
   macOSapp['CFBundleShortVersionString'] = CFBundleVersion
   macOSapp['LSMinimumSystemVersion'] = LSMinimumSystemVersion
-  macOSapp['CFBundlePackageType'] = CFBundlePackageType
+  macOSapp['CFBundlePackageType'] = "APPL"  # an application, not a plug-in bundle: Gatekeeper's exec assessment rejects BNDL as "not an app"
   macOSapp['CFBundleSignature'] = config['PLUG_UNIQUE_ID']
   macOSapp['CSResourcesFileMapped'] = CSResourcesFileMapped
   macOSapp['NSPrincipalClass'] = "SWELLApplication"
