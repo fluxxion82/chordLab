@@ -55,8 +55,8 @@ au_mfr()      { sed -n "s/^#define PLUG_MFR_ID '\(.*\)'.*/\1/p" "$CONFIG_H"; }
 head_tag()    { git describe --exact-match --tags HEAD 2>/dev/null || true; }   # informational rows only
 annotated_tag() {  # HEAD carries v$1: 0 an annotated tag, 1 not on HEAD, 2 a lightweight tag
     local tags; tags=$(git tag --points-at HEAD 2>/dev/null || true)   # captured: an early grep exit cannot fail a pipe
-    grep -qx "v$1" <<<"$tags" || return 1
-    [ "$(git cat-file -t "v$1" 2>/dev/null || true)" = tag ] || return 2
+    grep -qxF "v$1" <<<"$tags" || return 1                              # -F: the dots in a version are not wildcards
+    [ "$(git cat-file -t "refs/tags/v$1" 2>/dev/null || true)" = tag ] || return 2   # refs/tags/: never a branch v$1
 }
 work_tree()   { git -C "${1:-.}" rev-parse --is-inside-work-tree >/dev/null 2>&1; }
 tree_dirty()  {  # 0 dirty, 1 clean, 2 not a git work tree (never "clean": callers test ! tree_clean)
@@ -64,6 +64,12 @@ tree_dirty()  {  # 0 dirty, 1 clean, 2 not a git work tree (never "clean": calle
     [ -n "$(git -C "${1:-.}" status --porcelain 2>/dev/null)" ]
 }
 tree_clean()  { local rc=0; tree_dirty "$1" || rc=$?; [ "$rc" -eq 1 ]; }
+tree_excerpt() {  # the first changed paths of both trees, for a die message
+    local s i
+    s=$(git status --porcelain 2>/dev/null || true)
+    i=$(git -C "$IPLUG2_ROOT" status --porcelain 2>/dev/null) || i="not a git work tree"
+    printf '\n  ChordLab: %s\n  iPlug2:   %s' "$(head -n 10 <<<"${s:-(clean)}" | tr '\n' ' ')" "$(head -n 10 <<<"${i:-(clean)}" | tr '\n' ' ')"
+}
 
 scheme_of() { case "$1" in vst3) echo macOS-VST3 ;; au) echo macOS-AUv2 ;; app) echo macOS-APP ;; *) die "unknown format $1" ;; esac; }
 bundle_of() { case "$1" in vst3) echo ChordLab.vst3 ;; au) echo ChordLab.component ;; app) echo ChordLab.app ;; esac; }
@@ -90,9 +96,38 @@ check() {  # name ok(0|1) detail [hard]: under --report only a hard check fails 
 has_identity()      { local out; out=$(security find-identity -v -p "$1" 2>/dev/null) || return 1; grep -qF "\"$2\"" <<<"$out"; }
 versions_agree()    { local hex; hex=$(version_hex); [ -n "$hex" ] && [ "$(hex_to_str "$hex")" = "$(version_str)" ]; }
 notary_profile_ok() { "$TIMEOUT_CMD" 30 xcrun notarytool history --keychain-profile "$NOTARY_PROFILE"; }
+plists_current() {  # prints what is stale; 0 when the tracked plists carry PLUG_VERSION_STR and PLUG_VERSION_HEX
+    # A version bump regenerates these plists during the first build after it, which would dirty the tree mid-build.
+    python3 -I - "$(version_str)" "$(version_hex)" ChordLab/resources/ChordLab-{VST3,AU,macOS}-Info.plist <<'PY'
+import plistlib, sys
+ver, hexv, paths = sys.argv[1], sys.argv[2], sys.argv[3:]
+try:
+    want_au = int(hexv, 16)
+except ValueError:
+    want_au = None
+stale = []
+for path in paths:
+    name = path.rsplit('/', 1)[-1]
+    try:
+        with open(path, 'rb') as fp:
+            plist = plistlib.load(fp)
+    except Exception as e:
+        stale.append('%s unreadable (%s)' % (name, e))
+        continue
+    if plist.get('CFBundleVersion') != ver:
+        stale.append('%s CFBundleVersion %s' % (name, plist.get('CFBundleVersion')))
+    if name.endswith('-AU-Info.plist'):
+        comps = plist.get('AudioComponents') or [{}]
+        got = comps[0].get('version') if isinstance(comps[0], dict) else None
+        if want_au is None or got != want_au:
+            stale.append('%s AudioComponents[0].version %s, expected %s' % (name, got, want_au))
+print('; '.join(stale))
+sys.exit(1 if stale else 0)
+PY
+}
 
 preflight() {
-    local ver tool tag tag_rc
+    local ver tool tag tag_rc stale plists_rc
     ver=$(version_str)
     echo "release.sh preflight (ChordLab $ver)"
     for tool in xcodebuild codesign pkgbuild productbuild pkgutil auval lipo shasum python3 gh ditto; do
@@ -101,6 +136,12 @@ preflight() {
     check "tool notarytool" "$(probe xcrun --find notarytool)" "$(xcrun --find notarytool 2>/dev/null || true)"
     check "tool stapler" "$(probe xcrun --find stapler)" "$(xcrun --find stapler 2>/dev/null || true)"
     check "versions agree" "$(probe versions_agree)" "PLUG_VERSION_STR $ver, PLUG_VERSION_HEX 0x$(version_hex)" 1
+    stale=$(plists_current 2>&1) && plists_rc=0 || plists_rc=1
+    if [ "$plists_rc" -eq 0 ]; then
+        check "Info.plists current" 0 "CFBundleVersion $ver in the VST3, AU and macOS plists, AU version 0x$(version_hex)" 1
+    else
+        check "Info.plists current" 1 "${stale:-stale}: build once (scripts/check.sh --plugin) and commit the regenerated plists with the bump" 1
+    fi
     check "iPlug2 checkout" "$(probe test -f "$IPLUG2_ROOT/common-mac.xcconfig")" "${IPLUG2_ROOT:-unresolved: ../../../iPlug2 from ChordLab/projects}" 1
     check "VST3 SDK" "$(probe test -d "$IPLUG2_ROOT/Dependencies/IPlug/VST3_SDK/pluginterfaces")" "$IPLUG2_ROOT/Dependencies/IPlug/VST3_SDK" 1
     check "Developer ID Application" "$(probe has_identity codesigning "$APP_IDENTITY")" "$APP_IDENTITY"
@@ -268,7 +309,7 @@ try: d=json.loads(sys.stdin.read().strip().splitlines()[-1])
 except Exception: d={}
 if not isinstance(d, dict): d={}
 print(d.get("id") or "-", str(d.get("status") or "-").replace(" ","_"))' <<<"$submit") || true
-    [ "${id:--}" != "-" ] || die "notarytool submit failed (rc $rc, no submission id; see $LOGS/notarytool.err and $LOGS/notarytool-submit.json)"
+    [ "${id:--}" != "-" ] || die "notarytool submit failed (rc $rc, no submission id; see $LOGS/notarytool.err and $LOGS/notarytool-submit.json; if it was submitted, find it with: xcrun notarytool history --keychain-profile $NOTARY_PROFILE)"
     note "notarization submission $id: status ${status:--} (notarytool rc $rc)"
     case "${status:--}" in
         Accepted|Invalid|Rejected) ;;
@@ -292,7 +333,9 @@ PY
     [ "$py_rc" -ne 2 ] || die "the notarization log of submission $id is unreadable (status $status; see $LOGS/notarytool-log.json)"
     [ "$py_rc" -eq 0 ] || die "the notarization log of submission $id has errors (status $status; see $LOGS/notarytool-log.json)"
     [ "$status" = "Accepted" ] || die "notarization of submission $id: status $status (see $LOGS/notarytool-log.json)"
-    [ "$rc" -eq 0 ] || die "notarytool submit exited $rc although submission $id is Accepted (see $LOGS/notarytool.err)"
+    # Accepted with no error-severity issue: a non-zero exit alone does not stop the run; the staple, stapler validate
+    # and spctl below prove the outcome.
+    [ "$rc" -eq 0 ] || note "WARNING: notarytool submit exited $rc although submission $id is Accepted with no error (see $LOGS/notarytool.err)"
     xcrun stapler staple "$PKG" >>"$LOGS/stapler.log" 2>&1 || die "stapler staple failed (see $LOGS/stapler.log)"
     xcrun stapler validate "$PKG" >>"$LOGS/stapler.log" 2>&1 || die "stapler validate failed (see $LOGS/stapler.log)"
     spctl --assess --type install -vv "$PKG" >>"$LOGS/spctl.log" 2>&1 || die "spctl refuses the pkg (see $LOGS/spctl.log)"
@@ -309,7 +352,7 @@ provenance() {
         [ "$(git rev-parse HEAD)" = "$BUILD_HEAD" ] \
             && [ "$(git -C "$IPLUG2_ROOT" rev-parse HEAD 2>/dev/null || echo -)" = "$BUILD_IPLUG2_HEAD" ] \
             && tree_clean . && tree_clean "$IPLUG2_ROOT" \
-            || die "the tree changed during the build; rebuild"
+            || die "the tree changed during the build; rebuild$(tree_excerpt)"
     fi
     (cd "$DIST" && shasum -a 256 "$(basename "$PKG")" >"$(basename "$PKG").sha256")
     local vst3 rta rtm nl json=engine/third_party/nlohmann/json.hpp
@@ -350,7 +393,7 @@ prov_field() { sed -n "s/^$1: *//p" "$PROV"; }
 publish() {
     VER=$(version_str)
     PKG="$DIST/ChordLab-$VER.pkg"; PROV="${PKG%.pkg}.provenance.txt"
-    local remote_sha local_sha tag_rc=0 assets f
+    local remote_sha local_sha tag_rc=0 view_rc=0 assets f
     annotated_tag "$VER" || tag_rc=$?
     [ "$tag_rc" -ne 1 ] || die "HEAD is not tagged v$VER"
     [ "$tag_rc" -ne 2 ] || die "v$VER is a lightweight tag; the release notes come from an annotated one (git tag -a)"
@@ -363,9 +406,12 @@ publish() {
     [ "$(prov_field formats)" = "${FORMATS[*]}" ] || die "the pkg has formats '$(prov_field formats)', expected '${FORMATS[*]}'"
     xcrun stapler validate "$PKG" >/dev/null 2>&1 || die "$PKG is not stapled"
     remote_sha=$(git ls-remote origin "refs/tags/v$VER" | awk -v r="refs/tags/v$VER" '$2 == r {print $1}') || die "git ls-remote origin failed"
-    local_sha=$(git rev-parse "v$VER")
+    local_sha=$(git rev-parse "refs/tags/v$VER")
     [ -n "$remote_sha" ] || die "tag v$VER is not on origin yet: git push origin main v$VER"
     [ "$remote_sha" = "$local_sha" ] || die "origin's v$VER ($remote_sha) is not the local tag ($local_sha)"
+    "$TIMEOUT_CMD" 30 gh release view "v$VER" >/dev/null 2>&1 || view_rc=$?
+    [ "$view_rc" -ne 0 ] || die "a release or draft v$VER already exists: finish it (gh release upload/edit) or delete it (gh release delete v$VER)"
+    [ "$view_rc" -ne 124 ] || die "gh release view v$VER timed out after 30 s (network? gh auth status)"
     # A draft first, published only once every asset is there: a half-uploaded release is never public.
     gh release create "v$VER" "$PKG" "$PKG.sha256" "$PROV" --draft --title "ChordLab $VER" --notes-from-tag --verify-tag \
         || die "gh release create v$VER --draft failed (a draft may be left: gh release view v$VER)"
@@ -386,6 +432,11 @@ build() {
     rm -rf "$DIST"; mkdir -p "$STAGE" "$PKGS" "$LOGS"
     local fmt
     for fmt in "${FORMATS[@]}"; do build_format "$fmt"; done
+    # A build that rewrites a tracked file (a version bump's plists left uncommitted) would only be caught after
+    # notarization by the provenance guard: stop here instead.
+    if [ "$REHEARSAL" -eq 0 ] && { ! tree_clean . || ! tree_clean "$IPLUG2_ROOT"; }; then
+        die "the build changed the tree (commit the regenerated Info.plists with a version bump), then rebuild$(tree_excerpt)"
+    fi
     for fmt in "${FORMATS[@]}"; do verify_bundle "$STAGE/$fmt/$(bundle_of "$fmt")"; done
     # Task 10: au_validate
     package; notarize; provenance
