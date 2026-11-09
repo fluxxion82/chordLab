@@ -253,7 +253,7 @@ std::string invariantProblem(const DocumentStore& store, bool snapshot = true) {
         if (j.at("meter") != json({{"num", d.meter.num}, {"den", d.meter.den}})) {
             return "snapshot meter disagrees with the document";
         }
-        if (!j.at("feel").is_object() || j.at("feel").size() != 4 || !j.at("feelLimited").is_boolean() ||
+        if (!j.at("feel").is_object() || j.at("feel").size() != 7 || !j.at("feelLimited").is_boolean() ||
             j.at("feelLimited").get<bool>() != compile(d).feelLimited) {
             return "snapshot feel or feelLimited disagrees with the document";
         }
@@ -472,6 +472,7 @@ TEST_CASE("json robustness: seeded mutation fuzz of both readers keeps every inv
     corpus.push_back(readFixture("state-progression.json"));
     corpus.push_back(readFixture("state-legacy-phase1.json"));
     corpus.push_back(readFixture("state-feel.json"));
+    corpus.push_back(readFixture("state-legacy-feel.json"));
     for (std::size_t i = commandCount; i < corpus.size(); ++i) {
         REQUIRE_MESSAGE(!corpus[i].empty(), "state fixture missing");
     }
@@ -537,6 +538,9 @@ TEST_CASE("json robustness: mutated setFeel and setMeter payloads apply or rejec
     const std::vector<std::string> corpus = {
         json({{"schema", kJsonSchema}, {"cmd", "setFeel"}, {"rhythm", "arpUpDown"}, {"strum", "downUp"},
               {"strumSpeed", "loose"}, {"humanise", "heavy"}}).dump(),
+        json({{"schema", kJsonSchema}, {"cmd", "setFeel"}, {"rhythm", "arpeggio"}, {"strum", "off"},
+              {"strumSpeed", "medium"}, {"humanise", "off"}, {"arpPattern", "pinkyUpDown"}, {"arpRate", "half"},
+              {"arpRange", "two"}}).dump(),
         json({{"schema", kJsonSchema}, {"cmd", "setFeel"}, {"rhythm", "block"}, {"strum", "off"},
               {"strumSpeed", "medium"}, {"humanise", "off"}}).dump(),
         json({{"schema", kJsonSchema}, {"cmd", "setMeter"}, {"num", 7}, {"den", 8}}).dump(),
@@ -570,7 +574,7 @@ TEST_CASE("json robustness: mutated setFeel and setMeter payloads apply or rejec
 }
 
 TEST_CASE("json robustness: every valid feel and meter keeps the invariants and survives a save") {
-    const char* const rhythms[] = {"block", "pulse", "subdivided", "offbeats", "lowThenUpper", "arpUp", "arpUpDown"};
+    const char* const rhythms[] = {"block", "pulse", "subdivided", "offbeats", "lowThenUpper", "arpeggio"};
     const char* const strums[] = {"off", "down", "up", "downUp"};
     const char* const speeds[] = {"tight", "medium", "loose"};
     const char* const humanises[] = {"off", "light", "medium", "heavy"};
@@ -604,7 +608,38 @@ TEST_CASE("json robustness: every valid feel and meter keeps the invariants and 
             }
         }
     }
-    CHECK(n == 7 * 4 * 3 * 4);
+    CHECK(n == 6 * 4 * 3 * 4);
+}
+
+TEST_CASE("json robustness: every arpeggio pattern, rate and range keeps the invariants and survives a save") {
+    const char* const patterns[] = {"up",        "down",          "upDown",      "downUp",     "upAndDown",  "downAndUp",
+                                    "converge",  "diverge",       "conAndDiverge", "pinkyUp",  "pinkyUpDown", "thumbUp",
+                                    "thumbUpDown", "alberti",     "rootFirst",   "chord",      "random"};
+    const char* const rates[] = {"pulse", "subdivision", "half"};
+    const char* const ranges[] = {"one", "two"};
+    DocumentStore cmdStore = prefilledStore();
+    DocumentStore stateStore = prefilledStore();
+    int m = 0;
+    for (const char* p : patterns) {
+        for (const char* r : rates) {
+            for (const char* g : ranges) {
+                ++m;
+                const std::string feelMsg =
+                    json({{"schema", kJsonSchema}, {"cmd", "setFeel"}, {"rhythm", "arpeggio"}, {"strum", "off"},
+                          {"strumSpeed", "medium"}, {"humanise", "off"}, {"arpPattern", p}, {"arpRate", r},
+                          {"arpRange", g}}).dump();
+                bool accepted = false;
+                const std::string problem = feed(cmdStore, stateStore, feelMsg, &accepted);
+                REQUIRE_MESSAGE(problem.empty(), problem << " input=" << feelMsg);
+                CHECK(accepted);
+                DocumentStore again;
+                std::string error;
+                REQUIRE_MESSAGE(loadStateJson(again, stateJson(cmdStore), error), error);
+                CHECK(again.doc() == cmdStore.doc());
+            }
+        }
+    }
+    CHECK(m == 17 * 3 * 2);
 }
 
 // ---- explicit worst cases ----
@@ -708,7 +743,7 @@ TEST_CASE("json robustness: worst-case inputs are rejected cleanly") {
 }
 
 TEST_CASE("json robustness: a mistyped midiThru is rejected by both readers") {
-    for (const char* name : {"state-progression.json", "state-legacy-phase1.json", "state-feel.json"}) {
+    for (const char* name : {"state-progression.json", "state-legacy-phase1.json", "state-feel.json", "state-legacy-feel.json"}) {
         const std::string fixture = readFixture(name);
         REQUIRE_FALSE(fixture.empty());
         for (const json& bad : {json(1), json("yes"), json(nullptr), json::array()}) {
