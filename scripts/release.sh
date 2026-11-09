@@ -442,6 +442,19 @@ provenance() {
 
 prov_field() { sed -n "s/^$1: *//p" "$PROV"; }
 
+pkg_digest_bound() {  # the pkg's bytes are the ones its .sha256 file (one entry, this name) and the provenance name
+    local d base prov_d entries
+    base=$(basename "$PKG")
+    d=$(shasum -a 256 "$PKG" | cut -d' ' -f1) || die "could not hash $PKG"
+    prov_d=$(prov_field sha256)
+    entries=$(grep -c . "$PKG.sha256" || true)
+    if [ -n "$d" ] && [ "$prov_d" = "$d" ] && [ "$entries" = 1 ] \
+            && { grep -qxF "$d  $base" "$PKG.sha256" || grep -qxF "$d *$base" "$PKG.sha256"; }; then
+        return 0
+    fi
+    die "$base does not match its checksum file and provenance: the pkg hashes to $d; $base.sha256 lists ($entries entries) '$(tr '\n' ' ' <"$PKG.sha256" | sed 's/ $//')'; $(basename "$PROV") says sha256 '${prov_d:-none}'"
+}
+
 publish() {
     VER=$(version_str)
     PKG="$DIST/ChordLab-$VER.pkg"; PROV="${PKG%.pkg}.provenance.txt"
@@ -450,7 +463,7 @@ publish() {
     [ "$tag_rc" -ne 1 ] || die "HEAD is not tagged v$VER"
     [ "$tag_rc" -ne 2 ] || die "v$VER is a lightweight tag; the release notes come from an annotated one (git tag -a)"
     [ -f "$PKG" ] && [ -f "$PKG.sha256" ] && [ -f "$PROV" ] || die "run 'scripts/release.sh build' on the tag first ($PKG missing)"
-    (cd "$DIST" && shasum -a 256 -c "$(basename "$PKG").sha256" >/dev/null 2>&1) || die "$PKG does not match its .sha256"
+    pkg_digest_bound
     [ "$(prov_field chordlab | cut -d' ' -f1)" = "$(git rev-parse HEAD)" ] || die "the provenance names another commit than HEAD; rebuild on the tag"
     [ "$(prov_field rehearsal)" = "no" ] || die "a rehearsal build is not publishable"
     [ "$(prov_field notarized)" = "yes" ] || die "an unnotarized build is not publishable"
