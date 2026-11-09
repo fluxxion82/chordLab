@@ -16,7 +16,7 @@
 #       tag, already pushed.
 #
 # The Xcode project stays ad-hoc signed; nothing here changes it. The script writes dist/ (stage, pkgs, logs and
-# xcodebuild's intermediates: SYMROOT and OBJROOT point into it, so every build is cold) and, from Task 10, the AU
+# xcodebuild's intermediates: SYMROOT and OBJROOT point into it, so every build is cold) and the AU
 # copy that auval validates (~/Library/Audio/Plug-Ins/Components/ChordLab.component, see au_validate); nothing
 # else (Xcode's own shared module cache and logs under ~/Library/Developer aside).
 set -euo pipefail
@@ -35,7 +35,7 @@ DIST="$ROOT/dist"
 STAGE="$DIST/stage"
 PKGS="$DIST/pkgs"
 LOGS="$DIST/log"
-FORMATS=(vst3 app)                       # Task 10 adds au
+FORMATS=(vst3 au app)
 # IPLUG2_ROOT in ChordLab-mac.xcconfig is relative to ChordLab/projects (../../../iPlug2).
 IPLUG2_ROOT="$( (cd ChordLab/projects && rel="$(sed -n 's/^IPLUG2_ROOT *= *//p' ../config/ChordLab-mac.xcconfig)" \
     && [ -n "$rel" ] && cd "$rel" && pwd -P) 2>/dev/null || true)"
@@ -381,6 +381,7 @@ provenance() {
         echo "macos:          $(sw_vers -productVersion) ($(uname -m))"
         echo "formats:        ${FORMATS[*]}"
         echo "auval:          $AUVAL_RESULT"
+        if [ "$AUVAL_RESULT" = "$AUVAL_ARM64_ONLY" ]; then echo "WARNING:        auval ran on arm64 only (no Rosetta on the build Mac); the AU's x86_64 slice was not validated"; fi
         echo "notarized:      $([ "$SKIP_NOTARIZE" -eq 1 ] && echo no || echo yes)"
         echo "rehearsal:      $([ "$REHEARSAL" -eq 1 ] && echo yes || echo no)"
         echo "built:          $(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -402,7 +403,11 @@ publish() {
     [ "$(prov_field chordlab | cut -d' ' -f1)" = "$(git rev-parse HEAD)" ] || die "the provenance names another commit than HEAD; rebuild on the tag"
     [ "$(prov_field rehearsal)" = "no" ] || die "a rehearsal build is not publishable"
     [ "$(prov_field notarized)" = "yes" ] || die "an unnotarized build is not publishable"
-    [ "$(prov_field auval)" = "yes" ] || die "the AU was not validated (auval: $(prov_field auval)); rebuild without --skip-auval"
+    case "$(prov_field auval)" in
+        yes) ;;
+        "$AUVAL_ARM64_ONLY") note "WARNING: the AU's x86_64 slice was not validated (auval: $AUVAL_ARM64_ONLY)" ;;
+        *) die "the AU was not validated (auval: $(prov_field auval)); rebuild without --skip-auval" ;;
+    esac
     [ "$(prov_field formats)" = "${FORMATS[*]}" ] || die "the pkg has formats '$(prov_field formats)', expected '${FORMATS[*]}'"
     xcrun stapler validate "$PKG" >/dev/null 2>&1 || die "$PKG is not stapled"
     remote_sha=$(git ls-remote origin "refs/tags/v$VER" | awk -v r="refs/tags/v$VER" '$2 == r {print $1}') || die "git ls-remote origin failed"
@@ -424,6 +429,35 @@ publish() {
     note "published https://github.com/fluxxion82/chordLab/releases/tag/v$VER"
 }
 
+# auval: AUVAL_RESULT is "yes" (both slices), "yes (arm64 only)" (no Rosetta on this Mac: the x86_64 slice is not
+# validated, and the provenance says so) or "skipped"; publish accepts the first two.
+AUVAL_ARM64_ONLY="yes (arm64 only)"
+au_validate() {
+    local dst="$HOME/Library/Audio/Plug-Ins/Components/ChordLab.component" subtype mfr built_type
+    if [ "$SKIP_AUVAL" -eq 1 ]; then AUVAL_RESULT=skipped; note "auval skipped (--skip-auval): not publishable"; return; fi
+    subtype=$(au_subtype); mfr=$(au_mfr)
+    [ -n "$subtype" ] && [ -n "$mfr" ] || die "could not read PLUG_UNIQUE_ID / PLUG_MFR_ID from $CONFIG_H"
+    # Xcode copies the Info.plist in parallel with the script that regenerates it, so the first build after a plist
+    # change can ship the stale one (Task 7): refuse anything but a MIDI processor before validating.
+    built_type=$(plutil -extract AudioComponents.0.type raw -o - "$STAGE/au/ChordLab.component/Contents/Info.plist" 2>/dev/null || true)
+    [ "$built_type" = aumi ] || die "the staged AU's Info.plist says type '${built_type:-?}', expected aumi (rebuild; the plist copy raced the resource script)"
+    note "installing the staged AU into $dst for auval (this Mac only; replaces the dev copy)"
+    rm -rf "$dst"; ditto "$STAGE/au/ChordLab.component" "$dst"
+    killall -9 AudioComponentRegistrar 2>/dev/null || true
+    auval -strict -v aumi "$subtype" "$mfr" >"$LOGS/auval.log" 2>&1 || { tail -n 40 "$LOGS/auval.log" >&2; die "auval failed (see $LOGS/auval.log)"; }
+    grep -q "AU VALIDATION SUCCEEDED" "$LOGS/auval.log" || die "auval: no success line in $LOGS/auval.log"
+    if arch -x86_64 /usr/bin/true 2>/dev/null; then
+        arch -x86_64 auval -strict -v aumi "$subtype" "$mfr" >"$LOGS/auval-x86_64.log" 2>&1 || { tail -n 40 "$LOGS/auval-x86_64.log" >&2; die "auval (x86_64 slice) failed (see $LOGS/auval-x86_64.log)"; }
+        grep -q "AU VALIDATION SUCCEEDED" "$LOGS/auval-x86_64.log" || die "auval (x86_64 slice): no success line in $LOGS/auval-x86_64.log"
+        AUVAL_RESULT=yes
+        note "auval passed for arm64 and x86_64 (aumi $subtype $mfr)"
+    else
+        AUVAL_RESULT=$AUVAL_ARM64_ONLY
+        note "auval passed for arm64 (aumi $subtype $mfr)"
+        note "WARNING: Rosetta is not installed; the x86_64 slice was not validated (softwareupdate --install-rosetta)"
+    fi
+}
+
 build() {
     VER=$(version_str)
     REPORT=0; preflight
@@ -438,9 +472,8 @@ build() {
         die "the build changed the tree (commit the regenerated Info.plists with a version bump), then rebuild$(tree_excerpt)"
     fi
     for fmt in "${FORMATS[@]}"; do verify_bundle "$STAGE/$fmt/$(bundle_of "$fmt")"; done
-    # Task 10: au_validate
-    package; notarize; provenance
-    note "build done: $STAGE"
+    au_validate; package; notarize; provenance
+    note "build done: $(basename "$PKG") (formats: ${FORMATS[*]}; auval: $AUVAL_RESULT; notarized: $([ "$SKIP_NOTARIZE" -eq 1 ] && echo no || echo yes))"
 }
 
 # ---------------------------------------------------------------------------------------------------------
