@@ -28,7 +28,7 @@ Phase 1, the basics:
   Panic button.
 - MIDI drag-out of the progression as a `.mid` clip at the host tempo.
 - The document (progression, sections, voicings, keys, follow, loop, relation mode) and the editor
-  window size (900 × 800 for a new instance, resizable down to 700 × 568) are saved with the host project.
+  window size (900 × 800 for a new instance, resizable down to 700 × 600) are saved with the host project.
 
 Phase 2, explainable harmony:
 
@@ -57,6 +57,11 @@ Phase 3, so far:
 - A tension curve over the sequence bar, and a browsed-mode picker for parallel-mode browsing.
 - An Applied view of the palette: the browsed key's secondary dominants (V7/x) and leading-tone sevenths
   (vii°7/x), each above the chord it leads to, previewable and draggable like palette cells.
+- Feel: block, pulse, subdivided, offbeat, low-then-chord and Arpeggio rhythms; the Arpeggio has seventeen
+  patterns (Live's Arpeggiator styles plus Alberti, Root first, Chord and a per-chord Random), a rate and a
+  one- or two-octave range; strum and humanise; the document's meter.
+- Sequence bar editing: ⇧/⌘ multi-select, ⌘C ⌘X ⌘V ⌘D ⌘A, a Length menu with a default length for new chords,
+  and a Record toggle that turns palette presses into blocks as long as they were held.
 
 ## Install
 
@@ -236,8 +241,8 @@ binaries.
 - Sanitizers: with Apple clang 17 (Xcode 16) ASan deadlocked before `main()` and TSan hung; since
   Apple clang 21 (Xcode 27.1) UBSan, ASan and TSan all run the engine suite cleanly
   (`scripts/check.sh --ubsan --asan --tsan`, each step under a hard timeout).
-- Not yet: piano roll, melody tracks (Phase 3); chords are contiguous; the ruler assumes
-  4/4; one suggestion style (pop); macOS only (VST3, Audio Unit, app). The Xcode project still carries
+- Not yet: piano roll, melody tracks (Phase 3); chords are contiguous; one suggestion
+  style (pop); macOS only (VST3, Audio Unit, app). The Xcode project still carries
   iPlug2's AUv3, AAX, VST2 and iOS targets and Windows project files from the template; they are not
   maintained or tested.
 
