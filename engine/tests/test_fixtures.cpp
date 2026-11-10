@@ -72,7 +72,7 @@ Chord chordOf(PitchClass root, const char* typeId) {
     return Chord{root, &chordType(typeId)};
 }
 
-/// Every top-level member of a snapshot, as documented in json_api.h (27 of them). A contract change updates
+/// Every top-level member of a snapshot, as documented in json_api.h (29 of them). A contract change updates
 /// this list and the fixtures together: the snapshot's key set must equal it, so an undocumented key and a
 /// missing documented one both fail.
 const std::set<std::string> kSnapshotKeys = {
@@ -81,7 +81,7 @@ const std::set<std::string> kSnapshotKeys = {
     "modes",          "tonics",         "events",       "sections",       "suggestions",
     "palette",        "homeTriads",     "relationMode", "relationReference", "presets",
     "applied",        "transposeWithKey", "keyHintSeen",    "feel",           "meter",
-    "feelLimited",    "midiThru"};
+    "feelLimited",    "midiThru",       "selectedEventIds", "newChordBeats"};
 
 void checkSnapshotShape(const std::string& text) {
     const json j = json::parse(text);
@@ -101,7 +101,7 @@ void checkSnapshotShape(const std::string& text) {
 }
 
 /// The progression fixture: ids 1..4 = C (4 beats), Am (4), F (2), G7 (6); Am manual (inversion 1);
-/// autoVoiceLead on; sections 1 "Verse" (at 0, colour 0) and 2 "Chorus" (at 2, colour 3); F selected (id 3).
+/// autoVoiceLead on; sections 1 "Verse" (at 0, colour 0) and 2 "Chorus" (at 2, colour 3); Am and F selected (ids 2, 3), F the anchor.
 /// `browsed` is optional: the browsed key, when it is to differ from the project key.
 DocumentStore progressionStore(const Key* browsed) {
     DocumentStore store;
@@ -120,7 +120,7 @@ DocumentStore progressionStore(const Key* browsed) {
     REQUIRE(verse == 1);
     REQUIRE(chorus == 2);
     store.setSectionColour(chorus, 3);
-    store.setSelectedEvent(f);
+    store.setSelectedEvents({am, f}, f);  // Am and F selected, F the anchor
     if (browsed != nullptr) {
         store.setBrowsedKey(*browsed);
     }
@@ -129,7 +129,7 @@ DocumentStore progressionStore(const Key* browsed) {
 
 std::string snapshotOf(const DocumentStore& store) {
     const Document& d = store.doc();
-    return snapshotJson(d, buildPalette(d.browsedKey, d.projectKey), store.selectedEventId());
+    return snapshotJson(d, buildPalette(d.browsedKey, d.projectKey), store.selectedEventId(), store.selectedEventIds());
 }
 
 std::string homeEmpty() {
@@ -195,6 +195,8 @@ TEST_CASE("golden fixtures: generated snapshots carry the documented top-level k
     CHECK(empty.at("events").empty());
     CHECK(empty.at("sections").empty());
     CHECK(empty.at("selectedEventId").is_null());
+    CHECK(empty.at("selectedEventIds") == json::array());
+    CHECK(empty.at("newChordBeats").is_null());
     CHECK(empty.at("homeTriads").empty());
     CHECK(empty.at("projectKeyName") == "C Ionian");
     CHECK(empty.at("relationMode") == "blend");
@@ -208,6 +210,7 @@ TEST_CASE("golden fixtures: generated snapshots carry the documented top-level k
     CHECK(home.at("events").size() == 4);
     CHECK(home.at("sections").size() == 2);
     CHECK(home.at("selectedEventId") == 3);
+    CHECK(home.at("selectedEventIds") == json::array({2, 3}));
     CHECK(home.at("autoVoiceLead") == true);
     CHECK(home.at("homeTriads").empty());
     CHECK(home.at("events").at(1).at("manualVoicing") == true);
@@ -234,6 +237,7 @@ TEST_CASE("golden fixtures: the feel and meter fixtures carry non-default values
                 {"arpPattern", "pinkyUpDown"}, {"arpRate", "half"}, {"arpRange", "two"}}));
     CHECK(snap.at("meter") == json({{"num", 6}, {"den", 8}}));
     CHECK(snap.at("feelLimited") == false);
+    CHECK(snap.at("newChordBeats") == 1.5);
     const json state = json::parse(stateFeel());
     CHECK(state.at("feel") == snap.at("feel"));
     CHECK(state.at("meter") == snap.at("meter"));

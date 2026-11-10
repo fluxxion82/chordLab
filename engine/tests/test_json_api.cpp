@@ -798,10 +798,11 @@ TEST_CASE("snapshot: a home triad is the palette's triad cell of the project key
 
 namespace {
 
-/// The store's snapshot with its live selection, parsed back.
+/// The store's snapshot with its live selection (the anchor and every selected id), parsed back.
 json selectedSnapshot(const DocumentStore& store) {
     const Document& d = store.doc();
-    return json::parse(snapshotJson(d, buildPalette(d.browsedKey, d.projectKey), store.selectedEventId()));
+    return json::parse(snapshotJson(d, buildPalette(d.browsedKey, d.projectKey), store.selectedEventId(),
+                                    store.selectedEventIds()));
 }
 
 /// Every cell the UI sizes: the palette's, then the home row's.
@@ -1179,9 +1180,9 @@ TEST_CASE("rejection: transpose commands with missing, mistyped or out-of-range 
     CHECK(error.find("in -11..11") != std::string::npos);
 }
 
-TEST_CASE("snapshot: twenty-seven top-level keys, with the transpose flags, the feel and midiThru") {
+TEST_CASE("snapshot: twenty-nine top-level keys, with the transpose flags, the feel, midiThru, the selection and the new-chord length") {
     DocumentStore store = threeChords();
-    CHECK(snapshot(store).size() == 27);
+    CHECK(snapshot(store).size() == 29);
 }
 
 // --- Feel and meter --------------------------------------------------------------------------
@@ -3848,4 +3849,291 @@ TEST_CASE("appendChord: without a length, the new-chord length once one is set")
     applyOk(store, {{"cmd", "appendChord"}, {"root", 5}, {"type", "maj"}, {"lengthBeats", 2.0}});
     CHECK(store.doc().events[0].lengthBeats == 0.75);
     CHECK(store.doc().events[1].lengthBeats == 2.0);
+}
+
+// --- Strip editing: insertChords, removeChords, setLengths, selectEvents, setNewChordLength ----------------
+
+namespace {
+
+/// One `insertChords` entry: `root` and `type` plus the members of `extra`.
+json entry(int root, const char* type, json extra = json::object()) {
+    extra["root"] = root;
+    extra["type"] = type;
+    return extra;
+}
+
+json insertCmd(json index, json chords) {
+    return json{{"cmd", "insertChords"}, {"index", std::move(index)}, {"chords", std::move(chords)}};
+}
+
+/// The length of every event of the snapshot, in order.
+std::vector<double> snapshotLengths(const json& snap) {
+    std::vector<double> lengths;
+    for (const json& e : snap.at("events")) {
+        lengths.push_back(e.at("lengthBeats").get<double>());
+    }
+    return lengths;
+}
+
+}  // namespace
+
+TEST_CASE("insertChords: the entries land at the index in order, one undo step, selected with the last as anchor") {
+    DocumentStore store = threeChords();  // C 1, F 2, G7 3
+    const std::pair<int, int> depth = historyDepth(store);
+    applyOk(store, insertCmd(1, json::array({entry(9, "min", {{"lengthBeats", 2.0}}), entry(2, "min", {{"velocity", 80}})})));
+    const json snap = selectedSnapshot(store);
+    CHECK(snapshotIds(snap) == std::vector<int>{1, 4, 5, 2, 3});
+    CHECK(snapshotLengths(snap) == std::vector<double>{4.0, 2.0, 4.0, 4.0, 4.0});  // no length: one bar
+    CHECK(snap.at("events").at(1).at("symbol") == "Am");
+    CHECK(snap.at("events").at(2).at("velocity") == 80);
+    CHECK(snap.at("selectedEventIds") == json::array({4, 5}));
+    CHECK(snap.at("selectedEventId") == 5);
+    CHECK(historyDepth(store) == std::make_pair(depth.first + 1, 0));
+    applyOk(store, {{"cmd", "undo"}});
+    CHECK(snapshotIds(snapshot(store)) == std::vector<int>{1, 2, 3});
+    CHECK(store.selectedEventIds().empty());
+}
+
+TEST_CASE("insertChords: voicing fields; a given inversion or octave marks the chord manual unless told otherwise") {
+    DocumentStore store;
+    applyOk(store, insertCmd(0, json::array({entry(0, "maj", {{"inversion", 1}}),
+                                             entry(0, "maj", {{"octave", -1}}),
+                                             entry(0, "maj", {{"inversion", 2}, {"manualVoicing", false}}),
+                                             entry(0, "maj", {{"manualVoicing", true}}),
+                                             entry(0, "maj")})));
+    const auto& e = store.doc().events;
+    REQUIRE(e.size() == 5);
+    CHECK(e[0] == ChordEvent{1, kC, 4.0, 100, 1, 0, true});
+    CHECK(e[1] == ChordEvent{2, kC, 4.0, 100, 0, -1, true});
+    CHECK(e[2] == ChordEvent{3, kC, 4.0, 100, 2, 0, false});
+    CHECK(e[3] == ChordEvent{4, kC, 4.0, 100, 0, 0, true});
+    CHECK(e[4] == ChordEvent{5, kC, 4.0, 100, 0, 0, false});
+}
+
+TEST_CASE("insertChords: one bad entry rejects the whole message, names chords[i].field, and keeps the history") {
+    DocumentStore store = threeChords();
+    const json good = entry(5, "maj");
+    struct Bad {
+        json third;
+        const char* names;
+    };
+    const Bad cases[] = {
+        {entry(-1, "maj"), "chords[2].root"},
+        {entry(12, "maj"), "chords[2].root"},
+        {json({{"root", "0"}, {"type", "maj"}}), "chords[2].root"},
+        {json({{"root", 1.5}, {"type", "maj"}}), "chords[2].root"},
+        {json({{"type", "maj"}}), "chords[2].root"},
+        {entry(0, "nope"), "chords[2].type"},
+        {json({{"root", 0}, {"type", 7}}), "chords[2].type"},
+        {json({{"root", 0}}), "chords[2].type"},
+        {entry(0, "maj", {{"lengthBeats", "4"}}), "chords[2].lengthBeats"},
+        {entry(0, "maj", {{"lengthBeats", nullptr}}), "chords[2].lengthBeats"},
+        {entry(0, "maj", {{"velocity", 1.5}}), "chords[2].velocity"},
+        {entry(0, "maj", {{"velocity", "100"}}), "chords[2].velocity"},
+        {entry(0, "maj", {{"inversion", 3}}), "chords[2].inversion"},  // a triad has inversions 0..2
+        {entry(0, "maj", {{"inversion", -1}}), "chords[2].inversion"},
+        {entry(0, "maj", {{"inversion", "1"}}), "chords[2].inversion"},
+        {entry(0, "maj", {{"octave", 2}}), "chords[2].octave"},
+        {entry(0, "maj", {{"octave", -2}}), "chords[2].octave"},
+        {entry(0, "maj", {{"octave", 0.5}}), "chords[2].octave"},
+        {entry(0, "maj", {{"manualVoicing", 1}}), "chords[2].manualVoicing"},
+        {entry(0, "maj", {{"manualVoicing", "yes"}}), "chords[2].manualVoicing"},
+        {json(5), "chords[2]"},
+        {json::array(), "chords[2]"},
+    };
+    for (const Bad& bad : cases) {
+        const json cmd = insertCmd(1, json::array({good, good, bad.third}));
+        checkRejectedKeepsHistory(store, cmd);
+        std::string error;
+        CHECK_FALSE(apply(store, cmd, error));
+        CAPTURE(error);
+        CHECK(error.find(bad.names) != std::string::npos);
+    }
+    checkRejectedKeepsHistory(store, {{"cmd", "insertChords"}, {"chords", json::array({good})}});  // no index
+    checkRejectedKeepsHistory(store, insertCmd("1", json::array({good})));
+    checkRejectedKeepsHistory(store, insertCmd(1.5, json::array({good})));
+    checkRejectedKeepsHistory(store, {{"cmd", "insertChords"}, {"index", 1}});  // no chords
+    checkRejectedKeepsHistory(store, insertCmd(1, json::array()));
+    checkRejectedKeepsHistory(store, insertCmd(1, good));  // an object, not an array
+    checkRejectedKeepsHistory(store, insertCmd(1, json(std::vector<json>(kMaxChords + 1, good))));
+    CHECK(store.nextId() == 4);  // no id consumed
+}
+
+TEST_CASE("insertChords: refused whole past kMaxChords, with the reason; exactly kMaxChords is allowed") {
+    DocumentStore store;
+    std::string error;
+    REQUIRE_MESSAGE(loadStateJson(store, stateWithChords(kMaxChords - 2), error), error);
+    const json three = json::array({entry(0, "maj"), entry(5, "maj"), entry(7, "7")});
+    CHECK_FALSE(apply(store, insertCmd(0, three), error));
+    CAPTURE(error);
+    CHECK(error.find("insertChords") != std::string::npos);
+    CHECK(error.find(std::to_string(kMaxChords)) != std::string::npos);
+    CHECK(store.doc().events.size() == static_cast<std::size_t>(kMaxChords) - 2);
+    CHECK(store.nextId() == kMaxChords - 1);
+    applyOk(store, insertCmd(0, json::array({entry(0, "maj"), entry(5, "maj")})));
+    CHECK(store.doc().events.size() == static_cast<std::size_t>(kMaxChords));
+    CHECK_FALSE(apply(store, insertCmd(0, json::array({entry(0, "maj")})), error));
+}
+
+TEST_CASE("removeChords: the listed chords that exist, as removeChord would one after another, in one undo step") {
+    DocumentStore store = threeChords();
+    applyOk(store, {{"cmd", "appendChord"}, {"root", 0}, {"type", "maj"}});  // id 4
+    applyOk(store, {{"cmd", "addSection"}, {"index", 0}, {"name", "A"}});
+    applyOk(store, {{"cmd", "addSection"}, {"index", 2}, {"name", "B"}});
+    DocumentStore sequential = store;
+    const std::pair<int, int> depth = historyDepth(store);
+    applyOk(store, {{"cmd", "removeChords"}, {"ids", json::array({3, 99, 1, 3})}});
+    sequential.removeChord(1);
+    sequential.removeChord(3);
+    CHECK(snapshotIds(snapshot(store)) == std::vector<int>{2, 4});
+    CHECK(store.doc().sections == sequential.doc().sections);
+    CHECK(historyDepth(store).first == depth.first + 1);
+    applyOk(store, {{"cmd", "undo"}});
+    CHECK(snapshotIds(snapshot(store)) == std::vector<int>{1, 2, 3, 4});
+}
+
+TEST_CASE("removeChords / setLengths: no id that exists, or nothing to change, is a valid no-op without history") {
+    DocumentStore store = threeChords();
+    const Document before = store.doc();
+    const std::pair<int, int> depth = historyDepth(store);
+    applyOk(store, {{"cmd", "removeChords"}, {"ids", json::array({98, 99})}});
+    applyOk(store, {{"cmd", "setLengths"}, {"ids", json::array({98})}, {"lengthBeats", 1.0}});
+    applyOk(store, {{"cmd", "setLengths"}, {"ids", json::array({1})}, {"lengthBeats", 4.0}});  // already
+    CHECK(store.doc() == before);
+    CHECK(historyDepth(store) == depth);
+}
+
+TEST_CASE("setLengths: every listed chord, clamped, one undo step each call") {
+    DocumentStore store = threeChords();
+    applyOk(store, {{"cmd", "setLengths"}, {"ids", json::array({1, 3, 3})}, {"lengthBeats", 0.1}});
+    CHECK(snapshotLengths(snapshot(store)) == std::vector<double>{0.25, 4.0, 0.25});
+    applyOk(store, {{"cmd", "setLengths"}, {"ids", json::array({2})}, {"lengthBeats", 1000}});
+    CHECK(snapshotLengths(snapshot(store)) == std::vector<double>{0.25, 64.0, 0.25});
+    applyOk(store, {{"cmd", "undo"}});
+    applyOk(store, {{"cmd", "undo"}});
+    CHECK(snapshotLengths(snapshot(store)) == std::vector<double>{4.0, 4.0, 4.0});
+}
+
+TEST_CASE("rejection: removeChords and setLengths need a non-empty array of integer ids, setLengths a finite length") {
+    DocumentStore store = threeChords();
+    for (const char* name : {"removeChords", "setLengths"}) {
+        CAPTURE(name);
+        const auto withIds = [&](json ids) {
+            json c{{"cmd", name}, {"ids", std::move(ids)}};
+            if (std::string(name) == "setLengths") {
+                c["lengthBeats"] = 1.0;
+            }
+            return c;
+        };
+        json missing = withIds(json::array({1}));
+        missing.erase("ids");
+        checkRejectedKeepsHistory(store, missing);
+        checkRejectedKeepsHistory(store, withIds(json::array()));
+        checkRejectedKeepsHistory(store, withIds(1));
+        checkRejectedKeepsHistory(store, withIds(nullptr));
+        checkRejectedKeepsHistory(store, withIds(json::array({1, "2"})));
+        checkRejectedKeepsHistory(store, withIds(json::array({1.5})));
+        std::string error;
+        CHECK_FALSE(apply(store, withIds(json::array({1, true})), error));
+        CHECK(error.find("ids[1]") != std::string::npos);
+    }
+    checkRejectedKeepsHistory(store, {{"cmd", "setLengths"}, {"ids", json::array({1})}});
+    checkRejectedKeepsHistory(store, {{"cmd", "setLengths"}, {"ids", json::array({1})}, {"lengthBeats", "1"}});
+    checkRejectedKeepsHistory(store, {{"cmd", "setLengths"}, {"ids", json::array({1})}, {"lengthBeats", nullptr}});
+}
+
+TEST_CASE("selectEvents: unknown ids dropped, strip order, the anchor or the last; never history") {
+    DocumentStore store = threeChords();
+    const std::pair<int, int> depth = historyDepth(store);
+    applyOk(store, {{"cmd", "selectEvents"}, {"ids", json::array({3, 1, 99, 1})}, {"anchor", 1}});
+    CHECK(store.selectedEventIds() == std::vector<int>{1, 3});
+    CHECK(store.selectedEventId() == 1);
+    applyOk(store, {{"cmd", "selectEvents"}, {"ids", json::array({1, 2})}});
+    CHECK(store.selectedEventId() == 2);
+    applyOk(store, {{"cmd", "selectEvents"}, {"ids", json::array({1, 2})}, {"anchor", nullptr}});
+    CHECK(store.selectedEventId() == 2);
+    applyOk(store, {{"cmd", "selectEvents"}, {"ids", json::array({1, 2})}, {"anchor", 3}});
+    CHECK(store.selectedEventId() == 2);
+    applyOk(store, {{"cmd", "selectEvents"}, {"ids", json::array()}});
+    CHECK(store.selectedEventIds().empty());
+    CHECK(store.selectedEventId() == kNoEventId);
+    CHECK(historyDepth(store) == depth);
+}
+
+TEST_CASE("rejection: selectEvents needs an array of integer ids and an integer or null anchor") {
+    DocumentStore store = threeChords();
+    store.setSelectedEvents({1, 2}, 1);
+    checkRejectedKeepsHistory(store, {{"cmd", "selectEvents"}});
+    checkRejectedKeepsHistory(store, {{"cmd", "selectEvents"}, {"ids", 1}});
+    checkRejectedKeepsHistory(store, {{"cmd", "selectEvents"}, {"ids", json::array({true})}});
+    checkRejectedKeepsHistory(store, {{"cmd", "selectEvents"}, {"ids", json::array({1})}, {"anchor", "1"}});
+    checkRejectedKeepsHistory(store, {{"cmd", "selectEvents"}, {"ids", json::array({1})}, {"anchor", 1.5}});
+    CHECK(store.selectedEventIds() == std::vector<int>{1, 2});  // a rejected message leaves the selection alone
+    CHECK(store.selectedEventId() == 1);
+}
+
+TEST_CASE("snapshot: selectedEventIds is the selection in strip order; selectedEventId is its anchor") {
+    DocumentStore store = threeChords();
+    applyOk(store, {{"cmd", "selectEvents"}, {"ids", json::array({3, 1})}, {"anchor", 1}});
+    json snap = selectedSnapshot(store);
+    CHECK(snap.at("selectedEventIds") == json::array({1, 3}));
+    CHECK(snap.at("selectedEventId") == 1);
+    CHECK(snap.at("relationReference").at("eventId") == 1);  // the suggestions and relations follow the anchor
+    applyOk(store, {{"cmd", "moveChord"}, {"id", 3}, {"index", 0}});
+    CHECK(selectedSnapshot(store).at("selectedEventIds") == json::array({3, 1}));
+    applyOk(store, {{"cmd", "selectEvent"}, {"id", nullptr}});
+    snap = selectedSnapshot(store);
+    CHECK(snap.at("selectedEventIds") == json::array());
+    CHECK(snap.at("selectedEventId").is_null());
+}
+
+TEST_CASE("snapshot: the selection and its anchor are normalised together, so a selection always has its anchor") {
+    DocumentStore store = threeChords();
+    applyOk(store, {{"cmd", "moveChord"}, {"id", 3}, {"index", 0}});  // strip order 3, 1, 2
+    const Document& d = store.doc();
+    const Palette palette = buildPalette(d.browsedKey, d.projectKey);
+    // The anchor alone (a caller that passes no ids): listed.
+    json snap = json::parse(snapshotJson(d, palette, 2));
+    CHECK(snap.at("selectedEventIds") == json::array({2}));
+    CHECK(snap.at("selectedEventId") == 2);
+    // A stale anchor with a surviving selection: unknown ids dropped, the last surviving block is the anchor,
+    // and the suggestions and relations follow it.
+    snap = json::parse(snapshotJson(d, palette, 99, {99, 2}));
+    CHECK(snap.at("selectedEventIds") == json::array({2}));
+    CHECK(snap.at("selectedEventId") == 2);
+    CHECK(snap.at("relationReference").at("eventId") == 2);
+    // No anchor at all: the last selected block in strip order.
+    snap = json::parse(snapshotJson(d, palette, kNoEventId, {1, 3}));
+    CHECK(snap.at("selectedEventIds") == json::array({3, 1}));
+    CHECK(snap.at("selectedEventId") == 1);
+    CHECK(snap.at("relationReference").at("eventId") == 1);
+    // An anchor that names a block outside the selection: the selection wins, its last block is the anchor.
+    snap = json::parse(snapshotJson(d, palette, 2, {3, 1}));
+    CHECK(snap.at("selectedEventIds") == json::array({3, 1}));
+    CHECK(snap.at("selectedEventId") == 1);
+    // Nothing that names an event: no selection, no anchor.
+    snap = json::parse(snapshotJson(d, palette, 99, {98}));
+    CHECK(snap.at("selectedEventIds") == json::array());
+    CHECK(snap.at("selectedEventId").is_null());
+}
+
+TEST_CASE("setNewChordLength: a number or null, snapped, live, used by appendChord and insertChords, in the snapshot") {
+    DocumentStore store;
+    CHECK(snapshot(store).at("newChordBeats").is_null());
+    applyOk(store, {{"cmd", "setNewChordLength"}, {"lengthBeats", 1.3}});
+    CHECK(snapshot(store).at("newChordBeats") == 1.25);
+    applyOk(store, {{"cmd", "appendChord"}, {"root", 0}, {"type", "maj"}});
+    applyOk(store, insertCmd(1, json::array({entry(5, "maj"), entry(7, "7", {{"lengthBeats", 2.0}})})));
+    CHECK(snapshotLengths(snapshot(store)) == std::vector<double>{1.25, 1.25, 2.0});
+    CHECK(historyDepth(store) == std::make_pair(2, 0));  // the two edits, not the setting
+    applyOk(store, {{"cmd", "undo"}});
+    CHECK(snapshot(store).at("newChordBeats") == 1.25);  // live state: kept
+    applyOk(store, {{"cmd", "setNewChordLength"}, {"lengthBeats", nullptr}});
+    CHECK(snapshot(store).at("newChordBeats").is_null());
+    applyOk(store, {{"cmd", "appendChord"}, {"root", 9}, {"type", "min"}});
+    CHECK(snapshotLengths(snapshot(store)).back() == 4.0);
+    for (const json& wrong : {json("1"), json(true), json::object(), json::array()}) {
+        checkRejectedKeepsHistory(store, {{"cmd", "setNewChordLength"}, {"lengthBeats", wrong}});
+    }
+    checkRejectedKeepsHistory(store, {{"cmd", "setNewChordLength"}});
 }

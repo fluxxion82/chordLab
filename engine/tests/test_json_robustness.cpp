@@ -21,12 +21,14 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
 #include <iterator>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <string>
@@ -195,8 +197,21 @@ std::string invariantProblem(const DocumentStore& store, bool snapshot = true) {
         return "more than kMaxChords events";
     }
     const int sel = store.selectedEventId();
-    if (sel != kNoEventId && store.findIndex(sel) < 0) {
-        return "selected event id " + std::to_string(sel) + " names no event";
+    const std::vector<int>& selection = store.selectedEventIds();
+    int previousIndex = -1;
+    for (int id : selection) {
+        const int index = store.findIndex(id);
+        if (index < 0) {
+            return "selected event id " + std::to_string(id) + " names no event";
+        }
+        if (index <= previousIndex) {
+            return "selection not in strip order, or repeated";
+        }
+        previousIndex = index;
+    }
+    if (selection.empty() != (sel == kNoEventId) ||
+        (sel != kNoEventId && std::find(selection.begin(), selection.end(), sel) == selection.end())) {
+        return "the anchor is not one of the selected ids";
     }
     if (store.nextId() < 1 || store.nextSectionId() < 1) {
         return "nextId or nextSectionId below 1";
@@ -250,7 +265,8 @@ std::string invariantProblem(const DocumentStore& store, bool snapshot = true) {
         return {};
     }
     try {
-        const std::string snap = snapshotJson(d, buildPalette(d.browsedKey, d.projectKey), store.selectedEventId());
+        const std::string snap =
+            snapshotJson(d, buildPalette(d.browsedKey, d.projectKey), store.selectedEventId(), store.selectedEventIds());
         const json j = json::parse(snap);
         if (!j.is_object() || j.value("schema", 0) != kJsonSchema) {
             return "snapshot is not a schema-1 object";
@@ -265,6 +281,12 @@ std::string invariantProblem(const DocumentStore& store, bool snapshot = true) {
         const json sId = j.at("selectedEventId");
         if (sel == kNoEventId ? !sId.is_null() : sId != sel) {
             return "snapshot selectedEventId disagrees with the store";
+        }
+        if (j.at("selectedEventIds") != json(selection)) {
+            return "snapshot selectedEventIds disagrees with the store";
+        }
+        if (d.newChordBeats.has_value() ? j.at("newChordBeats") != *d.newChordBeats : !j.at("newChordBeats").is_null()) {
+            return "snapshot newChordBeats disagrees with the document";
         }
         // The applied chords are sized exactly when there is a reference, on the palette's 0..100 scale.
         const bool sized = !j.at("relationReference").is_null();
@@ -288,10 +310,13 @@ struct Observable {
     int nextId;
     int nextSectionId;
     int selected;
+    std::vector<int> selection;
     explicit Observable(const DocumentStore& s)
-        : doc(s.doc()), nextId(s.nextId()), nextSectionId(s.nextSectionId()), selected(s.selectedEventId()) {}
+        : doc(s.doc()), nextId(s.nextId()), nextSectionId(s.nextSectionId()), selected(s.selectedEventId()),
+          selection(s.selectedEventIds()) {}
     bool operator==(const Observable& o) const {
-        return doc == o.doc && nextId == o.nextId && nextSectionId == o.nextSectionId && selected == o.selected;
+        return doc == o.doc && nextId == o.nextId && nextSectionId == o.nextSectionId && selected == o.selected &&
+               selection == o.selection;
     }
 };
 
@@ -338,7 +363,8 @@ std::string readFixture(const char* name) {
 }
 
 /// One valid message for every command name of json_api.h (three for browseKey, two each for selectEvent,
-/// loadPreset, setFeel and setMeter), against ids 1..4 and section ids 1..2 of `prefilledStore`.
+/// selectEvents, setNewChordLength, loadPreset, setFeel and setMeter), against ids 1..4 and section ids 1..2 of
+/// `prefilledStore`.
 std::vector<std::string> commandCorpus() {
     const std::vector<json> bodies = {
         {{"cmd", "setKey"}, {"letter", "D"}, {"alter", -1}, {"mode", "Dorian"}},
@@ -375,6 +401,16 @@ std::vector<std::string> commandCorpus() {
         {{"cmd", "setFeel"}, {"rhythm", "block"}, {"strum", "off"}, {"strumSpeed", "medium"}, {"humanise", "off"}},
         {{"cmd", "setMeter"}, {"num", 6}, {"den", 8}},
         {{"cmd", "setMeter"}, {"num", 4}, {"den", 4}},
+        {{"cmd", "insertChords"}, {"index", 2},
+         {"chords", json::array({json({{"root", 2}, {"type", "m7"}, {"lengthBeats", 0.75}, {"velocity", 90}, {"inversion", 1},
+                                       {"octave", -1}, {"manualVoicing", true}}),
+                                 json({{"root", 7}, {"type", "7"}})})}},
+        {{"cmd", "removeChords"}, {"ids", json::array({4, 2, 99})}},
+        {{"cmd", "setLengths"}, {"ids", json::array({1, 3})}, {"lengthBeats", 1.5}},
+        {{"cmd", "selectEvents"}, {"ids", json::array({1, 2, 4})}, {"anchor", 2}},
+        {{"cmd", "selectEvents"}, {"ids", json::array()}},
+        {{"cmd", "setNewChordLength"}, {"lengthBeats", 0.5}},
+        {{"cmd", "setNewChordLength"}, {"lengthBeats", nullptr}},
         {{"cmd", "undo"}},
         {{"cmd", "redo"}},
     };
@@ -577,6 +613,73 @@ TEST_CASE("json robustness: mutated setFeel and setMeter payloads apply or rejec
     }
     CHECK(accepted > 10);
     CHECK(accepted < kFeelIterations);
+}
+
+// ---- strip-editing payloads ----
+
+TEST_CASE("json robustness: mutated strip-editing payloads apply or reject atomically") {
+    const std::vector<std::string> corpus = {
+        json({{"schema", kJsonSchema}, {"cmd", "insertChords"}, {"index", 2},
+              {"chords", json::array({json({{"root", 2}, {"type", "m7"}, {"lengthBeats", 0.75}, {"velocity", 90},
+                                            {"inversion", 1}, {"octave", -1}, {"manualVoicing", true}}),
+                                      json({{"root", 7}, {"type", "7"}})})}}).dump(),
+        json({{"schema", kJsonSchema}, {"cmd", "removeChords"}, {"ids", json::array({4, 2, 99})}}).dump(),
+        json({{"schema", kJsonSchema}, {"cmd", "setLengths"}, {"ids", json::array({1, 3})}, {"lengthBeats", 1.5}}).dump(),
+        json({{"schema", kJsonSchema}, {"cmd", "selectEvents"}, {"ids", json::array({1, 2, 4})}, {"anchor", 2}}).dump(),
+        json({{"schema", kJsonSchema}, {"cmd", "setNewChordLength"}, {"lengthBeats", 0.5}}).dump(),
+        json({{"schema", kJsonSchema}, {"cmd", "setNewChordLength"}, {"lengthBeats", nullptr}}).dump(),
+    };
+    Rng rng{0xA0761D6478BD642Full};
+    DocumentStore cmdStore = prefilledStore(true);
+    DocumentStore stateStore = prefilledStore(true);
+    int accepted = 0;
+    constexpr int kStripIterations = 1000;
+    for (int i = 0; i < kStripIterations; ++i) {
+        if (i % 25 == 0) {
+            cmdStore = prefilledStore((i / 25) % 2 == 0);
+            stateStore = prefilledStore((i / 25) % 2 == 0);
+        }
+        std::string m = corpus[rng.below(corpus.size())];
+        const std::size_t mutations = rng.below(2) == 0 ? 1 : 1 + rng.below(3);
+        for (std::size_t k = 0; k < mutations; ++k) {
+            mutateOnce(m, rng);
+        }
+        bool commandAccepted = false;
+        const std::string problem = feed(cmdStore, stateStore, m, &commandAccepted);
+        if (!problem.empty()) {
+            FAIL_CHECK(problem << " [iteration " << i << ", input=" << escaped(m) << "]");
+            break;
+        }
+        accepted += commandAccepted ? 1 : 0;
+    }
+    CHECK(accepted > 10);
+    CHECK(accepted < kStripIterations);
+}
+
+TEST_CASE("json robustness: every Length menu value as the new-chord length and on four blocks survives a save") {
+    // The menu's note values, the bars of 4/4, 3/4, 7/8 and 12/8, and the ends of the range.
+    const double values[] = {0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 3.5, 6.0, 7.0, 8.0, 14.0, 16.0, 24.0, 63.75, 64.0};
+    DocumentStore cmdStore = prefilledStore();
+    DocumentStore stateStore = prefilledStore();
+    for (const double beats : values) {
+        CAPTURE(beats);
+        const std::string newLength =
+            json({{"schema", kJsonSchema}, {"cmd", "setNewChordLength"}, {"lengthBeats", beats}}).dump();
+        const std::string lengths =
+            json({{"schema", kJsonSchema}, {"cmd", "setLengths"}, {"ids", json::array({1, 2, 3, 4})}, {"lengthBeats", beats}})
+                .dump();
+        for (const std::string& m : {newLength, lengths}) {
+            bool accepted = false;
+            const std::string problem = feed(cmdStore, stateStore, m, &accepted);
+            REQUIRE_MESSAGE(problem.empty(), problem << " input=" << m);
+            CHECK(accepted);
+        }
+        CHECK(cmdStore.doc().newChordBeats == std::optional<double>(beats));
+        DocumentStore again;
+        std::string error;
+        REQUIRE_MESSAGE(loadStateJson(again, stateJson(cmdStore), error), error);
+        CHECK(again.doc() == cmdStore.doc());
+    }
 }
 
 TEST_CASE("json robustness: every valid feel and meter keeps the invariants and survives a save") {
