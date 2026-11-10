@@ -54,7 +54,7 @@
 // saved with it always arrive together (a separate atomic could let a block chase an old progression with
 // a newly loaded flag). The other way, ProcessBlock stores the
 // block's host position and playing flag in atomics (mTransportPpq, mTransportPlaying) and OnIdle, on
-// the main thread, pushes them to the editor as the playhead at ~15 Hz when they change.
+// the main thread, pushes them, with the tempo, to the editor as the playhead at ~15 Hz when they change (the tempo also reaches Record, strip editing design D4).
 //
 // MIDI in (listening design D1, D2, D4, D5): (VST3 and the APP; the Audio Unit's path is described at the end
 // of this note) HandleMidiIn runs on the audio thread once per incoming event (ProcessMidiMsg calls it),
@@ -611,6 +611,7 @@ void ChordLab::OnUIOpen()
   mReportedIncompleteBlocks = 0;                                 // make OnIdle resend the current counts
   mReportedDroppedHeard = 0;
   mPushedPpq = std::numeric_limits<double>::quiet_NaN();         // ...and the playhead
+  mPushedBpm = std::numeric_limits<double>::quiet_NaN();         // ...and the tempo
 }
 
 void ChordLab::OnIdle()
@@ -657,9 +658,10 @@ void ChordLab::OnIdle()
     PushStatus(incomplete, mDroppedHeard);
   }
 
-  // The playhead: at most every kTransportPushInterval, only to an open editor, only when it moved more
-  // than a rounding error or started/stopped. mPushedPpq is NaN before the first push (or after an editor
-  // opened), and a NaN comparison is false, so that first push always happens.
+  // The playhead and the tempo: at most every kTransportPushInterval, only to an open editor, only when the
+  // position moved more than a rounding error, the transport started or stopped, or the tempo moved by 0.01 bpm
+  // or more (so a tempo change while stopped reaches Record). mPushedPpq and mPushedBpm are NaN before the first
+  // push (or after an editor opened), and a NaN comparison is false, so that first push always happens.
   if (mEditorOpen.load())
   {
     const auto now = std::chrono::steady_clock::now();
@@ -667,17 +669,19 @@ void ChordLab::OnIdle()
     {
       double ppq = mTransportPpq.load(std::memory_order_relaxed);
       bool playing = mTransportPlaying.load(std::memory_order_relaxed);
+      const double bpm = HostBpm();                              // finite and positive: 120 before the first block
       if (!std::isfinite(ppq))
       {
         ppq = 0.0;                                               // nlohmann would write null for NaN or inf...
         playing = false;                                         // ...and an unusable position hides the playhead
       }
-      if (!(std::fabs(ppq - mPushedPpq) <= 1e-6) || playing != mPushedPlaying)
+      if (!(std::fabs(ppq - mPushedPpq) <= 1e-6) || playing != mPushedPlaying || !(std::fabs(bpm - mPushedBpm) < 0.01))
       {
         mLastTransportPush = now;
         mPushedPpq = ppq;
         mPushedPlaying = playing;
-        PushTransport(ppq, playing);
+        mPushedBpm = bpm;
+        PushTransport(ppq, playing, bpm);
       }
     }
   }
@@ -960,7 +964,7 @@ void ChordLab::PushSnapshot()
     std::string json;
     {
       std::lock_guard<std::mutex> lock(mModelMutex);
-      json = chordlab::snapshotJson(mStore.doc(), mPalette, mStore.selectedEventId());  // the live selection drives suggestions
+      json = chordlab::snapshotJson(mStore.doc(), mPalette, mStore.selectedEventId(), mStore.selectedEventIds());  // the live selection: the anchor drives suggestions
     }
     SendArbitraryMsgFromDelegate((int) kMsgTagSnapshot, (int) json.size(), json.data());
   });
@@ -1009,12 +1013,13 @@ void ChordLab::PushStatus(uint32_t incompleteBlocks, uint32_t droppedHeard)
   });
 }
 
-void ChordLab::PushTransport(double ppq, bool playing)
+void ChordLab::PushTransport(double ppq, bool playing, double bpm)
 {
-  OnMain([this, ppq, playing] {
+  OnMain([this, ppq, playing, bpm] {
     if (!mEditorOpen.load())
       return;
-    const std::string json = nlohmann::json{{"schema", chordlab::kJsonSchema}, {"ppq", ppq}, {"playing", playing}}.dump();
+    const std::string json =
+      nlohmann::json{{"schema", chordlab::kJsonSchema}, {"ppq", ppq}, {"playing", playing}, {"bpm", bpm}}.dump();
     SendArbitraryMsgFromDelegate((int) kMsgTagTransport, (int) json.size(), json.data());
   });
 }

@@ -17,6 +17,9 @@ class ChordLabState: NSObject, ObservableObject {
   @Published var incompleteBlocks: Int = 0
   /// The playhead (`kMsgTagTransport`); nil until the plug-in pushes one.
   @Published var transport: TransportJSON?
+  /// The host tempo from the last transport push (`TransportJSON.tempo`), 120 until the first one (design D4):
+  /// what Record turns a held time into beats with.
+  var bpm: Double { transport?.tempo ?? 120 }
   /// The MIDI file of the last export request (`kMsgTagExportReady`), or nil while none is ready.
   @Published var exportPath: String?
   /// What the plug-in hears on its MIDI input (`kMsgTagHeard`, design D14); nil until the first push. The
@@ -48,6 +51,10 @@ class ChordLabState: NSObject, ObservableObject {
   @Published private(set) var heldCellId: String?
   /// Preview id of the held cell: a per-press counter, so that Start and Stop pair up in the scheduler.
   private var heldPreviewId: Int?
+  /// The transport row's Record switch (strip editing design D9): while on, releasing a palette or home-row cell
+  /// inserts its chord after the anchor (else at the end), as long as the cell was held. UI state: off whenever
+  /// the window opens, never saved.
+  @Published var recording = false
   private var previewCounter = 0
   /// While a cell is held, an `extend` for its preview every `keepAliveInterval` from a main-run-loop
   /// timer in the common modes (so it fires during mouse tracking). The scheduler ends a preview four
@@ -127,11 +134,28 @@ class ChordLabState: NSObject, ObservableObject {
     startKeepAlive(id: id)
   }
 
-  /// Releases `cell` if it is the held one; a cell that was already released (by a press elsewhere,
-  /// a cancelled gesture or disappearance) is ignored, never released twice.
-  @MainActor func releaseCell(_ cell: CellJSON) {
+  /// Releases `cell` if it is the held one; a cell that was already released (by a press elsewhere, a cancelled
+  /// gesture or disappearance) is ignored, never released twice. `release` says why the press ended and how long
+  /// it was held, from the window's event timestamps (`PressRelease`); with Record on, a press that ended with its
+  /// own button-up also inserts its chord for that long (`RecordLength`), and a press that became a drag (the drop
+  /// appends by itself), was superseded or disappeared records nothing.
+  @MainActor func releaseCell(_ cell: CellJSON, _ release: PressRelease) {
     guard heldCellId == cell.id else { return }
     releaseHeld()
+    record(cell, release)
+  }
+
+  /// Record's insert for a released cell (D9), or nothing (`RecordLength.recordedBeats`): the chord's root and
+  /// type, the held time at the host tempo (`bpm`), after the anchor or at the end; the insert selects it, so
+  /// presses chain.
+  @MainActor private func record(_ cell: CellJSON, _ release: PressRelease) {
+    guard let snapshot,
+          let beats = RecordLength.recordedBeats(
+            recording: recording, release: release, bpm: bpm,
+            defaultBeats: LengthOptions.newChordBeats(snapshot.newChordBeats, meter: snapshot.meter))
+    else { return }
+    let index = SelectionLogic.insertionIndex(ids: snapshot.events.map(\.id), anchor: snapshot.selectedEventId)
+    send(command: RecordLength.command(root: cell.root, type: cell.type, beats: beats, index: index))
   }
 
   /// Releases whatever is held (view disappearance, window close).
@@ -199,24 +223,89 @@ class ChordLabState: NSObject, ObservableObject {
     send(command, tag: kMsgTagCommand)
   }
 
-  /// Runs a keyboard command. Digits append the suggestion chip of that number (nothing when there is
-  /// no such chip); Delete removes the selected chord (nothing without a selection); undo and redo are
-  /// the key bar's commands. The router consumes every mapped key whether or not it did anything, so
-  /// the host never acts on it (see `KeyCommandMap`, `EditorKeyRouter`).
+  /// Runs a keyboard command. Digits append the suggestion chip of that number (nothing when there is no such
+  /// chip); Delete removes every selected chord in one step; ⌘C copies the selection, ⌘X cuts it, ⌘V pastes
+  /// after the anchor (else at the end), ⌘D duplicates the selection after its last block, ⌘A selects every
+  /// block (strip editing design D5, D6); undo and redo are the key bar's commands. Each does nothing when it
+  /// has nothing to act on, and the router consumes every mapped key whether or not it did anything, so the
+  /// host never acts on it (see `KeyCommandMap`, `EditorKeyRouter`).
   @MainActor func perform(_ command: KeyCommand) {
+    let selection = snapshot?.selection ?? []
     switch command {
     case .appendSuggestion(let n):
       guard let suggestions = snapshot?.suggestions, suggestions.indices.contains(n - 1) else { return }
       let suggestion = suggestions[n - 1]
       send(command: ["cmd": "appendChord", "root": suggestion.root, "type": suggestion.type])
     case .deleteSelection:
-      guard let id = snapshot?.selectedEventId else { return }
-      send(command: ["cmd": "removeChord", "id": id])
+      guard !selection.isEmpty else { return }
+      send(command: ClipboardChords.removeCommand(selection))
     case .undo:
       send(command: ["cmd": "undo"])
     case .redo:
       send(command: ["cmd": "redo"])
+    case .copy:
+      copyChords(selection)
+    case .cut:
+      cutChords(selection)
+    case .paste:
+      pasteChords(at: SelectionLogic.insertionIndex(ids: eventIds, anchor: snapshot?.selectedEventId))
+    case .duplicate:
+      duplicateChords(selection)
+    case .selectAll:
+      select(SelectionLogic.all(eventIds))
     }
+  }
+
+  // MARK: - Strip editing (the clipboard and the selection, strip editing design D5–D7)
+
+  /// Where the clipboard is written and read (`ChordPasteboard`): the general pasteboard; a harness may put a fake
+  /// here.
+  var pasteboard: any ChordPasteboard = NSPasteboard.general
+
+  /// The ids of the strip's blocks in order; empty before the first snapshot.
+  private var eventIds: [Int] { snapshot?.events.map(\.id) ?? [] }
+
+  /// ⌘C and the block menu's Copy: the chords `ids` (in strip order, whatever the order given) on the pasteboard
+  /// as one item in both forms (`ClipboardChords.copy`). Returns whether the pasteboard took it; false, the
+  /// pasteboard untouched, when none of them is on the strip.
+  @MainActor @discardableResult func copyChords(_ ids: [Int]) -> Bool {
+    guard let events = snapshot?.events else { return false }
+    return ClipboardChords.copy(ids, from: events, to: pasteboard)
+  }
+
+  /// ⌘X and the block menu's Cut: the copy, then `removeChords` (one undo step), sent only once the copy is
+  /// published (`ClipboardChords.cut`); a failed copy removes nothing.
+  @MainActor func cutChords(_ ids: [Int]) {
+    guard let events = snapshot?.events, let removal = ClipboardChords.cut(ids, from: events, to: pasteboard) else { return }
+    send(command: removal)
+  }
+
+  /// Whether the pasteboard holds ChordLab's chords (Paste after is disabled otherwise).
+  @MainActor var canPaste: Bool {
+    ClipboardChords.paste(from: pasteboard) != nil
+  }
+
+  /// ⌘V and Paste after: inserts the pasteboard's chords at `index` (one undo step; they become the selection).
+  /// A pasteboard without ChordLab's chords (text only, or nothing) pastes nothing; a paste past 256 chords is
+  /// the engine's refusal, shown like any other (`lastError`), and the pasteboard keeps its content.
+  @MainActor func pasteChords(at index: Int) {
+    guard let chords = ClipboardChords.paste(from: pasteboard) else { return }
+    send(command: ClipboardChords.insertCommand(chords, at: index))
+  }
+
+  /// ⌘D and the block menu's Duplicate: the chords `ids` again, right after the last of them, without touching
+  /// the pasteboard.
+  @MainActor func duplicateChords(_ ids: [Int]) {
+    guard let events = snapshot?.events else { return }
+    let chords = ClipboardChords.chords(of: events, ids: ids)
+    guard !chords.isEmpty else { return }
+    send(command: ClipboardChords.insertCommand(chords, at: SelectionLogic.index(after: ids, ids: eventIds)))
+  }
+
+  /// Makes `selection` the store's (one `selectEvent` or `selectEvents`), unless it already is.
+  @MainActor func select(_ selection: StripSelection) {
+    guard selection.ids != snapshot?.selection || selection.anchor != snapshot?.selectedEventId else { return }
+    send(command: SelectionLogic.command(selection))
   }
 
   // MARK: - Project key (the Key pickers) and the transpose row

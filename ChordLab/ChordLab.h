@@ -113,8 +113,8 @@ private:
   // otherwise the progression plays on untouched.
   void DrainRawMidiIn() noexcept;
 #endif
-  // Main thread: pushes {"schema":1,"ppq":ppq,"playing":playing} (the playhead) to the editor.
-  void PushTransport(double ppq, bool playing);
+  // Main thread: pushes {"schema":1,"ppq":ppq,"playing":playing,"bpm":bpm} (the playhead and the host tempo) to the editor.
+  void PushTransport(double ppq, bool playing, double bpm);
   // Main thread: exports the document (chordlab::exportMidi under mModelMutex, with its meter), writes it as a format 0 MIDI file under a unique, never-reused
   // name in the temporary directory at the host's tempo and pushes kMsgTagExportReady with the path, or
   // kMsgTagError. Nothing is rewritten or deleted here except exports older than ten minutes (see the
@@ -216,7 +216,7 @@ private:
   static constexpr std::chrono::milliseconds kHeardInterval{67};   // key evaluation and heard pushes, at most ~15 Hz
 
   // The playhead. ProcessBlock stores the block's host position and whether the progression plays; OnIdle
-  // pushes them as kMsgTagTransport at most every kTransportPushInterval, and only when they changed.
+  // pushes them, with the host tempo, as kMsgTagTransport at most every kTransportPushInterval, and only when one of them changed (the tempo by 0.01 bpm or more).
   std::atomic<double> mTransportPpq{0.0};
   std::atomic<bool> mTransportPlaying{false};
   // The host tempo as ProcessBlock last saw it, for the MIDI export and the listener; 120 until the first block.
@@ -228,6 +228,7 @@ private:
   std::chrono::steady_clock::time_point mLastTransportPush{};               // main thread
   double mPushedPpq = std::numeric_limits<double>::quiet_NaN();              // main thread; NaN: nothing pushed yet
   bool mPushedPlaying = false;                                              // main thread
+  double mPushedBpm = std::numeric_limits<double>::quiet_NaN();               // main thread; NaN: nothing pushed yet
   int mOpenPreviewId = -1;                                     // main thread: Start without a Stop yet
 
   // Whether an editor is attached: set at the end of OpenWindow, cleared in CloseWindow (both main

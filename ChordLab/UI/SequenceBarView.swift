@@ -10,18 +10,24 @@ import SwiftUI
 /// the reorder arithmetic share one linear layout, so what is drawn is what is computed.
 ///
 /// Editing, every step a command to the plugin (the snapshot it answers with redraws the strip):
-/// - drop a palette cell anywhere on the strip → `appendChord`;
-/// - click a block → `selectEvent {id}` (the snapshot's `selectedEventId` is the selection: the white ring,
-///   the suggestions strip and the plug-in agree on it); click the empty strip → `selectEvent {id: null}`;
-///   Delete / Forward Delete → `removeChord` of the selection, through the key routes
-///   (`ChordLabState.perform`);
+/// - drop a palette cell anywhere on the strip → `appendChord` (the new-chord length, strip editing design D3);
+/// - click a block → that block alone; ⇧-click → every block from the anchor to it; ⌘-click → toggles it
+///   (`SelectionLogic.resolve`, D7); click the empty strip → none; ⌘A → every block. One `selectEvent` or
+///   `selectEvents` each. The snapshot's `selectedEventIds` is the selection: every selected block wears the white
+///   ring, the anchor (`selectedEventId`, which the suggestions strip, the relations and the large tension dot
+///   follow) at full strength, the others at `groupRingOpacity`;
+/// - Delete / Forward Delete → `removeChords` of the selection, and ⌘C ⌘X ⌘V ⌘D, through the key routes
+///   (`ChordLabState.perform`); the block menu offers the same, on the selection when the block is part of it,
+///   else on the block alone (`SelectionLogic.targets`), with Paste after inserting after that block;
 /// - drag the handle at a block's right edge → `setLength`, snapped to quarter beats and clamped to
 ///   0.25…64, sent when the drag ends (the width follows the mouse meanwhile, as gesture state);
 /// - drag a block sideways → `moveChord` to the index its centre lands on, sent when the drag ends
-///   (only the dragged block moves meanwhile);
+///   (only the dragged block moves meanwhile). Both drags act on the block under the mouse alone; a selection
+///   it belongs to stays selected, and a block outside the selection becomes the selection when its drag starts;
 /// - click the "v" badge at a block's bottom right → the voicing popover (`VoicingPopoverView`:
-///   inversion, octave, Auto); right-click a block → a context menu with the same choices plus "Voicing…"
-///   for the popover. A chord with its own voicing wears a "manual" badge at the top right.
+///   inversion, octave, Auto); right-click a block → the block menu (Copy, Cut, Paste after, Duplicate, Remove),
+///   then the voicing choices and "Voicing…" for the popover. A chord with its own voicing wears a "manual"
+///   badge at the top right.
 /// The sections (P2-D6) sit in a header row above the blocks (`SectionsHeaderView`, in the same scroll
 /// and geometry), and a thin line through the block row marks each section's start.
 ///
@@ -76,6 +82,8 @@ struct SequenceBarView: View {
   static let curveSelectedDotSize: CGFloat = 6
   /// Vertical spacing between the header, the curve, the blocks and the ruler.
   static let rowSpacing: CGFloat = 2
+  /// The ring's strength on a selected block that is not the anchor (the anchor's is full).
+  static let groupRingOpacity = 0.6
 
   /// A resize in progress: the handle of `id` is being dragged and the block shows `lengthBeats`.
   /// `startEndX` is the progression's end before the drag, captured on its first update: the strip keeps
@@ -107,7 +115,9 @@ struct SequenceBarView: View {
   /// The document's meter (nil from an older plug-in build: 4/4).
   private var meter: MeterJSON? { state.snapshot?.meter }
 
-  /// The store's live selection, as the last snapshot reported it (nil before Phase 2 plug-in builds).
+  /// The store's live selection as the last snapshot reported it: every selected block in strip order (an older
+  /// plug-in reports the anchor alone), and the anchor among them.
+  private var selection: [Int] { state.snapshot?.selection ?? [] }
   private var selectedEventId: Int? { state.snapshot?.selectedEventId }
 
   /// The beat the playhead sits at, or nil when it is hidden.
@@ -142,7 +152,7 @@ struct SequenceBarView: View {
               Color.clear
                 .frame(width: contentWidth, height: Self.blockHeight)
                 .contentShape(Rectangle())
-                .onTapGesture { deselect() }                  // click the empty strip: deselect
+                .onTapGesture { state.select(.none) }          // click the empty strip: deselect
               HStack(spacing: 0) {
                 ForEach(Array(events.enumerated()), id: \.element.id) { index, event in
                   block(event, frame: layout.frames[index])
@@ -259,7 +269,8 @@ struct SequenceBarView: View {
   private func block(_ event: EventJSON, frame: SequenceGeometry.BlockFrame) -> some View {
     let color = PaletteCellView.color(family: event.family ?? "Other")
     let filled = (event.outOfKey ?? []).isEmpty
-    let selected = selectedEventId == event.id
+    let selected = selection.contains(event.id)
+    let isAnchor = selectedEventId == event.id
     let moving = move?.id == event.id
     let offset = moving ? (move?.offset ?? 0) : 0
     let sounding = playheadBeat.map { $0 >= event.startBeat && $0 < event.startBeat + event.lengthBeats } ?? false
@@ -273,7 +284,8 @@ struct SequenceBarView: View {
         RoundedRectangle(cornerRadius: Self.cornerRadius).fill(Color.white.opacity(filled ? 0.25 : 0.15))
       }
       if selected {
-        RoundedRectangle(cornerRadius: Self.cornerRadius).strokeBorder(Color.white, lineWidth: 2)
+        RoundedRectangle(cornerRadius: Self.cornerRadius)
+          .strokeBorder(Color.white.opacity(isAnchor ? 1 : Self.groupRingOpacity), lineWidth: 2)
       }
       labels(event)
       FunctionDot(function: event.function, size: Self.dotSize)
@@ -295,7 +307,7 @@ struct SequenceBarView: View {
     .overlay(alignment: .trailing) { handle(event, selected: selected, blockWidth: frame.width) }
     .overlay(alignment: .bottomTrailing) { voicingBadge(event, blockWidth: frame.width) }
     .contentShape(Rectangle())
-    .onTapGesture { select(event) }
+    .onTapGesture { click(event) }
     .gesture(moveGesture(event))
     .hoverTip(id: "event-\(event.id)",
               suppressed: moving || resize?.id == event.id || voicingPopoverId == event.id || handleHovered == event.id) {
@@ -304,7 +316,7 @@ struct SequenceBarView: View {
     .popover(isPresented: voicingPresented(event), arrowEdge: .bottom) {
       VoicingPopoverView(eventId: event.id).environmentObject(state).padding(12)
     }
-    .contextMenu { voicingMenu(event) }
+    .contextMenu { blockMenu(event) }
     .offset(x: offset)
     .zIndex(moving ? 1 : 0)
     .opacity(moving ? 0.85 : 1)
@@ -373,39 +385,57 @@ struct SequenceBarView: View {
     }
   }
 
-  /// The context menu: the voicing popover, the inversions and octaves directly, Auto, Transpose all chords
-  /// (the whole sequence by a semitone), and Remove.
-  @ViewBuilder private func voicingMenu(_ event: EventJSON) -> some View {
-    if event.inversion != nil {
-      Button("Voicing…") { openVoicing(event) }
-      Menu("Inversion") {
-        ForEach(0..<max(1, event.voicing.count), id: \.self) { inversion in
-          Button(VoicingPopoverView.inversionName(inversion) + ((event.inversion ?? 0) == inversion ? "  ✓" : "")) {
-            state.send(command: ["cmd": "setInversion", "id": event.id, "inversion": inversion])
-          }
-        }
-      }
-      Menu("Octave") {
-        ForEach([1, 0, -1], id: \.self) { octave in
-          Button(HarmonyText.octaveLabel(octave) + ((event.octave ?? 0) == octave ? "  ✓" : "")) {
-            state.send(command: ["cmd": "setOctave", "id": event.id, "octave": octave])
-          }
-        }
-      }
-      Button("Auto voicing") { state.send(command: ["cmd": "resetVoicing", "id": event.id]) }
-        .disabled(!VoicingReset.isAvailable(manual: event.manualVoicing, inversion: event.inversion, octave: event.octave))
-      // Every chord in the sequence, not just this one (one undo step each).
-      Menu("Transpose all chords") {
-        Button("Up a semitone") { state.send(command: ["cmd": "transposeProgression", "semitones": 1]) }
-        Button("Down a semitone") { state.send(command: ["cmd": "transposeProgression", "semitones": -1]) }
-      }
-      Divider()
+  /// The block menu (D7): Copy, Cut, Paste after, Duplicate and Remove, on the selection when the block is part of
+  /// it, else on the block alone (Paste after goes right after this block, disabled while the pasteboard holds no
+  /// ChordLab chords), then the voicing choices.
+  @ViewBuilder private func blockMenu(_ event: EventJSON) -> some View {
+    let targets = SelectionLogic.targets(block: event.id, selection: selection)
+    let count = targets.count > 1 ? " \(targets.count) chords" : ""
+    Button("Copy" + count) { state.copyChords(targets) }
+    Button("Cut" + count) { state.cutChords(targets) }
+    Button("Paste after") {
+      state.pasteChords(at: (events.firstIndex { $0.id == event.id } ?? events.count - 1) + 1)
     }
-    Button("Remove chord") { state.send(command: ["cmd": "removeChord", "id": event.id]) }
+    .disabled(!state.canPaste)
+    Button("Duplicate" + count) { state.duplicateChords(targets) }
+    Button(targets.count > 1 ? "Remove" + count : "Remove chord") {
+      state.send(command: ClipboardChords.removeCommand(targets))
+    }
+    if event.inversion != nil {
+      Divider()
+      voicingMenu(event)
+    }
+  }
+
+  /// The voicing choices: the voicing popover, the inversions and octaves directly, Auto, and Transpose all
+  /// chords (the whole sequence by a semitone).
+  @ViewBuilder private func voicingMenu(_ event: EventJSON) -> some View {
+    Button("Voicing…") { openVoicing(event) }
+    Menu("Inversion") {
+      ForEach(0..<max(1, event.voicing.count), id: \.self) { inversion in
+        Button(VoicingPopoverView.inversionName(inversion) + ((event.inversion ?? 0) == inversion ? "  ✓" : "")) {
+          state.send(command: ["cmd": "setInversion", "id": event.id, "inversion": inversion])
+        }
+      }
+    }
+    Menu("Octave") {
+      ForEach([1, 0, -1], id: \.self) { octave in
+        Button(HarmonyText.octaveLabel(octave) + ((event.octave ?? 0) == octave ? "  ✓" : "")) {
+          state.send(command: ["cmd": "setOctave", "id": event.id, "octave": octave])
+        }
+      }
+    }
+    Button("Auto voicing") { state.send(command: ["cmd": "resetVoicing", "id": event.id]) }
+      .disabled(!VoicingReset.isAvailable(manual: event.manualVoicing, inversion: event.inversion, octave: event.octave))
+    // Every chord in the sequence, not just this one (one undo step each).
+    Menu("Transpose all chords") {
+      Button("Up a semitone") { state.send(command: ["cmd": "transposeProgression", "semitones": 1]) }
+      Button("Down a semitone") { state.send(command: ["cmd": "transposeProgression", "semitones": -1]) }
+    }
   }
 
   private func openVoicing(_ event: EventJSON) {
-    select(event)
+    if !selection.contains(event.id) { select(event) }
     voicingPopoverId = event.id
   }
 
@@ -441,18 +471,23 @@ struct SequenceBarView: View {
 
   // MARK: - Gestures
 
-  /// The selection lives in the store (`selectEvent`); the snapshot it answers with draws the ring. A
-  /// chord removed or undone away is dropped from the selection by the store itself.
-  private func select(_ event: EventJSON) {
-    if selectedEventId != event.id {
-      state.send(command: ["cmd": "selectEvent", "id": event.id])
-    }
+  /// A click on a block (D7): the click's modifiers decide (`SelectionLogic.resolve`); the store gets the
+  /// result in one command, and the snapshot it answers with draws the rings. A chord removed or undone away is
+  /// dropped from the selection by the store itself.
+  private func click(_ event: EventJSON) {
+    state.select(SelectionLogic.resolve(click: event.id, modifiers: Self.clickModifiers(), ids: events.map(\.id),
+                                        current: selection, anchor: selectedEventId))
   }
 
-  private func deselect() {
-    if selectedEventId != nil {
-      state.send(command: ["cmd": "selectEvent", "id": NSNull()])
-    }
+  /// The modifiers held at this moment (a tap gesture reports none of its own on macOS).
+  private static func clickModifiers() -> ClickModifiers {
+    let flags = NSEvent.modifierFlags.intersection(.deviceIndependentFlagsMask)
+    return ClickModifiers(shift: flags.contains(.shift), command: flags.contains(.command))
+  }
+
+  /// `event` alone, as the anchor (a drag or the voicing popover starting on a block outside the selection).
+  private func select(_ event: EventJSON) {
+    state.select(StripSelection(ids: [event.id], anchor: event.id))
   }
 
   /// The handle drag. `.global`: see the header (neither the handle nor the strip's scrolling may move the
@@ -464,7 +499,7 @@ struct SequenceBarView: View {
         state = Resize(id: event.id, lengthBeats: Self.resizedLength(event.lengthBeats, by: value.translation.width),
                        startEndX: startEndX)
       }
-      .onChanged { _ in if selectedEventId != event.id { select(event) } }
+      .onChanged { _ in if !selection.contains(event.id) { select(event) } }
       .onEnded { value in
         let length = Self.resizedLength(event.lengthBeats, by: value.translation.width)
         if length != event.lengthBeats {
@@ -477,7 +512,7 @@ struct SequenceBarView: View {
   private func moveGesture(_ event: EventJSON) -> some Gesture {
     DragGesture(minimumDistance: Self.moveThreshold, coordinateSpace: .global)
       .updating($move) { value, state, _ in state = Move(id: event.id, offset: value.translation.width) }
-      .onChanged { _ in if selectedEventId != event.id { select(event) } }
+      .onChanged { _ in if !selection.contains(event.id) { select(event) } }
       .onEnded { value in
         let events = self.events
         guard let from = events.firstIndex(where: { $0.id == event.id }) else { return }

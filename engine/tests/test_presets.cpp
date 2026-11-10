@@ -339,10 +339,11 @@ TEST_CASE("appendProgression: onto an unsectioned progression, a leading default
     CHECK(d.sections[1] == Section{2, "Dance minor", 1, 2});
     CHECK(sectionsWellFormed(d));
     CHECK(store.nextSectionId() == 3);
-    CHECK(store.selectedEventId() == 2);  // the selected chord is still there
+    CHECK(store.selectedEventIds() == std::vector<int>{3, 4, 5, 6});  // the loaded chords, the last the anchor
+    CHECK(store.selectedEventId() == 6);
     REQUIRE(store.undo());
     CHECK(store.doc() == before);
-    CHECK(store.selectedEventId() == 2);
+    CHECK(store.selectedEventId() == kNoEventId);  // the loaded chords are gone; undo never restores a selection
     REQUIRE(store.undo());  // the load was one step: the next undo takes back the second append
     CHECK(store.doc().events.size() == 1);
 }
@@ -383,7 +384,7 @@ TEST_CASE("appendProgression: onto a sectioned progression, one new section at t
     CHECK(store.doc() == before);
 }
 
-TEST_CASE("replaceProgression: one section at 0, the old chords and sections gone, the selection cleared") {
+TEST_CASE("replaceProgression: one section at 0, the old chords and sections gone, the loaded chords selected") {
     DocumentStore store = twoChordStore();
     REQUIRE(store.addSection(1, "Chorus") == 2);  // after the leading "Section 1"
     store.setProjectKey(key('A', 0, Mode::Aeolian));
@@ -401,7 +402,8 @@ TEST_CASE("replaceProgression: one section at 0, the old chords and sections gon
     REQUIRE(d.sections.size() == 1);
     CHECK(d.sections[0] == Section{3, "Epic minor", 2, 0});
     CHECK(sectionsWellFormed(d));
-    CHECK(store.selectedEventId() == kNoEventId);
+    CHECK(store.selectedEventIds() == std::vector<int>{3, 4, 5, 6});
+    CHECK(store.selectedEventId() == 6);
     CHECK(d.projectKey == before.projectKey);
     CHECK(d.progressionLoop == false);
     CHECK(d.relationMode == RelationMode::Function);

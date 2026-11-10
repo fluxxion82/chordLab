@@ -1,4 +1,5 @@
 import CoreGraphics
+import Foundation
 
 /// The left mouse button as the editor's window sees it, kept by the root from the window's own mouse
 /// events and read by the views that act on a press: a palette cell (`PressAction`, through `PressLogic`)
@@ -12,7 +13,9 @@ import CoreGraphics
 /// latest press travelled past `dragThreshold` (per press, never carried into the next one); `isDown` is
 /// the button itself and `pressLocation` where the latest press began, in `coordinateSpace`, so a view
 /// can tell whether the press is its own. A down with the button already down (its up was missed)
-/// counts as a new press.
+/// counts as a new press. `pressTime` and `releaseTime` are the latest press's down and up in the events' own
+/// clock (`NSEvent.timestamp`), so a press's duration (`heldSeconds`) does not depend on when, or in how many
+/// updates, SwiftUI delivers the change (strip editing design D9: Record).
 public struct MouseButton: Equatable {
   /// The name of the coordinate space `pressLocation` is in: the editor root's, which `TipHost` names
   /// and the root's event monitor reports in. A view reads its own frame `in: .named(coordinateSpace)`.
@@ -25,17 +28,26 @@ public struct MouseButton: Equatable {
   public private(set) var presses = 0
   public private(set) var pressDragged = false
   public private(set) var pressLocation: CGPoint?
+  /// When the latest press went down and when its button came up, in the events' clock (`NSEvent.timestamp`,
+  /// seconds since boot); `releaseTime` is nil while that press is held (and before any up).
+  public private(set) var pressTime: TimeInterval = 0
+  public private(set) var releaseTime: TimeInterval?
+
+  /// The latest press's down-to-up time; nil while it is held, or before any press.
+  public var heldSeconds: TimeInterval? { releaseTime.map { max(0, $0 - pressTime) } }
   /// Where the current press began, until it has travelled past the threshold.
   private var origin: CGPoint?
 
   public init() {}
 
-  public mutating func down(at point: CGPoint) {
+  public mutating func down(at point: CGPoint, time: TimeInterval = 0) {
     isDown = true
     presses += 1
     pressDragged = false
     pressLocation = point
     origin = point
+    pressTime = time
+    releaseTime = nil
   }
 
   public mutating func dragged(to point: CGPoint) {
@@ -48,7 +60,8 @@ public struct MouseButton: Equatable {
     }
   }
 
-  public mutating func up() {
+  public mutating func up(time: TimeInterval = 0) {
+    if isDown { releaseTime = time }   // an up with no down records nothing
     isDown = false
     origin = nil
   }

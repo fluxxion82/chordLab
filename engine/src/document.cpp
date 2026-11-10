@@ -8,6 +8,7 @@
 #include <climits>
 #include <cmath>
 #include <cstddef>
+#include <iterator>
 #include <set>
 #include <string>
 #include <utility>
@@ -27,6 +28,10 @@ double Document::startBeatOf(int index) const {
 
 double Document::endBeat() const {
     return startBeatOf(static_cast<int>(events.size()));
+}
+
+double Document::newChordLength() const {
+    return newChordBeats.value_or(barTicks(meter) / static_cast<double>(kFeelTicksPerBeat));
 }
 
 int Document::sectionIndexOf(int eventIndex) const {
@@ -53,6 +58,11 @@ bool sectionsWellFormed(const Document& doc) {
         previousIndex = s.firstEventIndex;
     }
     return true;
+}
+
+double snapNewChordBeats(double beats) {
+    assert(std::isfinite(beats));
+    return std::clamp(std::round(beats * 4.0) / 4.0, kMinLengthBeats, kMaxLengthBeats);
 }
 
 // --- DocumentStore ---------------------------------------------------------------------
@@ -210,7 +220,7 @@ std::string sectionNameOr(std::string name, const std::vector<Section>& sections
 }
 
 /// Copies the live (non-undoable) fields of `current` into `target`, so that restoring a snapshot keeps
-/// the transport toggles, the relation mode, the key-transpose flags and MIDI Thru as they are now, and the browsed key
+/// the transport toggles, the relation mode, the key-transpose flags, MIDI Thru and the new-chord length as they are now, and the browsed key
 /// too, with one exception: a browsed key that is the project key ("home") follows the project key `target`
 /// restores, as it follows `setProjectKey`, so that undoing or redoing a key change leaves the palette on the
 /// key the progression is in, not on the key it just left. A browse elsewhere is kept as it is.
@@ -224,6 +234,7 @@ void keepLiveState(Document& target, const Document& current) {
     target.transposeWithKey = current.transposeWithKey;
     target.keyHintSeen = current.keyHintSeen;
     target.midiThru = current.midiThru;
+    target.newChordBeats = current.newChordBeats;
 }
 
 }  // namespace
@@ -240,6 +251,8 @@ void DocumentStore::replace(Document doc, int nextId, int nextSectionId) {
     assertValidKey(doc.projectKey);
     assertValidKey(doc.browsedKey);
     assert(static_cast<int>(doc.relationMode) >= 0 && static_cast<int>(doc.relationMode) < kNumRelationModes);
+    assert(!doc.newChordBeats ||
+           (std::isfinite(*doc.newChordBeats) && *doc.newChordBeats == snapNewChordBeats(*doc.newChordBeats)));
     assert(nextId >= 1);
     assert(nextSectionId >= 0);
     for ([[maybe_unused]] const ChordEvent& e : doc.events) {
@@ -260,7 +273,8 @@ void DocumentStore::replace(Document doc, int nextId, int nextSectionId) {
     undoStack_.clear();
     redoStack_.clear();
     nextId_ = nextId;
-    selectedEventId_ = kNoEventId;
+    selectedEventIds_.clear();
+    anchorEventId_ = kNoEventId;
 }
 
 int DocumentStore::nextId() const {
@@ -301,40 +315,73 @@ bool DocumentStore::commit(Document next) {
 }
 
 void DocumentStore::dropStaleSelection() noexcept {
-    if (selectedEventId_ != kNoEventId && indexOfEvent(doc_.events, selectedEventId_) < 0) {
-        selectedEventId_ = kNoEventId;
+    const auto exists = [this](int id) { return indexOfEvent(doc_.events, id) >= 0; };
+    // The anchor first, while the list still has the strip order of the document before the change: the
+    // nearest selected block that is left, the next one, else the one before.
+    if (anchorEventId_ != kNoEventId && !exists(anchorEventId_)) {
+        int replacement = kNoEventId;
+        const auto at = std::find(selectedEventIds_.begin(), selectedEventIds_.end(), anchorEventId_);
+        if (at != selectedEventIds_.end()) {
+            const auto after = std::find_if(at + 1, selectedEventIds_.end(), exists);
+            if (after != selectedEventIds_.end()) {
+                replacement = *after;
+            } else {
+                const auto before = std::find_if(std::make_reverse_iterator(at), selectedEventIds_.rend(), exists);
+                if (before != selectedEventIds_.rend()) {
+                    replacement = *before;
+                }
+            }
+        }
+        anchorEventId_ = replacement;
     }
+    selectedEventIds_.erase(std::remove_if(selectedEventIds_.begin(), selectedEventIds_.end(),
+                                           [&](int id) { return !exists(id); }),
+                            selectedEventIds_.end());
+    // The strip order of the document as it is now (a move or an undo may have reordered the blocks). In place
+    // and without allocating, so this stays noexcept.
+    std::sort(selectedEventIds_.begin(), selectedEventIds_.end(),
+              [this](int a, int b) { return indexOfEvent(doc_.events, a) < indexOfEvent(doc_.events, b); });
 }
 
 int DocumentStore::selectedEventId() const {
-    return selectedEventId_;
+    return anchorEventId_;
+}
+
+const std::vector<int>& DocumentStore::selectedEventIds() const {
+    return selectedEventIds_;
 }
 
 void DocumentStore::setSelectedEvent(int id) {
-    if (id == kNoEventId || indexOfEvent(doc_.events, id) >= 0) {
-        selectedEventId_ = id;
+    if (id == kNoEventId) {
+        selectedEventIds_.clear();
+        anchorEventId_ = kNoEventId;
+    } else if (indexOfEvent(doc_.events, id) >= 0) {
+        std::vector<int> selection{id};  // allocates first: a throw leaves the selection as it was
+        selectedEventIds_.swap(selection);
+        anchorEventId_ = id;
     }
 }
 
-int DocumentStore::appendChord(Chord chord, double lengthBeats, int velocity, std::optional<int> inversion) {
-    assertValidChord(chord);
-    if (!std::isfinite(lengthBeats) || nextId_ == INT_MAX ||
-        doc_.events.size() >= static_cast<std::size_t>(kMaxChords)) {
-        return kNoEventId;
+void DocumentStore::setSelectedEvents(const std::vector<int>& ids, int anchor) {
+    const std::set<int> wanted(ids.begin(), ids.end());
+    std::vector<int> selection;  // built aside: a throw leaves the selection as it was
+    for (const ChordEvent& e : doc_.events) {
+        if (wanted.count(e.id) != 0) {
+            selection.push_back(e.id);
+        }
     }
-    const int id = nextId_;
-    Document next = doc_;
-    ChordEvent event{id, chord, clampLength(lengthBeats), clampVelocity(velocity)};
-    if (inversion.has_value()) {
-        event.inversion = clampInversion(chord, *inversion);
-        event.manualVoicing = true;
-    }
-    next.events.push_back(event);
-    [[maybe_unused]] const bool changed = commit(std::move(next));
-    assert(changed);  // a fresh id always makes the sequence differ
-    ++nextId_;        // only now: a throw above leaves the counter, like the rest of the store, untouched
-    selectedEventId_ = id;  // live state, after the commit: a throw above leaves the selection as it was
-    return id;
+    const bool anchorSelected = std::find(selection.begin(), selection.end(), anchor) != selection.end();
+    const int newAnchor = selection.empty() ? kNoEventId : (anchorSelected ? anchor : selection.back());
+    selectedEventIds_.swap(selection);
+    anchorEventId_ = newAnchor;
+}
+
+int DocumentStore::appendChord(Chord chord, std::optional<double> lengthBeats, int velocity, std::optional<int> inversion) {
+    // One entry at the end: insertChords' clamps, refusals, selection and single commit. The entry is built
+    // before anything changes, so a failed allocation leaves the store as it was.
+    const std::vector<int> ids =
+        insertChords(static_cast<int>(doc_.events.size()), {ChordSpec{chord, lengthBeats, velocity, inversion}});
+    return ids.empty() ? kNoEventId : ids.front();
 }
 
 namespace {
@@ -385,8 +432,11 @@ bool DocumentStore::loadProgression(const std::vector<std::pair<Chord, double>>&
     const int join = static_cast<int>(next.events.size());
     next.events.reserve(next.events.size() + steps.size());
     int id = nextId_;
+    std::vector<int> selection;  // the loaded chords: the selection once committed (D2)
+    selection.reserve(steps.size());
     for (const auto& [chord, lengthBeats] : steps) {
         assertValidChord(chord);
+        selection.push_back(id);
         next.events.push_back(ChordEvent{id++, chord, clampLength(lengthBeats), 100});  // appendChord's defaults (P8)
     }
     int sectionId = nextSectionId_;
@@ -400,6 +450,8 @@ bool DocumentStore::loadProgression(const std::vector<std::pair<Chord, double>>&
     // Only now: a throw above leaves both counters, like the rest of the store, untouched.
     nextId_ += static_cast<int>(steps.size());
     nextSectionId_ += sectionIds;
+    anchorEventId_ = selection.back();  // live state, after the commit
+    selectedEventIds_.swap(selection);
     return true;
 }
 
@@ -521,6 +573,89 @@ void DocumentStore::removeChord(int id) {
     commit(std::move(next));
 }
 
+std::vector<int> DocumentStore::insertChords(int index, const std::vector<ChordSpec>& chords) {
+    if (chords.empty() || chords.size() > static_cast<std::size_t>(kMaxChords) - doc_.events.size() ||
+        nextId_ > INT_MAX - static_cast<int>(chords.size())) {  // n <= kMaxChords here: no overflow
+        return {};
+    }
+    for (const ChordSpec& c : chords) {
+        assertValidChord(c.chord);
+        if (c.lengthBeats.has_value() && !std::isfinite(*c.lengthBeats)) {
+            return {};
+        }
+    }
+    const int at = std::clamp(index, 0, static_cast<int>(doc_.events.size()));
+    const int count = static_cast<int>(chords.size());
+    Document next = doc_;
+    std::vector<ChordEvent> added;
+    added.reserve(chords.size());
+    std::vector<int> ids;
+    ids.reserve(chords.size());
+    int id = nextId_;
+    for (const ChordSpec& c : chords) {
+        ChordEvent event{id, c.chord, clampLength(c.lengthBeats.value_or(doc_.newChordLength())),
+                         clampVelocity(c.velocity)};
+        if (c.inversion.has_value()) {
+            event.inversion = clampInversion(c.chord, *c.inversion);
+        }
+        if (c.octave.has_value()) {
+            event.octave = clampOctave(*c.octave);
+        }
+        event.manualVoicing = c.manualVoicing.value_or(c.inversion.has_value() || c.octave.has_value());
+        added.push_back(event);
+        ids.push_back(id++);
+    }
+    next.events.insert(next.events.begin() + at, added.begin(), added.end());
+    for (Section& s : next.sections) {
+        if (s.firstEventIndex >= at && s.firstEventIndex != 0) {  // the first section, at 0, is pinned
+            s.firstEventIndex += count;
+        }
+    }
+    assert(sectionsWellFormed(next));
+    std::vector<int> selection = ids;  // before the commit, as appendChord
+    [[maybe_unused]] const bool changed = commit(std::move(next));
+    assert(changed);   // fresh ids always make the sequence differ
+    nextId_ += count;  // only now: a throw above leaves the counter, like the rest of the store, untouched
+    selectedEventIds_.swap(selection);  // live state: the inserted chords, the last the anchor (D2)
+    anchorEventId_ = ids.back();
+    return ids;
+}
+
+bool DocumentStore::removeChords(const std::vector<int>& ids) {
+    const std::set<int> wanted(ids.begin(), ids.end());
+    std::vector<int> indices;  // ascending: the chords that exist, once each
+    for (std::size_t i = 0; i < doc_.events.size(); ++i) {
+        if (wanted.count(doc_.events[i].id) != 0) {
+            indices.push_back(static_cast<int>(i));
+        }
+    }
+    if (indices.empty()) {
+        return false;
+    }
+    Document next = doc_;
+    for (std::size_t k = 0; k < indices.size(); ++k) {
+        const int index = indices[k] - static_cast<int>(k);  // the k removals before it moved it up k places
+        reindexSectionsForRemove(next.sections, index, static_cast<int>(next.events.size()));
+        next.events.erase(next.events.begin() + index);
+    }
+    return commit(std::move(next));
+}
+
+bool DocumentStore::setLengths(const std::vector<int>& ids, double lengthBeats) {
+    if (!std::isfinite(lengthBeats)) {
+        return false;
+    }
+    const std::set<int> wanted(ids.begin(), ids.end());
+    const double length = clampLength(lengthBeats);
+    Document next = doc_;
+    for (ChordEvent& e : next.events) {
+        if (wanted.count(e.id) != 0) {
+            e.lengthBeats = length;
+        }
+    }
+    return commit(std::move(next));  // nothing changed: no history
+}
+
 void DocumentStore::setProjectKey(Key key) {
     assertValidKey(key);
     Document next = doc_;
@@ -602,6 +737,14 @@ void DocumentStore::setKeyHintSeen(bool seen) {
 
 void DocumentStore::setMidiThru(bool on) {
     doc_.midiThru = on;  // live state: no history
+}
+
+void DocumentStore::setNewChordLength(std::optional<double> lengthBeats) {
+    if (lengthBeats.has_value() && !std::isfinite(*lengthBeats)) {
+        return;
+    }
+    // Live state: no history.
+    doc_.newChordBeats = lengthBeats.has_value() ? std::optional<double>(snapNewChordBeats(*lengthBeats)) : std::nullopt;
 }
 
 int DocumentStore::addSection(int firstEventIndex, std::string name) {

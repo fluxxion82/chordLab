@@ -13,6 +13,7 @@
 #include <climits>
 #include <cstddef>
 #include <limits>
+#include <optional>
 #include <random>
 #include <string>
 #include <string_view>
@@ -74,11 +75,11 @@ bool sameUndoableState(const Document& a, const Document& b) {
 }
 
 /// The live (session) part of a document: browsed key, the two transport toggles, the relation mode and
-/// the key-transpose switch and hint flag.
+/// the key-transpose switch and hint flag and the new-chord length.
 bool sameLiveState(const Document& a, const Document& b) {
     return a.browsedKey == b.browsedKey && a.progressionLoop == b.progressionLoop && a.followHost == b.followHost &&
            a.relationMode == b.relationMode && a.transposeWithKey == b.transposeWithKey &&
-           a.keyHintSeen == b.keyHintSeen && a.midiThru == b.midiThru;
+           a.keyHintSeen == b.keyHintSeen && a.midiThru == b.midiThru && a.newChordBeats == b.newChordBeats;
 }
 
 /// Runs `mutate`, checks it changed the document, then checks that undo restores the document from before
@@ -93,6 +94,32 @@ void checkRoundTrip(DocumentStore& store, Mutate mutate) {
     CHECK(store.doc() == before);
     REQUIRE(store.redo());
     CHECK(store.doc() == after);
+}
+
+/// An `insertChords` entry: `c` with an optional length and the store's defaults otherwise.
+ChordSpec spec(const Chord& c, std::optional<double> lengthBeats = std::nullopt) {
+    ChordSpec s{c};
+    s.lengthBeats = lengthBeats;
+    return s;
+}
+
+/// Length of every event in order.
+std::vector<double> lengthsOf(const DocumentStore& store) {
+    std::vector<double> lengths;
+    for (const ChordEvent& e : store.doc().events) {
+        lengths.push_back(e.lengthBeats);
+    }
+    return lengths;
+}
+
+/// Whether `store`'s most recent history entry is `reference`'s: each undoes once (on copies) to the same
+/// document. A refused call that wrongly pushed a snapshot would undo to the current document instead.
+bool sameHistoryTop(const DocumentStore& store, const DocumentStore& reference) {
+    DocumentStore a = store;
+    DocumentStore b = reference;
+    const bool undoneA = a.undo();
+    const bool undoneB = b.undo();
+    return undoneA == undoneB && a.doc() == b.doc();
 }
 
 }  // namespace
@@ -112,6 +139,7 @@ TEST_CASE("Document: defaults to C Ionian, empty, looping and following the host
     CHECK(doc.transposeWithKey == false);
     CHECK(doc.keyHintSeen == false);
     CHECK(doc.midiThru == true);
+    CHECK_FALSE(doc.newChordBeats.has_value());
 }
 
 TEST_CASE("Document: empty document has endBeat 0 and startBeatOf(0) 0") {
@@ -130,6 +158,17 @@ TEST_CASE("Document: startBeatOf is the sum of the lengths before the index; ind
     CHECK(doc.startBeatOf(2) == 5.5);
     CHECK(doc.startBeatOf(3) == 5.75);
     CHECK(doc.endBeat() == 5.75);
+}
+
+TEST_CASE("Document::newChordLength: one bar of the meter") {
+    Document doc;
+    CHECK(doc.newChordLength() == 4.0);
+    doc.meter = Meter{7, 8};
+    CHECK(doc.newChordLength() == 3.5);
+    doc.meter = Meter{6, 8};
+    CHECK(doc.newChordLength() == 3.0);
+    doc.meter = Meter{12, 8};
+    CHECK(doc.newChordLength() == 6.0);
 }
 
 TEST_CASE("ChordEvent / Document: equality compares every field") {
@@ -204,7 +243,7 @@ TEST_CASE("appendChord: three chords abut at 0, 4, 8 with endBeat 12 and ids 1, 
     CHECK(store.doc().events[0].lengthBeats == 4.0);
 }
 
-TEST_CASE("appendChord: defaults to four beats at velocity 100") {
+TEST_CASE("appendChord: defaults to one bar of the meter (four beats in 4/4) at velocity 100") {
     DocumentStore store;
     const int id = store.appendChord(kC);
     REQUIRE(store.findIndex(id) == 0);
@@ -768,6 +807,9 @@ TEST_CASE("Document ==: each feel and meter field makes documents unequal") {
     b = a;
     b.meter.den = 8;
     CHECK(a != b);
+    b = a;
+    b.newChordBeats = 2.0;
+    CHECK(a != b);
 }
 
 TEST_CASE("setFeel: one undo step, undo and redo restore, an equal value pushes nothing") {
@@ -1039,6 +1081,71 @@ TEST_CASE("setMidiThru: live state: defaults on, never pushes history, survives 
     CHECK(store.doc().midiThru == true);
 }
 
+TEST_CASE("snapNewChordBeats: the nearest quarter beat, halves away from zero, inside 0.25..64") {
+    CHECK(snapNewChordBeats(1.5) == 1.5);
+    CHECK(snapNewChordBeats(1.3) == 1.25);
+    CHECK(snapNewChordBeats(1.375) == 1.5);
+    CHECK(snapNewChordBeats(1.125) == 1.25);
+    CHECK(snapNewChordBeats(0.1) == 0.25);
+    CHECK(snapNewChordBeats(0.0) == 0.25);
+    CHECK(snapNewChordBeats(-3.0) == 0.25);
+    CHECK(snapNewChordBeats(63.9) == 64.0);
+    CHECK(snapNewChordBeats(100.0) == 64.0);
+}
+
+TEST_CASE("setNewChordLength: live state on the quarter-beat grid; nullopt is one bar of the meter; no history") {
+    DocumentStore store;
+    CHECK_FALSE(store.doc().newChordBeats.has_value());
+    CHECK(store.doc().newChordLength() == 4.0);
+    store.setNewChordLength(1.5);
+    CHECK(store.doc().newChordBeats == std::optional<double>(1.5));
+    CHECK(store.doc().newChordLength() == 1.5);
+    store.setNewChordLength(1.3);
+    CHECK(store.doc().newChordBeats == std::optional<double>(1.25));
+    store.setNewChordLength(1.375);
+    CHECK(store.doc().newChordBeats == std::optional<double>(1.5));
+    store.setNewChordLength(0.1);
+    CHECK(store.doc().newChordBeats == std::optional<double>(0.25));
+    store.setNewChordLength(100.0);
+    CHECK(store.doc().newChordBeats == std::optional<double>(64.0));
+    store.setNewChordLength(kNaN);  // no-op
+    store.setNewChordLength(kInf);
+    CHECK(store.doc().newChordBeats == std::optional<double>(64.0));
+    CHECK_FALSE(store.undo());  // never history
+    store.setNewChordLength(std::nullopt);
+    CHECK_FALSE(store.doc().newChordBeats.has_value());
+}
+
+TEST_CASE("setNewChordLength: kept by undo and redo; a meter change moves only the one-bar default") {
+    DocumentStore store;
+    store.setNewChordLength(0.5);
+    store.appendChord(kC);
+    store.setMeter(Meter{3, 4});
+    store.setNewChordLength(0.75);
+    REQUIRE(store.undo());  // the meter
+    CHECK(store.doc().newChordBeats == std::optional<double>(0.75));
+    REQUIRE(store.redo());
+    CHECK(store.doc().newChordBeats == std::optional<double>(0.75));
+    CHECK(store.doc().newChordLength() == 0.75);
+    store.setNewChordLength(std::nullopt);
+    CHECK(store.doc().newChordLength() == 3.0);  // one bar of 3/4
+    store.setMeter(Meter{7, 8});
+    CHECK(store.doc().newChordLength() == 3.5);
+    CHECK_FALSE(store.doc().newChordBeats.has_value());
+}
+
+TEST_CASE("appendChord and insertChords: a chord without a length takes the new-chord length; a given one wins") {
+    DocumentStore store;
+    store.setNewChordLength(1.5);
+    store.appendChord(kC);
+    store.appendChord(kF, 2.0);
+    store.insertChords(2, {spec(kG), spec(kC, 0.5)});
+    CHECK(lengthsOf(store) == std::vector<double>{1.5, 2.0, 1.5, 0.5});
+    store.setNewChordLength(std::nullopt);
+    store.appendChord(kF);
+    CHECK(store.doc().events.back().lengthBeats == 4.0);
+}
+
 TEST_CASE("setRelationMode: live state: every mode sticks, never pushes history, survives undo and redo") {
     DocumentStore store;
     for (const RelationMode mode : {RelationMode::Off, RelationMode::CommonTones, RelationMode::VoiceLeading,
@@ -1149,6 +1256,129 @@ TEST_CASE("replace: clears the selection, even when the new document has an even
     CHECK(store.selectedEventId() == kNoEventId);
     store.setSelectedEvent(2);
     CHECK(store.selectedEventId() == 2);
+}
+
+namespace {
+
+/// The store's selection, in strip order.
+std::vector<int> selectionOf(const DocumentStore& store) {
+    return store.selectedEventIds();
+}
+
+/// A store holding C (1), F (2), G7 (3), C (4), four beats each.
+DocumentStore fourChords() {
+    DocumentStore store = threeChords();
+    store.appendChord(kC, 4.0, 100);
+    return store;
+}
+
+}  // namespace
+
+TEST_CASE("setSelectedEvents: unknown ids dropped, repeats collapsed, strip order, the anchor or the last") {
+    DocumentStore store = fourChords();
+    store.setSelectedEvents({99, 3, 1, 3}, 1);
+    CHECK(selectionOf(store) == std::vector<int>{1, 3});
+    CHECK(store.selectedEventId() == 1);
+    store.setSelectedEvents({4, 2});  // no anchor: the last in strip order
+    CHECK(selectionOf(store) == std::vector<int>{2, 4});
+    CHECK(store.selectedEventId() == 4);
+    store.setSelectedEvents({4, 2}, 3);  // an anchor that is not selected: the last
+    CHECK(store.selectedEventId() == 4);
+    store.setSelectedEvents({98, 99}, 98);  // nothing that exists: cleared
+    CHECK(selectionOf(store).empty());
+    CHECK(store.selectedEventId() == kNoEventId);
+    store.setSelectedEvents({2}, kNoEventId);
+    CHECK(selectionOf(store) == std::vector<int>{2});
+    CHECK(store.selectedEventId() == 2);
+    store.setSelectedEvents({});
+    CHECK(selectionOf(store).empty());
+    CHECK(store.selectedEventId() == kNoEventId);
+}
+
+TEST_CASE("setSelectedEvent: one block alone after a multi-selection; selection calls never push history") {
+    DocumentStore store = fourChords();
+    store.setSelectedEvents({1, 2, 3}, 2);
+    store.setSelectedEvent(4);
+    CHECK(selectionOf(store) == std::vector<int>{4});
+    CHECK(store.selectedEventId() == 4);
+    store.setSelectedEvents({1, 2, 3}, 2);
+    store.setSelectedEvent(99);  // unknown: the selection stays
+    CHECK(selectionOf(store) == std::vector<int>{1, 2, 3});
+    CHECK(store.selectedEventId() == 2);
+    store.setSelectedEvent(kNoEventId);
+    CHECK(selectionOf(store).empty());
+    for (int i = 0; i < 4; ++i) {
+        REQUIRE(store.undo());  // the four appends are the whole history
+    }
+    CHECK_FALSE(store.undo());
+}
+
+TEST_CASE("selection: a removed block leaves it; a removed anchor moves to the next selected block, else the one before") {
+    DocumentStore store = fourChords();
+    store.setSelectedEvents({1, 2, 4}, 2);
+    store.removeChord(2);
+    CHECK(selectionOf(store) == std::vector<int>{1, 4});
+    CHECK(store.selectedEventId() == 4);  // the next selected block
+    store.removeChord(4);
+    CHECK(selectionOf(store) == std::vector<int>{1});
+    CHECK(store.selectedEventId() == 1);  // none after it: the one before
+    store.setSelectedEvents({1, 3}, 1);
+    store.removeChord(3);  // not the anchor
+    CHECK(selectionOf(store) == std::vector<int>{1});
+    CHECK(store.selectedEventId() == 1);
+    store.removeChord(1);
+    CHECK(selectionOf(store).empty());
+    CHECK(store.selectedEventId() == kNoEventId);
+}
+
+TEST_CASE("selection: removeChords drops every removed block at once") {
+    DocumentStore store = fourChords();
+    store.setSelectedEvents({1, 2, 3}, 2);
+    store.removeChords({2, 3});
+    CHECK(selectionOf(store) == std::vector<int>{1});
+    CHECK(store.selectedEventId() == 1);  // 3, after the anchor, went too
+}
+
+TEST_CASE("selection: undo and redo keep what exists and never restore; a move keeps strip order") {
+    DocumentStore store = threeChords();
+    REQUIRE(store.appendChord(kC) == 4);
+    store.setSelectedEvents({3, 4}, 4);
+    REQUIRE(store.undo());  // event 4 is gone
+    CHECK(selectionOf(store) == std::vector<int>{3});
+    CHECK(store.selectedEventId() == 3);
+    REQUIRE(store.redo());  // back, not reselected
+    CHECK(selectionOf(store) == std::vector<int>{3});
+    store.setSelectedEvents({1, 3}, 3);
+    store.moveChord(3, 0);
+    CHECK(idsOf(store) == std::vector<int>{3, 1, 2, 4});
+    CHECK(selectionOf(store) == std::vector<int>{3, 1});
+    CHECK(store.selectedEventId() == 3);
+    REQUIRE(store.undo());  // the move: the order is back
+    CHECK(selectionOf(store) == std::vector<int>{1, 3});
+}
+
+TEST_CASE("selection: appendChord selects the new chord alone; insertChords every inserted chord, the last the anchor") {
+    DocumentStore store = threeChords();
+    store.setSelectedEvents({1, 2}, 1);
+    REQUIRE(store.appendChord(kF) == 4);
+    CHECK(selectionOf(store) == std::vector<int>{4});
+    CHECK(store.selectedEventId() == 4);
+    CHECK(store.insertChords(1, {spec(kG, 1.0), spec(kC, 1.0)}) == std::vector<int>{5, 6});
+    CHECK(selectionOf(store) == std::vector<int>{5, 6});
+    CHECK(store.selectedEventId() == 6);
+    CHECK(store.insertChords(0, {spec(kC, kNaN)}).empty());  // a refused insert leaves the selection alone
+    CHECK(selectionOf(store) == std::vector<int>{5, 6});
+    REQUIRE(store.undo());  // the insert: both gone
+    CHECK(selectionOf(store).empty());
+    CHECK(store.selectedEventId() == kNoEventId);
+}
+
+TEST_CASE("replace: clears a multi-selection") {
+    DocumentStore store = fourChords();
+    store.setSelectedEvents({1, 2, 3});
+    store.replace(Document{}, 5);
+    CHECK(selectionOf(store).empty());
+    CHECK(store.selectedEventId() == kNoEventId);
 }
 
 TEST_CASE("undo: browsing between two appends keeps the browsed key while the append is undone") {
@@ -2113,6 +2343,216 @@ TEST_CASE("moveChord: when the first chord moves away and the next section's sta
 }
 
 // --- Undo / redo of sections -------------------------------------------------------------------
+
+TEST_CASE("insertChords: at 0, in the middle, at the end, and an index past either end clamps") {
+    DocumentStore store = threeChords();  // C 1, F 2, G7 3, four beats each
+    CHECK(store.insertChords(1, {spec(kG, 2.0), spec(kF, 1.0)}) == std::vector<int>{4, 5});
+    CHECK(idsOf(store) == std::vector<int>{1, 4, 5, 2, 3});
+    CHECK(startsOf(store) == std::vector<double>{0.0, 4.0, 6.0, 7.0, 11.0, 15.0});
+    CHECK(store.doc().events[1].chord == kG);
+    CHECK(store.doc().events[2].chord == kF);
+    CHECK(store.insertChords(0, {spec(kC, 0.5)}) == std::vector<int>{6});
+    CHECK(idsOf(store) == std::vector<int>{6, 1, 4, 5, 2, 3});
+    CHECK(store.insertChords(6, {spec(kF, 1.0)}) == std::vector<int>{7});  // index == size: the end
+    CHECK(idsOf(store) == std::vector<int>{6, 1, 4, 5, 2, 3, 7});
+    CHECK(store.insertChords(99, {spec(kG, 1.0)}) == std::vector<int>{8});
+    CHECK(store.insertChords(-5, {spec(kC, 1.0)}) == std::vector<int>{9});
+    CHECK(idsOf(store) == std::vector<int>{9, 6, 1, 4, 5, 2, 3, 7, 8});
+}
+
+TEST_CASE("insertChords: N chords are one undo step with fresh increasing ids, never reused") {
+    DocumentStore store = threeChords();
+    const Document before = store.doc();
+    REQUIRE(store.insertChords(1, {spec(kC, 1.0), spec(kF, 1.0), spec(kG, 1.0)}) == std::vector<int>{4, 5, 6});
+    const Document after = store.doc();
+    REQUIRE(store.undo());
+    CHECK(store.doc() == before);
+    REQUIRE(store.undo());  // the third append: the insert was exactly one step
+    CHECK(idsOf(store) == std::vector<int>{1, 2});
+    REQUIRE(store.redo());
+    REQUIRE(store.redo());
+    CHECK(store.doc() == after);
+    CHECK(store.nextId() == 7);
+    REQUIRE(store.undo());
+    CHECK(store.insertChords(3, {spec(kC, 1.0)}) == std::vector<int>{7});  // 4..6 are never handed out again
+}
+
+TEST_CASE("insertChords: refused whole past kMaxChords; exactly kMaxChords is allowed; an empty batch is refused") {
+    DocumentStore store;
+    for (int i = 0; i < kMaxChords - 3; ++i) {
+        REQUIRE(store.appendChord(kC, 1.0) == i + 1);
+    }
+    const DocumentStore reference = store;
+    CHECK(store.insertChords(0, {}).empty());
+    CHECK(store.insertChords(0, std::vector<ChordSpec>(4, spec(kF, 1.0))).empty());  // 253 + 4 = 257
+    CHECK(store.doc() == reference.doc());
+    CHECK(store.nextId() == kMaxChords - 2);
+    CHECK(sameHistoryTop(store, reference));
+    const std::vector<int> ids = store.insertChords(10, std::vector<ChordSpec>(3, spec(kF, 1.0)));  // exactly 256
+    CHECK(ids == std::vector<int>{kMaxChords - 2, kMaxChords - 1, kMaxChords});
+    CHECK(store.doc().events.size() == static_cast<std::size_t>(kMaxChords));
+    CHECK(store.insertChords(0, {spec(kC, 1.0)}).empty());
+}
+
+TEST_CASE("insertChords: refused whole when the id counter cannot hand out one id per chord") {
+    DocumentStore store(INT_MAX - 2);
+    CHECK(store.insertChords(0, std::vector<ChordSpec>(3, spec(kC, 1.0))).empty());  // would need INT_MAX itself
+    CHECK(store.doc().events.empty());
+    CHECK(store.nextId() == INT_MAX - 2);
+    CHECK(store.insertChords(0, std::vector<ChordSpec>(2, spec(kC, 1.0))) == std::vector<int>{INT_MAX - 2, INT_MAX - 1});
+    CHECK(store.nextId() == INT_MAX);
+    CHECK(store.insertChords(0, {spec(kC, 1.0)}).empty());
+}
+
+TEST_CASE("insertChords: a NaN or infinite length refuses the whole batch") {
+    DocumentStore store = threeChords();
+    const DocumentStore reference = store;
+    CHECK(store.insertChords(1, {spec(kC, 1.0), spec(kF, kNaN)}).empty());
+    CHECK(store.insertChords(1, {spec(kC, kInf)}).empty());
+    CHECK(store.doc() == reference.doc());
+    CHECK(store.nextId() == 4);
+    CHECK(sameHistoryTop(store, reference));
+}
+
+TEST_CASE("insertChords: lengths and velocities clamp; an entry without a length lasts one bar of the meter") {
+    DocumentStore store;
+    store.setMeter(Meter{7, 8});
+    store.insertChords(0, {spec(kC), spec(kF, 0.1), spec(kG, 100.0)});
+    CHECK(lengthsOf(store) == std::vector<double>{3.5, 0.25, 64.0});
+    ChordSpec quiet = spec(kC, 1.0);
+    quiet.velocity = 0;
+    ChordSpec loud = spec(kC, 1.0);
+    loud.velocity = 200;
+    store.insertChords(3, {quiet, loud});
+    CHECK(store.doc().events[3].velocity == 1);
+    CHECK(store.doc().events[4].velocity == 127);
+    CHECK(store.doc().events[0].velocity == 100);  // the default
+}
+
+TEST_CASE("insertChords: voicing fields as ChordEvent holds them; a given inversion or octave marks the chord manual") {
+    DocumentStore store;
+    ChordSpec inverted = spec(kC, 1.0);
+    inverted.inversion = 1;
+    ChordSpec lowered = spec(kC, 1.0);
+    lowered.octave = -1;
+    ChordSpec notManual = spec(kC, 1.0);
+    notManual.inversion = 2;
+    notManual.manualVoicing = false;
+    ChordSpec manualOnly = spec(kC, 1.0);
+    manualOnly.manualVoicing = true;
+    ChordSpec clamped = spec(kG, 1.0);  // G7: inversions 0..3
+    clamped.inversion = 9;
+    clamped.octave = 5;
+    store.insertChords(0, {inverted, lowered, notManual, manualOnly, spec(kF, 1.0), clamped});
+    const auto& e = store.doc().events;
+    REQUIRE(e.size() == 6);
+    CHECK(e[0] == ChordEvent{1, kC, 1.0, 100, 1, 0, true});
+    CHECK(e[1] == ChordEvent{2, kC, 1.0, 100, 0, -1, true});
+    CHECK(e[2] == ChordEvent{3, kC, 1.0, 100, 2, 0, false});
+    CHECK(e[3] == ChordEvent{4, kC, 1.0, 100, 0, 0, true});
+    CHECK(e[4] == ChordEvent{5, kF, 1.0, 100, 0, 0, false});
+    CHECK(e[5] == ChordEvent{6, kG, 1.0, 100, 3, 1, true});
+}
+
+TEST_CASE("insertChords: sections at or after the index move by the batch; the first stays pinned at 0") {
+    // twoSections: C 1, F 2, G7 3, C 4; "A" (id 1) at 0, "B" (id 2) at 2.
+    {
+        DocumentStore store = twoSections();
+        store.insertChords(2, {spec(kF, 1.0), spec(kG, 1.0)});  // at B's start: the new chords end A
+        CHECK(sectionStartsOf(store) == SectionStarts{{1, 0}, {2, 4}});
+        CHECK(sectionChordIdsOf(store) == std::vector<int>{1, 3});
+        checkSectionInvariants(store.doc());
+    }
+    {
+        DocumentStore store = twoSections();
+        store.insertChords(0, {spec(kF, 1.0)});  // at 0: into the first section, which stays at 0
+        CHECK(sectionStartsOf(store) == SectionStarts{{1, 0}, {2, 3}});
+        CHECK(sectionChordIdsOf(store) == std::vector<int>{5, 3});
+        checkSectionInvariants(store.doc());
+    }
+    {
+        DocumentStore store = twoSections();
+        store.insertChords(1, {spec(kF, 1.0)});  // inside A
+        CHECK(sectionStartsOf(store) == SectionStarts{{1, 0}, {2, 3}});
+        CHECK(sectionChordIdsOf(store) == std::vector<int>{1, 3});
+    }
+    {
+        DocumentStore store = twoSections();
+        store.insertChords(3, {spec(kF, 1.0)});  // inside B
+        store.insertChords(5, {spec(kG, 1.0)});  // at the end: B grows
+        CHECK(sectionStartsOf(store) == SectionStarts{{1, 0}, {2, 2}});
+        CHECK(idsOf(store) == std::vector<int>{1, 2, 3, 5, 4, 6});
+    }
+    {
+        DocumentStore store = threeChords();  // no sections: none appear
+        store.insertChords(1, {spec(kF, 1.0)});
+        CHECK(store.doc().sections.empty());
+    }
+}
+
+TEST_CASE("removeChords: every listed chord that exists, in index order, as removeChord would; one undo step") {
+    DocumentStore store = twoSections();
+    DocumentStore sequential = store;
+    const Document before = store.doc();
+    CHECK(store.removeChords({3, 99, 1, 3}));  // unknown skipped, the repeat applied once
+    sequential.removeChord(1);
+    sequential.removeChord(3);
+    CHECK(idsOf(store) == std::vector<int>{2, 4});
+    CHECK(sectionStartsOf(store) == SectionStarts{{1, 0}});  // B started on 3: gone; A stays on the new first chord
+    CHECK(store.doc().events == sequential.doc().events);
+    CHECK(store.doc().sections == sequential.doc().sections);
+    REQUIRE(store.undo());
+    CHECK(store.doc() == before);
+}
+
+TEST_CASE("removeChords: index order decides which section survives when both start chords go") {
+    // A (id 1) at 0 and B (id 2) at 1. In index order, removing chord 1 drops A (the next chord starts B, which
+    // becomes first); removing chord 2 then leaves B pinned on the one chord left. Back to front would keep A.
+    DocumentStore store = threeChords();
+    REQUIRE(store.addSection(0, "A") == 1);
+    REQUIRE(store.addSection(1, "B") == 2);
+    DocumentStore sequential = store;
+    CHECK(store.removeChords({2, 1}));
+    sequential.removeChord(1);
+    sequential.removeChord(2);
+    CHECK(idsOf(store) == std::vector<int>{3});
+    CHECK(sectionStartsOf(store) == SectionStarts{{2, 0}});
+    CHECK(store.doc().sections == sequential.doc().sections);
+}
+
+TEST_CASE("removeChords: all chords leave no sections; nothing that exists is a no-op without history") {
+    DocumentStore store = twoSections();
+    const DocumentStore reference = store;
+    CHECK_FALSE(store.removeChords({}));
+    CHECK_FALSE(store.removeChords({98, 99}));
+    CHECK(store.doc() == reference.doc());
+    CHECK(sameHistoryTop(store, reference));
+    CHECK(store.removeChords({4, 3, 2, 1}));
+    CHECK(store.doc().events.empty());
+    CHECK(store.doc().sections.empty());
+}
+
+TEST_CASE("setLengths: every listed chord that exists, clamped, one undo step; nothing changed is a no-op") {
+    DocumentStore store = threeChords();
+    const Document before = store.doc();
+    CHECK(store.setLengths({1, 3, 99, 3}, 2.5));
+    CHECK(lengthsOf(store) == std::vector<double>{2.5, 4.0, 2.5});
+    REQUIRE(store.undo());
+    CHECK(store.doc() == before);
+    CHECK(store.setLengths({1, 2}, 0.1));
+    CHECK(lengthsOf(store) == std::vector<double>{0.25, 0.25, 4.0});
+    CHECK(store.setLengths({2}, 100.0));
+    CHECK(lengthsOf(store) == std::vector<double>{0.25, 64.0, 4.0});
+    const DocumentStore reference = store;
+    CHECK_FALSE(store.setLengths({1}, 0.25));  // already
+    CHECK_FALSE(store.setLengths({1}, 0.2));   // clamps to the current value
+    CHECK_FALSE(store.setLengths({99}, 1.0));
+    CHECK_FALSE(store.setLengths({}, 1.0));
+    CHECK_FALSE(store.setLengths({1, 2}, kNaN));
+    CHECK_FALSE(store.setLengths({1, 2}, kInf));
+    CHECK(store.doc() == reference.doc());
+    CHECK(sameHistoryTop(store, reference));
+}
 
 TEST_CASE("undo / redo: every section operation round-trips") {
     DocumentStore store = threeChords();

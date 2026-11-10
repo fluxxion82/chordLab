@@ -803,6 +803,11 @@ struct Command {
         RemoveSection,
         MoveSectionStart,
         SelectEvent,
+        SelectEvents,
+        InsertChords,
+        RemoveChords,
+        SetLengths,
+        SetNewChordLength,
         SetRelationMode,
         LoadPreset,
         Undo,
@@ -813,11 +818,14 @@ struct Command {
     int steps = 0;             // BrowseSteps
     Mode mode = Mode::Ionian;  // BrowseMode
     Chord chord{0, nullptr};   // AppendChord
-    double lengthBeats = 4.0;  // AppendChord (optional), SetLength
-    bool hasLength = false;    // AppendChord: `lengthBeats` was given; otherwise one bar of the meter
+    double lengthBeats = 4.0;  // AppendChord (optional), SetLength, SetLengths, SetNewChordLength (when `hasLength`)
+    // AppendChord: `lengthBeats` was given, otherwise the new-chord length; SetNewChordLength: false is null
+    bool hasLength = false;
     int velocity = 100;        // AppendChord (optional, store default), SetVelocity
-    int id = 0;                // MoveChord, SetLength, SetVelocity, RemoveChord, the voicing, section and selection commands
-    int index = 0;             // MoveChord, AddSection, MoveSectionStart
+    // MoveChord, SetLength, SetVelocity, RemoveChord, the voicing, section and selection commands; SelectEvents' anchor
+    // (kNoEventId when absent or null)
+    int id = 0;
+    int index = 0;             // MoveChord, AddSection, MoveSectionStart, InsertChords
     // SetProgressionLoop, SetFollowHost, SetAutoVoiceLead, SetTransposeWithKey, SetKeyHintSeen, SetMidiThru
     bool on = false;
     Feel feel{};               // SetFeel
@@ -832,6 +840,14 @@ struct Command {
     ProgressionLoad load = ProgressionLoad::Append;   // LoadPreset
 };
 static_assert(std::is_trivially_destructible_v<Command>, "Command must be plain data: destroying one must not allocate");
+
+/// What a command carries besides `Command`'s plain fields, owned by the reader's frame like the section name:
+/// the chords of `insertChords` and the ids of `removeChords`, `setLengths` and `selectEvents`. Its destructor
+/// frees, never allocates.
+struct CommandLists {
+    std::vector<ChordSpec> chords;
+    std::vector<int> ids;
+};
 
 // Phase A parsers: each reads the fields of one command kind into `out`, reporting through `Fields`.
 
@@ -1011,6 +1027,148 @@ bool parseSelectEvent(Fields& fields, Command& out) {
     return toInt(*id, out.id) || fields.fail("id", "must be an integer or null");
 }
 
+/// One `insertChords` entry, `fields` being `chords[i]`: `root` (0..11) and `type` (a dictionary id) required;
+/// `lengthBeats` (a finite number), `velocity` (an integer), `inversion` (0..tones - 1 of the chord), `octave`
+/// (kMinVoicingOctave..kMaxVoicingOctave) and `manualVoicing` (a boolean) optional. Lengths and velocities
+/// are clamped by the store; the voicing fields are range-checked here, as `appendChord`'s inversion is. Every
+/// failure names the field with the entry's index ("chords[2].root must be an integer in 0..11").
+bool parseChordSpec(Fields& fields, ChordSpec& out) {
+    int root = 0;
+    std::string typeId;
+    if (!fields.getIntIn("root", 0, 11, root) || !fields.getString("type", typeId)) {
+        return false;
+    }
+    const ChordType* type = findChordType(typeId);
+    if (type == nullptr) {
+        return fields.fail("type", "\"" + typeId + "\" is not a chord type");
+    }
+    ChordSpec spec{Chord{root, type}};
+    if (fields.has("lengthBeats")) {
+        double beats = 0.0;
+        if (!fields.getNumber("lengthBeats", beats)) {
+            return false;
+        }
+        spec.lengthBeats = beats;
+    }
+    if (fields.has("velocity") && !fields.getInt("velocity", spec.velocity)) {
+        return false;
+    }
+    if (fields.has("inversion")) {
+        int inversion = 0;
+        if (!fields.getIntIn("inversion", 0, inversionCount(spec.chord) - 1, inversion)) {
+            return false;
+        }
+        spec.inversion = inversion;
+    }
+    if (fields.has("octave")) {
+        int octave = 0;
+        if (!fields.getIntIn("octave", kMinVoicingOctave, kMaxVoicingOctave, octave)) {
+            return false;
+        }
+        spec.octave = octave;
+    }
+    if (fields.has("manualVoicing")) {
+        bool manual = false;
+        if (!fields.getBool("manualVoicing", manual)) {
+            return false;
+        }
+        spec.manualVoicing = manual;
+    }
+    out = spec;
+    return true;
+}
+
+/// `insertChords {index, chords}`: `index` an integer (clamped by the store); `chords` a non-empty array of at
+/// most `kMaxChords` objects, each read by `parseChordSpec`. All of it is read before the store is touched, so
+/// one bad entry rejects the whole message.
+bool parseInsertChords(Fields& fields, Command& out, std::vector<ChordSpec>& chords, std::string& error) {
+    out.kind = Command::Kind::InsertChords;
+    if (!fields.getInt("index", out.index)) {
+        return false;
+    }
+    const json* list = fields.getArray("chords");
+    if (list == nullptr) {
+        return false;
+    }
+    if (list->empty()) {
+        return fields.fail("chords", "must hold at least one chord");
+    }
+    if (list->size() > static_cast<std::size_t>(kMaxChords)) {
+        return fields.fail("chords", "must hold at most " + std::to_string(kMaxChords) + " chords");
+    }
+    chords.clear();
+    chords.reserve(list->size());
+    for (std::size_t i = 0; i < list->size(); ++i) {
+        const std::string where = "chords[" + std::to_string(i) + "]";
+        const json& item = (*list)[i];
+        if (!item.is_object()) {
+            error = where + " must be an object";
+            return false;
+        }
+        Fields itemFields(item, where, error);
+        ChordSpec spec{Chord{0, nullptr}};
+        if (!parseChordSpec(itemFields, spec)) {
+            return false;
+        }
+        chords.push_back(spec);
+    }
+    return true;
+}
+
+/// `ids`: an array of integers, non-empty unless `allowEmpty` (`selectEvents`, where an empty list clears).
+/// Repeats and ids no event has are kept here; the store skips them. A bad element is named by its index
+/// ("ids[1] must be an integer").
+bool parseIds(Fields& fields, bool allowEmpty, std::vector<int>& ids, std::string& error) {
+    const json* list = fields.getArray("ids");
+    if (list == nullptr) {
+        return false;
+    }
+    if (list->empty() && !allowEmpty) {
+        return fields.fail("ids", "must hold at least one id");
+    }
+    ids.clear();
+    ids.reserve(list->size());
+    for (std::size_t i = 0; i < list->size(); ++i) {
+        int id = 0;
+        if (!toInt((*list)[i], id)) {
+            error = "ids[" + std::to_string(i) + "] must be an integer";
+            return false;
+        }
+        ids.push_back(id);
+    }
+    return true;
+}
+
+/// `selectEvents {ids, anchor?}`: `ids` an array of integers (empty clears the selection); `anchor` an
+/// integer, or null or absent for the last selected block.
+bool parseSelectEvents(Fields& fields, Command& out, std::vector<int>& ids, std::string& error) {
+    out.kind = Command::Kind::SelectEvents;
+    if (!parseIds(fields, true, ids, error)) {
+        return false;
+    }
+    out.id = kNoEventId;
+    const json* anchor = fields.find("anchor");
+    if (anchor == nullptr || anchor->is_null()) {
+        return true;
+    }
+    return toInt(*anchor, out.id) || fields.fail("anchor", "must be an integer or null");
+}
+
+/// `setNewChordLength {lengthBeats}`: a finite number, or null for one bar of the meter; the field is required.
+bool parseSetNewChordLength(Fields& fields, Command& out) {
+    out.kind = Command::Kind::SetNewChordLength;
+    const json* length = fields.find("lengthBeats");
+    if (length == nullptr) {
+        return fields.fail("lengthBeats", "is missing; it must be a finite number or null");
+    }
+    if (length->is_null()) {
+        out.hasLength = false;
+        return true;
+    }
+    out.hasLength = true;
+    return fields.getNumber("lengthBeats", out.lengthBeats);
+}
+
 /// `loadPreset {id, mode}`: `id` names a record of `allPresets()`, `mode` is "append" or "replace".
 bool parseLoadPreset(Fields& fields, Command& out) {
     out.kind = Command::Kind::LoadPreset;
@@ -1033,8 +1191,9 @@ bool parseLoadPreset(Fields& fields, Command& out) {
 // its cleanup into std::terminate with the mutation already applied. Phase A parses and validates into
 // plain data and returns with the tree destroyed; Phase B takes nothing but the store and that data.
 
-/// Phase A of `applyCommandJson`: parses and validates `text` into `out`, and a section name into `name`.
-bool parseCommand(std::string_view text, Command& out, std::string& name, std::string& error) {
+/// Phase A of `applyCommandJson`: parses and validates `text` into `out`, a section name into `name` and the
+/// lists of the plural commands into `lists`.
+bool parseCommand(std::string_view text, Command& out, std::string& name, CommandLists& lists, std::string& error) {
     json message;
     if (!parseMessage(text, message, error)) {
         return false;
@@ -1122,6 +1281,23 @@ bool parseCommand(std::string_view text, Command& out, std::string& name, std::s
     if (cmd == "selectEvent") {
         return parseSelectEvent(fields, out);
     }
+    if (cmd == "selectEvents") {
+        return parseSelectEvents(fields, out, lists.ids, error);
+    }
+    if (cmd == "insertChords") {
+        return parseInsertChords(fields, out, lists.chords, error);
+    }
+    if (cmd == "removeChords") {
+        out.kind = Command::Kind::RemoveChords;
+        return parseIds(fields, false, lists.ids, error);
+    }
+    if (cmd == "setLengths") {
+        out.kind = Command::Kind::SetLengths;
+        return parseIds(fields, false, lists.ids, error) && fields.getNumber("lengthBeats", out.lengthBeats);
+    }
+    if (cmd == "setNewChordLength") {
+        return parseSetNewChordLength(fields, out);
+    }
     if (cmd == "setRelationMode") {
         out.kind = Command::Kind::SetRelationMode;
         return parseRelationModeField(fields, "mode", out.relationMode);
@@ -1146,6 +1322,8 @@ enum class Refusal {
     None,
     DocumentFull,
     IdsExhausted,
+    InsertDocumentFull,
+    InsertIdsExhausted,
     SectionIdsExhausted,
     PresetDocumentFull,
     PresetIdsExhausted,
@@ -1191,11 +1369,11 @@ bool canStartSection(const Document& doc, int index) {
 }
 
 /// Phase B of `applyCommandJson`: applies a validated command through one store call, which gives the
-/// strong guarantee. Takes nothing but the store, plain data and the section name, so no JSON object can
-/// be alive here. Refuses only an append, when the document already holds `kMaxChords` chords or the
-/// store's id counter is exhausted, and a section add when the section id counter is; either way nothing
-/// changes.
-Refusal applyCommand(DocumentStore& store, const Command& command, std::string& name) {
+/// strong guarantee. Takes nothing but the store, plain data, the section name and the lists, so no JSON
+/// object can be alive here. Refuses only an append or an insert, when the result would pass `kMaxChords`
+/// chords or the store's id counter is exhausted, and a section add when the section id counter is; either way
+/// nothing changes.
+Refusal applyCommand(DocumentStore& store, const Command& command, std::string& name, const CommandLists& lists) {
     const Document& doc = store.doc();
     switch (command.kind) {
         case Command::Kind::SetKey:
@@ -1214,10 +1392,9 @@ Refusal applyCommand(DocumentStore& store, const Command& command, std::string& 
             if (doc.events.size() >= static_cast<std::size_t>(kMaxChords)) {
                 return Refusal::DocumentFull;
             }
-            // No length: one bar of the document's meter (barTicks / 960 beats; 4 in 4/4).
+            // No length: the document's new-chord length (D3; one bar of the meter until one is chosen).
             return store.appendChord(command.chord,
-                                     command.hasLength ? command.lengthBeats
-                                                       : barTicks(doc.meter) / static_cast<double>(kFeelTicksPerBeat),
+                                     command.hasLength ? std::optional<double>(command.lengthBeats) : std::nullopt,
                                      command.velocity,
                                      command.hasInversion ? std::optional<int>(command.inversion) : std::nullopt) !=
                            kNoEventId
@@ -1294,6 +1471,24 @@ Refusal applyCommand(DocumentStore& store, const Command& command, std::string& 
             return Refusal::None;
         case Command::Kind::SelectEvent:
             store.setSelectedEvent(command.id);
+            return Refusal::None;
+        case Command::Kind::SelectEvents:
+            store.setSelectedEvents(lists.ids, command.id);
+            return Refusal::None;
+        case Command::Kind::InsertChords:
+            if (lists.chords.size() > static_cast<std::size_t>(kMaxChords) - doc.events.size()) {
+                return Refusal::InsertDocumentFull;
+            }
+            // Lengths are finite (validated) and the batch fits: only the id counter can still refuse.
+            return store.insertChords(command.index, lists.chords).empty() ? Refusal::InsertIdsExhausted : Refusal::None;
+        case Command::Kind::RemoveChords:
+            store.removeChords(lists.ids);  // no id that exists is a valid no-op
+            return Refusal::None;
+        case Command::Kind::SetLengths:
+            store.setLengths(lists.ids, command.lengthBeats);
+            return Refusal::None;
+        case Command::Kind::SetNewChordLength:
+            store.setNewChordLength(command.hasLength ? std::optional<double>(command.lengthBeats) : std::nullopt);
             return Refusal::None;
         case Command::Kind::SetRelationMode:
             store.setRelationMode(command.relationMode);
@@ -1377,6 +1572,15 @@ bool parseState(std::string_view text, Document& doc, int& nextId, int& nextSect
     // Optional (states saved before MIDI Thru have none): true.
     if (fields.has("midiThru") && !fields.getBool("midiThru", doc.midiThru)) {
         return false;
+    }
+    // Optional (states saved before the new-chord length have none): null, one bar of the meter. A number is
+    // snapped and clamped as `setNewChordLength` stores it; anything else rejects the state.
+    if (fields.has("newChordBeats") && !fields.find("newChordBeats")->is_null()) {
+        double beats = 0.0;
+        if (!fields.getNumber("newChordBeats", beats)) {
+            return false;
+        }
+        doc.newChordBeats = snapNewChordBeats(beats);
     }
     // Optional (states saved before the feel have neither): block chords in 4/4. Present means valid, or the
     // whole state is rejected.
@@ -1557,11 +1761,32 @@ std::string heardJson(const Listener& listener, const Key& projectKey) {
 
 static_assert(kNoEventId == -1, "snapshotJson's default selectedEventId must be kNoEventId");
 
-std::string snapshotJson(const Document& doc, const Palette& palette, int selectedEventId) {
-    // The selection counts only when an event has that id; the UI may hold a stale one for a moment.
+std::string snapshotJson(const Document& doc, const Palette& palette, int selectedEventId,
+                         const std::vector<int>& selectedEventIds) {
+    // The selection and its anchor, normalised together (strip editing design D2): the given ids that name an
+    // event, in strip order; when none does, the anchor alone if it names one. A non-empty selection whose
+    // anchor is absent, unknown or not one of its blocks takes its last block as the anchor. The suggestions and
+    // the relations follow that anchor, so they never point outside the selection.
+    std::vector<int> selection;
+    {
+        const std::set<int> wanted(selectedEventIds.begin(), selectedEventIds.end());
+        for (const ChordEvent& e : doc.events) {
+            if (wanted.count(e.id) != 0) {
+                selection.push_back(e.id);
+            }
+        }
+    }
+    const bool anchorNamesEvent = std::any_of(doc.events.begin(), doc.events.end(),
+                                              [&](const ChordEvent& e) { return e.id == selectedEventId; });
+    if (selection.empty() && anchorNamesEvent) {
+        selection.push_back(selectedEventId);
+    }
+    const int anchor = std::find(selection.begin(), selection.end(), selectedEventId) != selection.end()
+                           ? selectedEventId
+                           : (selection.empty() ? kNoEventId : selection.back());
     int selectedIndex = -1;
     for (std::size_t i = 0; i < doc.events.size(); ++i) {
-        if (doc.events[i].id == selectedEventId) {
+        if (doc.events[i].id == anchor) {
             selectedIndex = static_cast<int>(i);
             break;
         }
@@ -1655,7 +1880,9 @@ std::string snapshotJson(const Document& doc, const Palette& palette, int select
                            {"keyHintSeen", doc.keyHintSeen},
                            {"midiThru", doc.midiThru},
                            {"endBeat", compiled.endBeat},
-                           {"selectedEventId", selectedIndex >= 0 ? json(selectedEventId) : json()},
+                           {"selectedEventId", selectedIndex >= 0 ? json(anchor) : json()},
+                           {"selectedEventIds", selection},
+                           {"newChordBeats", doc.newChordBeats ? json(*doc.newChordBeats) : json()},
                            {"modes", modesJson()},
                            {"tonics", tonicsJson()},
                            {"events", std::move(events)},
@@ -1693,6 +1920,7 @@ std::string stateJson(const DocumentStore& store, int editorWidth, int editorHei
                         {"transposeWithKey", doc.transposeWithKey},
                         {"keyHintSeen", doc.keyHintSeen},
                         {"midiThru", doc.midiThru},
+                        {"newChordBeats", doc.newChordBeats ? json(*doc.newChordBeats) : json()},
                         {"feel", feelToJson(doc.feel)},
                         {"meter", meterToJson(doc.meter)},
                         {"relationMode", relationModeName(doc.relationMode)},
@@ -1709,10 +1937,11 @@ bool applyCommandJson(DocumentStore& store, std::string_view text, std::string& 
         error.clear();
         Command command;
         std::string name;  // a section name; its destructor frees, never allocates
-        if (!parseCommand(text, command, name, error)) {  // Phase A: the JSON tree is destroyed on return
+        CommandLists lists;  // the plural commands' chords and ids; freed, never allocated, on return
+        if (!parseCommand(text, command, name, lists, error)) {  // Phase A: the JSON tree is destroyed on return
             return false;
         }
-        switch (applyCommand(store, command, name)) {  // Phase B: only the store, plain data and the name in scope
+        switch (applyCommand(store, command, name, lists)) {  // Phase B: only the store, plain data and the name in scope
             case Refusal::None:
                 return true;
             case Refusal::DocumentFull:
@@ -1724,6 +1953,13 @@ bool applyCommandJson(DocumentStore& store, std::string_view text, std::string& 
                 return false;
             case Refusal::SectionIdsExhausted:
                 error = "\"addSection\" refused: no section ids left";
+                return false;
+            case Refusal::InsertDocumentFull:
+                error = "\"insertChords\" refused: the document would hold more than " + std::to_string(kMaxChords) +
+                        " chords";
+                return false;
+            case Refusal::InsertIdsExhausted:
+                error = "\"insertChords\" refused: not enough event ids left";
                 return false;
             case Refusal::PresetDocumentFull:
                 error = "\"loadPreset\" refused: the document would hold more than " + std::to_string(kMaxChords) +

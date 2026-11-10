@@ -88,6 +88,21 @@ constexpr bool operator!=(const ChordEvent& a, const ChordEvent& b) noexcept {
     return !(a == b);
 }
 
+/// One chord for `DocumentStore::insertChords` (strip editing design D1): the chord; its length, the
+/// document's new-chord length (`Document::newChordLength`) when absent; its velocity; and a voicing as
+/// `ChordEvent` holds it. A given `inversion` or `octave` makes the chord manual (it sounds as given under auto
+/// voice-leading) unless `manualVoicing` says otherwise, as `appendChord` does with an inversion;
+/// `manualVoicing` alone sets the flag with root position in the default register. The store clamps every
+/// value as its setters clamp it.
+struct ChordSpec {
+    Chord chord;
+    std::optional<double> lengthBeats;
+    int velocity = 100;
+    std::optional<int> inversion;
+    std::optional<int> octave;
+    std::optional<bool> manualVoicing;
+};
+
 /// A named, coloured stretch of the progression (P2-D6). It starts on the chord at `firstEventIndex` and
 /// runs up to the next section's start (or the end of the progression), so a section is never empty.
 /// The first section always starts at 0, so when there are sections they partition the whole sequence
@@ -114,14 +129,14 @@ inline bool operator!=(const Section& a, const Section& b) noexcept {
 }
 
 /// The whole editable state of a project: the two keys, the progression, its sections, the voicing flag,
-/// the transport toggles, the palette's relation mode, the key-transpose switch and hint flag and the MIDI
-/// Thru switch. Plain data
+/// the transport toggles, the palette's relation mode, the key-transpose switch and hint flag, the MIDI
+/// Thru switch and the new-chord length. Plain data
 /// so that `DocumentStore` can snapshot it for undo; mutate it through the store, not directly.
 ///
 /// Undo scope: `events`, `sections`, `projectKey`, `autoVoiceLead`, `feel` and `meter` are undoable (they are what the user
 /// composes: the flag changes which notes `compile` produces, so toggling it is an edit of the progression,
 /// not a view of it). `browsedKey`, `progressionLoop`, `followHost`, `relationMode`, `transposeWithKey`,
-/// `keyHintSeen` and `midiThru` are live session state: changing them never creates history, and undo/redo leave their
+/// `keyHintSeen`, `midiThru` and `newChordBeats` are live session state: changing them never creates history, and undo/redo leave their
 /// current values alone while restoring the rest, with one exception: a `browsedKey` equal to `projectKey`
 /// (home) follows the project key wherever it changes, through `setProjectKey`, `undo` and `redo`, so the
 /// palette never stays on a key the project just left.
@@ -139,6 +154,9 @@ struct Document {
     bool transposeWithKey = false;  // live, persisted: a tonic change of the project key transposes the sequence
     bool keyHintSeen = false;       // live, persisted: the one-time "chords kept their notes" hint has shown
     bool midiThru = true;           // live, persisted: the plug-in passes the MIDI it hears to its output
+    /// live, persisted: how long a chord added without a length lasts, in beats, on the quarter-beat grid
+    /// inside [kMinLengthBeats, kMaxLengthBeats] (`snapNewChordBeats`); nullopt: one bar of the meter (D3)
+    std::optional<double> newChordBeats;
 
     /// Beat at which the event at `index` starts: the sum of the lengths before it. `index` must be in
     /// 0..events.size(); `startBeatOf(events.size())` is `endBeat()`.
@@ -146,6 +164,11 @@ struct Document {
 
     /// Beat at which the progression ends: the sum of every length (0 for an empty progression).
     double endBeat() const;
+
+    /// How long a chord added without a length lasts (`appendChord`, `insertChords`, D3): `newChordBeats` when
+    /// set, else one bar of `meter`, `barTicks(meter) / kFeelTicksPerBeat` beats (4 in 4/4, 3 in 3/4 and 6/8,
+    /// 3.5 in 7/8). A meter change moves the second, never the first.
+    double newChordLength() const;
 
     /// Position in `sections` of the section the event at `eventIndex` belongs to: the last section that
     /// starts at or before it. -1 when there are no sections (the first section starts at 0, so otherwise
@@ -160,7 +183,7 @@ inline bool operator==(const Document& a, const Document& b) noexcept {
            a.feel == b.feel && a.meter == b.meter &&
            a.progressionLoop == b.progressionLoop && a.followHost == b.followHost &&
            a.relationMode == b.relationMode && a.transposeWithKey == b.transposeWithKey &&
-           a.keyHintSeen == b.keyHintSeen && a.midiThru == b.midiThru;
+           a.keyHintSeen == b.keyHintSeen && a.midiThru == b.midiThru && a.newChordBeats == b.newChordBeats;
 }
 
 inline bool operator!=(const Document& a, const Document& b) noexcept {
@@ -173,6 +196,11 @@ inline bool operator!=(const Document& a, const Document& b) noexcept {
 /// `kMaxSectionNameBytes` bytes. What `DocumentStore::replace` asserts, and what a loader taking a
 /// document from outside the process must check before calling it.
 bool sectionsWellFormed(const Document& doc);
+
+/// `beats` on the new-chord length's grid (D3): rounded to the nearest quarter beat (halves away from zero),
+/// then clamped to [kMinLengthBeats, kMaxLengthBeats]: 1.3 is 1.25, 1.375 is 1.5, 0.1 is 0.25, 100 is 64.
+/// `beats` must be finite. What `DocumentStore::setNewChordLength` and `loadStateJson` store.
+double snapNewChordBeats(double beats);
 
 /// How `DocumentStore::appendProgression` / `replaceProgression` would place a batch of chords: after the
 /// last chord, or instead of every chord and section.
@@ -191,14 +219,16 @@ enum class ProgressionRefusal { None, Empty, NonFiniteLength, DocumentFull, Even
 /// undo stack and clears the redo stack. A call that changes nothing (an unknown id, a value equal to the
 /// current one after clamping, a move to the chord's current position, a rejected argument) pushes nothing
 /// and leaves the redo stack intact.
-/// `browsedKey`, `progressionLoop`, `followHost`, `relationMode`, `transposeWithKey`, `keyHintSeen` and
-/// `midiThru` are live state: their setters never touch the history, and `undo()`/`redo()` keep their current values
+/// `browsedKey`, `progressionLoop`, `followHost`, `relationMode`, `transposeWithKey`, `keyHintSeen`,
+/// `midiThru` and `newChordBeats` are live state: their setters never touch the history, and `undo()`/`redo()` keep their current values
 /// while restoring the undoable state, except that a browsed key equal to the project key (home) follows the
 /// project key they restore, as it follows `setProjectKey`, so that a key change, undone or redone, never
-/// leaves the palette on the old key. So is the selection (`selectedEventId`), which lives in the store
-/// rather than the document: it is kept across edits, undo and redo for as long as the selected event
-/// exists and is cleared the moment no event has its id (a remove, an undo of the append, a `replace`); it
-/// is never restored by undo and never persisted (`stateJson` leaves it out).
+/// leaves the palette on the old key. So is the selection (strip editing design D2), which lives in the store
+/// rather than the document: an ordered set of event ids in strip order (`selectedEventIds`) with one of them
+/// the anchor (`selectedEventId`), kept across edits, undo and redo for as long as each selected event exists
+/// (an id whose event goes is dropped; a dropped anchor moves to the nearest selected block that is left, the
+/// next one in strip order, else the one before), never restored by undo and never persisted (`stateJson`
+/// leaves it out).
 /// The history holds at most `kMaxUndoDepth` snapshots; beyond that the oldest is dropped.
 /// Event ids are handed out from a counter that starts at `firstId` (1 by default), only ever increases
 /// and is not part of the undoable state, so an id is never reused even after undo or redo. Section ids
@@ -224,18 +254,19 @@ public:
 
     const Document& doc() const;
 
-    /// Appends `chord` to the end of the progression and returns its new id. `chord.type` must be
-    /// non-null and `chord.root` in 0..11. `lengthBeats` is clamped to [kMinLengthBeats, kMaxLengthBeats]
-    /// and `velocity` to [kMinVelocity, kMaxVelocity]. The sections are untouched: the new chord joins the
-    /// last section, if any. The new chord becomes the selection (`selectedEventId`, live state: an undo
-    /// of the append clears it, like any removal), so the suggestions and relations read from it.
-    /// Without `inversion` the chord is in root position and not manual (auto voice-leading applies). With
-    /// one the event gets it, clamped to 0..`inversionCount(chord) - 1`, and `manualVoicing = true`, so it
-    /// sounds as given (the inversion, at octave 0) even under auto voice-leading, as after `setInversion`.
-    /// Returns `kNoEventId` and changes nothing (no event, no history, no id consumed) when `lengthBeats`
-    /// is NaN or infinite, when the document already holds `kMaxChords` chords, or when the id counter
-    /// has reached INT_MAX. The counter advances only once the append is committed.
-    int appendChord(Chord chord, double lengthBeats = 4.0, int velocity = 100,
+    /// Appends `chord` to the end of the progression and returns its new id: `insertChords` at the end with one
+    /// entry, so its rules hold here too. `chord.type` must be non-null and `chord.root` in 0..11. The length is
+    /// `lengthBeats`, or `Document::newChordLength()` without one (D3), clamped to [kMinLengthBeats,
+    /// kMaxLengthBeats]; `velocity` is clamped to [kMinVelocity, kMaxVelocity]. The sections are untouched: the
+    /// new chord joins the last section, if any. The new chord becomes the selection, alone, as the anchor (live
+    /// state: an undo of the append drops it, like any removal), so the suggestions and relations read from it.
+    /// Without `inversion` the chord is in root position and not manual (auto voice-leading applies). With one
+    /// the event gets it, clamped to 0..`inversionCount(chord) - 1`, and `manualVoicing = true`, so it sounds as
+    /// given (the inversion, at octave 0) even under auto voice-leading, as after `setInversion`. Returns
+    /// `kNoEventId` and changes nothing (no event, no history, no id consumed) when `lengthBeats` is NaN or
+    /// infinite, when the document already holds `kMaxChords` chords, or when the id counter has reached
+    /// INT_MAX.
+    int appendChord(Chord chord, std::optional<double> lengthBeats = std::nullopt, int velocity = 100,
                     std::optional<int> inversion = std::nullopt);
 
     /// Appends a whole progression, `steps` being each chord with its length, as ONE undoable step, and
@@ -247,7 +278,7 @@ public:
     /// first section must start at 0, appending onto a non-empty progression that has no sections first
     /// gives the chords already there a section of their own (default name and colour, the lower of the
     /// two ids); onto an empty or an already sectioned progression only the new section is added. Keys,
-    /// the voicing flag and live state are untouched, and the selection stays (its chord is still there).
+    /// the voicing flag and live state are untouched, and the loaded chords become the selection, the last of them the anchor.
     /// Returns false and changes nothing (no chord, no section, no history, no id consumed, the selection
     /// as it was) when `progressionRefusal(steps, ProgressionLoad::Append)` is not `None`. Every chord must
     /// satisfy the `Chord` preconditions (chord.h), as for `appendChord`. Both counters advance only once
@@ -257,8 +288,8 @@ public:
     /// Replaces every chord and section with `steps`, as ONE undoable step (never `replace`, which clears
     /// the history): the chords as `appendProgression` makes them, and one section named `sectionName`
     /// at 0 covering them all, so a single section id is needed. Keys, the voicing flag and live state are
-    /// untouched; the selection is cleared, because its chord is gone (the existing rule), and undo does
-    /// not restore it. Returns false and changes nothing when `progressionRefusal(steps,
+    /// untouched; the loaded chords become the selection, the last of them the anchor (undo drops
+    /// them again and restores no selection). Returns false and changes nothing when `progressionRefusal(steps,
     /// ProgressionLoad::Replace)` is not `None`.
     bool replaceProgression(const std::vector<std::pair<Chord, double>>& steps, std::string sectionName);
 
@@ -310,6 +341,32 @@ public:
     /// stays at 0 on the new first chord, unless that chord already starts a section (then that section
     /// becomes the first) or no chord is left (then no section is). Unknown id: no-op.
     void removeChord(int id);
+
+    /// Inserts `chords` so that the first lands at `index` (clamped to 0..size) and the rest follow in order, as
+    /// ONE undoable step, and returns their new ids in order (fresh and increasing, as `appendChord` hands them
+    /// out). Each entry becomes an event as `ChordSpec` says: its length clamped to [kMinLengthBeats,
+    /// kMaxLengthBeats] (`Document::newChordLength` without one), its velocity to [kMinVelocity, kMaxVelocity],
+    /// its inversion to 0..`inversionCount(chord) - 1`, its octave to [kMinVoicingOctave, kMaxVoicingOctave].
+    /// Sections: every section starting at or after `index` moves by `chords.size()`, except the first, which
+    /// is pinned at 0; so chords inserted at a section's start end the section before it, and chords inserted
+    /// at 0 join the first section. Returns an empty vector and changes nothing (no event, no history, no id
+    /// consumed) when `chords` is empty, when any length is NaN or infinite, when the result would hold more
+    /// than `kMaxChords` chords, or when the id counter cannot hand out `chords.size()` ids below INT_MAX.
+    /// The inserted chords become the selection, the last of them the anchor (live state, set after the commit).
+    /// Every chord must satisfy the `Chord` preconditions (chord.h). The counter advances only once the insert
+    /// is committed.
+    std::vector<int> insertChords(int index, const std::vector<ChordSpec>& chords);
+
+    /// Removes every chord of `ids` that exists, as ONE undoable step: in index order, each with
+    /// `removeChord`'s section rules (so when several start chords go, the order decides which section is left
+    /// at 0, exactly as successive `removeChord` calls from the front would). Ids no event has are skipped and a
+    /// repeated id counts once. Returns false and pushes nothing when no listed id exists.
+    bool removeChords(const std::vector<int>& ids);
+
+    /// Sets the length of every chord of `ids` that exists to `lengthBeats`, clamped as `setLength` clamps it,
+    /// as ONE undoable step; unknown ids are skipped. Returns false and pushes nothing when `lengthBeats` is NaN
+    /// or infinite, or when no length changed (no listed id exists, or each already has the clamped value).
+    bool setLengths(const std::vector<int>& ids, double lengthBeats);
 
     /// Undoable. `key.tonic` must satisfy the `Tonic` preconditions of pitch.h and `key.mode` be a
     /// declared `Mode`. When `Document::transposeWithKey` is on and the tonic's pitch class changes (a
@@ -366,14 +423,30 @@ public:
     /// slot (publication.h).
     void setMidiThru(bool on);
 
-    /// The id of the event the UI has selected, or `kNoEventId`. Live state (see the class comment): kept
-    /// while that event exists, whatever edits, undos and redos happen around it, and cleared as soon as
-    /// no event has the id. Never restored by undo and not persisted.
+    /// Live state, never recorded in the history and kept by undo and redo; persisted by `stateJson` (D3): the
+    /// length of a chord added without one. A value is stored as `snapNewChordBeats` gives it; nullopt returns
+    /// to one bar of the meter. A NaN or infinite value is a no-op. A meter change leaves it alone.
+    void setNewChordLength(std::optional<double> lengthBeats);
+
+    /// The anchor of the selection (D2): the block the suggestions, the palette relations and the snapshot's
+    /// `selectedEventId` follow, or `kNoEventId` when nothing is selected. Always one of `selectedEventIds()`
+    /// when that is not empty. Live state (see the class comment): never restored by undo and not persisted.
     int selectedEventId() const;
 
-    /// Selects event `id`; `kNoEventId` clears the selection. An id no event has is a no-op (the UI may
-    /// name an event that an edit just removed). Never recorded in the history.
+    /// Every selected event's id, in strip (index) order, without repeats; empty when nothing is selected. Kept
+    /// across edits, undo and redo for as long as each event exists: an id whose event goes is dropped, and when
+    /// it was the anchor the anchor moves to the nearest selected block that is left, the next one in strip
+    /// order as it was before the change, else the one before, else none.
+    const std::vector<int>& selectedEventIds() const;
+
+    /// Selects event `id` alone, as the anchor; `kNoEventId` clears the selection. An id no event has is a
+    /// no-op (the UI may name an event that an edit just removed). Never recorded in the history.
     void setSelectedEvent(int id);
+
+    /// Selects the events of `ids` that exist (unknown ids dropped, repeats collapsed), in strip order, with
+    /// `anchor` the anchor when it is one of them, else the last of them in strip order. An empty result (an
+    /// empty `ids`, or none that exists) clears the selection. Never recorded in the history.
+    void setSelectedEvents(const std::vector<int>& ids, int anchor = kNoEventId);
 
     /// Starts a section on the chord at `firstEventIndex` and returns its new id; the list stays sorted.
     /// An empty `name` takes the default "Section <n>", n the number of sections there are once it is added,
@@ -424,6 +497,7 @@ public:
     /// `doc` must satisfy the store's invariants (valid chords and keys, finite lengths within
     /// [kMinLengthBeats, kMaxLengthBeats], velocities within [kMinVelocity, kMaxVelocity], inversions
     /// within 0..`inversionCount(chord) - 1`, octaves within [kMinVoicingOctave, kMaxVoicingOctave],
+    /// `newChordBeats` absent or a value `snapNewChordBeats` leaves unchanged,
     /// distinct ids, at most `kMaxChords` events; sections as `sectionsWellFormed` requires, in particular
     /// ids in 1..INT_MAX-1) and `nextId` must be >= 1 and greater than every event id, so that ids stay
     /// unique. `nextSectionId` must likewise be >= 1 and greater than every section id, or 0 (the
@@ -457,7 +531,8 @@ private:
     bool loadProgression(const std::vector<std::pair<Chord, double>>& steps, std::string sectionName,
                          ProgressionLoad how);
 
-    /// Clears the selection when no event of the current document has its id. Called after every change
+    /// Drops the selected ids no event of the current document has, moving a dropped anchor as
+    /// `selectedEventIds` says, and re-sorts the rest into the document's strip order. Called after every change
     /// of `doc_` (a commit, an undo, a redo); `replace` clears unconditionally.
     void dropStaleSelection() noexcept;
 
@@ -466,7 +541,8 @@ private:
     std::deque<Document> redoStack_;
     int nextId_;
     int nextSectionId_ = 1;
-    int selectedEventId_ = kNoEventId;
+    std::vector<int> selectedEventIds_;  // strip order; empty: nothing selected
+    int anchorEventId_ = kNoEventId;     // one of selectedEventIds_, or kNoEventId when it is empty
 };
 
 }  // namespace chordlab

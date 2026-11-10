@@ -14,7 +14,7 @@ import SwiftUI
 ///
 /// Short on purpose (the same four rows under every rhythm and a line of notes, so the popover keeps its
 /// height): it opens beside the Feel button, to its left (the button ends the transport row, so a popover
-/// below it would run past the window's right edge at 700 pt), and stays inside the 700 x 568 minimum window.
+/// below it would run past the window's right edge at 700 pt), and stays inside the 700 x 600 minimum window.
 struct FeelPopoverView: View {
   @EnvironmentObject var state: ChordLabState
 
@@ -72,7 +72,7 @@ struct FeelPopoverView: View {
             .pickerStyle(.menu)
             .labelsHidden()
             .fixedSize()
-            .help("New chords last one bar of the meter; existing lengths stay")
+            .help("New chords last one bar of the meter while Length is at its default; existing lengths stay")
             .accessibilityLabel("Meter")
           }
         }
