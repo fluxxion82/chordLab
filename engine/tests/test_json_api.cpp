@@ -2909,12 +2909,13 @@ TEST_CASE("loadPreset append: the preset resolved in the project key, after the 
     CHECK(snap.at("sections").at(0) ==
           json({{"id", 1}, {"name", "Section 1"}, {"colourIndex", 0}, {"firstEventIndex", 0}}));
     CHECK(snap.at("sections").at(1) == json({{"id", 2}, {"name", "Axis"}, {"colourIndex", 1}, {"firstEventIndex", 3}}));
-    CHECK(store.selectedEventId() == 2);  // its chord is still there
+    CHECK(store.selectedEventIds() == std::vector<int>{4, 5, 6, 7});  // the preset's chords, the last the anchor
+    CHECK(store.selectedEventId() == 7);
     applyOk(store, {{"cmd", "undo"}});
     CHECK(store.doc() == before);
 }
 
-TEST_CASE("loadPreset replace: chords and sections replaced, keys and live state kept, selection cleared") {
+TEST_CASE("loadPreset replace: chords and sections replaced, keys and live state kept, the loaded chords selected") {
     DocumentStore store = richStore();  // D Dorian, sections 1 and 2
     store.setSelectedEvent(3);
     const Document before = store.doc();
@@ -2928,7 +2929,7 @@ TEST_CASE("loadPreset replace: chords and sections replaced, keys and live state
     CHECK(d.events[0].id == 4);
     REQUIRE(d.sections.size() == 1);
     CHECK(d.sections[0] == Section{3, "Andalusian", 2, 0});
-    CHECK(store.selectedEventId() == kNoEventId);
+    CHECK(store.selectedEventId() == 7);
     CHECK(d.projectKey == before.projectKey);
     CHECK(d.browsedKey == before.browsedKey);
     CHECK(d.relationMode == before.relationMode);

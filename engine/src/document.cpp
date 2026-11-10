@@ -8,6 +8,7 @@
 #include <climits>
 #include <cmath>
 #include <cstddef>
+#include <iterator>
 #include <set>
 #include <string>
 #include <utility>
@@ -264,7 +265,8 @@ void DocumentStore::replace(Document doc, int nextId, int nextSectionId) {
     undoStack_.clear();
     redoStack_.clear();
     nextId_ = nextId;
-    selectedEventId_ = kNoEventId;
+    selectedEventIds_.clear();
+    anchorEventId_ = kNoEventId;
 }
 
 int DocumentStore::nextId() const {
@@ -305,19 +307,65 @@ bool DocumentStore::commit(Document next) {
 }
 
 void DocumentStore::dropStaleSelection() noexcept {
-    if (selectedEventId_ != kNoEventId && indexOfEvent(doc_.events, selectedEventId_) < 0) {
-        selectedEventId_ = kNoEventId;
+    const auto exists = [this](int id) { return indexOfEvent(doc_.events, id) >= 0; };
+    // The anchor first, while the list still has the strip order of the document before the change: the
+    // nearest selected block that is left, the next one, else the one before.
+    if (anchorEventId_ != kNoEventId && !exists(anchorEventId_)) {
+        int replacement = kNoEventId;
+        const auto at = std::find(selectedEventIds_.begin(), selectedEventIds_.end(), anchorEventId_);
+        if (at != selectedEventIds_.end()) {
+            const auto after = std::find_if(at + 1, selectedEventIds_.end(), exists);
+            if (after != selectedEventIds_.end()) {
+                replacement = *after;
+            } else {
+                const auto before = std::find_if(std::make_reverse_iterator(at), selectedEventIds_.rend(), exists);
+                if (before != selectedEventIds_.rend()) {
+                    replacement = *before;
+                }
+            }
+        }
+        anchorEventId_ = replacement;
     }
+    selectedEventIds_.erase(std::remove_if(selectedEventIds_.begin(), selectedEventIds_.end(),
+                                           [&](int id) { return !exists(id); }),
+                            selectedEventIds_.end());
+    // The strip order of the document as it is now (a move or an undo may have reordered the blocks). In place
+    // and without allocating, so this stays noexcept.
+    std::sort(selectedEventIds_.begin(), selectedEventIds_.end(),
+              [this](int a, int b) { return indexOfEvent(doc_.events, a) < indexOfEvent(doc_.events, b); });
 }
 
 int DocumentStore::selectedEventId() const {
-    return selectedEventId_;
+    return anchorEventId_;
+}
+
+const std::vector<int>& DocumentStore::selectedEventIds() const {
+    return selectedEventIds_;
 }
 
 void DocumentStore::setSelectedEvent(int id) {
-    if (id == kNoEventId || indexOfEvent(doc_.events, id) >= 0) {
-        selectedEventId_ = id;
+    if (id == kNoEventId) {
+        selectedEventIds_.clear();
+        anchorEventId_ = kNoEventId;
+    } else if (indexOfEvent(doc_.events, id) >= 0) {
+        std::vector<int> selection{id};  // allocates first: a throw leaves the selection as it was
+        selectedEventIds_.swap(selection);
+        anchorEventId_ = id;
     }
+}
+
+void DocumentStore::setSelectedEvents(const std::vector<int>& ids, int anchor) {
+    const std::set<int> wanted(ids.begin(), ids.end());
+    std::vector<int> selection;  // built aside: a throw leaves the selection as it was
+    for (const ChordEvent& e : doc_.events) {
+        if (wanted.count(e.id) != 0) {
+            selection.push_back(e.id);
+        }
+    }
+    const bool anchorSelected = std::find(selection.begin(), selection.end(), anchor) != selection.end();
+    const int newAnchor = selection.empty() ? kNoEventId : (anchorSelected ? anchor : selection.back());
+    selectedEventIds_.swap(selection);
+    anchorEventId_ = newAnchor;
 }
 
 int DocumentStore::appendChord(Chord chord, double lengthBeats, int velocity, std::optional<int> inversion) {
@@ -334,10 +382,12 @@ int DocumentStore::appendChord(Chord chord, double lengthBeats, int velocity, st
         event.manualVoicing = true;
     }
     next.events.push_back(event);
+    std::vector<int> selection{id};  // before the commit: an allocation after it would break the strong guarantee
     [[maybe_unused]] const bool changed = commit(std::move(next));
     assert(changed);  // a fresh id always makes the sequence differ
     ++nextId_;        // only now: a throw above leaves the counter, like the rest of the store, untouched
-    selectedEventId_ = id;  // live state, after the commit: a throw above leaves the selection as it was
+    selectedEventIds_.swap(selection);  // live state, after the commit: a swap and an int write cannot throw
+    anchorEventId_ = id;
     return id;
 }
 
@@ -389,8 +439,11 @@ bool DocumentStore::loadProgression(const std::vector<std::pair<Chord, double>>&
     const int join = static_cast<int>(next.events.size());
     next.events.reserve(next.events.size() + steps.size());
     int id = nextId_;
+    std::vector<int> selection;  // the loaded chords: the selection once committed (D2)
+    selection.reserve(steps.size());
     for (const auto& [chord, lengthBeats] : steps) {
         assertValidChord(chord);
+        selection.push_back(id);
         next.events.push_back(ChordEvent{id++, chord, clampLength(lengthBeats), 100});  // appendChord's defaults (P8)
     }
     int sectionId = nextSectionId_;
@@ -404,6 +457,8 @@ bool DocumentStore::loadProgression(const std::vector<std::pair<Chord, double>>&
     // Only now: a throw above leaves both counters, like the rest of the store, untouched.
     nextId_ += static_cast<int>(steps.size());
     nextSectionId_ += sectionIds;
+    anchorEventId_ = selection.back();  // live state, after the commit
+    selectedEventIds_.swap(selection);
     return true;
 }
 
@@ -564,9 +619,12 @@ std::vector<int> DocumentStore::insertChords(int index, const std::vector<ChordS
         }
     }
     assert(sectionsWellFormed(next));
+    std::vector<int> selection = ids;  // before the commit, as appendChord
     [[maybe_unused]] const bool changed = commit(std::move(next));
     assert(changed);   // fresh ids always make the sequence differ
     nextId_ += count;  // only now: a throw above leaves the counter, like the rest of the store, untouched
+    selectedEventIds_.swap(selection);  // live state: the inserted chords, the last the anchor (D2)
+    anchorEventId_ = ids.back();
     return ids;
 }
 

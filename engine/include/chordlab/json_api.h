@@ -328,8 +328,9 @@ std::string heardJson(const Listener& listener, const Key& projectKey);
 ///   (`resolvePreset`) and loaded as ONE undoable step: "append" is `appendProgression` (after the last
 ///   chord, in a new section named after the preset; onto an unsectioned non-empty progression the
 ///   chords already there first get a default "Section <n>" at 0), "replace" is `replaceProgression`
-///   (every chord and section replaced, one section at 0 named after the preset, the selection cleared
-///   because its chord is gone; keys and live state untouched, history kept). Refused (false, an error
+///   (every chord and section replaced, one section at 0 named after the preset; keys and live state
+///   untouched, history kept). Either way the loaded chords become the selection, the last of them the
+///   anchor. Refused (false, an error
 ///   naming the reason, no change, no id consumed) for the store's reasons (`progressionRefusal`,
 ///   document.h): the result would hold more than `kMaxChords` chords, or the event or section id
 ///   counter cannot hand out the ids the load needs.

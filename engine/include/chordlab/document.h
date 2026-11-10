@@ -214,10 +214,12 @@ enum class ProgressionRefusal { None, Empty, NonFiniteLength, DocumentFull, Even
 /// `midiThru` are live state: their setters never touch the history, and `undo()`/`redo()` keep their current values
 /// while restoring the undoable state, except that a browsed key equal to the project key (home) follows the
 /// project key they restore, as it follows `setProjectKey`, so that a key change, undone or redone, never
-/// leaves the palette on the old key. So is the selection (`selectedEventId`), which lives in the store
-/// rather than the document: it is kept across edits, undo and redo for as long as the selected event
-/// exists and is cleared the moment no event has its id (a remove, an undo of the append, a `replace`); it
-/// is never restored by undo and never persisted (`stateJson` leaves it out).
+/// leaves the palette on the old key. So is the selection (strip editing design D2), which lives in the store
+/// rather than the document: an ordered set of event ids in strip order (`selectedEventIds`) with one of them
+/// the anchor (`selectedEventId`), kept across edits, undo and redo for as long as each selected event exists
+/// (an id whose event goes is dropped; a dropped anchor moves to the nearest selected block that is left, the
+/// next one in strip order, else the one before), never restored by undo and never persisted (`stateJson`
+/// leaves it out).
 /// The history holds at most `kMaxUndoDepth` snapshots; beyond that the oldest is dropped.
 /// Event ids are handed out from a counter that starts at `firstId` (1 by default), only ever increases
 /// and is not part of the undoable state, so an id is never reused even after undo or redo. Section ids
@@ -246,8 +248,8 @@ public:
     /// Appends `chord` to the end of the progression and returns its new id. `chord.type` must be
     /// non-null and `chord.root` in 0..11. `lengthBeats` is clamped to [kMinLengthBeats, kMaxLengthBeats]
     /// and `velocity` to [kMinVelocity, kMaxVelocity]. The sections are untouched: the new chord joins the
-    /// last section, if any. The new chord becomes the selection (`selectedEventId`, live state: an undo
-    /// of the append clears it, like any removal), so the suggestions and relations read from it.
+    /// last section, if any. The new chord becomes the selection, alone, as the anchor (live state: an undo
+    /// of the append drops it, like any removal), so the suggestions and relations read from it.
     /// Without `inversion` the chord is in root position and not manual (auto voice-leading applies). With
     /// one the event gets it, clamped to 0..`inversionCount(chord) - 1`, and `manualVoicing = true`, so it
     /// sounds as given (the inversion, at octave 0) even under auto voice-leading, as after `setInversion`.
@@ -266,7 +268,7 @@ public:
     /// first section must start at 0, appending onto a non-empty progression that has no sections first
     /// gives the chords already there a section of their own (default name and colour, the lower of the
     /// two ids); onto an empty or an already sectioned progression only the new section is added. Keys,
-    /// the voicing flag and live state are untouched, and the selection stays (its chord is still there).
+    /// the voicing flag and live state are untouched, and the loaded chords become the selection, the last of them the anchor.
     /// Returns false and changes nothing (no chord, no section, no history, no id consumed, the selection
     /// as it was) when `progressionRefusal(steps, ProgressionLoad::Append)` is not `None`. Every chord must
     /// satisfy the `Chord` preconditions (chord.h), as for `appendChord`. Both counters advance only once
@@ -276,8 +278,8 @@ public:
     /// Replaces every chord and section with `steps`, as ONE undoable step (never `replace`, which clears
     /// the history): the chords as `appendProgression` makes them, and one section named `sectionName`
     /// at 0 covering them all, so a single section id is needed. Keys, the voicing flag and live state are
-    /// untouched; the selection is cleared, because its chord is gone (the existing rule), and undo does
-    /// not restore it. Returns false and changes nothing when `progressionRefusal(steps,
+    /// untouched; the loaded chords become the selection, the last of them the anchor (undo drops
+    /// them again and restores no selection). Returns false and changes nothing when `progressionRefusal(steps,
     /// ProgressionLoad::Replace)` is not `None`.
     bool replaceProgression(const std::vector<std::pair<Chord, double>>& steps, std::string sectionName);
 
@@ -340,6 +342,7 @@ public:
     /// at 0 join the first section. Returns an empty vector and changes nothing (no event, no history, no id
     /// consumed) when `chords` is empty, when any length is NaN or infinite, when the result would hold more
     /// than `kMaxChords` chords, or when the id counter cannot hand out `chords.size()` ids below INT_MAX.
+    /// The inserted chords become the selection, the last of them the anchor (live state, set after the commit).
     /// Every chord must satisfy the `Chord` preconditions (chord.h). The counter advances only once the insert
     /// is committed.
     std::vector<int> insertChords(int index, const std::vector<ChordSpec>& chords);
@@ -410,14 +413,25 @@ public:
     /// slot (publication.h).
     void setMidiThru(bool on);
 
-    /// The id of the event the UI has selected, or `kNoEventId`. Live state (see the class comment): kept
-    /// while that event exists, whatever edits, undos and redos happen around it, and cleared as soon as
-    /// no event has the id. Never restored by undo and not persisted.
+    /// The anchor of the selection (D2): the block the suggestions, the palette relations and the snapshot's
+    /// `selectedEventId` follow, or `kNoEventId` when nothing is selected. Always one of `selectedEventIds()`
+    /// when that is not empty. Live state (see the class comment): never restored by undo and not persisted.
     int selectedEventId() const;
 
-    /// Selects event `id`; `kNoEventId` clears the selection. An id no event has is a no-op (the UI may
-    /// name an event that an edit just removed). Never recorded in the history.
+    /// Every selected event's id, in strip (index) order, without repeats; empty when nothing is selected. Kept
+    /// across edits, undo and redo for as long as each event exists: an id whose event goes is dropped, and when
+    /// it was the anchor the anchor moves to the nearest selected block that is left, the next one in strip
+    /// order as it was before the change, else the one before, else none.
+    const std::vector<int>& selectedEventIds() const;
+
+    /// Selects event `id` alone, as the anchor; `kNoEventId` clears the selection. An id no event has is a
+    /// no-op (the UI may name an event that an edit just removed). Never recorded in the history.
     void setSelectedEvent(int id);
+
+    /// Selects the events of `ids` that exist (unknown ids dropped, repeats collapsed), in strip order, with
+    /// `anchor` the anchor when it is one of them, else the last of them in strip order. An empty result (an
+    /// empty `ids`, or none that exists) clears the selection. Never recorded in the history.
+    void setSelectedEvents(const std::vector<int>& ids, int anchor = kNoEventId);
 
     /// Starts a section on the chord at `firstEventIndex` and returns its new id; the list stays sorted.
     /// An empty `name` takes the default "Section <n>", n the number of sections there are once it is added,
@@ -501,7 +515,8 @@ private:
     bool loadProgression(const std::vector<std::pair<Chord, double>>& steps, std::string sectionName,
                          ProgressionLoad how);
 
-    /// Clears the selection when no event of the current document has its id. Called after every change
+    /// Drops the selected ids no event of the current document has, moving a dropped anchor as
+    /// `selectedEventIds` says, and re-sorts the rest into the document's strip order. Called after every change
     /// of `doc_` (a commit, an undo, a redo); `replace` clears unconditionally.
     void dropStaleSelection() noexcept;
 
@@ -510,7 +525,8 @@ private:
     std::deque<Document> redoStack_;
     int nextId_;
     int nextSectionId_ = 1;
-    int selectedEventId_ = kNoEventId;
+    std::vector<int> selectedEventIds_;  // strip order; empty: nothing selected
+    int anchorEventId_ = kNoEventId;     // one of selectedEventIds_, or kNoEventId when it is empty
 };
 
 }  // namespace chordlab

@@ -1189,6 +1189,129 @@ TEST_CASE("replace: clears the selection, even when the new document has an even
     CHECK(store.selectedEventId() == 2);
 }
 
+namespace {
+
+/// The store's selection, in strip order.
+std::vector<int> selectionOf(const DocumentStore& store) {
+    return store.selectedEventIds();
+}
+
+/// A store holding C (1), F (2), G7 (3), C (4), four beats each.
+DocumentStore fourChords() {
+    DocumentStore store = threeChords();
+    store.appendChord(kC, 4.0, 100);
+    return store;
+}
+
+}  // namespace
+
+TEST_CASE("setSelectedEvents: unknown ids dropped, repeats collapsed, strip order, the anchor or the last") {
+    DocumentStore store = fourChords();
+    store.setSelectedEvents({99, 3, 1, 3}, 1);
+    CHECK(selectionOf(store) == std::vector<int>{1, 3});
+    CHECK(store.selectedEventId() == 1);
+    store.setSelectedEvents({4, 2});  // no anchor: the last in strip order
+    CHECK(selectionOf(store) == std::vector<int>{2, 4});
+    CHECK(store.selectedEventId() == 4);
+    store.setSelectedEvents({4, 2}, 3);  // an anchor that is not selected: the last
+    CHECK(store.selectedEventId() == 4);
+    store.setSelectedEvents({98, 99}, 98);  // nothing that exists: cleared
+    CHECK(selectionOf(store).empty());
+    CHECK(store.selectedEventId() == kNoEventId);
+    store.setSelectedEvents({2}, kNoEventId);
+    CHECK(selectionOf(store) == std::vector<int>{2});
+    CHECK(store.selectedEventId() == 2);
+    store.setSelectedEvents({});
+    CHECK(selectionOf(store).empty());
+    CHECK(store.selectedEventId() == kNoEventId);
+}
+
+TEST_CASE("setSelectedEvent: one block alone after a multi-selection; selection calls never push history") {
+    DocumentStore store = fourChords();
+    store.setSelectedEvents({1, 2, 3}, 2);
+    store.setSelectedEvent(4);
+    CHECK(selectionOf(store) == std::vector<int>{4});
+    CHECK(store.selectedEventId() == 4);
+    store.setSelectedEvents({1, 2, 3}, 2);
+    store.setSelectedEvent(99);  // unknown: the selection stays
+    CHECK(selectionOf(store) == std::vector<int>{1, 2, 3});
+    CHECK(store.selectedEventId() == 2);
+    store.setSelectedEvent(kNoEventId);
+    CHECK(selectionOf(store).empty());
+    for (int i = 0; i < 4; ++i) {
+        REQUIRE(store.undo());  // the four appends are the whole history
+    }
+    CHECK_FALSE(store.undo());
+}
+
+TEST_CASE("selection: a removed block leaves it; a removed anchor moves to the next selected block, else the one before") {
+    DocumentStore store = fourChords();
+    store.setSelectedEvents({1, 2, 4}, 2);
+    store.removeChord(2);
+    CHECK(selectionOf(store) == std::vector<int>{1, 4});
+    CHECK(store.selectedEventId() == 4);  // the next selected block
+    store.removeChord(4);
+    CHECK(selectionOf(store) == std::vector<int>{1});
+    CHECK(store.selectedEventId() == 1);  // none after it: the one before
+    store.setSelectedEvents({1, 3}, 1);
+    store.removeChord(3);  // not the anchor
+    CHECK(selectionOf(store) == std::vector<int>{1});
+    CHECK(store.selectedEventId() == 1);
+    store.removeChord(1);
+    CHECK(selectionOf(store).empty());
+    CHECK(store.selectedEventId() == kNoEventId);
+}
+
+TEST_CASE("selection: removeChords drops every removed block at once") {
+    DocumentStore store = fourChords();
+    store.setSelectedEvents({1, 2, 3}, 2);
+    store.removeChords({2, 3});
+    CHECK(selectionOf(store) == std::vector<int>{1});
+    CHECK(store.selectedEventId() == 1);  // 3, after the anchor, went too
+}
+
+TEST_CASE("selection: undo and redo keep what exists and never restore; a move keeps strip order") {
+    DocumentStore store = threeChords();
+    REQUIRE(store.appendChord(kC) == 4);
+    store.setSelectedEvents({3, 4}, 4);
+    REQUIRE(store.undo());  // event 4 is gone
+    CHECK(selectionOf(store) == std::vector<int>{3});
+    CHECK(store.selectedEventId() == 3);
+    REQUIRE(store.redo());  // back, not reselected
+    CHECK(selectionOf(store) == std::vector<int>{3});
+    store.setSelectedEvents({1, 3}, 3);
+    store.moveChord(3, 0);
+    CHECK(idsOf(store) == std::vector<int>{3, 1, 2, 4});
+    CHECK(selectionOf(store) == std::vector<int>{3, 1});
+    CHECK(store.selectedEventId() == 3);
+    REQUIRE(store.undo());  // the move: the order is back
+    CHECK(selectionOf(store) == std::vector<int>{1, 3});
+}
+
+TEST_CASE("selection: appendChord selects the new chord alone; insertChords every inserted chord, the last the anchor") {
+    DocumentStore store = threeChords();
+    store.setSelectedEvents({1, 2}, 1);
+    REQUIRE(store.appendChord(kF) == 4);
+    CHECK(selectionOf(store) == std::vector<int>{4});
+    CHECK(store.selectedEventId() == 4);
+    CHECK(store.insertChords(1, {spec(kG, 1.0), spec(kC, 1.0)}) == std::vector<int>{5, 6});
+    CHECK(selectionOf(store) == std::vector<int>{5, 6});
+    CHECK(store.selectedEventId() == 6);
+    CHECK(store.insertChords(0, {spec(kC, kNaN)}).empty());  // a refused insert leaves the selection alone
+    CHECK(selectionOf(store) == std::vector<int>{5, 6});
+    REQUIRE(store.undo());  // the insert: both gone
+    CHECK(selectionOf(store).empty());
+    CHECK(store.selectedEventId() == kNoEventId);
+}
+
+TEST_CASE("replace: clears a multi-selection") {
+    DocumentStore store = fourChords();
+    store.setSelectedEvents({1, 2, 3});
+    store.replace(Document{}, 5);
+    CHECK(selectionOf(store).empty());
+    CHECK(store.selectedEventId() == kNoEventId);
+}
+
 TEST_CASE("undo: browsing between two appends keeps the browsed key while the append is undone") {
     DocumentStore store;
     store.appendChord(kC);
