@@ -113,7 +113,7 @@ private:
   // otherwise the progression plays on untouched.
   void DrainRawMidiIn() noexcept;
 #endif
-  // Main thread: pushes {"schema":1,"ppq":ppq,"playing":playing} (the playhead) to the editor.
+  // Main thread: pushes {"schema":1,"ppq":ppq,"playing":playing,"bpm":bpm} (the playhead and the host tempo) to the editor.
   void PushTransport(double ppq, bool playing, double bpm);
   // Main thread: exports the document (chordlab::exportMidi under mModelMutex, with its meter), writes it as a format 0 MIDI file under a unique, never-reused
   // name in the temporary directory at the host's tempo and pushes kMsgTagExportReady with the path, or
