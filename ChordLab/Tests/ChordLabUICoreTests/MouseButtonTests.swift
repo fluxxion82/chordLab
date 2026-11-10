@@ -77,4 +77,21 @@ final class MouseButtonTests: XCTestCase {
     c.up()
     XCTAssertEqual(b, c)
   }
+
+  func testAPressKeepsItsEventTimestamps() {
+    var button = MouseButton()
+    XCTAssertNil(button.heldSeconds)
+    button.down(at: .zero, time: 1.0)
+    XCTAssertEqual(button.pressTime, 1.0)
+    XCTAssertNil(button.releaseTime, "held")
+    XCTAssertNil(button.heldSeconds)
+    button.up(time: 1.8)
+    XCTAssertEqual(button.releaseTime, 1.8)
+    XCTAssertEqual(button.heldSeconds, 0.8)
+    button.down(at: .zero, time: 5.0)
+    XCTAssertNil(button.releaseTime, "a new press clears the old up")
+    var stray = MouseButton()
+    stray.up(time: 3.0)
+    XCTAssertNil(stray.releaseTime, "an up with no down records nothing")
+  }
 }

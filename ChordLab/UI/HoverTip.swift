@@ -163,7 +163,7 @@ struct TipHost: ViewModifier {
 /// (`onContinuousHover`) missed moves, and every move over the palette's and the strip's scroll views,
 /// in the harness. Nil when the pointer leaves, on any mouse-down in the window (every tip comes down), when
 /// the application resigns active and when the window resigns key. It also reports the left button
-/// (`MouseButton`: down, up, and the press's first move past the drag threshold) from the same events,
+/// (`MouseButton`: down and up with their event timestamps, and the press's first move past the drag threshold) from the same events,
 /// whenever that state changes. It takes no clicks and passes every event on.
 private struct PointerTracker: NSViewRepresentable {
   let onPointer: (CGPoint?) -> Void
@@ -223,9 +223,9 @@ private final class PointerTrackingView: NSView {
     let point = convert(event.locationInWindow, from: nil)
     let before = button
     switch event.type {
-    case .leftMouseDown: button.down(at: point)
+    case .leftMouseDown: button.down(at: point, time: event.timestamp)
     case .leftMouseDragged: button.dragged(to: point)
-    case .leftMouseUp: button.up()
+    case .leftMouseUp: button.up(time: event.timestamp)
     default: break
     }
     if button != before { onButton?(button) }

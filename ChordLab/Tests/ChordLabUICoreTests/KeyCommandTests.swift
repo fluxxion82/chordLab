@@ -51,6 +51,26 @@ final class KeyCommandTests: XCTestCase {
     XCTAssertNil(KeyCommandMap.command(for: input(.character("z"), command: true, control: true)))
   }
 
+  func testCommandLettersEditTheStrip() {
+    let expected: [(Character, KeyCommand)] = [("c", .copy), ("x", .cut), ("v", .paste), ("d", .duplicate), ("a", .selectAll)]
+    for (letter, command) in expected {
+      XCTAssertEqual(KeyCommandMap.command(for: input(.character(letter), command: true)), command, "⌘\(letter)")
+      XCTAssertEqual(KeyCommandMap.command(for: input(.character(Character(letter.uppercased())), command: true)), command,
+                     "⌘\(letter) reported upper-case")
+      XCTAssertNil(KeyCommandMap.command(for: input(.character(letter), command: true, shift: true)), "⇧⌘\(letter) is the host's")
+      XCTAssertNil(KeyCommandMap.command(for: input(.character(letter), command: true, option: true)), "⌥⌘\(letter)")
+      XCTAssertNil(KeyCommandMap.command(for: input(.character(letter), command: true, control: true)), "⌃⌘\(letter)")
+      XCTAssertNil(KeyCommandMap.command(for: input(.character(letter))), "bare \(letter)")
+    }
+    XCTAssertNil(KeyCommandMap.command(for: input(.character("b"), command: true)), "⌘B is not ours")
+  }
+
+  func testCommandLettersArriveThroughTheVST3Route() {
+    let paste = KeyInput(characters: "v", virtualKey: 0x56, shift: false, command: true, option: false, control: false)
+    XCTAssertEqual(paste, input(.character("v"), command: true))
+    XCTAssertEqual(KeyCommandMap.command(for: paste), .paste)
+  }
+
   func testOtherKeysAreNotShortcuts() {
     XCTAssertNil(KeyCommandMap.command(for: input(.character(" "))), "Space stays the host's")
     XCTAssertNil(KeyCommandMap.command(for: input(.character("a"))))

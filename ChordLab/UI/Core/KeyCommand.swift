@@ -44,12 +44,18 @@ enum KeyCommand: Equatable {
   case deleteSelection
   case undo
   case redo
+  case copy        // ⌘C: the selection to the clipboard (strip editing design D5, D6)
+  case cut         // ⌘X: copy, then remove the selection
+  case paste       // ⌘V: the clipboard's chords after the anchor, else at the end
+  case duplicate   // ⌘D: the selection's chords again, after its last block
+  case selectAll   // ⌘A: every block, the last the anchor
 }
 
-/// The one key map, for both routes: bare digits 1–8 append that suggestion chip; Delete and Forward
-/// Delete remove the selected chord; ⌘Z and ⇧⌘Z undo and redo. Everything else (Space, letters, 9, 0,
-/// digits or deletes with a modifier, digits of other scripts such as "٢" or "²") is nil: not ours, the
-/// host keeps it.
+/// The one key map, for both routes: bare digits 1–8 append that suggestion chip; Delete and Forward Delete
+/// remove the selected chords; ⌘Z and ⇧⌘Z undo and redo; ⌘C, ⌘X, ⌘V, ⌘D and ⌘A copy, cut, paste, duplicate
+/// and select all, without Shift (⇧⌘C and the like stay the host's). Everything else (Space, letters, 9, 0,
+/// digits or deletes with a modifier, ⌥ or ⌃ with ⌘, digits of other scripts such as "٢" or "²") is nil: not
+/// ours, the host keeps it.
 enum KeyCommandMap {
   static func command(for input: KeyInput) -> KeyCommand? {
     let anyModifier = input.command || input.shift || input.option || input.control
@@ -58,8 +64,15 @@ enum KeyCommandMap {
       guard c.isASCII, ("1"..."8").contains(c), let n = c.wholeNumberValue else { return nil }
       return .appendSuggestion(n)
     case .character(let c) where input.command && !input.option && !input.control:
-      guard c == "z" || c == "Z" else { return nil }
-      return input.shift ? .redo : .undo
+      switch c.lowercased() {
+      case "z": return input.shift ? .redo : .undo
+      case "c" where !input.shift: return .copy
+      case "x" where !input.shift: return .cut
+      case "v" where !input.shift: return .paste
+      case "d" where !input.shift: return .duplicate
+      case "a" where !input.shift: return .selectAll
+      default: return nil
+      }
     case .delete, .forwardDelete:
       return anyModifier ? nil : .deleteSelection
     default:

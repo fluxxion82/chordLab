@@ -160,7 +160,7 @@ struct PaletteCellControl: View {
                     isHeard: heard, reference: state.snapshot?.relationReference)
       .pressAction(circular: true,                                  // the cell's `.contentShape(Circle())`
                    onPress: { state.pressCell(cell) },
-                   onRelease: { state.releaseCell(cell) })
+                   onRelease: { _ in state.releaseCell(cell) })
       .draggable(ChordRef(root: cell.root, type: cell.type)) {
         ChordDragPreview(cell: cell, labelMode: labelMode, beats: RulerMarks.barBeats(state.snapshot?.meter))
       }

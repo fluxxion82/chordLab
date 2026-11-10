@@ -219,6 +219,8 @@ class ChordLabState: NSObject, ObservableObject {
       send(command: ["cmd": "undo"])
     case .redo:
       send(command: ["cmd": "redo"])
+    case .copy, .cut, .paste, .duplicate, .selectAll:
+      break  // wired in Task 7
     }
   }
 
