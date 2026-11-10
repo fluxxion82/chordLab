@@ -379,7 +379,15 @@ std::string heardJson(const Listener& listener, const Key& projectKey);
 /// Returns true for every accepted command, including ones that change nothing: an edit naming an id no
 /// event or section has, a move to the chord's current position, and `undo`/`redo` with nothing to undo
 /// or redo are valid no-ops, not errors. `error` is cleared on success.
-bool applyCommandJson(DocumentStore& store, std::string_view json, std::string& error) noexcept;
+///
+/// `documentChanged`, when given, is set on every call: true when `store.doc()` differs from before the
+/// command (compared field by field, live state included: everything `stateJson` persists apart from the
+/// editor size and the id counters, which only move with the document), false for a rejected command, for
+/// an accepted no-op, for a setter given the value already held, and for the selection commands (the
+/// selection is not part of the document). It is what the plug-in forwards to the host as "the saved state
+/// changed", so a set whose only edits are ChordLab's gets saved.
+bool applyCommandJson(DocumentStore& store, std::string_view json, std::string& error,
+                      bool* documentChanged = nullptr) noexcept;
 
 /// The persistent form of the store's document, without the palette:
 /// ```

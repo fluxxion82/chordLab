@@ -1932,7 +1932,11 @@ std::string stateJson(const DocumentStore& store, int editorWidth, int editorHei
     return state.dump();
 }
 
-bool applyCommandJson(DocumentStore& store, std::string_view text, std::string& error) noexcept {
+bool applyCommandJson(DocumentStore& store, std::string_view text, std::string& error,
+                      bool* documentChanged) noexcept {
+    if (documentChanged != nullptr) {
+        *documentChanged = false;
+    }
     try {
         error.clear();
         Command command;
@@ -1941,7 +1945,17 @@ bool applyCommandJson(DocumentStore& store, std::string_view text, std::string& 
         if (!parseCommand(text, command, name, lists, error)) {  // Phase A: the JSON tree is destroyed on return
             return false;
         }
-        switch (applyCommand(store, command, name, lists)) {  // Phase B: only the store, plain data and the name in scope
+        // The document as it was, for `documentChanged`: a copy taken before the apply (so a failed
+        // allocation here changes nothing) and compared after it with `operator==`, which covers every
+        // field. A refused command leaves the document as it was, so the flag stays false for one.
+        const std::optional<Document> before =
+            documentChanged != nullptr ? std::optional<Document>(store.doc()) : std::nullopt;
+        // Phase B: only the store, plain data and the name in scope.
+        const Refusal refusal = applyCommand(store, command, name, lists);
+        if (before.has_value() && refusal == Refusal::None) {
+            *documentChanged = store.doc() != *before;
+        }
+        switch (refusal) {
             case Refusal::None:
                 return true;
             case Refusal::DocumentFull:

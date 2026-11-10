@@ -695,9 +695,10 @@ bool ChordLab::OnMessage(int msgTag, int ctrlTag, int dataSize, const void* pDat
                                                           : std::string_view();
     std::string error;
     bool accepted = false;
+    bool documentChanged = false;
     {
       std::lock_guard<std::mutex> lock(mModelMutex);
-      accepted = chordlab::applyCommandJson(mStore, json, error);
+      accepted = chordlab::applyCommandJson(mStore, json, error, &documentChanged);
       // Always rebuild: besides setKey/browseKey, undo/redo can change the project key, and the
       // palette is cheap (35 cells). Likewise always recompile: PublishSnapshotLocked publishes only
       // when the playback content actually changed.
@@ -709,6 +710,8 @@ bool ChordLab::OnMessage(int msgTag, int ctrlTag, int dataSize, const void* pDat
     }
     if (accepted)
     {
+      if (documentChanged)                                       // not for a selection or an accepted no-op
+        MarkHostDirty();                                         // outside the lock: it calls into the host
       PushSnapshot();
       if (mListener.active())
         PushHeard();                                             // names, symbol and numeral follow the project key
@@ -1000,6 +1003,22 @@ void ChordLab::PushError(const std::string& message)
                                .dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
     SendArbitraryMsgFromDelegate((int) kMsgTagError, (int) json.size(), json.data());
   });
+}
+
+void ChordLab::MarkHostDirty()
+{
+  // Main thread (OnMessage), the lock released. Without this Live never knew that a set had changed when
+  // only ChordLab was edited: ⌘S wrote nothing, ⌘N asked nothing, and the edits were lost on reopen (Live
+  // Test 14, finding 1). The window size is left out on purpose: a host-driven resize right after a state
+  // load would otherwise mark a freshly opened set modified.
+#if defined(VST3_API)
+  // The SDK's EditController helper: IComponentHandler2::setDirty(true) when the host offers that interface,
+  // kNotImplemented otherwise. Cheap and idempotent, so one call per changed command is enough.
+  setDirty(true);
+#endif
+  // AU_API: AUv2 has no dirty call, and Logic ignores both a kAudioUnitProperty_ClassInfo property-change
+  // notification and a dummy parameter (Apple developer forum thread 814070, 2026); see "Limits and
+  // troubleshooting" in docs/user-guide.md. APP_API: the standalone app saves its own document.
 }
 
 void ChordLab::PushStatus(uint32_t incompleteBlocks, uint32_t droppedHeard)
