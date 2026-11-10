@@ -279,8 +279,8 @@ std::string heardJson(const Listener& listener, const Key& projectKey);
 ///   `{"mode":"<Mode>"}` (the parallel mode on the same tonic pitch class, canonically spelled) or
 ///   `{"home":true}` (browsed key = project key).
 /// - `appendChord {root,type,lengthBeats?,velocity?,inversion?}`: `appendChord`, with velocity 100 and,
-///   without `lengthBeats`, one bar of the document meter (barTicks(meter) / 960 beats: 4 in 4/4, 3.5 in
-///   7/8). With `inversion` (an integer in 0..tones - 1 of the chord, else rejected naming the field) the
+///   without `lengthBeats`, the document's new-chord length (`Document::newChordLength`: `newChordBeats` when
+///   set, else one bar of the meter, barTicks(meter) / 960 beats: 4 in 4/4, 3.5 in 7/8). With `inversion` (an integer in 0..tones - 1 of the chord, else rejected naming the field) the
 ///   new chord has that inversion and is manual, so it sounds as given even under auto voice-leading;
 ///   without, root position and not manual. The new chord is selected (document.h), so the next
 ///   snapshot's `selectedEventId`, `suggestions` and `relationReference` follow it. Refused (false, an
@@ -352,7 +352,7 @@ bool applyCommandJson(DocumentStore& store, std::string_view json, std::string& 
 /// The persistent form of the store's document, without the palette:
 /// ```
 /// {"schema":1, "projectKey":<key>, "browsedKey":<key>, "progressionLoop":true, "followHost":true,
-///  "autoVoiceLead":false, "transposeWithKey":false, "keyHintSeen":false, "midiThru":true, "relationMode":"blend",
+///  "autoVoiceLead":false, "transposeWithKey":false, "keyHintSeen":false, "midiThru":true, "newChordBeats":null, "relationMode":"blend",
 ///  "feel":{"rhythm":"block","strum":"off","strumSpeed":"medium","humanise":"off","arpPattern":"up",
 ///          "arpRate":"subdivision","arpRange":"one"}, "meter":{"num":4,"den":4},
 ///  "events":[{"id":1,"root":0,"type":"maj","lengthBeats":4.0,"velocity":100,
@@ -368,7 +368,7 @@ bool applyCommandJson(DocumentStore& store, std::string_view json, std::string& 
 /// `nextSectionId` were added under schema 1 (Phase 2), `relationMode` (`relationModeName` of
 /// `Document::relationMode`, live state that is nonetheless saved with the set, R5) later, and
 /// `transposeWithKey` and `keyHintSeen` (also live state) after it, and `midiThru` (live state) after
-/// those: a reader that predates them ignores them, and `loadStateJson` defaults them when they are
+/// those, and `newChordBeats` (live state, the length of a chord added without one, null for one bar of the meter) after that: a reader that predates them ignores them, and `loadStateJson` defaults them when they are
 /// missing, so states cross both ways.
 /// Size: the largest state the store can hold (`kMaxChords` chords, a section on each, every name at
 /// `kMaxSectionNameBytes` bytes of characters that escape to two) is pinned by test_json_api.cpp at
@@ -392,7 +392,7 @@ std::string stateJson(const DocumentStore& store, int editorWidth = kDefaultEdit
 /// `manualVoicing` (false), `feel` (block chords; its `arpPattern`, `arpRate` and `arpRange` optional too, and the legacy `arpUp` /
 /// `arpUpDown` rhythm names accepted) and `meter` (4/4; when given, valid as in `setFeel` /
 /// `setMeter`, else the whole state is rejected), `autoVoiceLead` (false), `transposeWithKey` and
-/// `keyHintSeen` (false; when given, booleans), `midiThru` (true; when given, a boolean), `relationMode`
+/// `keyHintSeen` (false; when given, booleans), `midiThru` (true; when given, a boolean), `newChordBeats` (null; when given, null or a finite number, snapped and clamped as `snapNewChordBeats` does), `relationMode`
 /// ("blend"; when given, one of the five `relationModeName` strings, anything else rejecting the state),
 /// `sections` (none) and `nextSectionId`
 /// (derived, one past the largest section id, 1 without sections; when given it must be at least that and

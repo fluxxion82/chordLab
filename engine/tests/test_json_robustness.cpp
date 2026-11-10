@@ -204,6 +204,11 @@ std::string invariantProblem(const DocumentStore& store, bool snapshot = true) {
     if (!validMeter(d.meter)) {
         return "invalid meter " + std::to_string(d.meter.num) + "/" + std::to_string(d.meter.den);
     }
+    if (d.newChordBeats.has_value() &&
+        (!std::isfinite(*d.newChordBeats) || *d.newChordBeats < kMinLengthBeats || *d.newChordBeats > kMaxLengthBeats ||
+         std::fmod(*d.newChordBeats * 4.0, 1.0) != 0.0)) {
+        return "newChordBeats off the quarter-beat grid or out of bounds";
+    }
     if (static_cast<int>(d.feel.rhythm) < 0 || d.feel.rhythm > Rhythm::Arpeggio || static_cast<int>(d.feel.strum) < 0 ||
         d.feel.strum > Strum::DownUp || static_cast<int>(d.feel.speed) < 0 || d.feel.speed > StrumSpeed::Loose ||
         static_cast<int>(d.feel.humanise) < 0 || d.feel.humanise > Humanise::Heavy ||
@@ -473,6 +478,7 @@ TEST_CASE("json robustness: seeded mutation fuzz of both readers keeps every inv
     corpus.push_back(readFixture("state-legacy-phase1.json"));
     corpus.push_back(readFixture("state-feel.json"));
     corpus.push_back(readFixture("state-legacy-feel.json"));
+    corpus.push_back(readFixture("state-legacy-length.json"));
     for (std::size_t i = commandCount; i < corpus.size(); ++i) {
         REQUIRE_MESSAGE(!corpus[i].empty(), "state fixture missing");
     }

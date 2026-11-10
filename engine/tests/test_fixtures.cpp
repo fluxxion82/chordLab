@@ -6,8 +6,8 @@
 //     CHORDLAB_UPDATE_FIXTURES=1 build/engine_tests -tc="golden fixtures*"
 // (the test rewrites the files, still passes, and a second run without the variable proves equality).
 //
-// The two *-legacy-phase1.json files are hand-written Phase 1 shapes and state-legacy-feel.json a pre-arpeggio
-// feel; they are never rewritten.
+// The two *-legacy-phase1.json files are hand-written Phase 1 shapes, state-legacy-feel.json a pre-arpeggio feel
+// and state-legacy-length.json a state from before the new-chord length; they are never rewritten.
 
 #include "doctest.h"
 
@@ -151,12 +151,13 @@ std::string stateProgression() {
 }
 
 /// The progression fixture with a non-default value in every feel field (arpeggio, pinky up-down, half rate, two
-/// octaves, down-up strum, tight, light humanise) in 6/8.
+/// octaves, down-up strum, tight, light humanise) in 6/8 and a new-chord length of a dotted quarter.
 DocumentStore feelStore() {
     DocumentStore store = progressionStore(nullptr);
     store.setFeel(Feel{Rhythm::Arpeggio, Strum::DownUp, StrumSpeed::Tight, Humanise::Light, ArpPattern::PinkyUpDown,
                        ArpRate::Half, ArpRange::Two});
     store.setMeter(Meter{6, 8});
+    store.setNewChordLength(1.5);
     return store;
 }
 
@@ -236,6 +237,8 @@ TEST_CASE("golden fixtures: the feel and meter fixtures carry non-default values
     const json state = json::parse(stateFeel());
     CHECK(state.at("feel") == snap.at("feel"));
     CHECK(state.at("meter") == snap.at("meter"));
+    CHECK(state.at("newChordBeats") == 1.5);
+    CHECK(json::parse(stateProgression()).at("newChordBeats").is_null());
 
     const json home = json::parse(homeProgression());
     CHECK(home.at("feel") ==
@@ -284,6 +287,25 @@ TEST_CASE("legacy fixture: state-legacy-feel.json is a state saved before the ar
     CHECK(saved.at("feel").at("arpRate") == "subdivision");
     CHECK(saved.at("feel").at("arpRange") == "one");
     // And loads back equal.
+    DocumentStore again;
+    REQUIRE_MESSAGE(loadStateJson(again, saved.dump(), error), error);
+    CHECK(again.doc() == store.doc());
+}
+
+TEST_CASE("legacy fixture: state-legacy-length.json is a state saved before the new-chord length") {
+    // Hand-kept, never regenerated: state-progression.json as it was before `newChordBeats`.
+    std::string text;
+    REQUIRE_MESSAGE(readFile("state-legacy-length.json", text), "state-legacy-length.json missing");
+    const json j = json::parse(text);
+    CHECK_FALSE(j.contains("newChordBeats"));
+    DocumentStore store;
+    std::string error;
+    REQUIRE_MESSAGE(loadStateJson(store, text, error), error);
+    CHECK_FALSE(store.doc().newChordBeats.has_value());
+    CHECK(store.doc().events == progressionStore(nullptr).doc().events);
+    // Saved again, it carries the key (null) and loads back equal.
+    const json saved = json::parse(stateJson(store, 900, 600));
+    CHECK(saved.at("newChordBeats").is_null());
     DocumentStore again;
     REQUIRE_MESSAGE(loadStateJson(again, saved.dump(), error), error);
     CHECK(again.doc() == store.doc());

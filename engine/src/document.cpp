@@ -31,7 +31,7 @@ double Document::endBeat() const {
 }
 
 double Document::newChordLength() const {
-    return barTicks(meter) / static_cast<double>(kFeelTicksPerBeat);
+    return newChordBeats.value_or(barTicks(meter) / static_cast<double>(kFeelTicksPerBeat));
 }
 
 int Document::sectionIndexOf(int eventIndex) const {
@@ -58,6 +58,11 @@ bool sectionsWellFormed(const Document& doc) {
         previousIndex = s.firstEventIndex;
     }
     return true;
+}
+
+double snapNewChordBeats(double beats) {
+    assert(std::isfinite(beats));
+    return std::clamp(std::round(beats * 4.0) / 4.0, kMinLengthBeats, kMaxLengthBeats);
 }
 
 // --- DocumentStore ---------------------------------------------------------------------
@@ -215,7 +220,7 @@ std::string sectionNameOr(std::string name, const std::vector<Section>& sections
 }
 
 /// Copies the live (non-undoable) fields of `current` into `target`, so that restoring a snapshot keeps
-/// the transport toggles, the relation mode, the key-transpose flags and MIDI Thru as they are now, and the browsed key
+/// the transport toggles, the relation mode, the key-transpose flags, MIDI Thru and the new-chord length as they are now, and the browsed key
 /// too, with one exception: a browsed key that is the project key ("home") follows the project key `target`
 /// restores, as it follows `setProjectKey`, so that undoing or redoing a key change leaves the palette on the
 /// key the progression is in, not on the key it just left. A browse elsewhere is kept as it is.
@@ -229,6 +234,7 @@ void keepLiveState(Document& target, const Document& current) {
     target.transposeWithKey = current.transposeWithKey;
     target.keyHintSeen = current.keyHintSeen;
     target.midiThru = current.midiThru;
+    target.newChordBeats = current.newChordBeats;
 }
 
 }  // namespace
@@ -245,6 +251,8 @@ void DocumentStore::replace(Document doc, int nextId, int nextSectionId) {
     assertValidKey(doc.projectKey);
     assertValidKey(doc.browsedKey);
     assert(static_cast<int>(doc.relationMode) >= 0 && static_cast<int>(doc.relationMode) < kNumRelationModes);
+    assert(!doc.newChordBeats ||
+           (std::isfinite(*doc.newChordBeats) && *doc.newChordBeats == snapNewChordBeats(*doc.newChordBeats)));
     assert(nextId >= 1);
     assert(nextSectionId >= 0);
     for ([[maybe_unused]] const ChordEvent& e : doc.events) {
@@ -368,27 +376,12 @@ void DocumentStore::setSelectedEvents(const std::vector<int>& ids, int anchor) {
     anchorEventId_ = newAnchor;
 }
 
-int DocumentStore::appendChord(Chord chord, double lengthBeats, int velocity, std::optional<int> inversion) {
-    assertValidChord(chord);
-    if (!std::isfinite(lengthBeats) || nextId_ == INT_MAX ||
-        doc_.events.size() >= static_cast<std::size_t>(kMaxChords)) {
-        return kNoEventId;
-    }
-    const int id = nextId_;
-    Document next = doc_;
-    ChordEvent event{id, chord, clampLength(lengthBeats), clampVelocity(velocity)};
-    if (inversion.has_value()) {
-        event.inversion = clampInversion(chord, *inversion);
-        event.manualVoicing = true;
-    }
-    next.events.push_back(event);
-    std::vector<int> selection{id};  // before the commit: an allocation after it would break the strong guarantee
-    [[maybe_unused]] const bool changed = commit(std::move(next));
-    assert(changed);  // a fresh id always makes the sequence differ
-    ++nextId_;        // only now: a throw above leaves the counter, like the rest of the store, untouched
-    selectedEventIds_.swap(selection);  // live state, after the commit: a swap and an int write cannot throw
-    anchorEventId_ = id;
-    return id;
+int DocumentStore::appendChord(Chord chord, std::optional<double> lengthBeats, int velocity, std::optional<int> inversion) {
+    // One entry at the end: insertChords' clamps, refusals, selection and single commit. The entry is built
+    // before anything changes, so a failed allocation leaves the store as it was.
+    const std::vector<int> ids =
+        insertChords(static_cast<int>(doc_.events.size()), {ChordSpec{chord, lengthBeats, velocity, inversion}});
+    return ids.empty() ? kNoEventId : ids.front();
 }
 
 namespace {
@@ -744,6 +737,14 @@ void DocumentStore::setKeyHintSeen(bool seen) {
 
 void DocumentStore::setMidiThru(bool on) {
     doc_.midiThru = on;  // live state: no history
+}
+
+void DocumentStore::setNewChordLength(std::optional<double> lengthBeats) {
+    if (lengthBeats.has_value() && !std::isfinite(*lengthBeats)) {
+        return;
+    }
+    // Live state: no history.
+    doc_.newChordBeats = lengthBeats.has_value() ? std::optional<double>(snapNewChordBeats(*lengthBeats)) : std::nullopt;
 }
 
 int DocumentStore::addSection(int firstEventIndex, std::string name) {

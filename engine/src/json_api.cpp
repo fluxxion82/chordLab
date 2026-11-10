@@ -814,7 +814,7 @@ struct Command {
     Mode mode = Mode::Ionian;  // BrowseMode
     Chord chord{0, nullptr};   // AppendChord
     double lengthBeats = 4.0;  // AppendChord (optional), SetLength
-    bool hasLength = false;    // AppendChord: `lengthBeats` was given; otherwise one bar of the meter
+    bool hasLength = false;    // AppendChord: `lengthBeats` was given; otherwise the document's new-chord length
     int velocity = 100;        // AppendChord (optional, store default), SetVelocity
     int id = 0;                // MoveChord, SetLength, SetVelocity, RemoveChord, the voicing, section and selection commands
     int index = 0;             // MoveChord, AddSection, MoveSectionStart
@@ -1214,10 +1214,9 @@ Refusal applyCommand(DocumentStore& store, const Command& command, std::string& 
             if (doc.events.size() >= static_cast<std::size_t>(kMaxChords)) {
                 return Refusal::DocumentFull;
             }
-            // No length: one bar of the document's meter (barTicks / 960 beats; 4 in 4/4).
+            // No length: the document's new-chord length (D3; one bar of the meter until one is chosen).
             return store.appendChord(command.chord,
-                                     command.hasLength ? command.lengthBeats
-                                                       : barTicks(doc.meter) / static_cast<double>(kFeelTicksPerBeat),
+                                     command.hasLength ? std::optional<double>(command.lengthBeats) : std::nullopt,
                                      command.velocity,
                                      command.hasInversion ? std::optional<int>(command.inversion) : std::nullopt) !=
                            kNoEventId
@@ -1377,6 +1376,15 @@ bool parseState(std::string_view text, Document& doc, int& nextId, int& nextSect
     // Optional (states saved before MIDI Thru have none): true.
     if (fields.has("midiThru") && !fields.getBool("midiThru", doc.midiThru)) {
         return false;
+    }
+    // Optional (states saved before the new-chord length have none): null, one bar of the meter. A number is
+    // snapped and clamped as `setNewChordLength` stores it; anything else rejects the state.
+    if (fields.has("newChordBeats") && !fields.find("newChordBeats")->is_null()) {
+        double beats = 0.0;
+        if (!fields.getNumber("newChordBeats", beats)) {
+            return false;
+        }
+        doc.newChordBeats = snapNewChordBeats(beats);
     }
     // Optional (states saved before the feel have neither): block chords in 4/4. Present means valid, or the
     // whole state is rejected.
@@ -1693,6 +1701,7 @@ std::string stateJson(const DocumentStore& store, int editorWidth, int editorHei
                         {"transposeWithKey", doc.transposeWithKey},
                         {"keyHintSeen", doc.keyHintSeen},
                         {"midiThru", doc.midiThru},
+                        {"newChordBeats", doc.newChordBeats ? json(*doc.newChordBeats) : json()},
                         {"feel", feelToJson(doc.feel)},
                         {"meter", meterToJson(doc.meter)},
                         {"relationMode", relationModeName(doc.relationMode)},

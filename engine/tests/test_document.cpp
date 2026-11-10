@@ -75,11 +75,11 @@ bool sameUndoableState(const Document& a, const Document& b) {
 }
 
 /// The live (session) part of a document: browsed key, the two transport toggles, the relation mode and
-/// the key-transpose switch and hint flag.
+/// the key-transpose switch and hint flag and the new-chord length.
 bool sameLiveState(const Document& a, const Document& b) {
     return a.browsedKey == b.browsedKey && a.progressionLoop == b.progressionLoop && a.followHost == b.followHost &&
            a.relationMode == b.relationMode && a.transposeWithKey == b.transposeWithKey &&
-           a.keyHintSeen == b.keyHintSeen && a.midiThru == b.midiThru;
+           a.keyHintSeen == b.keyHintSeen && a.midiThru == b.midiThru && a.newChordBeats == b.newChordBeats;
 }
 
 /// Runs `mutate`, checks it changed the document, then checks that undo restores the document from before
@@ -139,6 +139,7 @@ TEST_CASE("Document: defaults to C Ionian, empty, looping and following the host
     CHECK(doc.transposeWithKey == false);
     CHECK(doc.keyHintSeen == false);
     CHECK(doc.midiThru == true);
+    CHECK_FALSE(doc.newChordBeats.has_value());
 }
 
 TEST_CASE("Document: empty document has endBeat 0 and startBeatOf(0) 0") {
@@ -242,7 +243,7 @@ TEST_CASE("appendChord: three chords abut at 0, 4, 8 with endBeat 12 and ids 1, 
     CHECK(store.doc().events[0].lengthBeats == 4.0);
 }
 
-TEST_CASE("appendChord: defaults to four beats at velocity 100") {
+TEST_CASE("appendChord: defaults to one bar of the meter (four beats in 4/4) at velocity 100") {
     DocumentStore store;
     const int id = store.appendChord(kC);
     REQUIRE(store.findIndex(id) == 0);
@@ -806,6 +807,9 @@ TEST_CASE("Document ==: each feel and meter field makes documents unequal") {
     b = a;
     b.meter.den = 8;
     CHECK(a != b);
+    b = a;
+    b.newChordBeats = 2.0;
+    CHECK(a != b);
 }
 
 TEST_CASE("setFeel: one undo step, undo and redo restore, an equal value pushes nothing") {
@@ -1075,6 +1079,71 @@ TEST_CASE("setMidiThru: live state: defaults on, never pushes history, survives 
     CHECK(store.doc().midiThru == true);
     REQUIRE(store.redo());
     CHECK(store.doc().midiThru == true);
+}
+
+TEST_CASE("snapNewChordBeats: the nearest quarter beat, halves away from zero, inside 0.25..64") {
+    CHECK(snapNewChordBeats(1.5) == 1.5);
+    CHECK(snapNewChordBeats(1.3) == 1.25);
+    CHECK(snapNewChordBeats(1.375) == 1.5);
+    CHECK(snapNewChordBeats(1.125) == 1.25);
+    CHECK(snapNewChordBeats(0.1) == 0.25);
+    CHECK(snapNewChordBeats(0.0) == 0.25);
+    CHECK(snapNewChordBeats(-3.0) == 0.25);
+    CHECK(snapNewChordBeats(63.9) == 64.0);
+    CHECK(snapNewChordBeats(100.0) == 64.0);
+}
+
+TEST_CASE("setNewChordLength: live state on the quarter-beat grid; nullopt is one bar of the meter; no history") {
+    DocumentStore store;
+    CHECK_FALSE(store.doc().newChordBeats.has_value());
+    CHECK(store.doc().newChordLength() == 4.0);
+    store.setNewChordLength(1.5);
+    CHECK(store.doc().newChordBeats == std::optional<double>(1.5));
+    CHECK(store.doc().newChordLength() == 1.5);
+    store.setNewChordLength(1.3);
+    CHECK(store.doc().newChordBeats == std::optional<double>(1.25));
+    store.setNewChordLength(1.375);
+    CHECK(store.doc().newChordBeats == std::optional<double>(1.5));
+    store.setNewChordLength(0.1);
+    CHECK(store.doc().newChordBeats == std::optional<double>(0.25));
+    store.setNewChordLength(100.0);
+    CHECK(store.doc().newChordBeats == std::optional<double>(64.0));
+    store.setNewChordLength(kNaN);  // no-op
+    store.setNewChordLength(kInf);
+    CHECK(store.doc().newChordBeats == std::optional<double>(64.0));
+    CHECK_FALSE(store.undo());  // never history
+    store.setNewChordLength(std::nullopt);
+    CHECK_FALSE(store.doc().newChordBeats.has_value());
+}
+
+TEST_CASE("setNewChordLength: kept by undo and redo; a meter change moves only the one-bar default") {
+    DocumentStore store;
+    store.setNewChordLength(0.5);
+    store.appendChord(kC);
+    store.setMeter(Meter{3, 4});
+    store.setNewChordLength(0.75);
+    REQUIRE(store.undo());  // the meter
+    CHECK(store.doc().newChordBeats == std::optional<double>(0.75));
+    REQUIRE(store.redo());
+    CHECK(store.doc().newChordBeats == std::optional<double>(0.75));
+    CHECK(store.doc().newChordLength() == 0.75);
+    store.setNewChordLength(std::nullopt);
+    CHECK(store.doc().newChordLength() == 3.0);  // one bar of 3/4
+    store.setMeter(Meter{7, 8});
+    CHECK(store.doc().newChordLength() == 3.5);
+    CHECK_FALSE(store.doc().newChordBeats.has_value());
+}
+
+TEST_CASE("appendChord and insertChords: a chord without a length takes the new-chord length; a given one wins") {
+    DocumentStore store;
+    store.setNewChordLength(1.5);
+    store.appendChord(kC);
+    store.appendChord(kF, 2.0);
+    store.insertChords(2, {spec(kG), spec(kC, 0.5)});
+    CHECK(lengthsOf(store) == std::vector<double>{1.5, 2.0, 1.5, 0.5});
+    store.setNewChordLength(std::nullopt);
+    store.appendChord(kF);
+    CHECK(store.doc().events.back().lengthBeats == 4.0);
 }
 
 TEST_CASE("setRelationMode: live state: every mode sticks, never pushes history, survives undo and redo") {

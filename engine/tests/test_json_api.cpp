@@ -2302,6 +2302,7 @@ TEST_CASE("state: shape") {
     CHECK(state.at("relationMode") == "voiceLeading");
     CHECK(state.at("transposeWithKey") == false);
     CHECK(state.at("keyHintSeen") == false);
+    CHECK(state.at("newChordBeats").is_null());
 
     const json defaults = json::parse(stateJson(store));
     CHECK(defaults.at("editor") == json({{"width", 900}, {"height", 620}}));
@@ -2313,6 +2314,7 @@ TEST_CASE("state: shape") {
     CHECK(empty.at("relationMode") == "blend");
     CHECK(empty.at("transposeWithKey") == false);
     CHECK(empty.at("keyHintSeen") == false);
+    CHECK(empty.at("newChordBeats").is_null());
 }
 
 TEST_CASE("state: transposeWithKey and keyHintSeen round-trip and a legacy state loads them false") {
@@ -2842,7 +2844,7 @@ namespace {
 
 /// The largest state the engine can produce: kMaxChords chords, a section on every one of them, each
 /// name at the byte bound and made of the characters JSON escapes to two bytes, and the relation mode with
-/// the longest name.
+/// the longest name, and the longest new-chord length.
 DocumentStore worstCaseStore() {
     DocumentStore store = fullStore();
     store.setRelationMode(RelationMode::VoiceLeading);
@@ -2853,13 +2855,14 @@ DocumentStore worstCaseStore() {
     for (int i = 0; i < kMaxChords; ++i) {
         REQUIRE(store.addSection(i, name) == i + 1);
     }
+    store.setNewChordLength(63.75);  // the longest value, five characters
     return store;
 }
 
 /// `stateJson` of `worstCaseStore()` at the default editor size, measured; pinned so that a change to the
 /// state's shape shows up here against `kMaxJsonBytes` (1 MiB) before it shows up as a state that will
 /// not load.
-constexpr std::size_t kWorstCaseStateBytes = 77025;
+constexpr std::size_t kWorstCaseStateBytes = 77047;
 
 }  // namespace
 
@@ -3793,4 +3796,56 @@ TEST_CASE("heardJson: held is ascending whatever the input order") {
     const json j = json::parse(heardJson(l, key('C', 0, Mode::Ionian)));
     CHECK(j["held"] == json::array({57, 60, 64, 67}));
     CHECK(heldNames(j) == std::vector<std::string>{"A", "C", "E", "G"});
+}
+
+// --- Strip editing: the new-chord length in the state -------------------------------------------------------
+
+TEST_CASE("state: newChordBeats round-trips as a number, null by default; a state without it loads null") {
+    DocumentStore original = richStore();
+    CHECK(json::parse(stateJson(original)).at("newChordBeats").is_null());
+    original.setNewChordLength(1.5);
+    json j = json::parse(stateJson(original));
+    CHECK(j.at("newChordBeats") == 1.5);
+
+    DocumentStore loaded;
+    std::string error;
+    REQUIRE_MESSAGE(loadStateJson(loaded, j.dump(), error), error);
+    CHECK(loaded.doc() == original.doc());
+    CHECK(loaded.doc().newChordBeats == std::optional<double>(1.5));
+
+    j.erase("newChordBeats");
+    REQUIRE_MESSAGE(loadStateJson(loaded, j.dump(), error), error);
+    CHECK_FALSE(loaded.doc().newChordBeats.has_value());
+    j["newChordBeats"] = nullptr;
+    loaded.setNewChordLength(2.0);
+    REQUIRE_MESSAGE(loadStateJson(loaded, j.dump(), error), error);
+    CHECK_FALSE(loaded.doc().newChordBeats.has_value());
+    j["newChordBeats"] = 1.3;  // snapped, as the setter stores it
+    REQUIRE_MESSAGE(loadStateJson(loaded, j.dump(), error), error);
+    CHECK(loaded.doc().newChordBeats == std::optional<double>(1.25));
+    j["newChordBeats"] = 500;  // clamped
+    REQUIRE_MESSAGE(loadStateJson(loaded, j.dump(), error), error);
+    CHECK(loaded.doc().newChordBeats == std::optional<double>(64.0));
+}
+
+TEST_CASE("state: a mistyped newChordBeats rejects the whole state, naming the field") {
+    DocumentStore store = threeChords();
+    json j = json::parse(stateJson(store));
+    for (const json& wrong : {json("1.5"), json(true), json::object(), json::array()}) {
+        CAPTURE(wrong.dump());
+        j["newChordBeats"] = wrong;
+        checkStateRejected(store, j.dump());
+        std::string error;
+        CHECK_FALSE(loadStateJson(store, j.dump(), error));
+        CHECK(error.find("newChordBeats") != std::string::npos);
+    }
+}
+
+TEST_CASE("appendChord: without a length, the new-chord length once one is set") {
+    DocumentStore store;
+    store.setNewChordLength(0.75);
+    applyOk(store, {{"cmd", "appendChord"}, {"root", 0}, {"type", "maj"}});
+    applyOk(store, {{"cmd", "appendChord"}, {"root", 5}, {"type", "maj"}, {"lengthBeats", 2.0}});
+    CHECK(store.doc().events[0].lengthBeats == 0.75);
+    CHECK(store.doc().events[1].lengthBeats == 2.0);
 }
