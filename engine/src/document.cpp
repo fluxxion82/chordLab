@@ -29,6 +29,10 @@ double Document::endBeat() const {
     return startBeatOf(static_cast<int>(events.size()));
 }
 
+double Document::newChordLength() const {
+    return barTicks(meter) / static_cast<double>(kFeelTicksPerBeat);
+}
+
 int Document::sectionIndexOf(int eventIndex) const {
     assert(eventIndex >= 0 && static_cast<std::size_t>(eventIndex) < events.size());
     int found = -1;  // only when there are no sections: the first section starts at 0
@@ -519,6 +523,86 @@ void DocumentStore::removeChord(int id) {
     reindexSectionsForRemove(next.sections, index, static_cast<int>(next.events.size()));
     next.events.erase(next.events.begin() + index);
     commit(std::move(next));
+}
+
+std::vector<int> DocumentStore::insertChords(int index, const std::vector<ChordSpec>& chords) {
+    if (chords.empty() || chords.size() > static_cast<std::size_t>(kMaxChords) - doc_.events.size() ||
+        nextId_ > INT_MAX - static_cast<int>(chords.size())) {  // n <= kMaxChords here: no overflow
+        return {};
+    }
+    for (const ChordSpec& c : chords) {
+        assertValidChord(c.chord);
+        if (c.lengthBeats.has_value() && !std::isfinite(*c.lengthBeats)) {
+            return {};
+        }
+    }
+    const int at = std::clamp(index, 0, static_cast<int>(doc_.events.size()));
+    const int count = static_cast<int>(chords.size());
+    Document next = doc_;
+    std::vector<ChordEvent> added;
+    added.reserve(chords.size());
+    std::vector<int> ids;
+    ids.reserve(chords.size());
+    int id = nextId_;
+    for (const ChordSpec& c : chords) {
+        ChordEvent event{id, c.chord, clampLength(c.lengthBeats.value_or(doc_.newChordLength())),
+                         clampVelocity(c.velocity)};
+        if (c.inversion.has_value()) {
+            event.inversion = clampInversion(c.chord, *c.inversion);
+        }
+        if (c.octave.has_value()) {
+            event.octave = clampOctave(*c.octave);
+        }
+        event.manualVoicing = c.manualVoicing.value_or(c.inversion.has_value() || c.octave.has_value());
+        added.push_back(event);
+        ids.push_back(id++);
+    }
+    next.events.insert(next.events.begin() + at, added.begin(), added.end());
+    for (Section& s : next.sections) {
+        if (s.firstEventIndex >= at && s.firstEventIndex != 0) {  // the first section, at 0, is pinned
+            s.firstEventIndex += count;
+        }
+    }
+    assert(sectionsWellFormed(next));
+    [[maybe_unused]] const bool changed = commit(std::move(next));
+    assert(changed);   // fresh ids always make the sequence differ
+    nextId_ += count;  // only now: a throw above leaves the counter, like the rest of the store, untouched
+    return ids;
+}
+
+bool DocumentStore::removeChords(const std::vector<int>& ids) {
+    const std::set<int> wanted(ids.begin(), ids.end());
+    std::vector<int> indices;  // ascending: the chords that exist, once each
+    for (std::size_t i = 0; i < doc_.events.size(); ++i) {
+        if (wanted.count(doc_.events[i].id) != 0) {
+            indices.push_back(static_cast<int>(i));
+        }
+    }
+    if (indices.empty()) {
+        return false;
+    }
+    Document next = doc_;
+    for (std::size_t k = 0; k < indices.size(); ++k) {
+        const int index = indices[k] - static_cast<int>(k);  // the k removals before it moved it up k places
+        reindexSectionsForRemove(next.sections, index, static_cast<int>(next.events.size()));
+        next.events.erase(next.events.begin() + index);
+    }
+    return commit(std::move(next));
+}
+
+bool DocumentStore::setLengths(const std::vector<int>& ids, double lengthBeats) {
+    if (!std::isfinite(lengthBeats)) {
+        return false;
+    }
+    const std::set<int> wanted(ids.begin(), ids.end());
+    const double length = clampLength(lengthBeats);
+    Document next = doc_;
+    for (ChordEvent& e : next.events) {
+        if (wanted.count(e.id) != 0) {
+            e.lengthBeats = length;
+        }
+    }
+    return commit(std::move(next));  // nothing changed: no history
 }
 
 void DocumentStore::setProjectKey(Key key) {

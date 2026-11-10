@@ -88,6 +88,21 @@ constexpr bool operator!=(const ChordEvent& a, const ChordEvent& b) noexcept {
     return !(a == b);
 }
 
+/// One chord for `DocumentStore::insertChords` (strip editing design D1): the chord; its length, the
+/// document's new-chord length (`Document::newChordLength`) when absent; its velocity; and a voicing as
+/// `ChordEvent` holds it. A given `inversion` or `octave` makes the chord manual (it sounds as given under auto
+/// voice-leading) unless `manualVoicing` says otherwise, as `appendChord` does with an inversion;
+/// `manualVoicing` alone sets the flag with root position in the default register. The store clamps every
+/// value as its setters clamp it.
+struct ChordSpec {
+    Chord chord;
+    std::optional<double> lengthBeats;
+    int velocity = 100;
+    std::optional<int> inversion;
+    std::optional<int> octave;
+    std::optional<bool> manualVoicing;
+};
+
 /// A named, coloured stretch of the progression (P2-D6). It starts on the chord at `firstEventIndex` and
 /// runs up to the next section's start (or the end of the progression), so a section is never empty.
 /// The first section always starts at 0, so when there are sections they partition the whole sequence
@@ -146,6 +161,10 @@ struct Document {
 
     /// Beat at which the progression ends: the sum of every length (0 for an empty progression).
     double endBeat() const;
+
+    /// How long a chord added without a length lasts (`appendChord`, `insertChords`): one bar of `meter`,
+    /// `barTicks(meter) / kFeelTicksPerBeat` beats (4 in 4/4, 3 in 3/4 and 6/8, 3.5 in 7/8).
+    double newChordLength() const;
 
     /// Position in `sections` of the section the event at `eventIndex` belongs to: the last section that
     /// starts at or before it. -1 when there are no sections (the first section starts at 0, so otherwise
@@ -310,6 +329,31 @@ public:
     /// stays at 0 on the new first chord, unless that chord already starts a section (then that section
     /// becomes the first) or no chord is left (then no section is). Unknown id: no-op.
     void removeChord(int id);
+
+    /// Inserts `chords` so that the first lands at `index` (clamped to 0..size) and the rest follow in order, as
+    /// ONE undoable step, and returns their new ids in order (fresh and increasing, as `appendChord` hands them
+    /// out). Each entry becomes an event as `ChordSpec` says: its length clamped to [kMinLengthBeats,
+    /// kMaxLengthBeats] (`Document::newChordLength` without one), its velocity to [kMinVelocity, kMaxVelocity],
+    /// its inversion to 0..`inversionCount(chord) - 1`, its octave to [kMinVoicingOctave, kMaxVoicingOctave].
+    /// Sections: every section starting at or after `index` moves by `chords.size()`, except the first, which
+    /// is pinned at 0; so chords inserted at a section's start end the section before it, and chords inserted
+    /// at 0 join the first section. Returns an empty vector and changes nothing (no event, no history, no id
+    /// consumed) when `chords` is empty, when any length is NaN or infinite, when the result would hold more
+    /// than `kMaxChords` chords, or when the id counter cannot hand out `chords.size()` ids below INT_MAX.
+    /// Every chord must satisfy the `Chord` preconditions (chord.h). The counter advances only once the insert
+    /// is committed.
+    std::vector<int> insertChords(int index, const std::vector<ChordSpec>& chords);
+
+    /// Removes every chord of `ids` that exists, as ONE undoable step: in index order, each with
+    /// `removeChord`'s section rules (so when several start chords go, the order decides which section is left
+    /// at 0, exactly as successive `removeChord` calls from the front would). Ids no event has are skipped and a
+    /// repeated id counts once. Returns false and pushes nothing when no listed id exists.
+    bool removeChords(const std::vector<int>& ids);
+
+    /// Sets the length of every chord of `ids` that exists to `lengthBeats`, clamped as `setLength` clamps it,
+    /// as ONE undoable step; unknown ids are skipped. Returns false and pushes nothing when `lengthBeats` is NaN
+    /// or infinite, or when no length changed (no listed id exists, or each already has the clamped value).
+    bool setLengths(const std::vector<int>& ids, double lengthBeats);
 
     /// Undoable. `key.tonic` must satisfy the `Tonic` preconditions of pitch.h and `key.mode` be a
     /// declared `Mode`. When `Document::transposeWithKey` is on and the tonic's pitch class changes (a
