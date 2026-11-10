@@ -57,7 +57,7 @@ struct PaletteView: View {
     VStack(alignment: .leading, spacing: 6) {
       // While the home row is shown the switch sits at its trailing end instead (`HomeRowView`), so the
       // grid keeps its viewport. While the listener is active the row is always shown, for the Heard group
-      // (the home row then leaves the switch to it); the 700×568 minimum leaves a full palette row in view.
+      // (the home row then leaves the switch to it); the 700×600 minimum leaves a full palette row in view.
       if heardActive {
         HStack(spacing: 8) {
           if placement == .paletteRow {
@@ -160,9 +160,9 @@ struct PaletteCellControl: View {
                     isHeard: heard, reference: state.snapshot?.relationReference)
       .pressAction(circular: true,                                  // the cell's `.contentShape(Circle())`
                    onPress: { state.pressCell(cell) },
-                   onRelease: { _ in state.releaseCell(cell) })
+                   onRelease: { state.releaseCell(cell, $0) })
       .draggable(ChordRef(root: cell.root, type: cell.type)) {
-        ChordDragPreview(cell: cell, labelMode: labelMode, beats: RulerMarks.barBeats(state.snapshot?.meter))
+        ChordDragPreview(cell: cell, labelMode: labelMode, beats: LengthOptions.newChordBeats(state.snapshot?.newChordBeats, meter: state.snapshot?.meter))
       }
   }
 }

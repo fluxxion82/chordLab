@@ -51,6 +51,10 @@ class ChordLabState: NSObject, ObservableObject {
   @Published private(set) var heldCellId: String?
   /// Preview id of the held cell: a per-press counter, so that Start and Stop pair up in the scheduler.
   private var heldPreviewId: Int?
+  /// The transport row's Record switch (strip editing design D9): while on, releasing a palette or home-row cell
+  /// inserts its chord after the anchor (else at the end), as long as the cell was held. UI state: off whenever
+  /// the window opens, never saved.
+  @Published var recording = false
   private var previewCounter = 0
   /// While a cell is held, an `extend` for its preview every `keepAliveInterval` from a main-run-loop
   /// timer in the common modes (so it fires during mouse tracking). The scheduler ends a preview four
@@ -130,11 +134,28 @@ class ChordLabState: NSObject, ObservableObject {
     startKeepAlive(id: id)
   }
 
-  /// Releases `cell` if it is the held one; a cell that was already released (by a press elsewhere,
-  /// a cancelled gesture or disappearance) is ignored, never released twice.
-  @MainActor func releaseCell(_ cell: CellJSON) {
+  /// Releases `cell` if it is the held one; a cell that was already released (by a press elsewhere, a cancelled
+  /// gesture or disappearance) is ignored, never released twice. `release` says why the press ended and how long
+  /// it was held, from the window's event timestamps (`PressRelease`); with Record on, a press that ended with its
+  /// own button-up also inserts its chord for that long (`RecordLength`), and a press that became a drag (the drop
+  /// appends by itself), was superseded or disappeared records nothing.
+  @MainActor func releaseCell(_ cell: CellJSON, _ release: PressRelease) {
     guard heldCellId == cell.id else { return }
     releaseHeld()
+    record(cell, release)
+  }
+
+  /// Record's insert for a released cell (D9), or nothing (`RecordLength.recordedBeats`): the chord's root and
+  /// type, the held time at the host tempo (`bpm`), after the anchor or at the end; the insert selects it, so
+  /// presses chain.
+  @MainActor private func record(_ cell: CellJSON, _ release: PressRelease) {
+    guard let snapshot,
+          let beats = RecordLength.recordedBeats(
+            recording: recording, release: release, bpm: bpm,
+            defaultBeats: LengthOptions.newChordBeats(snapshot.newChordBeats, meter: snapshot.meter))
+    else { return }
+    let index = SelectionLogic.insertionIndex(ids: snapshot.events.map(\.id), anchor: snapshot.selectedEventId)
+    send(command: RecordLength.command(root: cell.root, type: cell.type, beats: beats, index: index))
   }
 
   /// Releases whatever is held (view disappearance, window close).
