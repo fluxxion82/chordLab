@@ -202,26 +202,89 @@ class ChordLabState: NSObject, ObservableObject {
     send(command, tag: kMsgTagCommand)
   }
 
-  /// Runs a keyboard command. Digits append the suggestion chip of that number (nothing when there is
-  /// no such chip); Delete removes the selected chord (nothing without a selection); undo and redo are
-  /// the key bar's commands. The router consumes every mapped key whether or not it did anything, so
-  /// the host never acts on it (see `KeyCommandMap`, `EditorKeyRouter`).
+  /// Runs a keyboard command. Digits append the suggestion chip of that number (nothing when there is no such
+  /// chip); Delete removes every selected chord in one step; ⌘C copies the selection, ⌘X cuts it, ⌘V pastes
+  /// after the anchor (else at the end), ⌘D duplicates the selection after its last block, ⌘A selects every
+  /// block (strip editing design D5, D6); undo and redo are the key bar's commands. Each does nothing when it
+  /// has nothing to act on, and the router consumes every mapped key whether or not it did anything, so the
+  /// host never acts on it (see `KeyCommandMap`, `EditorKeyRouter`).
   @MainActor func perform(_ command: KeyCommand) {
+    let selection = snapshot?.selection ?? []
     switch command {
     case .appendSuggestion(let n):
       guard let suggestions = snapshot?.suggestions, suggestions.indices.contains(n - 1) else { return }
       let suggestion = suggestions[n - 1]
       send(command: ["cmd": "appendChord", "root": suggestion.root, "type": suggestion.type])
     case .deleteSelection:
-      guard let id = snapshot?.selectedEventId else { return }
-      send(command: ["cmd": "removeChord", "id": id])
+      guard !selection.isEmpty else { return }
+      send(command: ClipboardChords.removeCommand(selection))
     case .undo:
       send(command: ["cmd": "undo"])
     case .redo:
       send(command: ["cmd": "redo"])
-    case .copy, .cut, .paste, .duplicate, .selectAll:
-      break  // wired in Task 7
+    case .copy:
+      copyChords(selection)
+    case .cut:
+      cutChords(selection)
+    case .paste:
+      pasteChords(at: SelectionLogic.insertionIndex(ids: eventIds, anchor: snapshot?.selectedEventId))
+    case .duplicate:
+      duplicateChords(selection)
+    case .selectAll:
+      select(SelectionLogic.all(eventIds))
     }
+  }
+
+  // MARK: - Strip editing (the clipboard and the selection, strip editing design D5–D7)
+
+  /// Where the clipboard is written and read (`ChordPasteboard`): the general pasteboard; a harness may put a fake
+  /// here.
+  var pasteboard: any ChordPasteboard = NSPasteboard.general
+
+  /// The ids of the strip's blocks in order; empty before the first snapshot.
+  private var eventIds: [Int] { snapshot?.events.map(\.id) ?? [] }
+
+  /// ⌘C and the block menu's Copy: the chords `ids` (in strip order, whatever the order given) on the pasteboard
+  /// as one item in both forms (`ClipboardChords.copy`). Returns whether the pasteboard took it; false, the
+  /// pasteboard untouched, when none of them is on the strip.
+  @MainActor @discardableResult func copyChords(_ ids: [Int]) -> Bool {
+    guard let events = snapshot?.events else { return false }
+    return ClipboardChords.copy(ids, from: events, to: pasteboard)
+  }
+
+  /// ⌘X and the block menu's Cut: the copy, then `removeChords` (one undo step), sent only once the copy is
+  /// published (`ClipboardChords.cut`); a failed copy removes nothing.
+  @MainActor func cutChords(_ ids: [Int]) {
+    guard let events = snapshot?.events, let removal = ClipboardChords.cut(ids, from: events, to: pasteboard) else { return }
+    send(command: removal)
+  }
+
+  /// Whether the pasteboard holds ChordLab's chords (Paste after is disabled otherwise).
+  @MainActor var canPaste: Bool {
+    ClipboardChords.paste(from: pasteboard) != nil
+  }
+
+  /// ⌘V and Paste after: inserts the pasteboard's chords at `index` (one undo step; they become the selection).
+  /// A pasteboard without ChordLab's chords (text only, or nothing) pastes nothing; a paste past 256 chords is
+  /// the engine's refusal, shown like any other (`lastError`), and the pasteboard keeps its content.
+  @MainActor func pasteChords(at index: Int) {
+    guard let chords = ClipboardChords.paste(from: pasteboard) else { return }
+    send(command: ClipboardChords.insertCommand(chords, at: index))
+  }
+
+  /// ⌘D and the block menu's Duplicate: the chords `ids` again, right after the last of them, without touching
+  /// the pasteboard.
+  @MainActor func duplicateChords(_ ids: [Int]) {
+    guard let events = snapshot?.events else { return }
+    let chords = ClipboardChords.chords(of: events, ids: ids)
+    guard !chords.isEmpty else { return }
+    send(command: ClipboardChords.insertCommand(chords, at: SelectionLogic.index(after: ids, ids: eventIds)))
+  }
+
+  /// Makes `selection` the store's (one `selectEvent` or `selectEvents`), unless it already is.
+  @MainActor func select(_ selection: StripSelection) {
+    guard selection.ids != snapshot?.selection || selection.anchor != snapshot?.selectedEventId else { return }
+    send(command: SelectionLogic.command(selection))
   }
 
   // MARK: - Project key (the Key pickers) and the transpose row
