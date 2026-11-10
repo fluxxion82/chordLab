@@ -17,6 +17,9 @@ class ChordLabState: NSObject, ObservableObject {
   @Published var incompleteBlocks: Int = 0
   /// The playhead (`kMsgTagTransport`); nil until the plug-in pushes one.
   @Published var transport: TransportJSON?
+  /// The host tempo from the last transport push (`TransportJSON.tempo`), 120 until the first one (design D4):
+  /// what Record turns a held time into beats with.
+  var bpm: Double { transport?.tempo ?? 120 }
   /// The MIDI file of the last export request (`kMsgTagExportReady`), or nil while none is ready.
   @Published var exportPath: String?
   /// What the plug-in hears on its MIDI input (`kMsgTagHeard`, design D14); nil until the first push. The

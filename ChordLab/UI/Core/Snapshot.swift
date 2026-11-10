@@ -7,7 +7,7 @@ import Foundation
 /// `selectedEventId`, P2-M3's `homeTriads`, and the chord relations' `relationMode`, `relationReference`
 /// and per-cell `relation` / `relationText`, the progression presets' `presets`, and the applied chords'
 /// `applied` with its cells' `label` / `target`, and the spelled note names `voicingNames` /
-/// `outOfKeyNames`) are optional so that a UI built against this file still decodes a snapshot from an
+/// `outOfKeyNames`, and the strip editing's `selectedEventIds` and `newChordBeats`) are optional so that a UI built against this file still decodes a snapshot from an
 /// older plug-in build.
 
 /// `{"letter":"C","alter":0}`: a spelled tonic, `alter` -1 flat, 0 natural, 1 sharp.
@@ -245,6 +245,12 @@ struct Snapshot: Codable, Equatable {
   /// The selected event (the store's live selection), nil (JSON null, or absent) for none. The sequence
   /// bar's selection ring and the suggestions follow it.
   let selectedEventId: Int?
+  /// Every selected block in strip order (the store's multi-selection, strip editing design D2), the anchor
+  /// `selectedEventId` among them; absent from older plug-in builds. Read it through `selection`.
+  let selectedEventIds: [Int]?
+  /// The length in beats a chord added without one gets (design D3); nil (JSON null, or absent from an older
+  /// plug-in build) for one bar of the meter. The Length menu's title and dot show it.
+  let newChordBeats: Double?
   /// The sections in order of `firstEventIndex`; empty (or absent) when the document has none.
   let sections: [SectionJSON]?
   /// Up to 8 next-chord suggestions after the selected (else the last) chord, best first; the opening
@@ -277,6 +283,10 @@ struct Snapshot: Codable, Equatable {
   /// plug-in build sends no `homeTriads`.
   var homeRow: [CellJSON] { homeTriads ?? [] }
 
+  /// The selected blocks in strip order: `selectedEventIds`, or for an older plug-in build the one
+  /// `selectedEventId` (none when that is nil).
+  var selection: [Int] { selectedEventIds ?? selectedEventId.map { [$0] } ?? [] }
+
   /// Whether the key pickers can be built from this snapshot.
   var hasTonicTable: Bool { modes != nil && tonics != nil }
 
@@ -301,13 +311,23 @@ struct StatusJSON: Codable {
   let incompleteBlocks: Int
 }
 
-/// `kMsgTagTransport` payload: `{"schema":1,"ppq":beats,"playing":bool}`, the host position at the start
-/// of the last audio block and whether the progression plays there (transport running and Follow Live
-/// on). Pushed at ~15 Hz while it changes; the sequence bar's playhead.
+/// `kMsgTagTransport` payload: `{"schema":1,"ppq":beats,"playing":bool,"bpm":tempo}`, the host position at the
+/// start of the last audio block, whether the progression plays there (transport running and Follow Live on)
+/// and the host tempo (120 before the first block; strip editing design D4). Pushed at ~15 Hz while it changes
+/// and whenever the tempo moves by 0.01 bpm or more; the sequence bar's playhead and Record's beats.
 struct TransportJSON: Codable, Equatable {
   let schema: Int
   let ppq: Double
   let playing: Bool
+  /// Absent from older plug-in builds; read it through `tempo`.
+  var bpm: Double? = nil
+
+  /// The tempo in beats per minute: `bpm` when it is a positive finite number, else 120 (an older plug-in, or a
+  /// host that reported none).
+  var tempo: Double {
+    guard let bpm, bpm.isFinite, bpm > 0 else { return 120 }
+    return bpm
+  }
 }
 
 /// `kMsgTagExportReady` payload: `{"schema":1,"path":"…"}`, the MIDI file the plug-in just wrote for a

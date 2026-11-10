@@ -464,6 +464,60 @@ final class SnapshotTests: XCTestCase {
     XCTAssertThrowsError(try Self.decode(Snapshot.self, broken))
   }
 
+  // MARK: - Strip editing (the selection, the new-chord length, the tempo)
+
+  func testSelectionAndNewChordBeatsDecode() throws {
+    let json = Self.phase2.replacingOccurrences(of: "\"selectedEventId\":null,", with:
+      "\"selectedEventId\":2,\"selectedEventIds\":[1,2],\"newChordBeats\":1.5,")
+    let snapshot = try Self.decode(Snapshot.self, json)
+    XCTAssertEqual(snapshot.selectedEventIds, [1, 2])
+    XCTAssertEqual(snapshot.selectedEventId, 2)
+    XCTAssertEqual(snapshot.newChordBeats, 1.5)
+    XCTAssertEqual(snapshot.selection, [1, 2])
+  }
+
+  func testAnEmptySelectionAndANullNewChordBeatsDecode() throws {
+    let json = Self.phase2.replacingOccurrences(of: "\"selectedEventId\":null,", with:
+      "\"selectedEventId\":null,\"selectedEventIds\":[],\"newChordBeats\":null,")
+    let snapshot = try Self.decode(Snapshot.self, json)
+    XCTAssertEqual(snapshot.selectedEventIds, [])
+    XCTAssertNil(snapshot.newChordBeats)
+    XCTAssertEqual(snapshot.selection, [])
+  }
+
+  /// A plug-in built before multi-selection sends `selectedEventId` only: the selection is that block alone.
+  func testAnOlderSnapshotsSelectionIsTheSelectedEventAlone() throws {
+    let older = Self.phase2.replacingOccurrences(of: "\"selectedEventId\":null,", with: "\"selectedEventId\":2,")
+    let snapshot = try Self.decode(Snapshot.self, older)
+    XCTAssertNil(snapshot.selectedEventIds)
+    XCTAssertNil(snapshot.newChordBeats)
+    XCTAssertEqual(snapshot.selection, [2])
+    XCTAssertEqual(try Self.decode(Snapshot.self, Self.phase2).selection, [])
+    XCTAssertEqual(try Self.decode(Snapshot.self, Self.phase1).selection, [])
+  }
+
+  func testTheFixturesCarryTheMultiSelectionAndTheNewChordLength() throws {
+    let home = try snapshotFixture("snapshot-home-progression.json")
+    XCTAssertEqual(home.selectedEventIds, [2, 3])
+    XCTAssertEqual(home.selectedEventId, 3)
+    XCTAssertNil(home.newChordBeats)
+    XCTAssertEqual(try snapshotFixture("snapshot-feel.json").newChordBeats, 1.5)
+    XCTAssertEqual(try snapshotFixture("snapshot-home-empty.json").selectedEventIds, [])
+    XCTAssertNil(try snapshotFixture("snapshot-legacy-phase1.json").selectedEventIds)
+  }
+
+  func testTheTransportDecodesWithAndWithoutTheTempo() throws {
+    let withTempo = try Self.decode(TransportJSON.self, #"{"schema":1,"ppq":2.5,"playing":false,"bpm":96.5}"#)
+    XCTAssertEqual(withTempo, TransportJSON(schema: 1, ppq: 2.5, playing: false, bpm: 96.5))
+    XCTAssertEqual(withTempo.tempo, 96.5)
+    let older = try Self.decode(TransportJSON.self, #"{"schema":1,"ppq":2.5,"playing":false}"#)
+    XCTAssertNil(older.bpm)
+    XCTAssertEqual(older.tempo, 120)
+    XCTAssertEqual(TransportJSON(schema: 1, ppq: 0, playing: false, bpm: 0).tempo, 120)
+    XCTAssertEqual(TransportJSON(schema: 1, ppq: 0, playing: false, bpm: -5).tempo, 120)
+    XCTAssertEqual(TransportJSON(schema: 1, ppq: 0, playing: false, bpm: .nan).tempo, 120)
+  }
+
   // MARK: - Engine fixtures (engine/tests/fixtures)
 
   /// The files the engine tests write and these tests read; each missing one is a failure.
