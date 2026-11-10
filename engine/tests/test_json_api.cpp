@@ -4137,3 +4137,76 @@ TEST_CASE("setNewChordLength: a number or null, snapped, live, used by appendCho
     }
     checkRejectedKeepsHistory(store, {{"cmd", "setNewChordLength"}});
 }
+
+// --- Document changed: the host's modified flag -----------------------------------------------------------
+
+namespace {
+
+/// Sends `cmd` (schema added), requires it to be accepted and returns its `documentChanged` flag.
+bool changes(DocumentStore& store, json cmd) {
+    cmd["schema"] = kJsonSchema;
+    std::string error;
+    bool changed = true;  // the call must set it either way
+    const bool ok = applyCommandJson(store, cmd.dump(), error, &changed);
+    REQUIRE_MESSAGE(ok, error);
+    return changed;
+}
+
+}  // namespace
+
+TEST_CASE("applyCommandJson: documentChanged says whether the document differs from before the command") {
+    DocumentStore store = threeChords();
+
+    SUBCASE("an edit that changes the document") {
+        CHECK(changes(store, {{"cmd", "setLength"}, {"id", 1}, {"lengthBeats", 2.0}}));
+        CHECK(changes(store, {{"cmd", "appendChord"}, {"root", 9}, {"type", "min"}}));
+        CHECK(changes(store, {{"cmd", "removeChord"}, {"id", 2}}));
+        CHECK(changes(store, {{"cmd", "setKey"}, {"letter", "G"}, {"alter", 0}, {"mode", "Ionian"}}));
+        CHECK(changes(store, {{"cmd", "setInversion"}, {"id", 1}, {"inversion", 1}}));
+    }
+    SUBCASE("an accepted no-op: the value already held, an id no event has, a move to the current place") {
+        CHECK_FALSE(changes(store, {{"cmd", "setLength"}, {"id", 1}, {"lengthBeats", 4.0}}));
+        CHECK_FALSE(changes(store, {{"cmd", "setLength"}, {"id", 99}, {"lengthBeats", 1.0}}));
+        CHECK_FALSE(changes(store, {{"cmd", "moveChord"}, {"id", 1}, {"index", 0}}));
+    }
+    SUBCASE("the selection is not part of the document") {
+        CHECK_FALSE(changes(store, {{"cmd", "selectEvent"}, {"id", 2}}));
+        CHECK(store.selectedEventId() == 2);
+        CHECK_FALSE(changes(store, {{"cmd", "selectEvents"}, {"ids", {1, 3}}, {"anchor", 3}}));
+        CHECK(store.selectedEventIds() == std::vector<int>{1, 3});
+    }
+    SUBCASE("live state the saved state carries counts, when it moves") {
+        CHECK(changes(store, {{"cmd", "setNewChordLength"}, {"lengthBeats", 1.5}}));
+        CHECK_FALSE(changes(store, {{"cmd", "setNewChordLength"}, {"lengthBeats", 1.5}}));
+        CHECK(changes(store, {{"cmd", "browseKey"}, {"steps", 1}}));
+        CHECK(changes(store, {{"cmd", "browseKey"}, {"home", true}}));
+        CHECK_FALSE(changes(store, {{"cmd", "browseKey"}, {"home", true}}));
+        CHECK_FALSE(changes(store, {{"cmd", "setFollowHost"}, {"on", true}}));  // on by default
+        CHECK(changes(store, {{"cmd", "setFollowHost"}, {"on", false}}));
+    }
+    SUBCASE("undo and redo: a change when there is something to undo or redo, none otherwise") {
+        CHECK(changes(store, {{"cmd", "undo"}}));  // the last append
+        CHECK(store.doc().events.size() == 2);
+        CHECK(changes(store, {{"cmd", "redo"}}));
+        CHECK_FALSE(changes(store, {{"cmd", "redo"}}));  // nothing left to redo
+        DocumentStore fresh;
+        CHECK_FALSE(changes(fresh, {{"cmd", "undo"}}));
+    }
+    SUBCASE("a rejected command reports no change") {
+        std::string error;
+        bool changed = true;
+        CHECK_FALSE(applyCommandJson(store, R"({"schema":1,"cmd":"nonsense"})", error, &changed));
+        CHECK_FALSE(changed);
+        changed = true;
+        CHECK_FALSE(applyCommandJson(store, "not json", error, &changed));
+        CHECK_FALSE(changed);
+        changed = true;
+        CHECK_FALSE(applyCommandJson(store, R"({"schema":1,"cmd":"setLength","id":1,"lengthBeats":"nan"})", error, &changed));
+        CHECK_FALSE(changed);
+    }
+    SUBCASE("the flag is optional") {
+        std::string error;
+        CHECK(applyCommandJson(store, R"({"schema":1,"cmd":"setLength","id":1,"lengthBeats":2})", error));
+        CHECK(store.doc().events[0].lengthBeats == 2.0);
+    }
+}

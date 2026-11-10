@@ -72,6 +72,11 @@ private:
   void PushSnapshot();
   // Pushes {"schema":1,"error":message} to the editor, on the main thread.
   void PushError(const std::string& message);
+  // Main thread, never under mModelMutex: tells the host that the state SerializeState writes has changed, so
+  // that a project whose only edits are ChordLab's is saved (VST3: IComponentHandler2::setDirty; ChordLab has
+  // no parameters, so nothing else marks the host's document modified). Called once per accepted command whose
+  // documentChanged flag is set (json_api.h); a no-op under the AU and the standalone app.
+  void MarkHostDirty();
   // Runs `fn` on the main thread: inline when already there, else queued; dropped once the plugin is gone.
   void OnMain(std::function<void()> fn);
   // Main thread: adopts a restored editor size, asking the host to resize an open editor.
