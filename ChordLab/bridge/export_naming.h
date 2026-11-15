@@ -4,6 +4,7 @@
 // naming can be unit-tested outside Xcode (ChordLab/bridge/tests).
 
 #include <cctype>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -23,16 +24,18 @@ inline std::string safeExportLabel(std::string_view label)
     return safe;
 }
 
-/// The label (before safeExportLabel) of a clip export, D12: `<key>-<lane label>`, then `-<section name>` for a
+/// The label (before safeExportLabel) of a clip export, D12: `<key>-<lane label>`, then `-<section label>` for a
 /// section. The lane label is the lane's name for one lane ("Chords" for the chords lane, the track's name for a
 /// track: the caller passes the names in request order), "All" when `allLanes` (whatever `laneNames` holds), and
-/// "Lanes" for several explicit lanes: a joined list of up to five 64-byte track names could pass the file
-/// system's 255-byte name limit, so the label does not grow with the lanes. `sectionName` empty means the whole
-/// progression (or an unnamed section: no segment is added). An empty lane name, or no lanes at all without
-/// `allLanes`, leaves its segment out rather than a dangling '-'. "C Ionian" + {"Bass"} -> "C Ionian-Bass",
-/// + {"Chords"} and "Verse" -> "C Ionian-Chords-Verse", all lanes -> "C Ionian-All".
+/// "Lanes" for several explicit lanes: a joined list of at most kMaxTracks (4) 64-byte track names plus "Chords"
+/// could pass the file system's 255-byte name limit, so the label does not grow with the lanes. `sectionName`
+/// nullopt means the whole progression (no section segment); a present name is the section's, and a present but
+/// empty one (an unnamed section) is the segment "Section", so a section's file never has the whole
+/// progression's name. An empty lane name, or no lanes at all without `allLanes`, leaves its segment out rather
+/// than a dangling '-'. "C Ionian" + {"Bass"} -> "C Ionian-Bass", + {"Chords"} and "Verse" ->
+/// "C Ionian-Chords-Verse", + {"Chords"} and "" -> "C Ionian-Chords-Section", all lanes -> "C Ionian-All".
 inline std::string clipExportLabel(std::string_view keyName, const std::vector<std::string>& laneNames, bool allLanes,
-                                   std::string_view sectionName)
+                                   const std::optional<std::string>& sectionName)
 {
     std::string label(keyName);
     std::string_view lane;
@@ -47,10 +50,10 @@ inline std::string clipExportLabel(std::string_view keyName, const std::vector<s
         label += '-';
         label += lane;
     }
-    if (!sectionName.empty())
+    if (sectionName)
     {
         label += '-';
-        label += sectionName;
+        label += sectionName->empty() ? std::string_view("Section") : std::string_view(*sectionName);
     }
     return label;
 }

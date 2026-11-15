@@ -4,9 +4,11 @@
 
 #include <string>
 #include <string_view>
+#include <vector>
 
 using chordlab::bridge::parseClipExportRequest;
 using chordlab::bridge::parseSectionExportRequest;
+using chordlab::bridge::resolveClipExport;
 
 TEST_CASE("parseSectionExportRequest: the happy path") {
     const auto r = parseSectionExportRequest(R"({"schema":1,"id":7})");
@@ -238,4 +240,106 @@ TEST_CASE("parseClipExportRequest: an escaped \\u0000 is an ordinary string char
     CHECK(r->lanes.size() == 1);
     // ...but inside a lane entry it is just a string that is not "chords".
     CHECK_FALSE(parseClipExportRequest(R"({"schema":1,"lanes":["chords\u0000"]})").has_value());
+}
+
+// ---- resolveClipExport (what HandleExportClip does with a parsed request) ----
+
+namespace {
+// A document with sections 11 "Verse" and 12 "" (unnamed) and tracks 5 "Bass", 8 "Lead".
+chordlab::Document resolveDoc() {
+    chordlab::Document doc;
+    doc.sections.push_back(chordlab::Section{11, "Verse", 0, 0});
+    doc.sections.push_back(chordlab::Section{12, "", 1, 2});
+    doc.tracks.push_back(chordlab::Track{5, "Bass", chordlab::TrackRole::Bass, false, false, {}});
+    doc.tracks.push_back(chordlab::Track{8, "Lead", chordlab::TrackRole::Lead, false, false, {}});
+    return doc;
+}
+
+chordlab::bridge::ClipExportRequest requestOf(const std::string& lanes, const std::string& section = "null") {
+    const auto r = parseClipExportRequest(clipRequest(lanes, section));
+    REQUIRE(r.has_value());
+    return *r;
+}
+}  // namespace
+
+TEST_CASE("resolveClipExport: the whole progression has no section and spec.sectionIndex -1") {
+    const auto r = resolveClipExport(resolveDoc(), requestOf(R"(["chords"])"));
+    CHECK(r.problem == nullptr);
+    CHECK(r.spec.sectionIndex == -1);
+    CHECK_FALSE(r.sectionName.has_value());
+    CHECK_FALSE(r.spec.allLanes);
+    REQUIRE(r.spec.lanes.size() == 1);
+    CHECK(r.spec.lanes[0].chords);
+    CHECK(r.laneNames == std::vector<std::string>{"Chords"});
+}
+
+TEST_CASE("resolveClipExport: a section is its position in doc.sections and its name") {
+    const auto verse = resolveClipExport(resolveDoc(), requestOf("[5]", "11"));
+    CHECK(verse.problem == nullptr);
+    CHECK(verse.spec.sectionIndex == 0);
+    REQUIRE(verse.sectionName.has_value());
+    CHECK(*verse.sectionName == "Verse");
+
+    // An unnamed section is present with an empty name (not nullopt: the label says "Section").
+    const auto unnamed = resolveClipExport(resolveDoc(), requestOf("[5]", "12"));
+    CHECK(unnamed.problem == nullptr);
+    CHECK(unnamed.spec.sectionIndex == 1);
+    REQUIRE(unnamed.sectionName.has_value());
+    CHECK(unnamed.sectionName->empty());
+}
+
+TEST_CASE("resolveClipExport: an unknown section is \"no such section\"") {
+    const auto r = resolveClipExport(resolveDoc(), requestOf(R"(["chords"])", "99"));
+    REQUIRE(r.problem != nullptr);
+    CHECK(std::string(r.problem) == "no such section");
+    // A document without sections has none to name, even though exportClip reads index 0 as the whole.
+    const auto none = resolveClipExport(chordlab::Document{}, requestOf(R"(["chords"])", "1"));
+    REQUIRE(none.problem != nullptr);
+    CHECK(std::string(none.problem) == "no such section");
+}
+
+TEST_CASE("resolveClipExport: an unknown track is \"no such track\", the first one found") {
+    const auto r = resolveClipExport(resolveDoc(), requestOf(R"(["chords",5,77,88])"));
+    REQUIRE(r.problem != nullptr);
+    CHECK(std::string(r.problem) == "no such track");
+    const auto only = resolveClipExport(resolveDoc(), requestOf("[3]"));
+    REQUIRE(only.problem != nullptr);
+    CHECK(std::string(only.problem) == "no such track");
+}
+
+TEST_CASE("resolveClipExport: the section is checked before the tracks") {
+    const auto r = resolveClipExport(resolveDoc(), requestOf("[77]", "99"));
+    REQUIRE(r.problem != nullptr);
+    CHECK(std::string(r.problem) == "no such section");
+    // With a good section the track is the problem.
+    const auto track = resolveClipExport(resolveDoc(), requestOf("[77]", "11"));
+    REQUIRE(track.problem != nullptr);
+    CHECK(std::string(track.problem) == "no such track");
+}
+
+TEST_CASE("resolveClipExport: all lanes need no lane check and carry no lane names") {
+    const auto r = resolveClipExport(resolveDoc(), requestOf("\"all\""));
+    CHECK(r.problem == nullptr);
+    CHECK(r.spec.allLanes);
+    CHECK(r.spec.lanes.empty());
+    CHECK(r.laneNames.empty());
+    CHECK(r.spec.sectionIndex == -1);
+    const auto inSection = resolveClipExport(resolveDoc(), requestOf("\"all\"", "12"));
+    CHECK(inSection.problem == nullptr);
+    CHECK(inSection.spec.allLanes);
+    CHECK(inSection.spec.sectionIndex == 1);
+    const auto badSection = resolveClipExport(resolveDoc(), requestOf("\"all\"", "3"));
+    REQUIRE(badSection.problem != nullptr);
+    CHECK(std::string(badSection.problem) == "no such section");
+}
+
+TEST_CASE("resolveClipExport: lane names and spec lanes follow the request order") {
+    const auto r = resolveClipExport(resolveDoc(), requestOf(R"([8,"chords",5])"));
+    CHECK(r.problem == nullptr);
+    CHECK(r.laneNames == std::vector<std::string>{"Lead", "Chords", "Bass"});
+    REQUIRE(r.spec.lanes.size() == 3);
+    CHECK(r.spec.lanes[0].trackId == 8);
+    CHECK_FALSE(r.spec.lanes[0].chords);
+    CHECK(r.spec.lanes[1].chords);
+    CHECK(r.spec.lanes[2].trackId == 5);
 }

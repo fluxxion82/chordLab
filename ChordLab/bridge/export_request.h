@@ -4,6 +4,7 @@
 // handling can be unit-tested outside Xcode (ChordLab/bridge/tests).
 
 #include "message_fields.h"
+#include "chordlab/document.h"
 #include "chordlab/export.h"
 #include "chordlab/json_api.h"
 #include "chordlab/tracks.h"
@@ -132,6 +133,74 @@ inline std::optional<ClipExportRequest> parseClipExportRequest(std::string_view 
         request.sectionId = *id;
     }
     return request;
+}
+
+/// What a parsed clip export request means for one document: the engine's spec, the lane names for the label, the
+/// section's name, or the first problem found.
+struct ResolvedClipExport {
+    /// `allLanes` and `lanes` as requested; `sectionIndex` the section's position in `doc.sections`, -1 for the
+    /// whole progression. Meaningful only when `problem` is null.
+    chordlab::ClipSpec spec;
+    /// The name of each requested lane, in request order: "Chords" for the chords lane, the track's name for a
+    /// track. Empty for `allLanes` (the label does not use names then). Meaningful only when `problem` is null.
+    std::vector<std::string> laneNames;
+    /// The requested section's name (empty for an unnamed one); nullopt for the whole progression.
+    std::optional<std::string> sectionName;
+    /// null, or the text of the kMsgTagError to send: "no such section" or "no such track". Static storage.
+    const char* problem = nullptr;
+};
+
+/// Resolves the ids of `request` against `doc` (the caller holds the model lock). `exportClip` answers an unknown
+/// track or section with empty bytes ("nothing to export"), so this names which id is wrong. The section is
+/// checked first ("no such section": its id matches no `doc.sections[i].id`; a document without sections has
+/// none, whatever `exportClip` would read index 0 as), then the lanes in request order, the first track id that
+/// matches no `doc.tracks[i].id` giving "no such track". One problem is reported, the first. With `allLanes` no
+/// lane is checked. Pure over `doc`: no engine function is called.
+inline ResolvedClipExport resolveClipExport(const chordlab::Document& doc, const ClipExportRequest& request)
+{
+    ResolvedClipExport out;
+    out.spec.allLanes = request.allLanes;
+    out.spec.lanes = request.lanes;
+    out.spec.sectionIndex = -1;
+    if (request.sectionId)
+    {
+        std::size_t found = doc.sections.size();
+        for (std::size_t i = 0; i < doc.sections.size(); ++i)
+            if (doc.sections[i].id == *request.sectionId)
+            {
+                found = i;
+                break;
+            }
+        if (found == doc.sections.size())
+        {
+            out.problem = "no such section";
+            return out;
+        }
+        out.spec.sectionIndex = static_cast<int>(found);
+        out.sectionName = doc.sections[found].name;
+    }
+    for (const chordlab::ClipLane& lane : request.lanes)
+    {
+        if (lane.chords)
+        {
+            out.laneNames.push_back("Chords");
+            continue;
+        }
+        const chordlab::Track* track = nullptr;
+        for (const chordlab::Track& candidate : doc.tracks)
+            if (candidate.id == lane.trackId)
+            {
+                track = &candidate;
+                break;
+            }
+        if (!track)
+        {
+            out.problem = "no such track";
+            return out;
+        }
+        out.laneNames.push_back(track->name);
+    }
+    return out;
 }
 
 }  // namespace chordlab::bridge

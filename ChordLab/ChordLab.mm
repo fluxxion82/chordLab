@@ -884,8 +884,8 @@ void ChordLab::HandleExportClip(std::string_view text)
 {
   // Main thread. {"schema":1,"lanes":...,"sectionId":...}: lanes are independent clips of their own notes
   // (tracks design D12). exportClip answers an unknown track or section with empty bytes ("nothing to
-  // export"), so the ids are resolved here, under the same lock as the export, for an error that says
-  // which is wrong (the section is checked first; the first problem found is the one reported).
+  // export"), so resolveClipExport (bridge/export_request.h, unit-tested) resolves the ids under the same lock
+  // as the export, for an error that says which is wrong (the section first, then the first unknown track).
   @autoreleasepool
   {
   const std::optional<chordlab::bridge::ClipExportRequest> request = chordlab::bridge::parseClipExportRequest(text);
@@ -895,54 +895,23 @@ void ChordLab::HandleExportClip(std::string_view text)
     return;
   }
   const double bpm = HostBpm();
+  chordlab::bridge::ResolvedClipExport resolved;
   std::vector<uint8_t> bytes;
   std::string label;
-  const char* problem = nullptr;
   {
     std::lock_guard<std::mutex> lock(mModelMutex);
     const chordlab::Document& doc = mStore.doc();
-    chordlab::ClipSpec spec;
-    spec.allLanes = request->allLanes;
-    spec.lanes = request->lanes;
-    spec.sectionIndex = -1;
-    std::string sectionName;
-    if (request->sectionId)
+    resolved = chordlab::bridge::resolveClipExport(doc, *request);
+    if (!resolved.problem)
     {
-      const int index = mStore.findSectionIndex(*request->sectionId);
-      if (index < 0)
-        problem = "no such section";
-      else
-      {
-        spec.sectionIndex = index;
-        sectionName = doc.sections[(size_t) index].name;
-      }
-    }
-    std::vector<std::string> laneNames;
-    for (const chordlab::ClipLane& lane : request->lanes)
-    {
-      if (lane.chords)
-      {
-        laneNames.push_back("Chords");
-        continue;
-      }
-      const int index = mStore.findTrackIndex(lane.trackId);
-      if (index < 0)
-      {
-        if (!problem)
-          problem = "no such track";
-      }
-      else
-        laneNames.push_back(doc.tracks[(size_t) index].name);
-    }
-    if (!problem)
-    {
-      bytes = chordlab::exportClip(doc, spec, bpm);
-      label = chordlab::bridge::clipExportLabel(chordlab::keyName(doc.projectKey), laneNames, request->allLanes, sectionName);
+      bytes = chordlab::exportClip(doc, resolved.spec, bpm);
+      label = chordlab::bridge::clipExportLabel(chordlab::keyName(doc.projectKey), resolved.laneNames, request->allLanes,
+                                                resolved.sectionName);
     }
   }
-  if (problem)
+  if (resolved.problem)
   {
-    PushError(problem);                                          // outside the lock, like every call into the UI
+    PushError(resolved.problem);                                 // outside the lock, like every call into the UI
     return;
   }
   WriteExport(bytes, label);
@@ -951,20 +920,22 @@ void ChordLab::HandleExportClip(std::string_view text)
 
 void ChordLab::WriteExport(const std::vector<uint8_t>& bytes, const std::string& label)
 {
-  // Main thread, never real-time. `bytes` come from chordlab::exportMidi (empty when there is nothing to write).
+  // Main thread, never real-time. `bytes` come from chordlab::exportMidi or chordlab::exportClip (empty when there is
+  // nothing to write: no events, or the writer refused).
   @autoreleasepool
   {
   if (bytes.empty())
   {
-    PushError("nothing to export");                              // no chords, or the writer refused (a tempo it cannot encode)
+    PushError("nothing to export");                              // no events, or the writer refused (a tempo it cannot encode)
     return;
   }
 
   // NSTemporaryDirectory()/ChordLab/ChordLab-<label>-<yyyyMMdd-HHmmss>-<pid>-<counter>-<uuid8>.mid, the
-  // label (the key, plus the section name for a section) spelled with 's' for a sharp and '-' for
-  // anything but an ASCII letter or digit so the name is safe anywhere ("C-Ionian", "Fs-Dorian",
-  // "C-Ionian-Verse"); pid, counter and uuid make it unique across instances and processes, and the name
-  // is checked to be unused before anything is written (see the cleanup note above).
+  // label (the key; plus the section name for a section; for a clip, the lane and then the section) spelled
+  // with 's' for a sharp and '-' for anything but an ASCII letter or digit so the name is safe anywhere
+  // ("C-Ionian", "Fs-Dorian", "C-Ionian-Verse", "C-Ionian-Bass-Verse"); pid, counter and uuid make it unique
+  // across instances and processes, and the name is checked to be unused before anything is written (see the
+  // cleanup note above).
   const std::string safeLabel = chordlab::bridge::safeExportLabel(label);
   char stamp[32] = {0};
   const std::time_t now = std::time(nullptr);
