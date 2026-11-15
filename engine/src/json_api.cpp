@@ -28,6 +28,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <set>
 #include <string>
@@ -404,6 +405,30 @@ public:
         return fail(name, "must be an integer " + range);
     }
 
+    /// An integer in `lo`..`hi` inclusive, read at 64 bits: the JSON number must be an integer (no fraction or
+    /// exponent) that fits an `int64_t`, so nothing is narrowed or wrapped before the range check (2^63 and
+    /// -2^63 - 1 are errors, not wrapped values).
+    bool getInt64In(const char* name, std::int64_t lo, std::int64_t hi, std::int64_t& out) {
+        const json* v = require(name);
+        if (v == nullptr) {
+            return false;
+        }
+        if (v->is_number_unsigned()) {
+            const auto u = v->get<std::uint64_t>();
+            if (hi >= 0 && u <= static_cast<std::uint64_t>(hi) && static_cast<std::int64_t>(u) >= lo) {
+                out = static_cast<std::int64_t>(u);
+                return true;
+            }
+        } else if (v->is_number_integer()) {
+            const auto i = v->get<std::int64_t>();
+            if (i >= lo && i <= hi) {
+                out = i;
+                return true;
+            }
+        }
+        return fail(name, "must be an integer in " + std::to_string(lo) + ".." + std::to_string(hi));
+    }
+
     /// A finite number (integer or float).
     bool getNumber(const char* name, double& out) {
         const json* v = require(name);
@@ -481,7 +506,7 @@ public:
         return false;
     }
 
-private:
+    /// The field, or nullptr after recording "missing <field>".
     const json* require(const char* name) {
         const json* v = find(name);
         if (v == nullptr) {
@@ -490,6 +515,7 @@ private:
         return v;
     }
 
+private:
     const json& object_;
     std::string where_;
     std::string& error_;
@@ -810,6 +836,18 @@ struct Command {
         SetNewChordLength,
         SetRelationMode,
         LoadPreset,
+        AddTrack,
+        RemoveTrack,
+        PatchTrack,
+        MoveTrack,
+        SetTrackMute,
+        SetTrackSolo,
+        SetChordsMute,
+        SetChordsSolo,
+        InsertNotes,
+        RemoveNotes,
+        UpdateNotes,
+        SelectNotes,
         Undo,
         Redo
     };
@@ -823,10 +861,12 @@ struct Command {
     bool hasLength = false;
     int velocity = 100;        // AppendChord (optional, store default), SetVelocity
     // MoveChord, SetLength, SetVelocity, RemoveChord, the voicing, section and selection commands; SelectEvents' anchor
-    // (kNoEventId when absent or null)
+    // (kNoEventId when absent or null); the track of the track and note commands (wire `id`, or `trackId` for the note
+    // commands; SelectNotes: kNoTrackId for a null `trackId`)
     int id = 0;
-    int index = 0;             // MoveChord, AddSection, MoveSectionStart, InsertChords
-    // SetProgressionLoop, SetFollowHost, SetAutoVoiceLead, SetTransposeWithKey, SetKeyHintSeen, SetMidiThru
+    int index = 0;             // MoveChord, AddSection, MoveSectionStart, InsertChords, MoveTrack
+    // SetProgressionLoop, SetFollowHost, SetAutoVoiceLead, SetTransposeWithKey, SetKeyHintSeen, SetMidiThru,
+    // SetTrackMute, SetTrackSolo, SetChordsMute, SetChordsSolo
     bool on = false;
     Feel feel{};               // SetFeel
     Meter meter{};             // SetMeter
@@ -838,15 +878,23 @@ struct Command {
     RelationMode relationMode = RelationMode::Blend;  // SetRelationMode
     const Preset* preset = nullptr;                   // LoadPreset: a record of allPresets(), never null once parsed
     ProgressionLoad load = ProgressionLoad::Append;   // LoadPreset
+    TrackRole role = TrackRole::Other;                // AddTrack, PatchTrack (when `hasRole`)
+    bool hasRole = false;                             // PatchTrack: `role` was given
+    bool hasName = false;                             // AddTrack, PatchTrack: a `name` was given (it travels in `name`)
+    bool hasBaseRevision = false;                     // InsertNotes, RemoveNotes, UpdateNotes: `baseRevision` was given
+    std::uint64_t baseRevision = 0;                   // ... and this is it
 };
 static_assert(std::is_trivially_destructible_v<Command>, "Command must be plain data: destroying one must not allocate");
 
 /// What a command carries besides `Command`'s plain fields, owned by the reader's frame like the section name:
-/// the chords of `insertChords` and the ids of `removeChords`, `setLengths` and `selectEvents`. Its destructor
-/// frees, never allocates.
+/// the chords of `insertChords` (with their notes), the ids of `removeChords`, `setLengths`, `selectEvents`,
+/// `removeNotes` and `selectNotes`, and the notes of `insertNotes` and `updateNotes`. Its destructor frees,
+/// never allocates.
 struct CommandLists {
     std::vector<ChordSpec> chords;
     std::vector<int> ids;
+    std::vector<NoteSpec> notes;
+    std::vector<NoteEdit> edits;
 };
 
 // Phase A parsers: each reads the fields of one command kind into `out`, reporting through `Fields`.
@@ -977,15 +1025,20 @@ bool parseSetOctave(Fields& fields, Command& out) {
     return fields.getInt("id", out.id) && fields.getInt("octave", out.octave);
 }
 
-/// Reads a section `name` field: a string of at most `kMaxSectionNameBytes` UTF-8 bytes.
-bool getSectionName(Fields& fields, std::string& name) {
+/// Reads a `name` field: a string of at most `maxBytes` UTF-8 bytes.
+bool getBoundedName(Fields& fields, std::string& name, int maxBytes) {
     if (!fields.getString("name", name)) {
         return false;
     }
-    if (name.size() > static_cast<std::size_t>(kMaxSectionNameBytes)) {
-        return fields.fail("name", "must be at most " + std::to_string(kMaxSectionNameBytes) + " bytes");
+    if (name.size() > static_cast<std::size_t>(maxBytes)) {
+        return fields.fail("name", "must be at most " + std::to_string(maxBytes) + " bytes");
     }
     return true;
+}
+
+/// Reads a section `name` field: a string of at most `kMaxSectionNameBytes` UTF-8 bytes.
+bool getSectionName(Fields& fields, std::string& name) {
+    return getBoundedName(fields, name, kMaxSectionNameBytes);
 }
 
 /// `addSection {index, name?}`: the name, when given, goes to `name`; absent, it stays empty (the store's
@@ -1027,12 +1080,121 @@ bool parseSelectEvent(Fields& fields, Command& out) {
     return toInt(*id, out.id) || fields.fail("id", "must be an integer or null");
 }
 
+/// Wire names of `TrackRole`, in enum order: what `addTrack`, `patchTrack` and a lane's `role` carry.
+constexpr const char* kTrackRoleNames[] = {"bass", "lead", "other"};
+
+/// Reads the role at `fields[name]`: "bass", "lead" or "other" (lowercase, as the snapshot publishes them).
+/// Missing is "missing <field>"; mistyped and unknown values alike are one message listing the three.
+bool parseRoleField(Fields& fields, const char* name, TrackRole& out) {
+    const json* v = fields.require(name);
+    if (v == nullptr) {
+        return false;
+    }
+    if (v->is_string()) {
+        const std::string text = v->get<std::string>();
+        for (int i = 0; i < 3; ++i) {
+            if (text == kTrackRoleNames[i]) {
+                out = static_cast<TrackRole>(i);
+                return true;
+            }
+        }
+    }
+    return fields.fail(name, "must be \"bass\", \"lead\" or \"other\"");
+}
+
+/// An optional integer: absent leaves `out` empty, present must be an integer (null is not one).
+bool getOptionalInt(Fields& fields, const char* name, std::optional<int>& out) {
+    if (!fields.has(name)) {
+        return true;
+    }
+    int value = 0;
+    if (!fields.getInt(name, value)) {
+        return false;
+    }
+    out = value;
+    return true;
+}
+
+/// An optional 64-bit tick count (`getInt64In` over the whole of int64; the store clamps it into the domain).
+bool getOptionalTicks(Fields& fields, const char* name, std::optional<std::int64_t>& out) {
+    if (!fields.has(name)) {
+        return true;
+    }
+    std::int64_t value = 0;
+    if (!fields.getInt64In(name, std::numeric_limits<std::int64_t>::min(), std::numeric_limits<std::int64_t>::max(), value)) {
+        return false;
+    }
+    out = value;
+    return true;
+}
+
+/// A required 64-bit tick count.
+bool getTicks(Fields& fields, const char* name, std::int64_t& out) {
+    return fields.getInt64In(name, std::numeric_limits<std::int64_t>::min(), std::numeric_limits<std::int64_t>::max(), out);
+}
+
+/// The most chord notes one `insertChords` batch may carry in all: every track's worth.
+constexpr std::size_t kMaxChordNotes = static_cast<std::size_t>(kMaxTracks) * static_cast<std::size_t>(kMaxNotesPerTrack);
+
+/// The `notes` of one `insertChords` entry, `chordFields` being `chords[i]`: an array of objects `{lane:{trackId?,
+/// name, role}, offset, length, pitch, velocity?}` (`velocity` 100 when absent). `noteTotal` counts the notes of the
+/// whole batch so far and may not pass `kMaxChordNotes`, checked before any element is read. Ticks are int64
+/// (the store clamps), pitch, velocity and the lane's `trackId` ints. Errors carry the whole path
+/// ("chords[1].notes[0].lane.role must be ...").
+bool parseChordNotes(Fields& chordFields, std::vector<ChordNoteSpec>& out, std::size_t& noteTotal, std::string& error) {
+    const json* list = chordFields.getArray("notes");
+    if (list == nullptr) {
+        return false;
+    }
+    if (list->size() > kMaxChordNotes - noteTotal) {
+        return chordFields.fail("notes", "must not bring the batch to more than " + std::to_string(kMaxChordNotes) + " notes");
+    }
+    noteTotal += list->size();
+    out.clear();
+    out.reserve(list->size());
+    for (std::size_t i = 0; i < list->size(); ++i) {
+        const std::string where = chordFields.label("notes") + "[" + std::to_string(i) + "]";
+        const json& item = (*list)[i];
+        if (!item.is_object()) {
+            error = where + " must be an object";
+            return false;
+        }
+        Fields noteFields(item, where, error);
+        ChordNoteSpec note;
+        const json* laneObject = noteFields.getObject("lane");
+        if (laneObject == nullptr) {
+            return false;
+        }
+        Fields laneFields(*laneObject, noteFields.label("lane"), error);
+        if (!getBoundedName(laneFields, note.lane.name, kMaxTrackNameBytes) ||
+            !parseRoleField(laneFields, "role", note.lane.role)) {
+            return false;
+        }
+        if (laneFields.has("trackId") && !laneFields.find("trackId")->is_null()) {
+            int trackId = 0;
+            if (!laneFields.getInt("trackId", trackId)) {
+                return false;
+            }
+            note.lane.trackId = trackId;
+        }
+        if (!getTicks(noteFields, "offset", note.offsetTick) || !getTicks(noteFields, "length", note.lengthTicks) ||
+            !noteFields.getInt("pitch", note.pitch)) {
+            return false;
+        }
+        if (noteFields.has("velocity") && !noteFields.getInt("velocity", note.velocity)) {
+            return false;
+        }
+        out.push_back(std::move(note));
+    }
+    return true;
+}
+
 /// One `insertChords` entry, `fields` being `chords[i]`: `root` (0..11) and `type` (a dictionary id) required;
 /// `lengthBeats` (a finite number), `velocity` (an integer), `inversion` (0..tones - 1 of the chord), `octave`
 /// (kMinVoicingOctave..kMaxVoicingOctave) and `manualVoicing` (a boolean) optional. Lengths and velocities
 /// are clamped by the store; the voicing fields are range-checked here, as `appendChord`'s inversion is. Every
 /// failure names the field with the entry's index ("chords[2].root must be an integer in 0..11").
-bool parseChordSpec(Fields& fields, ChordSpec& out) {
+bool parseChordSpec(Fields& fields, ChordSpec& out, std::size_t& noteTotal, std::string& error) {
     int root = 0;
     std::string typeId;
     if (!fields.getIntIn("root", 0, 11, root) || !fields.getString("type", typeId)) {
@@ -1074,6 +1236,9 @@ bool parseChordSpec(Fields& fields, ChordSpec& out) {
         }
         spec.manualVoicing = manual;
     }
+    if (fields.has("notes") && !parseChordNotes(fields, spec.notes, noteTotal, error)) {
+        return false;
+    }
     out = spec;
     return true;
 }
@@ -1098,6 +1263,7 @@ bool parseInsertChords(Fields& fields, Command& out, std::vector<ChordSpec>& cho
     }
     chords.clear();
     chords.reserve(list->size());
+    std::size_t noteTotal = 0;
     for (std::size_t i = 0; i < list->size(); ++i) {
         const std::string where = "chords[" + std::to_string(i) + "]";
         const json& item = (*list)[i];
@@ -1107,7 +1273,7 @@ bool parseInsertChords(Fields& fields, Command& out, std::vector<ChordSpec>& cho
         }
         Fields itemFields(item, where, error);
         ChordSpec spec{Chord{0, nullptr}};
-        if (!parseChordSpec(itemFields, spec)) {
+        if (!parseChordSpec(itemFields, spec, noteTotal, error)) {
             return false;
         }
         chords.push_back(spec);
@@ -1118,13 +1284,17 @@ bool parseInsertChords(Fields& fields, Command& out, std::vector<ChordSpec>& cho
 /// `ids`: an array of integers, non-empty unless `allowEmpty` (`selectEvents`, where an empty list clears).
 /// Repeats and ids no event has are kept here; the store skips them. A bad element is named by its index
 /// ("ids[1] must be an integer").
-bool parseIds(Fields& fields, bool allowEmpty, std::vector<int>& ids, std::string& error) {
+bool parseIds(Fields& fields, bool allowEmpty, std::vector<int>& ids, std::string& error,
+              std::size_t maxCount = std::numeric_limits<std::size_t>::max()) {
     const json* list = fields.getArray("ids");
     if (list == nullptr) {
         return false;
     }
     if (list->empty() && !allowEmpty) {
         return fields.fail("ids", "must hold at least one id");
+    }
+    if (list->size() > maxCount) {
+        return fields.fail("ids", "must hold at most " + std::to_string(maxCount) + " ids");
     }
     ids.clear();
     ids.reserve(list->size());
@@ -1152,6 +1322,155 @@ bool parseSelectEvents(Fields& fields, Command& out, std::vector<int>& ids, std:
         return true;
     }
     return toInt(*anchor, out.id) || fields.fail("anchor", "must be an integer or null");
+}
+
+/// The optional `baseRevision` of the note commands (tracks D4): absent, or a non-negative JSON integer (read as
+/// `uint64_t`, which nlohmann holds exactly); a negative, fractional or larger value is an error, not a wrapped one.
+bool parseBaseRevision(Fields& fields, Command& out) {
+    const json* v = fields.find("baseRevision");
+    if (v == nullptr) {
+        return true;
+    }
+    if (v->is_number_unsigned()) {
+        out.baseRevision = v->get<std::uint64_t>();
+    } else if (v->is_number_integer() && v->get<std::int64_t>() >= 0) {
+        out.baseRevision = static_cast<std::uint64_t>(v->get<std::int64_t>());
+    } else {
+        return fields.fail("baseRevision", "must be a non-negative integer");
+    }
+    out.hasBaseRevision = true;
+    return true;
+}
+
+/// `addTrack {role, name?}`: `role` "bass", "lead" or "other"; `name` a string of at most `kMaxTrackNameBytes` bytes
+/// (longer is rejected, not cut, as a section name), travelling in `name`; empty or absent takes the store's default.
+bool parseAddTrack(Fields& fields, Command& out, std::string& name) {
+    out.kind = Command::Kind::AddTrack;
+    if (!parseRoleField(fields, "role", out.role)) {
+        return false;
+    }
+    out.hasName = fields.has("name");
+    return !out.hasName || getBoundedName(fields, name, kMaxTrackNameBytes);
+}
+
+/// `patchTrack {id, name?, role?}`: either field may be absent; with neither the store refuses.
+bool parsePatchTrack(Fields& fields, Command& out, std::string& name) {
+    out.kind = Command::Kind::PatchTrack;
+    if (!fields.getInt("id", out.id)) {
+        return false;
+    }
+    out.hasName = fields.has("name");
+    if (out.hasName && !getBoundedName(fields, name, kMaxTrackNameBytes)) {
+        return false;
+    }
+    out.hasRole = fields.has("role");
+    return !out.hasRole || parseRoleField(fields, "role", out.role);
+}
+
+/// `setTrackMute {id, on}` / `setTrackSolo {id, on}`.
+bool parseTrackToggle(Fields& fields, Command::Kind kind, Command& out) {
+    out.kind = kind;
+    return fields.getInt("id", out.id) && fields.getBool("on", out.on);
+}
+
+/// `insertNotes {trackId, notes:[{pitch, start, length, velocity?}], baseRevision?}`: `notes` an array of at most
+/// `kMaxNotesPerTrack` objects (an empty one is the store's refusal); `pitch` and `velocity` ints (100 when
+/// absent), `start` and `length` 64-bit integers, all clamped by the store. Errors name the entry
+/// ("notes[2].start must be an integer in ...").
+bool parseInsertNotes(Fields& fields, Command& out, std::vector<NoteSpec>& notes, std::string& error) {
+    out.kind = Command::Kind::InsertNotes;
+    if (!fields.getInt("trackId", out.id)) {
+        return false;
+    }
+    const json* list = fields.getArray("notes");
+    if (list == nullptr) {
+        return false;
+    }
+    if (list->size() > static_cast<std::size_t>(kMaxNotesPerTrack)) {
+        return fields.fail("notes", "must hold at most " + std::to_string(kMaxNotesPerTrack) + " notes");
+    }
+    notes.clear();
+    notes.reserve(list->size());
+    for (std::size_t i = 0; i < list->size(); ++i) {
+        const std::string where = "notes[" + std::to_string(i) + "]";
+        const json& item = (*list)[i];
+        if (!item.is_object()) {
+            error = where + " must be an object";
+            return false;
+        }
+        Fields noteFields(item, where, error);
+        NoteSpec spec{};
+        spec.velocity = 100;
+        if (!noteFields.getInt("pitch", spec.pitch) || !getTicks(noteFields, "start", spec.startTick) ||
+            !getTicks(noteFields, "length", spec.lengthTicks)) {
+            return false;
+        }
+        if (noteFields.has("velocity") && !noteFields.getInt("velocity", spec.velocity)) {
+            return false;
+        }
+        notes.push_back(spec);
+    }
+    return parseBaseRevision(fields, out);
+}
+
+/// `updateNotes {trackId, notes:[{id, pitch?, start?, length?, velocity?}], baseRevision?}`: as `insertNotes`, with
+/// `id` required and every other field optional (absent keeps the note's value; null is an error).
+bool parseUpdateNotes(Fields& fields, Command& out, std::vector<NoteEdit>& edits, std::string& error) {
+    out.kind = Command::Kind::UpdateNotes;
+    if (!fields.getInt("trackId", out.id)) {
+        return false;
+    }
+    const json* list = fields.getArray("notes");
+    if (list == nullptr) {
+        return false;
+    }
+    if (list->size() > static_cast<std::size_t>(kMaxNotesPerTrack)) {
+        return fields.fail("notes", "must hold at most " + std::to_string(kMaxNotesPerTrack) + " notes");
+    }
+    edits.clear();
+    edits.reserve(list->size());
+    for (std::size_t i = 0; i < list->size(); ++i) {
+        const std::string where = "notes[" + std::to_string(i) + "]";
+        const json& item = (*list)[i];
+        if (!item.is_object()) {
+            error = where + " must be an object";
+            return false;
+        }
+        Fields noteFields(item, where, error);
+        NoteEdit edit{};
+        if (!noteFields.getInt("id", edit.id) || !getOptionalInt(noteFields, "pitch", edit.pitch) ||
+            !getOptionalTicks(noteFields, "start", edit.startTick) ||
+            !getOptionalTicks(noteFields, "length", edit.lengthTicks) ||
+            !getOptionalInt(noteFields, "velocity", edit.velocity)) {
+            return false;
+        }
+        edits.push_back(edit);
+    }
+    return parseBaseRevision(fields, out);
+}
+
+/// `removeNotes {trackId, ids, baseRevision?}`: `ids` an array of at most `kMaxNotesPerTrack` integers; empty is a
+/// valid no-op, as the store's.
+bool parseRemoveNotes(Fields& fields, Command& out, std::vector<int>& ids, std::string& error) {
+    out.kind = Command::Kind::RemoveNotes;
+    return fields.getInt("trackId", out.id) && parseIds(fields, true, ids, error, static_cast<std::size_t>(kMaxNotesPerTrack)) &&
+           parseBaseRevision(fields, out);
+}
+
+/// `selectNotes {trackId, ids}`: `trackId` an integer, or null for no track (null, like `kNoTrackId` = -1, clears the
+/// selection, as `selectEvent`); `ids` an array of at most `kMaxNotesPerTrack` integers, empty clears.
+bool parseSelectNotes(Fields& fields, Command& out, std::vector<int>& ids, std::string& error) {
+    out.kind = Command::Kind::SelectNotes;
+    const json* track = fields.require("trackId");
+    if (track == nullptr) {
+        return false;
+    }
+    if (track->is_null()) {
+        out.id = kNoTrackId;
+    } else if (!toInt(*track, out.id)) {
+        return fields.fail("trackId", "must be an integer or null");
+    }
+    return parseIds(fields, true, ids, error, static_cast<std::size_t>(kMaxNotesPerTrack));
 }
 
 /// `setNewChordLength {lengthBeats}`: a finite number, or null for one bar of the meter; the field is required.
@@ -1305,6 +1624,43 @@ bool parseCommand(std::string_view text, Command& out, std::string& name, Comman
     if (cmd == "loadPreset") {
         return parseLoadPreset(fields, out);
     }
+    if (cmd == "addTrack") {
+        return parseAddTrack(fields, out, name);
+    }
+    if (cmd == "removeTrack") {
+        return parseIdOnly(fields, Command::Kind::RemoveTrack, out);
+    }
+    if (cmd == "patchTrack") {
+        return parsePatchTrack(fields, out, name);
+    }
+    if (cmd == "moveTrack") {
+        out.kind = Command::Kind::MoveTrack;
+        return fields.getInt("id", out.id) && fields.getInt("index", out.index);
+    }
+    if (cmd == "setTrackMute") {
+        return parseTrackToggle(fields, Command::Kind::SetTrackMute, out);
+    }
+    if (cmd == "setTrackSolo") {
+        return parseTrackToggle(fields, Command::Kind::SetTrackSolo, out);
+    }
+    if (cmd == "setChordsMute") {
+        return parseToggle(fields, Command::Kind::SetChordsMute, out);
+    }
+    if (cmd == "setChordsSolo") {
+        return parseToggle(fields, Command::Kind::SetChordsSolo, out);
+    }
+    if (cmd == "insertNotes") {
+        return parseInsertNotes(fields, out, lists.notes, error);
+    }
+    if (cmd == "removeNotes") {
+        return parseRemoveNotes(fields, out, lists.ids, error);
+    }
+    if (cmd == "updateNotes") {
+        return parseUpdateNotes(fields, out, lists.edits, error);
+    }
+    if (cmd == "selectNotes") {
+        return parseSelectNotes(fields, out, lists.ids, error);
+    }
     if (cmd == "undo") {
         out.kind = Command::Kind::Undo;
         return true;
@@ -1329,7 +1685,7 @@ enum class Refusal {
     PresetIdsExhausted,
     PresetSectionIdsExhausted,
     PresetInvalid,
-    Store  ///< the store refused and gave its reason (today the track invariant on a chord timing edit, tracks D4, D10)
+    Store  ///< the store (or the command, for a stale `baseRevision` or an unknown track of a live flag) refused and gave its reason
 };
 
 /// The wire name of a command that `Refusal::Store` can refuse, for its error message.
@@ -1351,6 +1707,24 @@ const char* commandWireName(Command::Kind kind) {
             return "removeChords";
         case Command::Kind::LoadPreset:
             return "loadPreset";
+        case Command::Kind::AddTrack:
+            return "addTrack";
+        case Command::Kind::RemoveTrack:
+            return "removeTrack";
+        case Command::Kind::PatchTrack:
+            return "patchTrack";
+        case Command::Kind::MoveTrack:
+            return "moveTrack";
+        case Command::Kind::SetTrackMute:
+            return "setTrackMute";
+        case Command::Kind::SetTrackSolo:
+            return "setTrackSolo";
+        case Command::Kind::InsertNotes:
+            return "insertNotes";
+        case Command::Kind::RemoveNotes:
+            return "removeNotes";
+        case Command::Kind::UpdateNotes:
+            return "updateNotes";
         default:
             break;
     }
@@ -1362,6 +1736,17 @@ const char* commandWireName(Command::Kind kind) {
 /// (changed, or failed without one: a valid no-op).
 Refusal storeRefusal(bool ok, const std::string& reason) {
     return !ok && !reason.empty() ? Refusal::Store : Refusal::None;
+}
+
+/// True, with the drag message in `reason`, when `command` carries a `baseRevision` that is not the store's
+/// revision: the gesture that produced the command was computed from an older document (tracks D4), so nothing is
+/// applied. Checked before the store sees the command, so a stale command is this refusal whatever else is wrong with it.
+bool staleBase(const DocumentStore& store, const Command& command, std::string& reason) {
+    if (!command.hasBaseRevision || command.baseRevision == store.revision()) {
+        return false;
+    }
+    reason = "The notes changed while you were dragging";
+    return true;
 }
 
 /// `loadPreset`: resolves the preset in the project key and hands it to the store, which builds the
@@ -1543,6 +1928,59 @@ Refusal applyCommand(DocumentStore& store, const Command& command, std::string& 
             return Refusal::None;
         case Command::Kind::LoadPreset:
             return applyLoadPreset(store, *command.preset, command.load, reason);
+        case Command::Kind::AddTrack:
+            return store.addTrack(command.role, command.hasName ? std::optional<std::string>(std::move(name)) : std::nullopt,
+                                  &reason) != kNoTrackId
+                       ? Refusal::None
+                       : Refusal::Store;
+        case Command::Kind::RemoveTrack:
+            return storeRefusal(store.removeTrack(command.id, &reason), reason);
+        case Command::Kind::PatchTrack:
+            return storeRefusal(store.patchTrack(command.id,
+                                                 command.hasName ? std::optional<std::string>(std::move(name)) : std::nullopt,
+                                                 command.hasRole ? std::optional<TrackRole>(command.role) : std::nullopt,
+                                                 &reason),
+                                reason);
+        case Command::Kind::MoveTrack:
+            return storeRefusal(store.moveTrack(command.id, command.index, &reason), reason);
+        case Command::Kind::SetTrackMute:
+        case Command::Kind::SetTrackSolo:
+            // The store cannot tell an unknown id from a value already held (both false), so the command asks first:
+            // an unknown track is an error, the value already held a valid no-op.
+            if (store.findTrackIndex(command.id) < 0) {
+                reason = "No track with id " + std::to_string(command.id);
+                return Refusal::Store;
+            }
+            if (command.kind == Command::Kind::SetTrackMute) {
+                store.setTrackMute(command.id, command.on);
+            } else {
+                store.setTrackSolo(command.id, command.on);
+            }
+            return Refusal::None;
+        case Command::Kind::SetChordsMute:
+            store.setChordsMute(command.on);
+            return Refusal::None;
+        case Command::Kind::SetChordsSolo:
+            store.setChordsSolo(command.on);
+            return Refusal::None;
+        case Command::Kind::InsertNotes:
+            if (staleBase(store, command, reason)) {
+                return Refusal::Store;
+            }
+            return store.insertNotes(command.id, lists.notes, &reason).empty() ? Refusal::Store : Refusal::None;
+        case Command::Kind::RemoveNotes:
+            if (staleBase(store, command, reason)) {
+                return Refusal::Store;
+            }
+            return storeRefusal(store.removeNotes(command.id, lists.ids, &reason), reason);
+        case Command::Kind::UpdateNotes:
+            if (staleBase(store, command, reason)) {
+                return Refusal::Store;
+            }
+            return storeRefusal(store.updateNotes(command.id, lists.edits, &reason), reason);
+        case Command::Kind::SelectNotes:
+            store.setNoteSelection(command.id, lists.ids);  // live state; an unknown track is a no-op, as selectEvent
+            return Refusal::None;
         case Command::Kind::Undo:
             store.undo();  // nothing to undo is a no-op, not an error
             return Refusal::None;

@@ -491,6 +491,10 @@ bool DocumentStore::commitTracks(Document next, int nextTrackId, int nextNoteId,
 }
 
 bool DocumentStore::commitTiming(Document next, std::string* refusal) {
+    return commitTimingWithIds(std::move(next), nextTrackId_, nextNoteId_, refusal);
+}
+
+bool DocumentStore::commitTimingWithIds(Document next, int nextTrackId, int nextNoteId, std::string* refusal) {
     // The notes keep their anchors and offsets (D3): only their derived starts moved, which may reorder a track.
     if (std::any_of(next.tracks.begin(), next.tracks.end(), [](const Track& t) { return !t.notes.empty(); })) {
         const ChordTimeline timeline = chordTimeline(next);
@@ -498,7 +502,7 @@ bool DocumentStore::commitTiming(Document next, std::string* refusal) {
             sortTrackNotes(t.notes, timeline);
         }
     }
-    return commitTracks(std::move(next), nextTrackId_, nextNoteId_, refusal);
+    return commitTracks(std::move(next), nextTrackId, nextNoteId, refusal);
 }
 
 void DocumentStore::dropStaleSelection() noexcept {
@@ -787,6 +791,112 @@ bool DocumentStore::removeChord(int id, std::string* refusal) {
     return commitTiming(std::move(next), refusal);
 }
 
+namespace {
+
+/// The wire and message name of a role.
+const char* roleName(TrackRole role) {
+    switch (role) {
+        case TrackRole::Bass:
+            return "bass";
+        case TrackRole::Lead:
+            return "lead";
+        case TrackRole::Other:
+            return "other";
+    }
+    return "other";
+}
+
+/// `insertChords`' notes (D21): resolves the lane of every note of `chords` and appends the note, anchored to the
+/// chord it comes with (`chordIds[i]` for `chords[i]`, all in `next`), to its track in `next`, creating the tracks the
+/// lanes need. `original` is the document before the insert: ids and names are looked up there, so a track created
+/// for this batch is found only through the batch's own (name, role) list. Hands ids out from `nextTrackId` and
+/// `nextNoteId` (advanced). False, with the reason in `refusal`, for an ambiguous lane, no room for a new track or
+/// exhausted ids; `next` and the counters are then to be discarded by the caller.
+bool attachChordNotes(const Document& original, Document& next, const std::vector<ChordSpec>& chords,
+                      const std::vector<int>& chordIds, int& nextTrackId, int& nextNoteId, std::string* refusal) {
+    std::size_t total = 0;
+    for (const ChordSpec& c : chords) {
+        total += c.notes.size();
+    }
+    if (total == 0) {
+        return true;
+    }
+    if (static_cast<std::size_t>(INT_MAX - nextNoteId) < total) {  // ids stop below INT_MAX, as insertNotes'
+        refuse(refusal, "No note ids are left");
+        return false;
+    }
+    const ChordTimeline timeline = chordTimeline(next);
+    struct Created {
+        std::string name;
+        TrackRole role;
+        std::size_t index;
+    };
+    std::vector<Created> created;
+    for (std::size_t i = 0; i < chords.size(); ++i) {
+        const std::int32_t boundary = timeline.boundaries[static_cast<std::size_t>(timeline.indexOf(chordIds[i]))];
+        for (const ChordNoteSpec& n : chords[i].notes) {
+            std::size_t trackIndex = 0;
+            bool found = false;
+            if (n.lane.trackId.has_value()) {
+                for (std::size_t t = 0; t < original.tracks.size() && !found; ++t) {
+                    if (original.tracks[t].id == *n.lane.trackId) {
+                        trackIndex = t;
+                        found = true;
+                    }
+                }
+            }
+            std::string laneName;
+            if (!found) {
+                laneName = boundedName(n.lane.name, kMaxTrackNameBytes);
+                int matches = 0;
+                for (std::size_t t = 0; t < original.tracks.size(); ++t) {
+                    if (original.tracks[t].role == n.lane.role && original.tracks[t].name == laneName) {
+                        trackIndex = t;
+                        ++matches;
+                    }
+                }
+                if (matches > 1) {
+                    refuse(refusal, "Lane \"" + laneName + "\" (" + roleName(n.lane.role) +
+                                        ") matches more than one track");
+                    return false;
+                }
+                found = matches == 1;
+            }
+            if (!found) {
+                const auto shared = std::find_if(created.begin(), created.end(), [&](const Created& c) {
+                    return c.role == n.lane.role && c.name == laneName;
+                });
+                if (shared != created.end()) {
+                    trackIndex = shared->index;
+                } else {
+                    if (next.tracks.size() >= static_cast<std::size_t>(kMaxTracks)) {
+                        refuse(refusal, "At most " + std::to_string(kMaxTracks) + " tracks");
+                        return false;
+                    }
+                    if (nextTrackId >= INT_MAX) {
+                        refuse(refusal, "No track ids are left");
+                        return false;
+                    }
+                    trackIndex = next.tracks.size();
+                    next.tracks.push_back(Track{nextTrackId++, laneName, n.lane.role, false, false, {}});
+                    created.push_back(Created{laneName, n.lane.role, trackIndex});
+                }
+            }
+            // D1's order: the derived start is clamped first (the offset itself is kept when it stays in the
+            // domain, so a note past its chord's end stays inactive), then the length against what it leaves.
+            const std::int64_t offset = std::clamp<std::int64_t>(n.offsetTick, 0, kMaxNoteTick);
+            const std::int32_t start = clampNoteStart(boundary + offset);
+            assert(start >= boundary);
+            next.tracks[trackIndex].notes.push_back(
+                TrackNote{nextNoteId++, clampNotePitch(n.pitch), chordIds[i], std::max<std::int32_t>(0, start - boundary),
+                          clampNoteLength(n.lengthTicks, start), clampNoteVelocity(n.velocity)});
+        }
+    }
+    return true;
+}
+
+}  // namespace
+
 std::vector<int> DocumentStore::insertChords(int index, const std::vector<ChordSpec>& chords, std::string* refusal) {
     clearRefusal(refusal);
     if (chords.empty()) {
@@ -836,11 +946,19 @@ std::vector<int> DocumentStore::insertChords(int index, const std::vector<ChordS
         }
     }
     assert(sectionsWellFormed(next));
+    // The chords' notes (D21) join their lanes in the same candidate; the ids they take are published with it.
+    int publishedTrackId = nextTrackId_;
+    int publishedNoteId = nextNoteId_;
+    if (!attachChordNotes(doc_, next, chords, ids, publishedTrackId, publishedNoteId, refusal)) {
+        return {};
+    }
     std::vector<int> selection = ids;  // before the commit, as appendChord
-    if (!commitTiming(std::move(next), refusal)) {
+    if (!commitTimingWithIds(std::move(next), publishedTrackId, publishedNoteId, refusal)) {
         return {};  // fresh ids always make the sequence differ, so this is a refusal
     }
-    nextId_ += count;  // only now: a throw above leaves the counter, like the rest of the store, untouched
+    nextId_ += count;  // only now: a throw above leaves the counters, like the rest of the store, untouched
+    nextTrackId_ = publishedTrackId;
+    nextNoteId_ = publishedNoteId;
     selectedEventIds_.swap(selection);  // live state: the inserted chords, the last the anchor (D2)
     anchorEventId_ = ids.back();
     return ids;

@@ -342,10 +342,11 @@ std::string heardJson(const Listener& listener, const Key& projectKey);
 ///   order).
 /// - `insertChords {index, chords}` (strip editing design D1): `insertChords(index, chords)`, ONE undo step;
 ///   `index` an integer (clamped to 0..size by the store); `chords` a non-empty array of at most `kMaxChords`
-///   objects `{root, type, lengthBeats?, velocity?, inversion?, octave?, manualVoicing?}`: `root` and `type` as
+///   objects `{root, type, lengthBeats?, velocity?, inversion?, octave?, manualVoicing?, notes?}`: `root` and `type` as
 ///   for `appendChord`, `lengthBeats` a finite number (the new-chord length when absent), `velocity` an integer,
 ///   `inversion` an integer in 0..tones - 1 of the chord, `octave` an integer in -1..1, `manualVoicing` a
-///   boolean (a given inversion or octave makes the chord manual unless it says otherwise). Every entry is
+///   boolean (a given inversion or octave makes the chord manual unless it says otherwise), `notes` the chord's
+///   track notes (below, D21). Every entry is
 ///   validated before anything changes, and an error names the field with its index ("chords[2].root must be an
 ///   integer in 0..11"). The inserted chords become the selection, the last the anchor. Refused (false, an
 ///   error naming the reason, no change, no id consumed) when the result would hold more than `kMaxChords`
@@ -374,6 +375,57 @@ std::string heardJson(const Listener& listener, const Key& projectKey);
 ///   document.h): the result would hold more than `kMaxChords` chords, or the event or section id
 ///   counter cannot hand out the ids the load needs; and by the track invariant (above). "append" keeps every
 ///   note, "replace" removes every note of every track (the tracks stay).
+/// - **Tracks and notes** (tracks design D4, D5, D21; tracks.h, document.h). Integers: `trackId`, `id`, `index`,
+///   `pitch`, `velocity` and the entries of `ids` are JSON integers that must fit an `int` (2147483648 is an error,
+///   not a wrapped value); the tick fields `start`, `length` and `offset` are read at 64 bits and may be any JSON
+///   integer that fits an `int64_t` (9223372036854775808 and -9223372036854775809 are errors), which the store then
+///   clamps into D1's domain (start first, then the length against the space left); `pitch` and `velocity` are
+///   clamped by the store, as an `insertChords` velocity is. Floats, strings and null are never integers. Every
+///   error names the field with its index ("notes[2].start must be an integer in -9223372036854775808..
+///   9223372036854775807", "chords[1].notes[0].lane.role must be \"bass\", \"lead\" or \"other\"", "missing
+///   notes[1].pitch").
+///   - `addTrack {role, name?}`: `addTrack`, one undo step. `role` is the lowercase string "bass", "lead" or "other"
+///     (as the snapshot will publish roles); `name` a string of at most `kMaxTrackNameBytes` UTF-8 bytes (longer is
+///     rejected, not cut: as a section name), empty or absent for the role's default name.
+///   - `removeTrack {id}`, `patchTrack {id, name?, role?}`, `moveTrack {id, index}`: the store calls, one undo step
+///     each (`name` bounded as above, empty allowed and stored empty; `index` clamped by the store). `patchTrack`
+///     with neither field is the store's refusal ("Give a name or a role"); a patch that changes nothing, and a move
+///     to the current place, are valid no-ops.
+///   - `setTrackMute {id, on}`, `setTrackSolo {id, on}`, `setChordsMute {on}`, `setChordsSolo {on}`: live state (no
+///     history, no revision, kept by undo and redo), persisted, so a toggle that changes a flag sets
+///     `documentChanged`. The value already held is a valid no-op; an `id` no track has is a refusal ("No track with
+///     id 9"), since the store's return cannot tell the two apart.
+///   - `insertNotes {trackId, notes, baseRevision?}`: `insertNotes`, one undo step; the inserted notes become the
+///     note selection. `notes` is an array of at most `kMaxNotesPerTrack` objects `{pitch, start, length,
+///     velocity?}` (`velocity` 100 when absent; `start` the absolute tick, resolved to its chord and offset by the
+///     store); an empty array is the store's refusal ("No notes to insert").
+///   - `removeNotes {trackId, ids, baseRevision?}`: `removeNotes`; `ids` at most `kMaxNotesPerTrack` integers (a longer
+///     list is an error before the store is touched); unknown ids are skipped and an empty list is a valid no-op.
+///   - `updateNotes {trackId, notes, baseRevision?}`: `updateNotes`, one undo step; `notes` at most `kMaxNotesPerTrack`
+///     objects `{id, pitch?, start?, length?, velocity?}` with absolute values (an absent field keeps the note's, null
+///     is an error); an empty array is a valid no-op, an unknown or repeated id the store's refusal.
+///   - `baseRevision` (optional, on those three): a non-negative JSON integer (read as `uint64_t`; negative, fractional
+///     or beyond 2^64 - 1 is an error). When present and not equal to `DocumentStore::revision()` the command is
+///     refused before anything else, store untouched, no history, `documentChanged` false: `"insertNotes" refused: The
+///     notes changed while you were dragging` (the wire name of the command). Absent: no check.
+///   - `selectNotes {trackId, ids}`: `setNoteSelection`, live state (never history, never the revision, never
+///     `documentChanged`); `ids` at most `kMaxNotesPerTrack` integers, unknown ones dropped, repeats collapsed, the rest
+///     in the track's note order; an empty result clears. `trackId` is an integer or null: null clears the selection
+///     whatever `ids` holds (the documented form; the integer -1, `kNoTrackId`, is the same value and clears too),
+///     and a track no track has is a no-op, as `selectEvent` with an unknown id.
+///   - `insertChords` entries (above) take an optional `notes` array of objects `{lane, offset, length, pitch,
+///     velocity?}` (D21, the chord clipboard): `lane` is `{trackId?, name, role}` (`trackId` an integer, null or absent;
+///     `name` at most `kMaxTrackNameBytes` bytes; `role` as for `addTrack`), `offset` the ticks after the chord's
+///     start (`offset` and `length` 64-bit), `pitch` and `velocity` as above. All the notes of one message together
+///     number at most `kMaxTracks * kMaxNotesPerTrack` (an error beyond, naming the entry, before the store is
+///     touched). The store resolves each lane inside the one commit: the track with that id when it exists, else the
+///     unique track with that name and role, else a new track (one per absent name and role), anchoring each note to
+///     the chord it comes with, offsets past the chord's end carried as inactive notes. Refused, with the store's
+///     reason, when a name and role match more than one track, when a new track would pass `kMaxTracks`, or when the
+///     track invariant fails.
+///   Every store refusal above is `"<command>" refused: <reason>` with no change, no history and `documentChanged`
+///   false; every accepted command that changes content or a persisted flag sets `documentChanged`, `selectNotes` and
+///   no-ops do not.
 /// - `undo`, `redo`: no fields. A browsed key that is the project key stays so when they restore another
 ///   project key (document.h), so the UI never has to follow them with `browseKey {home}`.
 ///

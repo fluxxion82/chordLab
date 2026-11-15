@@ -27,6 +27,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <limits>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -4383,4 +4385,747 @@ TEST_CASE("loadPreset: append keeps every note; replace removes every note and k
     CHECK(store.doc().tracks.at(1).mute);
     REQUIRE(store.undo());
     CHECK(store.doc().tracks == tracks);
+}
+
+// --- Track and note commands (tracks Task 3) -------------------------------------------------------------
+
+namespace {
+
+/// `threeChords` with an empty Bass track (id 1) named "Bass".
+DocumentStore chordsAndBass() {
+    DocumentStore store = threeChords();
+    REQUIRE(store.addTrack(TrackRole::Bass) == 1);
+    return store;
+}
+
+/// `chordsAndBass` with Bass notes 1..3 at 100, kBarTicks + 200 and 2 * kBarTicks + 300, in the three chords.
+DocumentStore chordsAndNotes() {
+    DocumentStore store = chordsAndBass();
+    REQUIRE(store.insertNotes(1, {NoteSpec{36, 100, 480}, NoteSpec{38, kBarTicks + 200, 480},
+                                  NoteSpec{40, 2 * kBarTicks + 300, 480}}) == std::vector<int>{1, 2, 3});
+    return store;
+}
+
+/// Sends `text` (raw) and checks it was refused with exactly `expected` and that nothing at all changed: the
+/// document, revision, history, counters and selections, and `documentChanged` stayed false.
+void checkErrorRaw(DocumentStore& store, const std::string& text, const std::string& expected) {
+    CAPTURE(text.substr(0, 300));
+    const DocumentStore reference = store;
+    std::string error;
+    bool changed = true;
+    CHECK_FALSE(applyCommandJson(store, text, error, &changed));
+    CHECK_FALSE(changed);
+    CHECK(error == expected);
+    CHECK(store.doc() == reference.doc());
+    CHECK(store.revision() == reference.revision());
+    CHECK(store.nextId() == reference.nextId());
+    CHECK(store.nextTrackId() == reference.nextTrackId());
+    CHECK(store.nextNoteId() == reference.nextNoteId());
+    CHECK(store.selectedEventIds() == reference.selectedEventIds());
+    CHECK(store.noteSelection() == reference.noteSelection());
+    DocumentStore a = store;
+    DocumentStore b = reference;
+    CHECK(a.undo() == b.undo());
+    CHECK(a.doc() == b.doc());  // no history pushed
+}
+
+void checkError(DocumentStore& store, json cmd, const std::string& expected) {
+    cmd["schema"] = kJsonSchema;
+    checkErrorRaw(store, cmd.dump(), expected);
+}
+
+/// `checkError` for a store's refusal: `"<wire>" refused: <reason>`.
+void checkRefusedWith(DocumentStore& store, json cmd, const std::string& wire, const std::string& reason) {
+    const std::string expected = "\"" + wire + "\" refused: " + reason;
+    checkError(store, std::move(cmd), expected);
+}
+
+const std::string kInt64Range = "in -9223372036854775808..9223372036854775807";
+const std::string kDragMessage = "The notes changed while you were dragging";
+const std::string kRoleMessage = "must be \"bass\", \"lead\" or \"other\"";
+
+const std::vector<TrackNote>& notesOfTrack(const DocumentStore& store, std::size_t trackIndex = 0) {
+    return store.doc().tracks.at(trackIndex).notes;
+}
+
+/// The note ids of track `trackIndex`, in its note order.
+std::vector<int> noteIds(const DocumentStore& store, std::size_t trackIndex = 0) {
+    std::vector<int> ids;
+    for (const TrackNote& n : notesOfTrack(store, trackIndex)) {
+        ids.push_back(n.id);
+    }
+    return ids;
+}
+
+std::vector<int> trackIds(const DocumentStore& store) {
+    std::vector<int> ids;
+    for (const Track& t : store.doc().tracks) {
+        ids.push_back(t.id);
+    }
+    return ids;
+}
+
+/// The derived start of the note with `id`, whichever track holds it.
+std::int64_t noteStartOf(const DocumentStore& store, int id) {
+    for (const Track& t : store.doc().tracks) {
+        for (const TrackNote& n : t.notes) {
+            if (n.id == id) {
+                return noteStart(store.doc(), n);
+            }
+        }
+    }
+    FAIL("no note with id " << id);
+    return -1;
+}
+
+json noteJson(int pitch, std::int64_t start, std::int64_t length) {
+    return {{"pitch", pitch}, {"start", start}, {"length", length}};
+}
+
+}  // namespace
+
+TEST_CASE("addTrack: adds a track of the role with its default or given name, one undo step") {
+    DocumentStore store = threeChords();
+    CHECK(changes(store, {{"cmd", "addTrack"}, {"role", "lead"}}));
+    CHECK(changes(store, {{"cmd", "addTrack"}, {"role", "bass"}, {"name", "Walk"}}));
+    CHECK(changes(store, {{"cmd", "addTrack"}, {"role", "other"}}));
+    CHECK(changes(store, {{"cmd", "addTrack"}, {"role", "other"}, {"name", ""}}));  // empty: the default, as the store's
+    REQUIRE(store.doc().tracks.size() == 4);
+    CHECK(store.doc().tracks.at(0).name == "Lead");
+    CHECK(store.doc().tracks.at(0).role == TrackRole::Lead);
+    CHECK(store.doc().tracks.at(1).name == "Walk");
+    CHECK(store.doc().tracks.at(1).role == TrackRole::Bass);
+    CHECK(store.doc().tracks.at(2).name == "Track");
+    CHECK(store.doc().tracks.at(2).role == TrackRole::Other);
+    CHECK(store.doc().tracks.at(3).name == "Track 2");
+    CHECK(trackIds(store) == std::vector<int>{1, 2, 3, 4});
+    CHECK(historyDepth(store).first == 3 + 4);  // three chords and four tracks
+    applyOk(store, {{"cmd", "undo"}});
+    CHECK(store.doc().tracks.size() == 3);
+    // At the limit: refused with the store's reason; the 64-byte name is the longest taken.
+    DocumentStore full = threeChords();
+    for (int i = 0; i < kMaxTracks; ++i) {
+        applyOk(full, {{"cmd", "addTrack"}, {"role", "other"}, {"name", std::string(kMaxTrackNameBytes, 'n')}});
+    }
+    CHECK(full.doc().tracks.at(0).name.size() == static_cast<std::size_t>(kMaxTrackNameBytes));
+    checkRefusedWith(full, {{"cmd", "addTrack"}, {"role", "bass"}}, "addTrack", "At most 4 tracks");
+}
+
+TEST_CASE("addTrack: a bad role or name is rejected naming the field; nothing changes") {
+    DocumentStore store = chordsAndNotes();
+    checkError(store, {{"cmd", "addTrack"}}, "missing \"role\"");
+    for (const json& bad : {json("Bass"), json("BASS"), json("drums"), json(""), json(1), json(nullptr), json(true), json::array()}) {
+        checkError(store, {{"cmd", "addTrack"}, {"role", bad}}, "\"role\" " + kRoleMessage);
+    }
+    for (const json& bad : {json(5), json(nullptr), json(true), json::array(), json::object()}) {
+        checkError(store, {{"cmd", "addTrack"}, {"role", "lead"}, {"name", bad}}, "\"name\" must be a string");
+    }
+    // As a section name: longer than the bound is rejected, not cut.
+    checkError(store, {{"cmd", "addTrack"}, {"role", "lead"}, {"name", std::string(kMaxTrackNameBytes + 1, 'x')}},
+               "\"name\" must be at most 64 bytes");
+}
+
+TEST_CASE("removeTrack, patchTrack, moveTrack: the store calls; an unknown track is refused, no-ops are accepted") {
+    DocumentStore store = chordsAndNotes();
+    applyOk(store, {{"cmd", "addTrack"}, {"role", "lead"}});
+    applyOk(store, {{"cmd", "addTrack"}, {"role", "other"}});
+    REQUIRE(trackIds(store) == std::vector<int>{1, 2, 3});
+    SUBCASE("patchTrack") {
+        CHECK(changes(store, {{"cmd", "patchTrack"}, {"id", 2}, {"name", "Melody"}}));
+        CHECK(store.doc().tracks.at(1).name == "Melody");
+        CHECK(store.doc().tracks.at(1).role == TrackRole::Lead);
+        CHECK(changes(store, {{"cmd", "patchTrack"}, {"id", 2}, {"role", "bass"}}));
+        CHECK(store.doc().tracks.at(1).role == TrackRole::Bass);
+        CHECK(changes(store, {{"cmd", "patchTrack"}, {"id", 2}, {"name", "Hook"}, {"role", "other"}}));
+        CHECK(store.doc().tracks.at(1).name == "Hook");
+        CHECK(store.doc().tracks.at(1).role == TrackRole::Other);
+        CHECK(changes(store, {{"cmd", "patchTrack"}, {"id", 2}, {"name", ""}}));  // empty stays empty, as renameSection
+        CHECK(store.doc().tracks.at(1).name.empty());
+        CHECK_FALSE(changes(store, {{"cmd", "patchTrack"}, {"id", 2}, {"name", ""}, {"role", "other"}}));  // no-op
+        const std::pair<int, int> depth = historyDepth(store);
+        CHECK_FALSE(changes(store, {{"cmd", "patchTrack"}, {"id", 1}, {"name", "Bass"}}));
+        CHECK(historyDepth(store) == depth);
+        checkRefusedWith(store, {{"cmd", "patchTrack"}, {"id", 1}}, "patchTrack", "Give a name or a role");
+        checkRefusedWith(store, {{"cmd", "patchTrack"}, {"id", 9}, {"name", "x"}}, "patchTrack", "No track with id 9");
+        checkError(store, {{"cmd", "patchTrack"}, {"id", 1}, {"role", "Lead"}}, "\"role\" " + kRoleMessage);
+        checkError(store, {{"cmd", "patchTrack"}, {"id", 1}, {"name", 4}}, "\"name\" must be a string");
+        checkError(store, {{"cmd", "patchTrack"}, {"id", 1}, {"name", std::string(65, 'x')}}, "\"name\" must be at most 64 bytes");
+        checkError(store, {{"cmd", "patchTrack"}, {"name", "x"}}, "missing \"id\"");
+    }
+    SUBCASE("moveTrack") {
+        CHECK(changes(store, {{"cmd", "moveTrack"}, {"id", 3}, {"index", 0}}));
+        CHECK(trackIds(store) == std::vector<int>{3, 1, 2});
+        CHECK(changes(store, {{"cmd", "moveTrack"}, {"id", 3}, {"index", 99}}));  // clamped to the end
+        CHECK(trackIds(store) == std::vector<int>{1, 2, 3});
+        CHECK(changes(store, {{"cmd", "moveTrack"}, {"id", 1}, {"index", -5}}) == false);  // already first: clamped to 0
+        CHECK(trackIds(store) == std::vector<int>{1, 2, 3});
+        checkRefusedWith(store, {{"cmd", "moveTrack"}, {"id", 9}, {"index", 0}}, "moveTrack", "No track with id 9");
+        checkError(store, {{"cmd", "moveTrack"}, {"id", 1}}, "missing \"index\"");
+        checkError(store, {{"cmd", "moveTrack"}, {"id", 1}, {"index", 1.5}}, "\"index\" must be an integer");
+        checkError(store, {{"cmd", "moveTrack"}, {"id", 1}, {"index", 2147483648ll}}, "\"index\" must be an integer");
+    }
+    SUBCASE("removeTrack") {
+        CHECK(changes(store, {{"cmd", "removeTrack"}, {"id", 1}}));  // with its notes
+        CHECK(trackIds(store) == std::vector<int>{2, 3});
+        checkRefusedWith(store, {{"cmd", "removeTrack"}, {"id", 1}}, "removeTrack", "No track with id 1");
+        checkError(store, {{"cmd", "removeTrack"}, {"id", "1"}}, "\"id\" must be an integer");
+        applyOk(store, {{"cmd", "undo"}});
+        CHECK(trackIds(store) == std::vector<int>{1, 2, 3});
+        CHECK(noteIds(store) == std::vector<int>{1, 2, 3});
+    }
+}
+
+TEST_CASE("setTrackMute, setTrackSolo, setChordsMute, setChordsSolo: live flags, no history, the host is dirtied") {
+    DocumentStore store = chordsAndNotes();
+    const std::uint64_t revision = store.revision();
+    const std::pair<int, int> depth = historyDepth(store);
+    CHECK(changes(store, {{"cmd", "setTrackMute"}, {"id", 1}, {"on", true}}));
+    CHECK(store.doc().tracks.at(0).mute);
+    CHECK(changes(store, {{"cmd", "setTrackSolo"}, {"id", 1}, {"on", true}}));
+    CHECK(store.doc().tracks.at(0).solo);
+    CHECK(changes(store, {{"cmd", "setChordsMute"}, {"on", true}}));
+    CHECK(store.doc().chordsMuted);
+    CHECK(changes(store, {{"cmd", "setChordsSolo"}, {"on", true}}));
+    CHECK(store.doc().chordsSolo);
+    CHECK(store.revision() == revision);  // live state moves no revision
+    CHECK(historyDepth(store) == depth);  // and pushes no history
+    // The value already held is a valid no-op, reported as no change.
+    CHECK_FALSE(changes(store, {{"cmd", "setTrackMute"}, {"id", 1}, {"on", true}}));
+    CHECK_FALSE(changes(store, {{"cmd", "setChordsSolo"}, {"on", true}}));
+    CHECK(changes(store, {{"cmd", "setTrackMute"}, {"id", 1}, {"on", false}}));
+    CHECK(changes(store, {{"cmd", "setChordsMute"}, {"on", false}}));
+    CHECK_FALSE(store.doc().tracks.at(0).mute);
+    CHECK_FALSE(store.doc().chordsMuted);
+    // An unknown track is an error (the store cannot tell it from a no-op, the command can); the chords have no id.
+    checkRefusedWith(store, {{"cmd", "setTrackMute"}, {"id", 9}, {"on", true}}, "setTrackMute", "No track with id 9");
+    checkRefusedWith(store, {{"cmd", "setTrackSolo"}, {"id", 0}, {"on", true}}, "setTrackSolo", "No track with id 0");
+    checkError(store, {{"cmd", "setTrackMute"}, {"id", 1}}, "missing \"on\"");
+    checkError(store, {{"cmd", "setTrackSolo"}, {"id", 1}, {"on", 1}}, "\"on\" must be true or false");
+    checkError(store, {{"cmd", "setChordsMute"}}, "missing \"on\"");
+    checkError(store, {{"cmd", "setChordsSolo"}, {"on", "true"}}, "\"on\" must be true or false");
+    checkError(store, {{"cmd", "setTrackMute"}, {"on", true}}, "missing \"id\"");
+}
+
+TEST_CASE("insertNotes: inserts the notes with velocity 100 by default, selects them, one undo step, a revision") {
+    DocumentStore store = chordsAndBass();
+    const std::uint64_t revision = store.revision();
+    json notes = json::array({noteJson(60, kBarTicks + 100, 480), noteJson(62, 0, 960)});
+    notes[1]["velocity"] = 64;
+    CHECK(changes(store, {{"cmd", "insertNotes"}, {"trackId", 1}, {"notes", notes}}));
+    REQUIRE(notesOfTrack(store).size() == 2);
+    CHECK(store.revision() == revision + 1);
+    // In note order (start, pitch, id): the second spec first.
+    CHECK(notesOfTrack(store).at(0) == TrackNote{2, 62, 1, 0, 960, 64});
+    CHECK(notesOfTrack(store).at(1) == TrackNote{1, 60, 2, 100, 480, 100});
+    CHECK(store.noteSelection() == NoteSelection{1, {2, 1}});
+    CHECK(historyDepth(store).first == 3 + 1 + 1);  // chords, the track, the notes
+    applyOk(store, {{"cmd", "undo"}});
+    CHECK(notesOfTrack(store).empty());
+    CHECK(store.noteSelection() == NoteSelection{});
+    // Pitch and velocity are clamped by the store, start and length by their domain.
+    notes = json::array({noteJson(200, -40, 1)});
+    notes[0]["velocity"] = 0;
+    applyOk(store, {{"cmd", "insertNotes"}, {"trackId", 1}, {"notes", notes}});
+    CHECK(notesOfTrack(store).at(0).pitch == 127);
+    CHECK(notesOfTrack(store).at(0).velocity == 1);
+    CHECK(notesOfTrack(store).at(0).offsetTick == 0);
+    CHECK(notesOfTrack(store).at(0).lengthTicks == kMinTrackNoteTicks);
+    // The extremes of 64 bits clamp too; a start past the end has no chord and is refused by the store.
+    notes = json::array({noteJson(60, std::numeric_limits<std::int64_t>::min(), std::numeric_limits<std::int64_t>::max())});
+    applyOk(store, {{"cmd", "insertNotes"}, {"trackId", 1}, {"notes", notes}});
+    CHECK(noteStartOf(store, store.nextNoteId() - 1) == 0);  // the clamped start; ids are never reused after the undo
+    notes = json::array({noteJson(60, std::numeric_limits<std::int64_t>::max(), 480)});
+    checkRefusedWith(store, {{"cmd", "insertNotes"}, {"trackId", 1}, {"notes", notes}}, "insertNotes",
+                     "A note must start before the end of the progression");
+}
+
+TEST_CASE("insertNotes: refusals by the store name the command and its reason") {
+    DocumentStore store = chordsAndBass();
+    const json one = json::array({noteJson(60, 0, 480)});
+    checkRefusedWith(store, {{"cmd", "insertNotes"}, {"trackId", 9}, {"notes", one}}, "insertNotes", "No track with id 9");
+    checkRefusedWith(store, {{"cmd", "insertNotes"}, {"trackId", 1}, {"notes", json::array()}}, "insertNotes",
+                     "No notes to insert");
+    DocumentStore empty;
+    REQUIRE(empty.addTrack(TrackRole::Lead) == 1);
+    checkRefusedWith(empty, {{"cmd", "insertNotes"}, {"trackId", 1}, {"notes", one}}, "insertNotes", "Add chords first");
+    json stack = json::array();
+    for (int i = 0; i <= kMaxTrackPolyphony; ++i) {
+        stack.push_back(noteJson(40 + i, 0, 480));
+    }
+    checkRefusedWith(store, {{"cmd", "insertNotes"}, {"trackId", 1}, {"notes", stack}}, "insertNotes",
+                     "At most " + std::to_string(kMaxTrackPolyphony) + " track notes can sound at once");
+}
+
+TEST_CASE("insertNotes, updateNotes: every field's type and range error names the field with its index") {
+    DocumentStore store = chordsAndNotes();
+    const std::string at2 = "notes[2].";
+    const auto three = [](json third) {
+        return json::array({noteJson(60, 0, 480), noteJson(62, 480, 480), std::move(third)});
+    };
+    SUBCASE("insertNotes") {
+        const auto bad = [&](const std::string& field, const json& value) {
+            json third = noteJson(64, 960, 480);
+            third[field] = value;
+            return json{{"cmd", "insertNotes"}, {"trackId", 1}, {"notes", three(third)}};
+        };
+        for (const json& v : {json("1"), json(1.5), json(nullptr), json(true), json::array(), json(2147483648ll), json(-2147483649ll)}) {
+            checkError(store, bad("pitch", v), at2 + "pitch must be an integer");
+            checkError(store, bad("velocity", v), at2 + "velocity must be an integer");
+        }
+        for (const json& v : {json("1"), json(1.5), json(nullptr), json(true), json::array(), json(1e300)}) {
+            checkError(store, bad("start", v), at2 + "start must be an integer " + kInt64Range);
+            checkError(store, bad("length", v), at2 + "length must be an integer " + kInt64Range);
+        }
+        for (const char* field : {"pitch", "start", "length"}) {
+            json third = noteJson(64, 960, 480);
+            third.erase(field);
+            checkError(store, {{"cmd", "insertNotes"}, {"trackId", 1}, {"notes", three(third)}},
+                       std::string("missing ") + at2 + field);
+        }
+        checkError(store, {{"cmd", "insertNotes"}, {"trackId", 1}, {"notes", three(json(5))}}, "notes[2] must be an object");
+        checkError(store, {{"cmd", "insertNotes"}, {"trackId", 1}, {"notes", three(json::array())}}, "notes[2] must be an object");
+        checkError(store, {{"cmd", "insertNotes"}, {"trackId", 1}}, "missing \"notes\"");
+        checkError(store, {{"cmd", "insertNotes"}, {"trackId", 1}, {"notes", "x"}}, "\"notes\" must be an array");
+        checkError(store, {{"cmd", "insertNotes"}, {"notes", json::array()}}, "missing \"trackId\"");
+        for (const json& v : {json("1"), json(1.5), json(nullptr), json(2147483648ll), json(-2147483649ll)}) {
+            checkError(store, {{"cmd", "insertNotes"}, {"trackId", v}, {"notes", json::array()}}, "\"trackId\" must be an integer");
+        }
+    }
+    SUBCASE("integers beyond 64 bits, as raw text") {
+        const std::string head = R"({"schema":1,"cmd":"insertNotes","trackId":1,"notes":[{"pitch":60,"length":480,"start":)";
+        for (const char* beyond : {"9223372036854775808", "-9223372036854775809", "18446744073709551616", "1e19"}) {
+            checkErrorRaw(store, head + beyond + "}]}", "notes[0].start must be an integer " + kInt64Range);
+        }
+        const std::string lengthHead = R"({"schema":1,"cmd":"insertNotes","trackId":1,"notes":[{"pitch":60,"start":0,"length":)";
+        for (const char* beyond : {"9223372036854775808", "-9223372036854775809"}) {
+            checkErrorRaw(store, lengthHead + beyond + "}]}", "notes[0].length must be an integer " + kInt64Range);
+        }
+        // The edges of int64 are accepted (and clamped) and the extremes that fit are not errors.
+        std::string error;
+        CHECK(applyCommandJson(store, head + "9223372036854775807}]}", error) == false);  // no chord owns it: refused, not an error of range
+        CHECK(error == "\"insertNotes\" refused: A note must start before the end of the progression");
+        CHECK(applyCommandJson(store, head + "-9223372036854775808}]}", error));
+    }
+    SUBCASE("updateNotes") {
+        const auto bad = [&](const std::string& field, const json& value) {
+            json entry = {{"id", 1}};
+            entry[field] = value;
+            return json{{"cmd", "updateNotes"}, {"trackId", 1}, {"notes", json::array({json{{"id", 2}}, json{{"id", 3}}, entry})}};
+        };
+        for (const json& v : {json("1"), json(1.5), json(nullptr), json(true), json(2147483648ll)}) {
+            checkError(store, bad("pitch", v), at2 + "pitch must be an integer");
+            checkError(store, bad("velocity", v), at2 + "velocity must be an integer");
+            checkError(store, bad("id", v), at2 + "id must be an integer");
+        }
+        for (const json& v : {json("1"), json(1.5), json(nullptr), json(true)}) {
+            checkError(store, bad("start", v), at2 + "start must be an integer " + kInt64Range);
+            checkError(store, bad("length", v), at2 + "length must be an integer " + kInt64Range);
+        }
+        checkError(store, {{"cmd", "updateNotes"}, {"trackId", 1}, {"notes", json::array({json::object()})}}, "missing notes[0].id");
+        checkError(store, {{"cmd", "updateNotes"}, {"trackId", 1}, {"notes", json::array({7})}}, "notes[0] must be an object");
+        checkError(store, {{"cmd", "updateNotes"}, {"trackId", 1}}, "missing \"notes\"");
+        checkError(store, {{"cmd", "updateNotes"}, {"notes", json::array()}}, "missing \"trackId\"");
+    }
+}
+
+TEST_CASE("insertNotes, removeNotes, updateNotes, selectNotes: array sizes are bounded before the store is touched") {
+    DocumentStore store = chordsAndNotes();
+    json many = json::array();
+    for (int i = 0; i <= kMaxNotesPerTrack; ++i) {
+        many.push_back(noteJson(60, 0, 480));
+    }
+    checkError(store, {{"cmd", "insertNotes"}, {"trackId", 1}, {"notes", many}},
+               "\"notes\" must hold at most " + std::to_string(kMaxNotesPerTrack) + " notes");
+    json edits = json::array();
+    json ids = json::array();
+    for (int i = 0; i <= kMaxNotesPerTrack; ++i) {
+        edits.push_back({{"id", 1}});
+        ids.push_back(1);
+    }
+    checkError(store, {{"cmd", "updateNotes"}, {"trackId", 1}, {"notes", edits}},
+               "\"notes\" must hold at most " + std::to_string(kMaxNotesPerTrack) + " notes");
+    checkError(store, {{"cmd", "removeNotes"}, {"trackId", 1}, {"ids", ids}},
+               "\"ids\" must hold at most " + std::to_string(kMaxNotesPerTrack) + " ids");
+    checkError(store, {{"cmd", "selectNotes"}, {"trackId", 1}, {"ids", ids}},
+               "\"ids\" must hold at most " + std::to_string(kMaxNotesPerTrack) + " ids");
+}
+
+TEST_CASE("insertNotes: a 1024-note message fits kMaxJsonBytes and is accepted") {
+    // Starts spread so that the onset cap holds exactly (kMaxTrackOnsetsPerBeat per 960-tick window) and no two
+    // notes overlap (polyphony 1, under kMaxTrackPolyphony).
+    constexpr std::int64_t step = kFeelTicksPerBeat / kMaxTrackOnsetsPerBeat;
+    static_assert(step >= kMinTrackNoteTicks, "back-to-back notes of the minimum length must fit one step");
+    constexpr std::int64_t totalTicks = kMaxNotesPerTrack * step;
+    constexpr int bars = static_cast<int>((totalTicks + kBarTicks - 1) / kBarTicks);
+    DocumentStore store;
+    for (int i = 0; i < bars; ++i) {
+        REQUIRE(store.appendChord(kC, 4.0, 100) == i + 1);
+    }
+    REQUIRE(store.addTrack(TrackRole::Lead) == 1);
+    json notes = json::array();
+    for (int i = 0; i < kMaxNotesPerTrack; ++i) {
+        json note = noteJson(40 + i % 40, i * step, kMinTrackNoteTicks);
+        note["velocity"] = 1 + i % 127;
+        notes.push_back(note);
+    }
+    const std::string text = json{{"schema", kJsonSchema}, {"cmd", "insertNotes"}, {"trackId", 1}, {"notes", notes}}.dump();
+    CHECK(text.size() < kMaxJsonBytes);
+    std::string error;
+    bool changed = false;
+    REQUIRE_MESSAGE(applyCommandJson(store, text, error, &changed), error);
+    CHECK(changed);
+    CHECK(notesOfTrack(store).size() == static_cast<std::size_t>(kMaxNotesPerTrack));
+    CHECK(store.noteSelection().ids.size() == static_cast<std::size_t>(kMaxNotesPerTrack));
+    // One more is over the track's limit: the store's refusal, not a parse error.
+    checkRefusedWith(store, {{"cmd", "insertNotes"}, {"trackId", 1}, {"notes", json::array({noteJson(60, 0, 480)})}}, "insertNotes",
+                     "At most " + std::to_string(kMaxNotesPerTrack) + " notes per track");
+}
+
+TEST_CASE("baseRevision: the three note commands apply on a match and refuse on any other value, changing nothing") {
+    DocumentStore store = chordsAndNotes();
+    const std::uint64_t revision = store.revision();
+    const json one = json::array({noteJson(60, 100, 480)});
+    const json edit = json::array({json{{"id", 1}, {"pitch", 50}}});
+    const json removal = json::array({3});
+    for (const std::uint64_t wrong : {revision + 1, revision - 1, std::uint64_t{0}, std::numeric_limits<std::uint64_t>::max()}) {
+        checkRefusedWith(store, {{"cmd", "insertNotes"}, {"trackId", 1}, {"notes", one}, {"baseRevision", wrong}}, "insertNotes", kDragMessage);
+        checkRefusedWith(store, {{"cmd", "updateNotes"}, {"trackId", 1}, {"notes", edit}, {"baseRevision", wrong}}, "updateNotes", kDragMessage);
+        checkRefusedWith(store, {{"cmd", "removeNotes"}, {"trackId", 1}, {"ids", removal}, {"baseRevision", wrong}}, "removeNotes", kDragMessage);
+    }
+    CHECK(store.revision() == revision);
+    // Live state and selection moved nothing, so a drag started before them still lands.
+    applyOk(store, {{"cmd", "setTrackMute"}, {"id", 1}, {"on", true}});
+    applyOk(store, {{"cmd", "selectNotes"}, {"trackId", 1}, {"ids", {1}}});
+    CHECK(store.revision() == revision);
+    CHECK(changes(store, {{"cmd", "updateNotes"}, {"trackId", 1}, {"notes", edit}, {"baseRevision", revision}}));
+    CHECK(notesOfTrack(store).at(0).pitch == 50);
+    CHECK(store.revision() == revision + 1);
+    // The previous base is stale now, for each command.
+    checkRefusedWith(store, {{"cmd", "removeNotes"}, {"trackId", 1}, {"ids", removal}, {"baseRevision", revision}}, "removeNotes", kDragMessage);
+    CHECK(changes(store, {{"cmd", "removeNotes"}, {"trackId", 1}, {"ids", removal}, {"baseRevision", revision + 1}}));
+    CHECK(changes(store, {{"cmd", "insertNotes"}, {"trackId", 1}, {"notes", one}, {"baseRevision", revision + 2}}));
+    // An undo moves it as well; a chord edit too.
+    checkRefusedWith(store, {{"cmd", "insertNotes"}, {"trackId", 1}, {"notes", one}, {"baseRevision", revision + 2}}, "insertNotes", kDragMessage);
+    // Without baseRevision, no check at all.
+    CHECK(changes(store, {{"cmd", "insertNotes"}, {"trackId", 1}, {"notes", one}}));
+    // The check comes before the store's own: a stale base on an unknown track is the drag message.
+    checkRefusedWith(store, {{"cmd", "insertNotes"}, {"trackId", 9}, {"notes", one}, {"baseRevision", 1}}, "insertNotes", kDragMessage);
+}
+
+TEST_CASE("baseRevision: a non-negative integer of 64 bits; anything else is an error naming the field") {
+    DocumentStore store = chordsAndNotes();
+    const json removal = json::array({3});
+    for (const json& bad : {json(-1), json(1.5), json(1.0), json("1"), json(nullptr), json(true), json::array(), json(-9223372036854775807ll - 1)}) {
+        checkError(store, {{"cmd", "removeNotes"}, {"trackId", 1}, {"ids", removal}, {"baseRevision", bad}},
+                   "\"baseRevision\" must be a non-negative integer");
+        checkError(store, {{"cmd", "insertNotes"}, {"trackId", 1}, {"notes", json::array()}, {"baseRevision", bad}},
+                   "\"baseRevision\" must be a non-negative integer");
+    }
+    checkErrorRaw(store, R"({"schema":1,"cmd":"removeNotes","trackId":1,"ids":[3],"baseRevision":18446744073709551616})",
+                  "\"baseRevision\" must be a non-negative integer");
+    checkErrorRaw(store, R"({"schema":1,"cmd":"removeNotes","trackId":1,"ids":[3],"baseRevision":-0.0})",
+                  "\"baseRevision\" must be a non-negative integer");
+}
+
+TEST_CASE("removeNotes: removes the listed notes of the track, unknown ids skipped, an empty list a no-op") {
+    DocumentStore store = chordsAndNotes();
+    CHECK(changes(store, {{"cmd", "removeNotes"}, {"trackId", 1}, {"ids", {3, 99, 3}}}));
+    CHECK(noteIds(store) == std::vector<int>{1, 2});
+    const std::uint64_t revision = store.revision();
+    CHECK_FALSE(changes(store, {{"cmd", "removeNotes"}, {"trackId", 1}, {"ids", {99}}}));
+    CHECK_FALSE(changes(store, {{"cmd", "removeNotes"}, {"trackId", 1}, {"ids", json::array()}}));
+    CHECK(store.revision() == revision);
+    checkRefusedWith(store, {{"cmd", "removeNotes"}, {"trackId", 7}, {"ids", {1}}}, "removeNotes", "No track with id 7");
+    checkError(store, {{"cmd", "removeNotes"}, {"trackId", 1}, {"ids", {1, "2"}}}, "ids[1] must be an integer");
+    checkError(store, {{"cmd", "removeNotes"}, {"trackId", 1}, {"ids", {1, 2147483648ll}}}, "ids[1] must be an integer");
+    checkError(store, {{"cmd", "removeNotes"}, {"trackId", 1}}, "missing \"ids\"");
+    checkError(store, {{"cmd", "removeNotes"}, {"ids", {1}}}, "missing \"trackId\"");
+    checkError(store, {{"cmd", "removeNotes"}, {"trackId", 1}, {"ids", 1}}, "\"ids\" must be an array");
+    applyOk(store, {{"cmd", "undo"}});
+    CHECK(noteIds(store) == std::vector<int>{1, 2, 3});
+}
+
+TEST_CASE("updateNotes: absolute values, a moved start re-anchors, an absent field keeps the note's, no-ops accepted") {
+    DocumentStore store = chordsAndNotes();
+    const std::vector<TrackNote> before = notesOfTrack(store);
+    // Pitch only, velocity only, length only.
+    CHECK(changes(store, {{"cmd", "updateNotes"}, {"trackId", 1}, {"notes", {{{"id", 1}, {"pitch", 41}}}}}));
+    CHECK(changes(store, {{"cmd", "updateNotes"}, {"trackId", 1}, {"notes", {{{"id", 1}, {"velocity", 20}}}}}));
+    CHECK(changes(store, {{"cmd", "updateNotes"}, {"trackId", 1}, {"notes", {{{"id", 1}, {"length", 960}}}}}));
+    CHECK(notesOfTrack(store).at(0) == TrackNote{1, 41, 1, 100, 960, 20});
+    // A start across a boundary: the note changes its chord.
+    CHECK(changes(store, {{"cmd", "updateNotes"}, {"trackId", 1}, {"notes", {{{"id", 1}, {"start", kBarTicks + 50}}}}}));
+    CHECK(noteIds(store) == std::vector<int>{1, 2, 3});
+    CHECK(notesOfTrack(store).at(0).anchorEventId == 2);
+    CHECK(notesOfTrack(store).at(0).offsetTick == 50);
+    // The snapshot's own start is no move; the same values again are no change at all.
+    const std::uint64_t revision = store.revision();
+    CHECK_FALSE(changes(store, {{"cmd", "updateNotes"}, {"trackId", 1}, {"notes", {{{"id", 1}, {"start", kBarTicks + 50}, {"pitch", 41}}}}}));
+    CHECK_FALSE(changes(store, {{"cmd", "updateNotes"}, {"trackId", 1}, {"notes", json::array()}}));
+    CHECK(store.revision() == revision);
+    // Several notes in one step.
+    const std::pair<int, int> depth = historyDepth(store);
+    CHECK(changes(store, {{"cmd", "updateNotes"}, {"trackId", 1}, {"notes", {{{"id", 2}, {"pitch", 1}}, {{"id", 3}, {"pitch", 2}}}}}));
+    CHECK(historyDepth(store).first == depth.first + 1);
+    // The store's refusals.
+    checkRefusedWith(store, {{"cmd", "updateNotes"}, {"trackId", 1}, {"notes", {{{"id", 99}, {"pitch", 1}}}}}, "updateNotes",
+                     "No note with id 99 in track 1");
+    checkRefusedWith(store, {{"cmd", "updateNotes"}, {"trackId", 1}, {"notes", {{{"id", 2}, {"pitch", 1}}, {{"id", 2}, {"pitch", 3}}}}},
+                     "updateNotes", "Note 2 is listed twice");
+    checkRefusedWith(store, {{"cmd", "updateNotes"}, {"trackId", 8}, {"notes", json::array()}}, "updateNotes", "No track with id 8");
+    checkRefusedWith(store, {{"cmd", "updateNotes"}, {"trackId", 1}, {"notes", {{{"id", 2}, {"start", 3 * kBarTicks}}}}}, "updateNotes",
+                     "A note must start before the end of the progression");
+}
+
+TEST_CASE("selectNotes: normalises to the track's note order, drops unknown ids, never moves the revision") {
+    DocumentStore store = chordsAndNotes();
+    const std::uint64_t revision = store.revision();
+    const std::pair<int, int> depth = historyDepth(store);
+    CHECK_FALSE(changes(store, {{"cmd", "selectNotes"}, {"trackId", 1}, {"ids", {3, 1, 99, 3}}}));
+    CHECK(store.noteSelection() == NoteSelection{1, {1, 3}});  // note order, repeats collapsed, 99 dropped
+    CHECK_FALSE(changes(store, {{"cmd", "selectNotes"}, {"trackId", 1}, {"ids", {2}}}));
+    CHECK(store.noteSelection() == NoteSelection{1, {2}});
+    CHECK(store.revision() == revision);
+    CHECK(historyDepth(store) == depth);
+    // Only unknown ids: nothing is selected.
+    CHECK_FALSE(changes(store, {{"cmd", "selectNotes"}, {"trackId", 1}, {"ids", {98, 99}}}));
+    CHECK(store.noteSelection() == NoteSelection{});
+    // Empty ids clear; so does a null track, and kNoTrackId (-1) reaches the store as the same value.
+    applyOk(store, {{"cmd", "selectNotes"}, {"trackId", 1}, {"ids", {1}}});
+    CHECK_FALSE(changes(store, {{"cmd", "selectNotes"}, {"trackId", 1}, {"ids", json::array()}}));
+    CHECK(store.noteSelection() == NoteSelection{});
+    applyOk(store, {{"cmd", "selectNotes"}, {"trackId", 1}, {"ids", {1}}});
+    CHECK_FALSE(changes(store, {{"cmd", "selectNotes"}, {"trackId", nullptr}, {"ids", {1}}}));
+    CHECK(store.noteSelection() == NoteSelection{});
+    applyOk(store, {{"cmd", "selectNotes"}, {"trackId", 1}, {"ids", {1}}});
+    CHECK_FALSE(changes(store, {{"cmd", "selectNotes"}, {"trackId", -1}, {"ids", json::array()}}));
+    CHECK(store.noteSelection() == NoteSelection{});
+    // A track no track has is a no-op, as selectEvent with an unknown id: the selection stays.
+    applyOk(store, {{"cmd", "selectNotes"}, {"trackId", 1}, {"ids", {2}}});
+    CHECK_FALSE(changes(store, {{"cmd", "selectNotes"}, {"trackId", 9}, {"ids", {1}}}));
+    CHECK(store.noteSelection() == NoteSelection{1, {2}});
+    // Errors.
+    checkError(store, {{"cmd", "selectNotes"}, {"ids", {1}}}, "missing \"trackId\"");
+    checkError(store, {{"cmd", "selectNotes"}, {"trackId", 1}}, "missing \"ids\"");
+    for (const json& bad : {json("1"), json(1.5), json(true), json::array(), json(2147483648ll)}) {
+        checkError(store, {{"cmd", "selectNotes"}, {"trackId", bad}, {"ids", {1}}}, "\"trackId\" must be an integer or null");
+    }
+    checkError(store, {{"cmd", "selectNotes"}, {"trackId", 1}, {"ids", {1, 1.5}}}, "ids[1] must be an integer");
+    checkError(store, {{"cmd", "selectNotes"}, {"trackId", 1}, {"ids", "all"}}, "\"ids\" must be an array");
+    // Edits keep the selection, dropping what is gone (the store's rule).
+    applyOk(store, {{"cmd", "selectNotes"}, {"trackId", 1}, {"ids", {1, 2, 3}}});
+    applyOk(store, {{"cmd", "removeNotes"}, {"trackId", 1}, {"ids", {2}}});
+    CHECK(store.noteSelection() == NoteSelection{1, {1, 3}});
+}
+
+TEST_CASE("documentChanged: true for note edits, track edits and the persisted live flags; false for selection, refusals, no-ops") {
+    DocumentStore store = chordsAndNotes();
+    const json one = json::array({noteJson(60, 100, 480)});
+    SUBCASE("true") {
+        CHECK(changes(store, {{"cmd", "insertNotes"}, {"trackId", 1}, {"notes", one}}));
+        CHECK(changes(store, {{"cmd", "updateNotes"}, {"trackId", 1}, {"notes", {{{"id", 1}, {"pitch", 99}}}}}));
+        CHECK(changes(store, {{"cmd", "removeNotes"}, {"trackId", 1}, {"ids", {2}}}));
+        CHECK(changes(store, {{"cmd", "addTrack"}, {"role", "lead"}}));
+        CHECK(changes(store, {{"cmd", "patchTrack"}, {"id", 2}, {"name", "x"}}));
+        CHECK(changes(store, {{"cmd", "moveTrack"}, {"id", 2}, {"index", 0}}));
+        CHECK(changes(store, {{"cmd", "removeTrack"}, {"id", 2}}));
+        CHECK(changes(store, {{"cmd", "setTrackMute"}, {"id", 1}, {"on", true}}));
+        CHECK(changes(store, {{"cmd", "setTrackSolo"}, {"id", 1}, {"on", true}}));
+        CHECK(changes(store, {{"cmd", "setChordsMute"}, {"on", true}}));
+        CHECK(changes(store, {{"cmd", "setChordsSolo"}, {"on", true}}));
+        CHECK(changes(store, {{"cmd", "insertChords"}, {"index", 0},
+                              {"chords", {{{"root", 0}, {"type", "maj"},
+                                           {"notes", {{{"lane", {{"name", "Bass"}, {"role", "bass"}}}, {"offset", 0}, {"length", 480}, {"pitch", 40}}}}}}}}));
+    }
+    SUBCASE("false") {
+        CHECK_FALSE(changes(store, {{"cmd", "selectNotes"}, {"trackId", 1}, {"ids", {1, 2}}}));
+        CHECK_FALSE(changes(store, {{"cmd", "selectNotes"}, {"trackId", nullptr}, {"ids", json::array()}}));
+        // Accepted no-ops.
+        CHECK_FALSE(changes(store, {{"cmd", "removeNotes"}, {"trackId", 1}, {"ids", {99}}}));
+        CHECK_FALSE(changes(store, {{"cmd", "updateNotes"}, {"trackId", 1}, {"notes", {{{"id", 1}, {"pitch", 36}}}}}));
+        CHECK_FALSE(changes(store, {{"cmd", "patchTrack"}, {"id", 1}, {"name", "Bass"}}));
+        CHECK_FALSE(changes(store, {{"cmd", "moveTrack"}, {"id", 1}, {"index", 0}}));
+        CHECK_FALSE(changes(store, {{"cmd", "setTrackMute"}, {"id", 1}, {"on", false}}));
+        CHECK_FALSE(changes(store, {{"cmd", "setChordsSolo"}, {"on", false}}));
+        // Refusals, errors and a stale base.
+        for (const json& cmd : {json{{"cmd", "removeTrack"}, {"id", 9}}, json{{"cmd", "setTrackMute"}, {"id", 9}, {"on", true}},
+                                json{{"cmd", "insertNotes"}, {"trackId", 1}, {"notes", one}, {"baseRevision", 999}},
+                                json{{"cmd", "addTrack"}, {"role", "tuba"}}}) {
+            json c = cmd;
+            c["schema"] = kJsonSchema;
+            std::string error;
+            bool changed = true;
+            CHECK_FALSE(applyCommandJson(store, c.dump(), error, &changed));
+            CHECK_FALSE(changed);
+        }
+    }
+}
+
+TEST_CASE("track and note commands are undoable steps with a revision each; the live flags and the selection are not") {
+    DocumentStore store = chordsAndNotes();
+    const std::uint64_t r0 = store.revision();
+    applyOk(store, {{"cmd", "addTrack"}, {"role", "other"}});
+    applyOk(store, {{"cmd", "insertNotes"}, {"trackId", 2}, {"notes", {noteJson(60, 0, 480)}}});
+    applyOk(store, {{"cmd", "updateNotes"}, {"trackId", 2}, {"notes", {{{"id", 4}, {"pitch", 61}}}}});
+    applyOk(store, {{"cmd", "removeNotes"}, {"trackId", 2}, {"ids", {4}}});
+    applyOk(store, {{"cmd", "patchTrack"}, {"id", 2}, {"role", "lead"}});
+    applyOk(store, {{"cmd", "moveTrack"}, {"id", 2}, {"index", 0}});
+    CHECK(store.revision() == r0 + 6);
+    applyOk(store, {{"cmd", "setTrackSolo"}, {"id", 2}, {"on", true}});
+    applyOk(store, {{"cmd", "selectNotes"}, {"trackId", 1}, {"ids", {1}}});
+    CHECK(store.revision() == r0 + 6);
+    for (int i = 0; i < 6; ++i) {
+        applyOk(store, {{"cmd", "undo"}});
+    }
+    CHECK(store.revision() == r0 + 12);  // an undo is a content change too
+    CHECK(trackIds(store) == std::vector<int>{1});
+}
+
+// --- insertChords carries notes (D21) ---
+
+namespace {
+
+json laneJson(const std::string& name, const char* role, std::optional<int> trackId = std::nullopt) {
+    json lane = {{"name", name}, {"role", role}};
+    if (trackId.has_value()) {
+        lane["trackId"] = *trackId;
+    }
+    return lane;
+}
+
+json chordNoteJson(json lane, std::int64_t offset, std::int64_t length, int pitch, std::optional<int> velocity = std::nullopt) {
+    json note = {{"lane", std::move(lane)}, {"offset", offset}, {"length", length}, {"pitch", pitch}};
+    if (velocity.has_value()) {
+        note["velocity"] = *velocity;
+    }
+    return note;
+}
+
+json insertWith(int index, json notes, double lengthBeats = 4.0) {
+    return {{"cmd", "insertChords"},
+            {"index", index},
+            {"chords", json::array({json{{"root", 0}, {"type", "maj"}, {"lengthBeats", lengthBeats}, {"notes", std::move(notes)}}})}};
+}
+
+}  // namespace
+
+TEST_CASE("insertChords: entries with notes resolve each lane by track id, else name and role, else a new track") {
+    DocumentStore store = chordsAndNotes();
+    applyOk(store, {{"cmd", "addTrack"}, {"role", "lead"}});
+    REQUIRE(trackIds(store) == std::vector<int>{1, 2});
+    const std::uint64_t revision = store.revision();
+    // One entry: a note by id into the Lead track (whatever its name and role say), one by name and role into Bass,
+    // two into one new "Pad".
+    const json notes = json::array({chordNoteJson(laneJson("whatever", "bass", 2), 480, 960, 72, 90),
+                                    chordNoteJson(laneJson("Bass", "bass"), 0, 480, 33),
+                                    chordNoteJson(laneJson("Pad", "other"), 0, 480, 60),
+                                    chordNoteJson(laneJson("Pad", "other"), 960, 480, 64)});
+    CHECK(changes(store, insertWith(1, notes)));  // a new chord (id 4) before the old second one
+    CHECK(store.revision() == revision + 1);
+    REQUIRE(trackIds(store) == std::vector<int>{1, 2, 3});
+    CHECK(store.doc().tracks.at(2).name == "Pad");
+    CHECK(store.doc().tracks.at(2).role == TrackRole::Other);
+    CHECK(noteIds(store, 0) == std::vector<int>{1, 5, 2, 3});  // note 5 (pitch 33) at the new chord, before the moved ones
+    CHECK(notesOfTrack(store, 0).at(1) == TrackNote{5, 33, 4, 0, 480, 100});  // velocity defaults to 100
+    CHECK(notesOfTrack(store, 1) == std::vector<TrackNote>{TrackNote{4, 72, 4, 480, 960, 90}});
+    CHECK(notesOfTrack(store, 2) == std::vector<TrackNote>{TrackNote{6, 60, 4, 0, 480, 100}, TrackNote{7, 64, 4, 960, 480, 100}});
+    CHECK(store.nextTrackId() == 4);
+    CHECK(store.nextNoteId() == 8);
+    CHECK(noteStartOf(store, 4) == kBarTicks + 480);
+    CHECK(historyDepth(store).first == 3 + 1 + 1 + 1 + 1);  // chords, Bass, its notes, Lead, this one step
+    applyOk(store, {{"cmd", "undo"}});  // one step takes the chord, the notes and the new track
+    CHECK(trackIds(store) == std::vector<int>{1, 2});
+    CHECK(store.doc().events.size() == 3);
+    CHECK(noteIds(store, 0) == std::vector<int>{1, 2, 3});
+}
+
+TEST_CASE("insertChords: notes carried inactive; anchors on the new chords; the existing notes keep theirs") {
+    DocumentStore store = chordsAndNotes();
+    // A one-beat chord at the start with a note at offset 2000: past its end, inactive, kept.
+    applyOk(store, insertWith(0, {chordNoteJson(laneJson("Bass", "bass", 1), 2000, 480, 50)}, 1.0));
+    const TrackNote& carried = notesOfTrack(store).at(1);  // starts at tick 2000, after the one at 100 + 960
+    REQUIRE(carried.id == 4);
+    CHECK(carried.anchorEventId == 4);
+    CHECK(carried.offsetTick == 2000);
+    CHECK_FALSE(noteActive(store.doc(), carried));
+    for (const TrackNote& n : notesOfTrack(store)) {
+        if (n.id <= 3) {
+            CHECK(n.anchorEventId == n.id);  // C, F, G7 were ids 1..3 and keep their notes
+        }
+    }
+}
+
+TEST_CASE("insertChords: an ambiguous lane and a lane with no room are refused whole") {
+    DocumentStore store = chordsAndBass();
+    applyOk(store, {{"cmd", "addTrack"}, {"role", "bass"}, {"name", "Bass"}});  // a second "Bass" Bass track
+    REQUIRE(trackIds(store) == std::vector<int>{1, 2});
+    checkRefusedWith(store, insertWith(0, {chordNoteJson(laneJson("Bass", "bass"), 0, 480, 40)}), "insertChords",
+                     "Lane \"Bass\" (bass) matches more than one track");
+    CHECK(changes(store, insertWith(0, {chordNoteJson(laneJson("Bass", "bass", 2), 0, 480, 40)})));  // an id settles it
+    applyOk(store, {{"cmd", "addTrack"}, {"role", "lead"}});
+    applyOk(store, {{"cmd", "addTrack"}, {"role", "other"}});
+    REQUIRE(store.doc().tracks.size() == static_cast<std::size_t>(kMaxTracks));
+    checkRefusedWith(store, insertWith(0, {chordNoteJson(laneJson("Pad", "other"), 0, 480, 40)}), "insertChords", "At most 4 tracks");
+}
+
+TEST_CASE("insertChords: a refusal by the track limits keeps the new track and ids out; counters and history unchanged") {
+    DocumentStore store = chordsAndBass();
+    json stack = json::array();
+    for (int i = 0; i <= kMaxTrackPolyphony; ++i) {
+        stack.push_back(chordNoteJson(laneJson("Stack", "lead"), 0, 480, 40 + i));
+    }
+    checkRefusedWith(store, insertWith(0, stack), "insertChords",
+                     "At most " + std::to_string(kMaxTrackPolyphony) + " track notes can sound at once");
+    CHECK(trackIds(store) == std::vector<int>{1});
+}
+
+TEST_CASE("insertChords: note entries' errors name the chord, the note and the field") {
+    DocumentStore store = chordsAndBass();
+    const json good = chordNoteJson(laneJson("Bass", "bass"), 0, 480, 40);
+    const auto withNotes = [](json notes) {
+        return json{{"cmd", "insertChords"},
+                    {"index", 0},
+                    {"chords", json::array({json{{"root", 0}, {"type", "maj"}},
+                                            json{{"root", 5}, {"type", "maj"}, {"notes", std::move(notes)}}})}};
+    };
+    const auto note = [&](const std::function<void(json&)>& spoil) {
+        json n = good;
+        spoil(n);
+        return withNotes(json::array({good, n}));
+    };
+    const std::string at = "chords[1].notes[1].";
+    checkError(store, note([](json& n) { n["lane"]["role"] = "Bass"; }), "chords[1].notes[1].lane.role " + kRoleMessage);
+    checkError(store, note([](json& n) { n["lane"]["role"] = 3; }), "chords[1].notes[1].lane.role " + kRoleMessage);
+    checkError(store, note([](json& n) { n["lane"].erase("role"); }), "missing chords[1].notes[1].lane.role");
+    checkError(store, note([](json& n) { n["lane"].erase("name"); }), "missing chords[1].notes[1].lane.name");
+    checkError(store, note([](json& n) { n["lane"]["name"] = 5; }), "chords[1].notes[1].lane.name must be a string");
+    checkError(store, note([](json& n) { n["lane"]["name"] = std::string(65, 'x'); }),
+               "chords[1].notes[1].lane.name must be at most 64 bytes");
+    checkError(store, note([](json& n) { n["lane"]["trackId"] = "1"; }), "chords[1].notes[1].lane.trackId must be an integer");
+    checkError(store, note([](json& n) { n["lane"]["trackId"] = 2147483648ll; }), "chords[1].notes[1].lane.trackId must be an integer");
+    checkError(store, note([](json& n) { n.erase("lane"); }), "missing chords[1].notes[1].lane");
+    checkError(store, note([](json& n) { n["lane"] = "Bass"; }), "chords[1].notes[1].lane must be an object");
+    checkError(store, note([](json& n) { n["offset"] = 1.5; }), at + "offset must be an integer " + kInt64Range);
+    checkError(store, note([](json& n) { n["offset"] = "0"; }), at + "offset must be an integer " + kInt64Range);
+    checkError(store, note([](json& n) { n.erase("offset"); }), "missing " + at + "offset");
+    checkError(store, note([](json& n) { n["length"] = nullptr; }), at + "length must be an integer " + kInt64Range);
+    checkError(store, note([](json& n) { n.erase("length"); }), "missing " + at + "length");
+    checkError(store, note([](json& n) { n["pitch"] = 1.5; }), at + "pitch must be an integer");
+    checkError(store, note([](json& n) { n["pitch"] = 2147483648ll; }), at + "pitch must be an integer");
+    checkError(store, note([](json& n) { n.erase("pitch"); }), "missing " + at + "pitch");
+    checkError(store, note([](json& n) { n["velocity"] = "loud"; }), at + "velocity must be an integer");
+    checkError(store, withNotes(json::array({good, 7})), "chords[1].notes[1] must be an object");
+    checkError(store, withNotes(json("notes")), "chords[1].notes must be an array");
+    checkErrorRaw(store,
+                  R"({"schema":1,"cmd":"insertChords","index":0,"chords":[{"root":0,"type":"maj","notes":[{"lane":{"name":"B","role":"bass"},"offset":9223372036854775808,"length":1,"pitch":1}]}]})",
+                  "chords[0].notes[0].offset must be an integer " + kInt64Range);
+    // The batch is bounded as a whole.
+    json many = json::array();
+    for (int i = 0; i <= kMaxTracks * kMaxNotesPerTrack; ++i) {
+        many.push_back(good);
+    }
+    checkError(store, withNotes(many), "chords[1].notes must not bring the batch to more than " +
+                                           std::to_string(kMaxTracks * kMaxNotesPerTrack) + " notes");
+    // A chord entry without notes (or with an empty list) is as before.
+    CHECK(changes(store, withNotes(json::array())));
 }

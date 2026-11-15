@@ -17,6 +17,7 @@
 #include "chordlab/palette.h"
 #include "chordlab/pitch.h"
 #include "chordlab/scale.h"
+#include "chordlab/tracks.h"
 #include "chordlab/voicing.h"
 
 #include <nlohmann/json.hpp>
@@ -59,7 +60,9 @@ const char* const kNumberLiterals[] = {"1e400",  "-1e400",   "184467440737095516
                                        "2147483648", "-2147483649", "0",     "-1",     "1",
                                        "2",     "3",      "11",   "12",     "255",
                                        "0.0",   "-0.0",   "4.5",  "1e-400", "63.99999",
-                                       "64.00001", "1e308", "NaN",  "Infinity", "0x10"};
+                                       "64.00001", "1e308", "NaN",  "Infinity", "0x10",
+                                       "9223372036854775807", "-9223372036854775808", "9223372036854775808",
+                                       "-9223372036854775809", "1024", "4096", "960"};
 constexpr std::size_t kNumberLiteralCount = sizeof(kNumberLiterals) / sizeof(kNumberLiterals[0]);
 
 std::string insertToken(Rng& rng) {
@@ -261,6 +264,33 @@ std::string invariantProblem(const DocumentStore& store, bool snapshot = true) {
             return "section id " + std::to_string(s.id) + " not below nextSectionId";
         }
     }
+    // The tracks: the one invariant of tracks.h with the counters the store holds, and a note selection that is a
+    // duplicate-free subsequence of its track's notes, empty exactly when it names no track.
+    std::string trackError;
+    if (!validateTracks(d, store.nextTrackId(), store.nextNoteId(), trackError)) {
+        return "track invariant broken: " + trackError;
+    }
+    const NoteSelection& noteSelection = store.noteSelection();
+    if (noteSelection.ids.empty() != (noteSelection.trackId == kNoTrackId)) {
+        return "the note selection is empty exactly when it names no track";
+    }
+    if (noteSelection.trackId != kNoTrackId) {
+        const int trackIndex = store.findTrackIndex(noteSelection.trackId);
+        if (trackIndex < 0) {
+            return "the note selection names a track that does not exist";
+        }
+        const std::vector<TrackNote>& notes = d.tracks[static_cast<std::size_t>(trackIndex)].notes;
+        std::size_t at = 0;
+        for (const int id : noteSelection.ids) {
+            while (at < notes.size() && notes[at].id != id) {
+                ++at;
+            }
+            if (at == notes.size()) {
+                return "the note selection is not a subsequence of the track's notes";
+            }
+            ++at;
+        }
+    }
     if (!snapshot) {
         return {};
     }
@@ -311,12 +341,18 @@ struct Observable {
     int nextSectionId;
     int selected;
     std::vector<int> selection;
+    int nextTrackId;
+    int nextNoteId;
+    std::uint64_t revision;
+    NoteSelection noteSelection;
     explicit Observable(const DocumentStore& s)
         : doc(s.doc()), nextId(s.nextId()), nextSectionId(s.nextSectionId()), selected(s.selectedEventId()),
-          selection(s.selectedEventIds()) {}
+          selection(s.selectedEventIds()), nextTrackId(s.nextTrackId()), nextNoteId(s.nextNoteId()),
+          revision(s.revision()), noteSelection(s.noteSelection()) {}
     bool operator==(const Observable& o) const {
         return doc == o.doc && nextId == o.nextId && nextSectionId == o.nextSectionId && selected == o.selected &&
-               selection == o.selection;
+               selection == o.selection && nextTrackId == o.nextTrackId && nextNoteId == o.nextNoteId &&
+               revision == o.revision && noteSelection == o.noteSelection;
     }
 };
 
@@ -413,6 +449,71 @@ std::vector<std::string> commandCorpus() {
         {{"cmd", "setNewChordLength"}, {"lengthBeats", nullptr}},
         {{"cmd", "undo"}},
         {{"cmd", "redo"}},
+    };
+    std::vector<std::string> out;
+    for (json body : bodies) {
+        body["schema"] = kJsonSchema;
+        out.push_back(body.dump());
+    }
+    return out;
+}
+
+/// `prefilledStore` plus tracks: Bass (id 1) with notes 1..3 in the first three chords, Lead (id 2, named "Melody")
+/// with note 4 in the second, an Other track (id 3) without notes, note 2 selected; `withRedo` leaves one undone step.
+/// The notes sit far inside the polyphony and onset caps.
+DocumentStore prefilledTrackStore(bool withRedo = false) {
+    DocumentStore store = prefilledStore(false);
+    store.addTrack(TrackRole::Bass);
+    store.addTrack(TrackRole::Lead, std::string("Melody"));
+    store.addTrack(TrackRole::Other);
+    store.insertNotes(1, {NoteSpec{36, 100, 480}, NoteSpec{38, 3840 + 200, 960, 80}, NoteSpec{40, 7680 + 300, 480}});
+    store.insertNotes(2, {NoteSpec{72, 3840, 960}});
+    if (withRedo) {
+        store.setVelocity(1, 77);
+        store.undo();
+    }
+    store.setSelectedEvent(2);
+    store.setNoteSelection(1, {2});
+    return store;
+}
+
+/// One valid message per track and note command (and `insertChords` with notes), against `prefilledTrackStore(false)`:
+/// `revision` is that store's revision, for the `baseRevision` entries (stale on a store with a redo step, which is
+/// the refusal path).
+std::vector<std::string> trackCommandCorpus(std::uint64_t revision) {
+    const json bassLane = {{"trackId", 1}, {"name", "Bass"}, {"role", "bass"}};
+    const std::vector<json> bodies = {
+        {{"cmd", "addTrack"}, {"role", "lead"}},
+        {{"cmd", "addTrack"}, {"role", "other"}, {"name", "Pad \xCE\x94"}},
+        {{"cmd", "removeTrack"}, {"id", 2}},
+        {{"cmd", "patchTrack"}, {"id", 3}, {"name", "Keys"}, {"role", "lead"}},
+        {{"cmd", "patchTrack"}, {"id", 1}, {"role", "other"}},
+        {{"cmd", "moveTrack"}, {"id", 3}, {"index", 0}},
+        {{"cmd", "setTrackMute"}, {"id", 1}, {"on", true}},
+        {{"cmd", "setTrackSolo"}, {"id", 2}, {"on", true}},
+        {{"cmd", "setChordsMute"}, {"on", true}},
+        {{"cmd", "setChordsSolo"}, {"on", true}},
+        {{"cmd", "insertNotes"}, {"trackId", 3},
+         {"notes", json::array({json({{"pitch", 60}, {"start", 0}, {"length", 480}}),
+                                json({{"pitch", 64}, {"start", 4000}, {"length", 960}, {"velocity", 90}})})},
+         {"baseRevision", revision}},
+        {{"cmd", "insertNotes"}, {"trackId", 1},
+         {"notes", json::array({json({{"pitch", 130}, {"start", 12000}, {"length", 99999999999}, {"velocity", 500}})})}},
+        {{"cmd", "removeNotes"}, {"trackId", 1}, {"ids", json::array({3, 99, 3})}, {"baseRevision", revision}},
+        {{"cmd", "removeNotes"}, {"trackId", 1}, {"ids", json::array()}},
+        {{"cmd", "updateNotes"}, {"trackId", 1},
+         {"notes", json::array({json({{"id", 1}, {"pitch", 50}, {"velocity", 30}}),
+                                json({{"id", 2}, {"start", 7700}, {"length", 480}})})},
+         {"baseRevision", revision}},
+        {{"cmd", "selectNotes"}, {"trackId", 1}, {"ids", json::array({3, 1, 77})}},
+        {{"cmd", "selectNotes"}, {"trackId", nullptr}, {"ids", json::array()}},
+        {{"cmd", "insertChords"}, {"index", 1},
+         {"chords", json::array({json({{"root", 0}, {"type", "maj"}, {"lengthBeats", 2.0},
+                                       {"notes", json::array({json({{"lane", bassLane}, {"offset", 480}, {"length", 480}, {"pitch", 33}, {"velocity", 70}}),
+                                                              json({{"lane", {{"name", "Melody"}, {"role", "lead"}}}, {"offset", 5000}, {"length", 480}, {"pitch", 76}}),
+                                                              json({{"lane", {{"name", "Drone"}, {"role", "other"}}}, {"offset", 0}, {"length", 960}, {"pitch", 36}, {"velocity", 60}})})}}),
+                                 json({{"root", 7}, {"type", "7"},
+                                       {"notes", json::array({json({{"lane", {{"name", "Drone"}, {"role", "other"}}}, {"offset", 0}, {"length", 960}, {"pitch", 43}})})}})})}},
     };
     std::vector<std::string> out;
     for (json body : bodies) {
@@ -654,6 +755,85 @@ TEST_CASE("json robustness: mutated strip-editing payloads apply or reject atomi
     }
     CHECK(accepted > 10);
     CHECK(accepted < kStripIterations);
+}
+
+// ---- track and note payloads ----
+
+TEST_CASE("json robustness: every track and note command is accepted on a prepared store, and its mutants apply or reject atomically") {
+    const std::vector<std::string> corpus = trackCommandCorpus(prefilledTrackStore(false).revision());
+    // The corpus itself: each entry accepted on a fresh prepared store, then all of them in a row on a shared one.
+    for (std::size_t i = 0; i < corpus.size(); ++i) {
+        DocumentStore store = prefilledTrackStore(false);
+        std::string error;
+        CHECK_MESSAGE(applyCommandJson(store, corpus[i], error), "track corpus entry " << i << " rejected: " << error
+                                                                                        << " input=" << escaped(corpus[i]));
+    }
+    {
+        DocumentStore cmdStore = prefilledTrackStore(false);
+        DocumentStore stateStore = prefilledStore();
+        for (const std::string& m : corpus) {
+            const std::string problem = feed(cmdStore, stateStore, m);
+            CHECK_MESSAGE(problem.empty(), problem << " input=" << escaped(m));
+        }
+    }
+    Rng rng{0xE7037ED1A0B428DBull};
+    DocumentStore cmdStore = prefilledTrackStore(true);
+    DocumentStore stateStore = prefilledStore(true);
+    int accepted = 0;
+    constexpr int kTrackIterations = 1500;
+    for (int i = 0; i < kTrackIterations; ++i) {
+        if (i % 25 == 0) {  // a fresh store now and then (alternately with a redo step, which makes baseRevision stale)
+            cmdStore = prefilledTrackStore((i / 25) % 2 == 0);
+            stateStore = prefilledStore((i / 25) % 2 == 0);
+        }
+        std::string m = corpus[rng.below(corpus.size())];
+        const std::size_t mutations = rng.below(2) == 0 ? 1 : 1 + rng.below(3);
+        for (std::size_t k = 0; k < mutations; ++k) {
+            mutateOnce(m, rng);
+        }
+        bool commandAccepted = false;
+        const std::string problem = feed(cmdStore, stateStore, m, &commandAccepted);
+        if (!problem.empty()) {
+            FAIL_CHECK(problem << " [iteration " << i << ", input=" << escaped(m) << "]");
+            break;
+        }
+        accepted += commandAccepted ? 1 : 0;
+    }
+    MESSAGE("json robustness track fuzz: " << kTrackIterations << " mutants, " << accepted << " accepted as commands");
+    CHECK(accepted > 20);
+    CHECK(accepted < kTrackIterations);
+}
+
+TEST_CASE("json robustness: integers at the edges of 64 and 32 bits are refused or clamped in every track field, never wrapped") {
+    const char* const edges[] = {"9223372036854775807", "-9223372036854775808", "9223372036854775808", "-9223372036854775809",
+                                 "18446744073709551615", "18446744073709551616", "2147483647", "2147483648", "-2147483648",
+                                 "-2147483649", "4294967296", "1e19", "-1e19"};
+    DocumentStore cmdStore = prefilledTrackStore();
+    DocumentStore stateStore = prefilledStore();
+    const auto sweep = [&](const std::string& before, const std::string& after) {
+        for (const char* edge : edges) {
+            const std::string text = before + edge + after;
+            const std::string problem = feed(cmdStore, stateStore, text);
+            REQUIRE_MESSAGE(problem.empty(), problem << " input=" << text);
+        }
+    };
+    sweep(R"({"schema":1,"cmd":"insertNotes","trackId":1,"notes":[{"pitch":60,"length":480,"start":)", "}]}");
+    sweep(R"({"schema":1,"cmd":"insertNotes","trackId":1,"notes":[{"pitch":60,"start":0,"length":)", "}]}");
+    sweep(R"({"schema":1,"cmd":"insertNotes","trackId":1,"notes":[{"start":0,"length":480,"pitch":)", "}]}");
+    sweep(R"({"schema":1,"cmd":"insertNotes","trackId":1,"notes":[{"pitch":60,"start":0,"length":480,"velocity":)", "}]}");
+    sweep(R"({"schema":1,"cmd":"insertNotes","trackId":)", R"(,"notes":[{"pitch":60,"start":0,"length":480}]})");
+    sweep(R"({"schema":1,"cmd":"updateNotes","trackId":1,"notes":[{"id":1,"start":)", "}]}");
+    sweep(R"({"schema":1,"cmd":"updateNotes","trackId":1,"notes":[{"id":1,"length":)", "}]}");
+    sweep(R"({"schema":1,"cmd":"updateNotes","trackId":1,"notes":[{"id":)", R"(,"pitch":1}]})");
+    sweep(R"({"schema":1,"cmd":"removeNotes","trackId":1,"ids":[1],"baseRevision":)", "}");
+    sweep(R"({"schema":1,"cmd":"removeNotes","trackId":1,"ids":[)", "]}");
+    sweep(R"({"schema":1,"cmd":"selectNotes","trackId":)", R"(,"ids":[1]})");
+    sweep(R"({"schema":1,"cmd":"moveTrack","id":1,"index":)", "}");
+    sweep(R"({"schema":1,"cmd":"setTrackMute","on":true,"id":)", "}");
+    sweep(R"({"schema":1,"cmd":"insertChords","index":0,"chords":[{"root":0,"type":"maj","notes":[{"lane":{"name":"B","role":"bass"},"length":480,"pitch":40,"offset":)",
+          "}]}]}");
+    sweep(R"({"schema":1,"cmd":"insertChords","index":0,"chords":[{"root":0,"type":"maj","notes":[{"lane":{"name":"B","role":"bass","trackId":)",
+          R"(},"length":480,"pitch":40,"offset":0}]}]})");
 }
 
 TEST_CASE("json robustness: every Length menu value as the new-chord length and on four blocks survives a save") {

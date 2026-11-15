@@ -90,19 +90,43 @@ constexpr bool operator!=(const ChordEvent& a, const ChordEvent& b) noexcept {
     return !(a == b);
 }
 
+/// Which lane a note of `insertChords` belongs to (tracks design D21): the track `trackId` when this document has
+/// one with that id, else the unique track whose name (cut to `kMaxTrackNameBytes`) and `role` are these, else a new
+/// track with that name and role. A copy from this document finds its track by id, a paste into another by name and
+/// role.
+struct LaneRef {
+    std::optional<int> trackId;
+    std::string name;
+    TrackRole role = TrackRole::Other;
+};
+
+/// One note a chord of `insertChords` carries (D21): the chord's start plus `offsetTick` is where it starts (the
+/// note is anchored to the chord it inserts), `lengthTicks`, `pitch` and `velocity` as `NoteSpec`'s, clamped as the
+/// store clamps them (pitch and velocity, the offset to >= 0 and the derived start into the note domain, then the
+/// length against what is left; an offset past the chord's end is kept: the note is inactive, D3). 64-bit ticks.
+struct ChordNoteSpec {
+    LaneRef lane;
+    std::int64_t offsetTick = 0;
+    std::int64_t lengthTicks = 0;
+    int pitch = 0;
+    int velocity = 100;
+};
+
 /// One chord for `DocumentStore::insertChords` (strip editing design D1): the chord; its length, the
 /// document's new-chord length (`Document::newChordLength`) when absent; its velocity; and a voicing as
 /// `ChordEvent` holds it. A given `inversion` or `octave` makes the chord manual (it sounds as given under auto
 /// voice-leading) unless `manualVoicing` says otherwise, as `appendChord` does with an inversion;
 /// `manualVoicing` alone sets the flag with root position in the default register. The store clamps every
-/// value as its setters clamp it.
+/// value as its setters clamp it. `notes` are the track notes the chord carries (D21): the copy and paste of
+/// chords with their lanes; empty for a plain insert.
 struct ChordSpec {
     Chord chord;
-    std::optional<double> lengthBeats;
+    std::optional<double> lengthBeats = std::nullopt;
     int velocity = 100;
-    std::optional<int> inversion;
-    std::optional<int> octave;
-    std::optional<bool> manualVoicing;
+    std::optional<int> inversion = std::nullopt;
+    std::optional<int> octave = std::nullopt;
+    std::optional<bool> manualVoicing = std::nullopt;
+    std::vector<ChordNoteSpec> notes = {};
 };
 
 /// A named, coloured stretch of the progression (P2-D6). It starts on the chord at `firstEventIndex` and
@@ -446,6 +470,19 @@ public:
     /// The inserted chords become the selection, the last of them the anchor (live state, set after the commit).
     /// Every chord must satisfy the `Chord` preconditions (chord.h). The counter advances only once the insert
     /// is committed.
+    ///
+    /// **Chord notes (tracks D21).** Each `ChordSpec::notes` entry joins a lane resolved inside the same commit
+    /// (`LaneRef`): the track with that id when the document has one, else the unique track whose name (cut to
+    /// `kMaxTrackNameBytes`) and role match, else a new track appended with that name (as given: an empty one stays
+    /// empty) and role, shared by every note of the batch naming the same absent (name, role). The note is anchored to
+    /// the chord it comes with and clamped as `ChordNoteSpec` says; note ids come from the counter in chord, then
+    /// entry order, and so do the ids of new tracks. Further refusal reasons: more than one track with the lane's name
+    /// and role ("Lane \"Bass\" (bass) matches more than one track"), no room for a new track ("At most 4 tracks"),
+    /// the track or note id counter unable to hand out the ids the batch needs ("No track ids are left", "No note
+    /// ids are left"); and the whole candidate (chords, moved notes, new tracks and notes) is validated by
+    /// `validateTracks` with the counters it publishes, so a track over its note limit or the playback caps refuses
+    /// the insert with the validator's message and leaves no track behind. The note selection is unchanged (the stale
+    /// drop apart); a refusal changes nothing.
     std::vector<int> insertChords(int index, const std::vector<ChordSpec>& chords, std::string* refusal = nullptr);
 
     /// Removes every chord of `ids` that exists, as ONE undoable step: in index order, each with
@@ -735,6 +772,10 @@ private:
     /// track and note counters (a timing edit hands out no track or note id). Every note of `next` must anchor one
     /// of its chords: the removals drop the notes of the chords they remove before calling it.
     bool commitTiming(Document next, std::string* refusal);
+
+    /// `commitTiming` publishing `nextTrackId` and `nextNoteId` with the document (an insert that created tracks
+    /// and notes): validated with them; the caller assigns the counters after a true return, as the track edits do.
+    bool commitTimingWithIds(Document next, int nextTrackId, int nextNoteId, std::string* refusal);
 
     /// The one body of `appendProgression` and `replaceProgression`: checks `progressionRefusal`, builds
     /// the next document (events, sections and, for a replace, tracks emptied of notes) and commits it once.

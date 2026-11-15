@@ -1970,3 +1970,277 @@ TEST_CASE("appendProgression keeps every note; replaceProgression removes every 
     REQUIRE(store.undo());
     CHECK(store.doc().tracks == tracks);  // undo brings the notes back
 }
+
+// --- insertChords with notes (tracks design D21) -----------------------------------------
+
+namespace {
+
+LaneRef laneNamed(std::string name, TrackRole role, std::optional<int> trackId = std::nullopt) {
+    return LaneRef{trackId, std::move(name), role};
+}
+
+ChordNoteSpec chordNote(LaneRef lane, std::int64_t offset, std::int64_t length, int pitch, int velocity = 100) {
+    return ChordNoteSpec{std::move(lane), offset, length, pitch, velocity};
+}
+
+ChordSpec chordWith(Chord c, double beats, std::vector<ChordNoteSpec> notes) {
+    ChordSpec spec{c, beats};
+    spec.notes = std::move(notes);
+    return spec;
+}
+
+/// `oneNotePerChord` (Bass id 1, notes 1..3) plus a Lead track (id 2) with no notes.
+DocumentStore bassAndLead() {
+    DocumentStore store = oneNotePerChord();
+    REQUIRE(store.addTrack(TrackRole::Lead) == 2);
+    return store;
+}
+
+}  // namespace
+
+TEST_CASE("insertChords with notes: a lane naming an existing track id goes to that track, whatever its name and role") {
+    DocumentStore store = bassAndLead();
+    const int tracksBefore = store.nextTrackId();
+    std::string refusal = "stale";
+    // Inserted at index 1 (before F): the new chord has id 4 and starts at kBar.
+    checkOneStep(store, [&](DocumentStore& s) {
+        CHECK(s.insertChords(1, {chordWith(kC, 4.0, {chordNote(laneNamed("anything", TrackRole::Bass, 2), 480, 960, 72, 90)})},
+                             &refusal) == std::vector<int>{4});
+    });
+    CHECK(refusal.empty());
+    CHECK(store.nextTrackId() == tracksBefore);  // no track was created
+    CHECK(trackIdsOf(store) == std::vector<int>{1, 2});
+    CHECK(notesOf(store, 0) == kOneNotePerChord);  // the Bass track is untouched
+    REQUIRE(notesOf(store, 1).size() == 1);
+    CHECK(notesOf(store, 1).at(0) == TrackNote{4, 72, 4, 480, 960, 90});  // id from the counter, anchor the new chord
+    CHECK(noteStart(store.doc(), notesOf(store, 1).at(0)) == kBar + 480);
+    CHECK(store.nextNoteId() == 5);
+}
+
+TEST_CASE("insertChords with notes: no track id (or none in this document) resolves by name and role, uniquely") {
+    DocumentStore store = bassAndLead();
+    std::string refusal;
+    SUBCASE("name and role of an existing track") {
+        CHECK(store.insertChords(0, {chordWith(kC, 4.0, {chordNote(laneNamed("Lead", TrackRole::Lead), 0, 480, 72)})},
+                                 &refusal) == std::vector<int>{4});
+        CHECK(trackIdsOf(store) == std::vector<int>{1, 2});
+        CHECK(noteIdsOf(store, 1) == std::vector<int>{4});
+    }
+    SUBCASE("a track id this document does not have falls back to the name") {
+        CHECK(store.insertChords(0, {chordWith(kC, 4.0, {chordNote(laneNamed("Bass", TrackRole::Bass, 77), 0, 480, 40)})},
+                                 &refusal) == std::vector<int>{4});
+        CHECK(trackIdsOf(store) == std::vector<int>{1, 2});
+        CHECK(notesOf(store, 0).size() == 4);
+    }
+    SUBCASE("a name longer than the track limit is cut before it is compared") {
+        REQUIRE(store.patchTrack(2, std::string(kMaxTrackNameBytes, 'x'), std::nullopt));
+        CHECK(store.insertChords(0, {chordWith(kC, 4.0, {chordNote(laneNamed(std::string(kMaxTrackNameBytes + 10, 'x'),
+                                                                           TrackRole::Lead), 0, 480, 72)})},
+                                 &refusal) == std::vector<int>{4});
+        CHECK(trackIdsOf(store) == std::vector<int>{1, 2});
+        CHECK(noteIdsOf(store, 1) == std::vector<int>{4});
+    }
+    CHECK(refusal.empty());
+}
+
+TEST_CASE("insertChords with notes: an absent lane becomes one new track at the end, shared by every note naming it") {
+    DocumentStore store = bassAndLead();
+    std::string refusal = "stale";
+    const std::vector<ChordSpec> chords{
+        chordWith(kC, 4.0, {chordNote(laneNamed("Pad", TrackRole::Other), 0, 480, 60), chordNote(laneNamed("Pad", TrackRole::Other), 960, 480, 64)}),
+        chordWith(kF, 4.0, {chordNote(laneNamed("Pad", TrackRole::Other), 0, 480, 65), chordNote(laneNamed("Bass", TrackRole::Lead), 0, 480, 77)})};
+    checkOneStep(store, [&](DocumentStore& s) { CHECK(s.insertChords(3, chords, &refusal) == std::vector<int>{4, 5}); });
+    CHECK(refusal.empty());
+    // "Bass" with role Lead is not the Bass track: it is absent too, a second new track.
+    REQUIRE(trackIdsOf(store) == std::vector<int>{1, 2, 3, 4});
+    CHECK(trackAt(store, 2).name == "Pad");
+    CHECK(trackAt(store, 2).role == TrackRole::Other);
+    CHECK_FALSE(trackAt(store, 2).mute);
+    CHECK_FALSE(trackAt(store, 2).solo);
+    CHECK(trackAt(store, 3).name == "Bass");
+    CHECK(trackAt(store, 3).role == TrackRole::Lead);
+    CHECK(notesOf(store, 2) == std::vector<TrackNote>{TrackNote{4, 60, 4, 0, 480, 100}, TrackNote{5, 64, 4, 960, 480, 100},
+                                                      TrackNote{6, 65, 5, 0, 480, 100}});
+    CHECK(notesOf(store, 3) == std::vector<TrackNote>{TrackNote{7, 77, 5, 0, 480, 100}});
+    CHECK(store.nextTrackId() == 5);
+    CHECK(store.nextNoteId() == 8);
+}
+
+TEST_CASE("insertChords with notes: notes sort into their track beside the existing ones, anchors on the new chords") {
+    DocumentStore store = oneNotePerChord();  // notes at 100, kBar + 200, 2 kBar + 300
+    // Two chords at index 1: ids 4 and 5, starting at kBar and kBar + 1920; the old second and third chords move later.
+    REQUIRE(store.insertChords(1, {chordWith(kC, 2.0, {chordNote(laneNamed("Bass", TrackRole::Bass, 1), 50, 480, 30)}),
+                                   chordWith(kF, 2.0, {chordNote(laneNamed("Bass", TrackRole::Bass, 1), 10, 480, 31)})}) ==
+            std::vector<int>{4, 5});
+    CHECK(noteIdsOf(store) == std::vector<int>{1, 4, 5, 2, 3});
+    CHECK(startsOf(store) == Starts{100, kBar + 50, kBar + 1920 + 10, kBar + 1920 * 2 + 200, 2 * kBar + 1920 * 2 + 300});
+    CHECK(noteWithId(store, 4).anchorEventId == 4);
+    CHECK(noteWithId(store, 5).anchorEventId == 5);
+    CHECK(noteWithId(store, 2).anchorEventId == 2);  // the existing notes keep their chords
+}
+
+TEST_CASE("insertChords with notes: notes past their chord's end are carried, inactive") {
+    DocumentStore store = threeChordsAndBass();
+    // A one-beat chord (960 ticks) and a note at offset 2000: inactive, kept, as the clipboard carries them.
+    REQUIRE(store.insertChords(0, {chordWith(kC, 1.0, {chordNote(laneNamed("Bass", TrackRole::Bass, 1), 2000, 480, 40),
+                                                       chordNote(laneNamed("Bass", TrackRole::Bass, 1), 100, 480, 41)})}) ==
+            std::vector<int>{4});
+    REQUIRE(notesOf(store).size() == 2);
+    const TrackNote& active = noteWithId(store, 2);
+    const TrackNote& inactive = noteWithId(store, 1);
+    CHECK(inactive.offsetTick == 2000);
+    CHECK(inactive.anchorEventId == 4);
+    CHECK_FALSE(noteActive(store.doc(), inactive));
+    CHECK(noteActive(store.doc(), active));
+    // Lengthening the chord brings it back.
+    REQUIRE(store.setLength(4, 4.0));
+    CHECK(noteActive(store.doc(), noteWithId(store, 1)));
+}
+
+TEST_CASE("insertChords with notes: pitch, velocity, offset and length are clamped as the store clamps them") {
+    DocumentStore store = threeChordsAndBass();
+    const LaneRef bass = laneNamed("Bass", TrackRole::Bass, 1);
+    REQUIRE(store.insertChords(0, {chordWith(kC, 4.0, {chordNote(bass, -50, 1, 200, 0),
+                                                       chordNote(bass, 0, 1000, -3, 500),
+                                                       chordNote(bass, std::numeric_limits<std::int64_t>::max(),
+                                                                 std::numeric_limits<std::int64_t>::max(), 60, 100)})}) ==
+            std::vector<int>{4});
+    // Sorted by derived start: the two at the chord's start, then the clamped far one.
+    REQUIRE(notesOf(store).size() == 3);
+    const TrackNote& a = noteWithId(store, 1);
+    const TrackNote& b = noteWithId(store, 2);
+    const TrackNote& far = noteWithId(store, 3);
+    CHECK(a.offsetTick == 0);
+    CHECK(a.lengthTicks == kMinTrackNoteTicks);
+    CHECK(a.pitch == 127);
+    CHECK(a.velocity == 1);
+    CHECK(b.pitch == 0);
+    CHECK(b.velocity == 127);
+    CHECK(b.lengthTicks == 1000);
+    // The derived start is clamped to kMaxNoteTick - kMinTrackNoteTicks and the length to what is left (30).
+    CHECK(noteStart(store.doc(), far) == kMaxNoteTick - kMinTrackNoteTicks);
+    CHECK(far.lengthTicks == kMinTrackNoteTicks);
+}
+
+TEST_CASE("insertChords with notes: an ambiguous lane refuses the whole insert, naming the lane") {
+    DocumentStore store = bassAndLead();
+    REQUIRE(store.addTrack(TrackRole::Lead, std::string("Lead")) == 3);  // a second "Lead" Lead
+    const DocumentStore reference = store;
+    std::string refusal = "stale";
+    CHECK(store.insertChords(0, {chordWith(kC, 4.0, {chordNote(laneNamed("Lead", TrackRole::Lead), 0, 480, 72)})},
+                             &refusal).empty());
+    CHECK(refusal.find("Lead") != std::string::npos);
+    CHECK(refusal.find("more than one") != std::string::npos);
+    checkRefused(store, reference);
+    // A track id that exists settles it: no ambiguity to resolve.
+    CHECK(store.insertChords(0, {chordWith(kC, 4.0, {chordNote(laneNamed("Lead", TrackRole::Lead, 3), 0, 480, 72)})},
+                             &refusal) == std::vector<int>{4});
+    CHECK(noteIdsOf(store, 2) == std::vector<int>{4});
+}
+
+TEST_CASE("insertChords with notes: no room for a new track refuses the whole insert") {
+    DocumentStore store = bassAndLead();
+    REQUIRE(store.addTrack(TrackRole::Other) == 3);
+    std::string refusal = "stale";
+    SUBCASE("three tracks, one new lane fits, two do not") {
+        const DocumentStore reference = store;
+        CHECK(store.insertChords(0, {chordWith(kC, 4.0, {chordNote(laneNamed("A", TrackRole::Other), 0, 480, 60),
+                                                         chordNote(laneNamed("B", TrackRole::Other), 0, 480, 61)})},
+                                 &refusal).empty());
+        CHECK(refusal == "At most " + std::to_string(kMaxTracks) + " tracks");
+        checkRefused(store, reference);
+        CHECK(store.insertChords(0, {chordWith(kC, 4.0, {chordNote(laneNamed("A", TrackRole::Other), 0, 480, 60),
+                                                         chordNote(laneNamed("A", TrackRole::Other), 960, 480, 61)})},
+                                 &refusal) == std::vector<int>{4});
+        CHECK(trackIdsOf(store) == std::vector<int>{1, 2, 3, 4});
+    }
+    SUBCASE("four tracks") {
+        REQUIRE(store.addTrack(TrackRole::Other) == 4);
+        const DocumentStore reference = store;
+        CHECK(store.insertChords(0, {chordWith(kC, 4.0, {chordNote(laneNamed("New", TrackRole::Bass), 0, 480, 60)})},
+                                 &refusal).empty());
+        CHECK(refusal == "At most " + std::to_string(kMaxTracks) + " tracks");
+        checkRefused(store, reference);
+        // Notes that name existing lanes still go in.
+        CHECK(store.insertChords(0, {chordWith(kC, 4.0, {chordNote(laneNamed("Bass", TrackRole::Bass), 0, 480, 60)})},
+                                 &refusal) == std::vector<int>{4});
+    }
+}
+
+TEST_CASE("insertChords with notes: a refusal by the track limits leaves no new track, no ids consumed, no history") {
+    DocumentStore store = threeChordsAndBass();
+    const DocumentStore reference = store;
+    std::vector<ChordNoteSpec> nine;  // one past the polyphony cap, all sounding together, in a brand-new lane
+    for (int i = 0; i <= kMaxTrackPolyphony; ++i) {
+        nine.push_back(chordNote(laneNamed("Stack", TrackRole::Lead), 0, 480, 40 + i));
+    }
+    std::string refusal = "stale";
+    CHECK(store.insertChords(0, {chordWith(kC, 4.0, nine)}, &refusal).empty());
+    CHECK(refusal == kPolyphonyMessage);
+    checkRefused(store, reference);
+    CHECK(trackIdsOf(store) == std::vector<int>{1});
+    CHECK(store.nextId() == reference.nextId());
+    CHECK(store.selectedEventIds() == reference.selectedEventIds());
+}
+
+TEST_CASE("insertChords with notes: refused when the new notes push a track past its note limit") {
+    // 14 chords of four beats (56 beats) hold 1024 notes at 20 starts per beat, under the onset cap.
+    DocumentStore store;
+    for (int i = 0; i < 14; ++i) {
+        REQUIRE(store.appendChord(kC, 4.0) == i + 1);
+    }
+    REQUIRE(store.addTrack(TrackRole::Bass) == 1);
+    std::vector<NoteSpec> many;
+    for (int i = 0; i < kMaxNotesPerTrack; ++i) {
+        many.push_back(ns(60, i * 48, 30));
+    }
+    REQUIRE(store.insertNotes(1, many).size() == static_cast<std::size_t>(kMaxNotesPerTrack));
+    const DocumentStore reference = store;
+    std::string refusal = "stale";
+    CHECK(store.insertChords(14, {chordWith(kC, 4.0, {chordNote(laneNamed("Bass", TrackRole::Bass, 1), 0, 480, 60)})},
+                             &refusal).empty());
+    CHECK(refusal == "At most " + std::to_string(kMaxNotesPerTrack) + " notes per track");
+    checkRefused(store, reference);
+}
+
+TEST_CASE("insertChords with notes: the chords become the selection, the note selection stays, a no-notes insert takes no ids") {
+    DocumentStore store = oneNotePerChord();
+    store.setNoteSelection(1, {2, 3});
+    const int nextTrack = store.nextTrackId();
+    const int nextNote = store.nextNoteId();
+    REQUIRE(store.insertChords(0, {ChordSpec{kC, 2.0}}) == std::vector<int>{4});
+    CHECK(store.nextTrackId() == nextTrack);
+    CHECK(store.nextNoteId() == nextNote);
+    CHECK(store.noteSelection() == NoteSelection{1, {2, 3}});
+    REQUIRE(store.insertChords(0, {chordWith(kC, 2.0, {chordNote(laneNamed("Bass", TrackRole::Bass), 0, 480, 40)})}) ==
+            std::vector<int>{5});
+    CHECK(store.selectedEventIds() == std::vector<int>{5});
+    CHECK(store.noteSelection() == NoteSelection{1, {2, 3}});  // untouched: the stale drop only
+    CHECK(store.nextNoteId() == nextNote + 1);
+}
+
+TEST_CASE("insertChords with notes: an exhausted track or note id counter refuses; nothing is consumed") {
+    DocumentStore store = threeChords();
+    // A state whose counters sit at the top: replace() takes them as given.
+    Document doc = store.doc();
+    doc.tracks.push_back(Track{1, "Bass", TrackRole::Bass, false, false, {}});
+    SUBCASE("note ids") {
+        store.replace(doc, store.nextId(), store.nextSectionId(), 2, INT_MAX - 1);
+        const DocumentStore reference = store;
+        std::string refusal;
+        CHECK(store.insertChords(0, {chordWith(kC, 4.0, {chordNote(laneNamed("Bass", TrackRole::Bass), 0, 480, 40),
+                                                         chordNote(laneNamed("Bass", TrackRole::Bass), 0, 480, 41)})},
+                                 &refusal).empty());
+        CHECK(refusal == "No note ids are left");
+        checkRefused(store, reference);
+    }
+    SUBCASE("track ids") {
+        store.replace(doc, store.nextId(), store.nextSectionId(), INT_MAX, 1);
+        const DocumentStore reference = store;
+        std::string refusal;
+        CHECK(store.insertChords(0, {chordWith(kC, 4.0, {chordNote(laneNamed("New", TrackRole::Lead), 0, 480, 40)})},
+                                 &refusal).empty());
+        CHECK(refusal == "No track ids are left");
+        checkRefused(store, reference);
+    }
+}
