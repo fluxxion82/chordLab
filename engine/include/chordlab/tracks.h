@@ -102,14 +102,17 @@ constexpr int kNoTrackId = -1;
 /// authored intervals [start, start + length), so a note ending where another starts does not overlap it.
 /// `validateTracks` enforces it. Fixed with `kMaxTrackOnsetsPerBeat` by the capacity proof (the joint
 /// physical-message bound above the capacity test in engine/tests/test_scheduler.cpp): the worst block of the
-/// supported envelope writes at most 436 + 2 x polyphony + 4 x onsets events, which these values hold to exactly
-/// the plug-in's output capacity of 512 (8 and 24 gave 548; polyphony was lowered first, then the onsets).
-constexpr int kMaxTrackPolyphony = 6;
+/// supported envelope writes at most 436 + 2N + 4M events (N this cap, M `kMaxTrackOnsetsPerBeat`), and the
+/// plug-in's output capacity is 512, so any caps with 2N + 4M <= 76 fit. 8 and 24 gave 548; 8 and 15 give exactly
+/// 512, keeping the polyphony and lowering only the onset rate, the binding term (6 and 16 is the other point on
+/// that frontier).
+constexpr int kMaxTrackPolyphony = 8;
 
 /// The most track-note starts any 960-tick window [t, t + 960) may hold, over the active notes of all tracks,
 /// muted ones included (D10). `validateTracks` enforces it. Fixed by the capacity proof (see `kMaxTrackPolyphony`):
-/// one block can see two windows' worth of starts at a loop wrap, so each start here costs four events of the bound.
-constexpr int kMaxTrackOnsetsPerBeat = 16;
+/// one block can see two windows' worth of starts at a loop wrap, so each start here costs four events of the bound
+/// (436 + 2N + 4M <= 512).
+constexpr int kMaxTrackOnsetsPerBeat = 15;
 
 /// The note selection (D5): live state of `DocumentStore`, one track at a time. `ids` are notes of track
 /// `trackId`, in that track's note order, without repeats; empty exactly when `trackId` is `kNoTrackId`.
@@ -203,8 +206,8 @@ enum class TrackFault { None, Structure, Domain, Polyphony, Onsets };
 ///   notes sorted by (derived start, pitch, id);
 /// - note ids unique across all tracks (the smallest repeated id is reported);
 /// - D10's limits over the active notes of all tracks, muted ones included: `trackPolyphony` at most
-///   `kMaxTrackPolyphony` ("At most 6 track notes can sound at once") and `densestOnsetWindow` at most
-///   `kMaxTrackOnsetsPerBeat` ("At most 16 notes can start within one beat across all tracks"), the numbers
+///   `kMaxTrackPolyphony` ("At most 8 track notes can sound at once") and `densestOnsetWindow` at most
+///   `kMaxTrackOnsetsPerBeat` ("At most 15 notes can start within one beat across all tracks"), the numbers
 ///   being the constants'.
 /// The chords must satisfy the store's chord invariants (lengths in [kMinLengthBeats, kMaxLengthBeats], at most
 /// `kMaxChords`, distinct ids); the tracks may be anything (dangling anchors, extreme offsets and lengths): the

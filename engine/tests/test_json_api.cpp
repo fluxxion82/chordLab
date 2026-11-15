@@ -4475,18 +4475,21 @@ TEST_CASE("insertChords: a refusal by the track limits names the command and the
 }
 
 TEST_CASE("chord timing commands: a refusal by the onset cap names the command and the cap and changes nothing") {
-    // Half the cap of short notes ending where the first chord ends, and one more than half at the start of the
-    // third: removing the second chord, or moving the third into its place, packs them all into one beat.
+    // Half the cap (rounded down) of short notes ending where the first chord ends, and the rest of the cap plus one
+    // at the start of the third: removing the second chord, or moving the third into its place, packs them all into
+    // one beat.
     constexpr int cap = kMaxTrackOnsetsPerBeat;
+    constexpr int tail = cap / 2;
+    constexpr int head = cap - tail + 1;
     constexpr std::int32_t step = kMinTrackNoteTicks;  // back to back: polyphony 1
     static_assert((cap + 1) * step < kFeelTicksPerBeat, "the packed run must fit in one beat");
     DocumentStore store = threeChords();
     REQUIRE(store.addTrack(TrackRole::Bass) == 1);
     std::vector<NoteSpec> notes;
-    for (int j = 0; j < cap / 2; ++j) {
-        notes.push_back(NoteSpec{60, kBarTicks - (cap / 2 - j) * step, step});
+    for (int j = 0; j < tail; ++j) {
+        notes.push_back(NoteSpec{60, kBarTicks - (tail - j) * step, step});
     }
-    for (int j = 0; j < cap / 2 + 1; ++j) {
+    for (int j = 0; j < head; ++j) {
         notes.push_back(NoteSpec{62, 2 * kBarTicks + j * step, step});
     }
     REQUIRE(store.insertNotes(1, notes).size() == notes.size());
@@ -5875,20 +5878,22 @@ TEST_CASE("state: tracks are validated against the clamped chord lengths, not th
 
 TEST_CASE("insertChords: a chord carrying a note into a full track is refused with the validator's text") {
     // The per-track note limit is a structure fault, not a chord-term one (D17a): the text passes through whole.
-    DocumentStore store;
-    REQUIRE(store.appendChord(kC, kMaxLengthBeats) == 1);
-    REQUIRE(store.addTrack(TrackRole::Bass) == 1);
-    // kMaxTrackOnsetsPerBeat onsets a beat, none overlapping: only the count is at its cap.
+    // kMaxTrackOnsetsPerBeat onsets a beat, none overlapping: only the count is at its cap. They span as many
+    // chords of kMaxLengthBeats as they need; the new chord goes after the last.
     constexpr int spacing = kFeelTicksPerBeat / kMaxTrackOnsetsPerBeat;
-    static_assert(spacing >= kMinTrackNoteTicks && kMaxNotesPerTrack * spacing <= kMaxLengthBeats * kFeelTicksPerBeat,
-                  "the notes must fit the one chord without overlapping");
+    constexpr int chordTicks = static_cast<int>(kMaxLengthBeats) * kFeelTicksPerBeat;
+    constexpr int chords = (kMaxNotesPerTrack * spacing + chordTicks - 1) / chordTicks;
+    static_assert(spacing >= kMinTrackNoteTicks, "the notes must not overlap");
+    DocumentStore store;
+    for (int i = 0; i < chords; ++i) REQUIRE(store.appendChord(kC, kMaxLengthBeats) == i + 1);
+    REQUIRE(store.addTrack(TrackRole::Bass) == 1);
     std::vector<NoteSpec> notes;
     for (int i = 0; i < kMaxNotesPerTrack; ++i) {
         notes.push_back(NoteSpec{40, i * spacing, 30});
     }
     REQUIRE(store.insertNotes(1, notes).size() == static_cast<std::size_t>(kMaxNotesPerTrack));
     const json one = json::array({chordNoteJson(laneJson("Bass", "bass", 1), 0, 480, 40)});
-    const json cmd = insertWith(1, one);
+    const json cmd = insertWith(chords, one);
     REQUIRE(cmd.dump().size() < kMaxJsonBytes);
     checkTrackRefusal(store, cmd, "insertChords", "At most " + std::to_string(kMaxNotesPerTrack) + " notes per track");
 }

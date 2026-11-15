@@ -1666,8 +1666,8 @@ TEST_CASE("compilePlayback: every event lies in [0, endBeat], sorted and paired,
         const std::int64_t end = chordBoundaryTicks(store.doc()).back();
         std::vector<NoteSpec> bass;
         std::vector<NoteSpec> lead;
-        // At most two bass and four lead notes sound at once (the polyphony cap holds six); a lead pitch comes back
-        // every third note, 1410 ticks on, while its previous note still sounds, so the merge cuts it.
+        // At most two bass and four lead notes sound at once (the polyphony cap holds at least six); a lead pitch comes
+        // back every third note, 1410 ticks on, while its previous note still sounds, so the merge cuts it.
         static_assert(kMaxTrackPolyphony >= 6, "two bass and four lead notes overlap");
         for (std::int64_t t = 0; t + 30 < end; t += 470) {
             bass.push_back(ns(t % 940 == 0 ? 48 : 60, t, 900, 70));

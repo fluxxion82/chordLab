@@ -1748,21 +1748,24 @@ TEST_CASE("a lengthen that would reactivate a note past the onset cap is refused
 }
 
 TEST_CASE("removeChord / moveChord: refused when the later chord's notes move up into the beat of an earlier chord's tail") {
-    // Half the cap of short notes ending where chord 1 ends, one more than half from chord 3's start: removing chord
-    // 2, or moving chord 3 into its place, packs them into one beat. Polyphony stays 1 (back to back).
+    // Half the cap (rounded down) of short notes ending where chord 1 ends, the rest of the cap plus one from chord
+    // 3's start: removing chord 2, or moving chord 3 into its place, packs them into one beat. Polyphony stays 1
+    // (back to back).
     constexpr int cap = kMaxTrackOnsetsPerBeat;
+    constexpr int tail = cap / 2;
+    constexpr int head = cap - tail + 1;
     constexpr std::int32_t step = kMinTrackNoteTicks;
     static_assert((cap + 1) * step < kFeelTicksPerBeat, "the packed run must fit in one beat");
     DocumentStore store = threeChordsAndBass();
     std::vector<NoteSpec> notes;
-    for (int j = 0; j < cap / 2; ++j) {
-        notes.push_back(ns(60, kBar - (cap / 2 - j) * step, step));  // chord 1's tail
+    for (int j = 0; j < tail; ++j) {
+        notes.push_back(ns(60, kBar - (tail - j) * step, step));  // chord 1's tail
     }
-    for (int j = 0; j < cap / 2 + 1; ++j) {
+    for (int j = 0; j < head; ++j) {
         notes.push_back(ns(62, 2 * kBar + j * step, step));  // chord 3's head
     }
     REQUIRE(store.insertNotes(1, notes).size() == notes.size());
-    REQUIRE(densestOnsetWindow(store.doc()) == cap / 2 + 1);
+    REQUIRE(densestOnsetWindow(store.doc()) == head);
     store.setSelectedEvents({2, 3}, 2);
     const DocumentStore reference = store;
     std::string refusal;
@@ -2193,12 +2196,14 @@ TEST_CASE("insertChords with notes: a refusal by the track limits leaves no new 
 }
 
 TEST_CASE("insertChords with notes: refused when the new notes push a track past its note limit") {
-    // 16 chords of four beats (64 beats) hold 1024 notes at the onset cap's rate, kMaxTrackOnsetsPerBeat a beat.
+    // Chords of four beats, as many as hold 1024 notes at the onset cap's rate, kMaxTrackOnsetsPerBeat a beat; the
+    // new chord goes after the last.
     constexpr int spacing = kFeelTicksPerBeat / kMaxTrackOnsetsPerBeat;
-    static_assert(spacing >= kMinTrackNoteTicks && (kMaxNotesPerTrack - 1) * spacing + 30 <= 16 * 4 * kFeelTicksPerBeat,
-                  "the notes must fit the 16 chords without overlapping");
+    constexpr int chordTicks = 4 * kFeelTicksPerBeat;
+    constexpr int chords = ((kMaxNotesPerTrack - 1) * spacing + 30 + chordTicks - 1) / chordTicks;
+    static_assert(spacing >= kMinTrackNoteTicks, "the notes must not overlap");
     DocumentStore store;
-    for (int i = 0; i < 16; ++i) {
+    for (int i = 0; i < chords; ++i) {
         REQUIRE(store.appendChord(kC, 4.0) == i + 1);
     }
     REQUIRE(store.addTrack(TrackRole::Bass) == 1);
@@ -2209,7 +2214,8 @@ TEST_CASE("insertChords with notes: refused when the new notes push a track past
     REQUIRE(store.insertNotes(1, many).size() == static_cast<std::size_t>(kMaxNotesPerTrack));
     const DocumentStore reference = store;
     std::string refusal = "stale";
-    CHECK(store.insertChords(14, {chordWith(kC, 4.0, {chordNote(laneNamed("Bass", TrackRole::Bass, 1), 0, 480, 60)})},
+    CHECK(store.insertChords(chords,
+                             {chordWith(kC, 4.0, {chordNote(laneNamed("Bass", TrackRole::Bass, 1), 0, 480, 60)})},
                              &refusal).empty());
     CHECK(refusal == "At most " + std::to_string(kMaxNotesPerTrack) + " notes per track");
     checkRefused(store, reference);

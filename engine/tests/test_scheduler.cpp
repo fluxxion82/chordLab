@@ -2729,13 +2729,19 @@ constexpr double kEnvTempo = 300.0;
 constexpr int kEnvFrames = 4096;
 constexpr double kEnvSamplesPerBeat = kEnvRate * 60.0 / kEnvTempo;  // 8820
 static_assert(kEnvFrames / kEnvSamplesPerBeat <= 0.47, "the envelope's block spans at most 0.47 beat");
+// The two-wrap claim (a block sees at most 2M track starts): the shortest loop is one chord of the document's
+// minimum length (kMinLengthBeats, a document invariant; the scheduler itself accepts any loop), and a block spanning
+// at most two of them touches at most two wraps' worth of the loop's starts.
+static_assert(kEnvFrames / kEnvSamplesPerBeat <= 2 * kMinLengthBeats,
+              "the envelope's block spans at most two of the shortest loops");
 
 /// The derivation's terms (the capacity test's comment), from the constants they rest on.
 constexpr int kBoundSounding = 128;                                    // S0: one physical note per pitch
 constexpr int kBoundPreviewOns = static_cast<int>(Scheduler::kMaxPreviews) * 8;  // eight previews of eight
 constexpr int kBoundThruOns = static_cast<int>(Scheduler::kMaxThruPerBlock);
 constexpr int kBoundChordVoices = 5;                                   // the dictionary's largest type
-constexpr int kBoundChordPitches = 2 * kBoundChordVoices;              // Cs: an arpeggio over two octaves
+constexpr int kBoundArpOctaves = 2;                                    // ArpRange::Two (pinned by arpOctaves)
+constexpr int kBoundChordPitches = kBoundArpOctaves * kBoundChordVoices;  // Cs: an arpeggio over two octaves
 constexpr int kBoundChordOns = kMaxFeelEventsPerBeat / 2 + kBoundChordPitches;  // chase + timeline, chord lane
 constexpr int kBoundTrackOns = kMaxTrackPolyphony + 2 * kMaxTrackOnsetsPerBeat;  // chase + timeline, tracks
 constexpr int kPhysicalBound = kBoundSounding + kBoundPreviewOns + 2 * kBoundThruOns + 2 * kBoundChordOns +
@@ -2745,9 +2751,27 @@ static_assert(kPhysicalBound <= static_cast<int>(kOutCapacity),
 constexpr int kScratchBound = (kBoundChordPitches + kMaxTrackPolyphony) + kBoundThruOns +
                               2 * (kMaxFeelEventsPerBeat + 2 * kMaxTrackOnsetsPerBeat) + kBoundChordPitches +
                               kMaxTrackPolyphony;
-static_assert(kScratchBound <=
+// The mandatory events share the scratch: the progression's release-all (one at most) and up to two expiry
+// candidates per preview are pushed before the chase and the timeline, the thru release-all before the thru notes,
+// and every attack-side push stops at kMaxEventsPerBlock - kReservedReleaseEvents counting them.
+constexpr int kScratchMandatoryFirst = 2 + 2 * static_cast<int>(Scheduler::kMaxPreviews);
+static_assert(kScratchBound + kScratchMandatoryFirst <=
                   static_cast<int>(Scheduler::kMaxEventsPerBlock - Scheduler::kReservedReleaseEvents),
               "a block inside the envelope must never carry timeline events over");
+
+/// The octaves an arpeggio spans, per `ArpRange`. No default: a new range would warn here (-Wswitch), and the
+/// derivation's Cs assumes two octaves at most.
+constexpr int arpOctaves(ArpRange range) {
+    switch (range) {
+        case ArpRange::One:
+            return 1;
+        case ArpRange::Two:
+            return 2;
+    }
+    return 0;
+}
+static_assert(arpOctaves(ArpRange::One) <= kBoundArpOctaves && arpOctaves(ArpRange::Two) <= kBoundArpOctaves,
+              "Cs assumes arpeggios over two octaves at most");
 
 std::int64_t envSample(double beat, double anchor) {
     return static_cast<std::int64_t>(std::floor((beat - anchor) * kEnvSamplesPerBeat + 0.5));
@@ -3197,18 +3221,30 @@ std::vector<int> joined(const std::vector<std::vector<int>>& parts) {
     return all;
 }
 
-/// The written counts of the adversarial blocks, for the summary.
-std::vector<std::pair<std::string, std::size_t>>& capacityLog() {
-    static std::vector<std::pair<std::string, std::size_t>> log;
-    return log;
-}
-
+/// Reports one adversarial block's written count and checks it against the derived bound and the capacity.
 void logBlock(const std::string& name, std::size_t written) {
-    capacityLog().emplace_back(name, written);
     MESSAGE("capacity block " << name << ": " << written << " events written (capacity " << kOutCapacity
                               << ", derived bound " << kPhysicalBound << ", caps " << kMaxTrackPolyphony << "/"
                               << kMaxTrackOnsetsPerBeat << ")");
     CHECK(written <= static_cast<std::size_t>(kPhysicalBound));
+    CHECK(written <= kOutCapacity);
+}
+
+/// The most pitches sounding at once in `compiled` (sorted by beat, offs before ons at one beat).
+int mostPitchesAtOnce(const Compiled& compiled) {
+    std::array<int, 128> open{};
+    int sounding = 0;
+    int most = 0;
+    for (const NoteEvent& e : compiled.events) {
+        int& n = open[static_cast<std::size_t>(e.pitch)];
+        if (e.on) {
+            if (n++ == 0) ++sounding;
+            most = std::max(most, sounding);
+        } else if (n > 0 && --n == 0) {
+            --sounding;
+        }
+    }
+    return most;
 }
 
 /// Rows of track notes 30 ticks (kMinTrackNoteTicks) apart over `slots` voices: note j in row j / slots.
@@ -3239,18 +3275,25 @@ std::vector<NoteSpec> rows(const std::vector<int>& pitches, int slots, std::int6
 ///   (feel D11; `densestBeat` counts across the wrap; the block path, the over-budget fallback included, holds at
 ///   most four boundaries of 5 offs and 5 ons a beat), so at most 96 in one block however many wraps it crosses.
 ///   At most Cs = 10 chord-lane pitches sound at once: every performed note lies inside its own chord, a chord
-///   plays its arpeggio note list, at most 5 voices (the dictionary's largest type, pinned below) over two octaves,
-///   and the notes of one pitch are disjoint. (The tests' eight-voice cluster, played in one octave, stays inside.)
+///   plays its arpeggio note list, at most 5 voices (the dictionary's largest type) over at most two octaves
+///   (`ArpRange` ends at Two, `arpOctaves`), and the notes of one pitch are disjoint; the capacity assumptions case
+///   below pins the voices and measures the most chord-lane pitches sounding at once from `compile` over the
+///   densest feels (it reaches 10). (The tests' eight-voice cluster, played in one octave, stays inside.)
 /// - Tracks: `validateTracks` holds the active notes of all tracks, muted ones included, to N = kMaxTrackPolyphony
 ///   sounding and M = kMaxTrackOnsetsPerBeat starting in any 960-tick window; clipping at endBeat and the merge only
 ///   shorten, merge or drop notes, so the snapshot keeps both. The window does not wrap, so one block sees at most
-///   2M track starts: M before the loop end and M after its start, or, on a loop shorter than the block (0.25 beat
-///   at the least, which one window holds whole), the loop's M starts at most twice.
+///   2M track starts: M before the loop end and M after its start, or, on a loop shorter than the block, the loop's
+///   M starts at most twice. That last case needs the block to span at most two of the shortest loops: one chord of
+///   kMinLengthBeats (0.25 beat, which one window holds whole), a minimum the document's invariants set, not the
+///   scheduler (a static_assert above pins 0.4644 <= 2 x kMinLengthBeats).
 /// - The merge never creates an attack (a merged on sits at a chord-lane on or a track start) and a pitch sounding
 ///   after it sounds in the chord lane or in a track.
-/// - Workload, assumed: at most kMaxPreviews (8) previews of 8 pitches, none started and stopped in the same block
-///   (a preview acquired in a block holds its pitches to the block's end); at most kMaxThruPerBlock (64) incoming
-///   notes a block (enforced: the rest waits for the next block, which reports it).
+/// - Workload, assumed: a preview budget of pitches held at the block's end + 2 x pitches started and released
+///   within the block <= 64 (eight 8-pitch previews, kMaxPreviews of 8); at most kMaxThruPerBlock (64) incoming
+///   notes a block (enforced: the rest waits for the next block, which reports it). A burst of queued preview
+///   commands beyond that budget (the queue drains up to 64 commands a block, each able to replace sounding
+///   previews) is outside the bound: the overload policy handles it (releases first, attacks dropped and counted,
+///   `process` false).
 ///
 /// The identity. Physical notes are per pitch: an on only from silence, an off only from sounding, a retrigger an
 /// off and an on of a sounding pitch (`Writer`, `attack`, `physicalOff`, `payOwed`; an owed pitch has no owner).
@@ -3262,9 +3305,10 @@ std::vector<NoteSpec> rows(const std::vector<int>& pitches, int slots, std::int6
 ///
 /// ONS, phase by phase in the order `process` runs them:
 /// 1. Owed releases (`payOwed`, first): no ons; they are among S0.
-/// 2. Preview commands: at most 8 x 8 = 64 ons (a preview joining a sounding pitch is silent). Each pitch a preview
-///    acquires sounds at the block's end, so E >= those ons: previews add at most 2 x 64 - 64 = 64 beyond S0 (a stop
-///    and a start on the same 64 pitches: 64 offs inside S0 - E, 64 ons).
+/// 2. Preview commands (a preview joining a sounding pitch is silent). A pitch a preview acquires and holds to the
+///    block's end costs one on beyond S0 - E (it is among E); one acquired and released within the block costs an on
+///    and an off. So previews add at most the budget, 64, beyond S0 (a stop and a start on the same 64 pitches: 64
+///    offs inside S0 - E, 64 ons).
 /// 3. The discontinuity (a seek, a start, a stop, `reset`, an `adopt` of a new generation): the progression's
 ///    release-all; the thru release-all after `reset`, `releaseThru`, `dropThru`, a thru on -> off edge or an
 ///    overflow. No ons; their offs are among S0 - E.
@@ -3280,33 +3324,36 @@ std::vector<NoteSpec> rows(const std::vector<int>& pitches, int slots, std::int6
 /// Hence
 ///     written <= [S0 + 2 x previewOns - E] + 2 x thruOns + 2 x (c0 + x) + 2 x (t0 + y)
 ///              <= (128 + 64) + 2 x 64 + 2 x 58 + 2 x (N + 2M) = 436 + 2N + 4M.
-/// The provisional caps, N = 8 and M = 24, give 548 > 512, so they could not stand. Polyphony first: N = 6 leaves
-/// M <= 16, and N = 6, M = 16 give exactly 128 + 64 + 128 + 116 + 76 = 512 (S0, previews beyond it, thru, chord
-/// lane, tracks). (N = 8 would need M <= 15; 8 and 16 give 516.)
+/// The provisional caps, N = 8 and M = 24, give 548 > 512, so they could not stand. Every point with 2N + 4M <= 76
+/// fits. The onset rate is the binding term (one start costs four events through the wrap doubling), so the
+/// polyphony stays at 8 and M = 15 gives exactly 128 + 64 + 128 + 116 + 76 = 512 (S0, previews beyond it, thru,
+/// chord lane, tracks); N = 6, M = 16 is the other point on that frontier (8 and 16 give 516).
 ///
 /// Where the worst sits. It needs a flush (the chase) that also releases every thru note (a `reset`, a bypass end
 /// or a raw-input overflow at the same block as a seek or an adopt) with all 128 pitches sounding, the workload, and
 /// a chord lane and tracks at their per-block maxima, every on a retrigger. Without a thru release-all a
 /// start-sounding thru note ends only through a thru note-off (one of the 64 events), so S0 - E holds only the
 /// previews' pitches, thru note-offs and the progression's own start pitches (at most Cs + N): 128 (previews) +
-/// 128 (2 x thru ons + thru offs) + 2 x (58 + N + 2M) + (10 + N) = 382 + 3N + 4M (464). A continuous block has no
+/// 128 (2 x thru ons + thru offs) + 2 x (58 + N + 2M) + (10 + N) = 382 + 3N + 4M (466). A continuous block has no
 /// chase: x minus the chord lane's offs is c_end - c_start, so x <= 48 + Cs / 2 = 53, and the block writes at most
-/// (128 + 64) + 128 + 2 x (53 + 2M) = 426 + 4M (490). An `adopt` is a flush in a continuous block, a seek's equal.
+/// (128 + 64) + 128 + 2 x (53 + 2M) = 426 + 4M (486). An `adopt` is a flush in a continuous block, a seek's equal.
 /// Recovery: owed pitches are among S0 and paid first, so a block after a panic or after an overloaded block obeys
 /// the same bound; inside the envelope no block exceeds the capacity, so only a panic owes anything.
 ///
 /// Scratch. The block's logical events fit `Scheduler::kMaxEventsPerBlock` without carrying any timeline over: the
 /// chase at most Cs + N, thru 64, the timeline at most 2 x (96 + 2M) + Cs + N (merged ons, and per pitch at most as
-/// many offs as ons plus the pitches sounding at the start): 16 + 64 + 272 = 352 <= 480 (kMaxEventsPerBlock -
-/// kReservedReleaseEvents, `kScratchBound`); the mandatory ones (two release-alls, two expiry candidates per
-/// preview) fit the reserved 32. So inside the envelope no release is owed, no attack dropped and nothing carried
-/// over: `process` returns true.
+/// many offs as ons plus the pitches sounding at the start): 18 + 64 + 270 = 352 (`kScratchBound`). The mandatory
+/// events share the array and are pushed first: the progression's release-all and up to 2 x kMaxPreviews (16)
+/// expiry candidates before the chase and the timeline, the thru release-all before the thru notes; every
+/// attack-side push stops at kMaxEventsPerBlock - kReservedReleaseEvents (480) counting them. The condition is
+/// therefore 352 + 2 + 16 = 370 <= 480 (`kScratchMandatoryFirst`, a static_assert). So inside the envelope no release
+/// is owed, no attack dropped and nothing carried over: `process` returns true.
 ///
-/// Measured at 6 / 16 (each block's MESSAGE; "the measured worst block" names the largest): (a) seek to 127.9 with
-/// all 128 pitches sounding 380, with a thru release-all 436 (the worst); (b) wrap block 374; (c) two wraps of a
-/// 0.25-beat loop 352; (d) seek onto a dense chord boundary 326; (e) adopt during sustained notes 332; (f) after
-/// owed releases 360, after a panic 368. (At 8 / 24 the same blocks wrote 412, 468, 408, 384, 344, 336, 360, 368:
-/// all complete, but the bound, not the blocks built, decides.) The chord lanes here reach about 16 ons a block;
+/// Measured at 8 / 15 (each block's MESSAGE): (a) seek to 127.9 with all 128 pitches sounding 380, with a thru
+/// release-all 436 (the worst); (b) wrap block 372; (c) two wraps of a 0.25-beat loop 348; (d) seek onto a dense
+/// chord boundary 326; (e) adopt during sustained notes 336; (f) after owed releases 360, after a panic 368. (At
+/// 6 / 16 they wrote 380, 436, 374, 352, 326, 332, 360, 368; at 8 / 24, 412, 468, 408, 384, 344, 336, 360, 368: all
+/// complete, but the bound, not the blocks built, decides.) The chord lanes here reach about 16 ons a block;
 /// the bound allows 58, which is where the measured worst and the bound part.
 ///
 /// The test below is the burst modelled before tracks (no track notes): the densest progression with eight previews
@@ -3401,6 +3448,42 @@ TEST_CASE("scheduler capacity: the dictionary and the feel budget the derivation
         CAPTURE(type.id);
         CHECK(static_cast<int>(type.intervals.size()) <= kBoundChordVoices);
     }
+    // Cs measured from real `compile` output: ninths (five voices) in long and quarter-beat chords, so that a strum
+    // or humanise acts across every boundary, under every rhythm, strum (loose) and humanise, and every arpeggio
+    // pattern and rate over one and two octaves, in 4/4 and 7/8.
+    DocumentStore ninths;
+    const char* const types[] = {"9", "maj9", "m9", "9", "m9", "maj9"};
+    const double lengths[] = {1.0, 0.25, 0.75, 2.0, 0.25, 1.5};
+    for (int i = 0; i < 6; ++i) ninths.appendChord(Chord{(i * 5) % 12, &chordType(types[i])}, lengths[i], 100);
+    int most = 0;
+    for (const Meter meter : {Meter{4, 4}, Meter{7, 8}}) {
+        ninths.setMeter(meter);
+        for (const Rhythm rhythm : {Rhythm::Block, Rhythm::Pulse, Rhythm::Subdivided, Rhythm::Offbeats,
+                                    Rhythm::LowThenUpper, Rhythm::Arpeggio}) {
+            for (const Strum strum : {Strum::Off, Strum::Down, Strum::Up, Strum::DownUp}) {
+                for (const Humanise humanise : {Humanise::Off, Humanise::Heavy}) {
+                    const int patterns = rhythm == Rhythm::Arpeggio ? kArpPatternCount : 1;
+                    for (int pattern = 0; pattern < patterns; ++pattern) {
+                        for (const ArpRate rate : {ArpRate::Pulse, ArpRate::Subdivision, ArpRate::Half}) {
+                            for (const ArpRange range : {ArpRange::One, ArpRange::Two}) {
+                                ninths.setFeel(Feel{rhythm, strum, StrumSpeed::Loose, humanise,
+                                                    static_cast<ArpPattern>(pattern), rate, range});
+                                const Compiled compiled = compile(ninths.doc());
+                                REQUIRE_FALSE(compiled.feelLimited);
+                                most = std::max(most, mostPitchesAtOnce(compiled));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    MESSAGE("most chord-lane pitches sounding at once over the densest feels: " << most << " (Cs "
+                                                                                << kBoundChordPitches << ")");
+    // It reaches Cs: in 7/8 a heavily humanised Chord-pattern arpeggio at the Half rate over two octaves overlaps one
+    // hit's five notes with the next hit's, an octave up.
+    CHECK(most >= kBoundChordVoices);  // a ninth's five voices do sound together
+    CHECK(most <= kBoundChordPitches);
     CHECK(kMaxFeelEventsPerBeat == 96);
     CHECK(kPhysicalBound == 436 + 2 * kMaxTrackPolyphony + 4 * kMaxTrackOnsetsPerBeat);
     MESSAGE("derived physical bound " << kPhysicalBound << " of " << kOutCapacity << " at caps "
@@ -3694,13 +3777,4 @@ TEST_CASE("scheduler capacity (f): a block after owed releases pays them first a
         for (int b = 0; b < 4; ++b) rig.block(rig.clockPpq(), false);
         rig.silence();
     }
-}
-
-TEST_CASE("scheduler capacity: the measured worst block") {
-    if (capacityLog().empty()) return;  // the adversarial blocks did not run (a filtered run)
-    const auto worst = std::max_element(capacityLog().begin(), capacityLog().end(),
-                                        [](const auto& a, const auto& b) { return a.second < b.second; });
-    MESSAGE("capacity: measured worst block " << worst->second << " (" << worst->first << ") of " << kOutCapacity
-                                              << ", derived bound " << kPhysicalBound);
-    CHECK(worst->second <= kOutCapacity);
 }

@@ -302,7 +302,7 @@ enum class ProgressionRefusal { None, Empty, NonFiniteLength, DocumentFull, Even
 /// short human-readable reason; on a mere no-op (valid, but nothing would change) it returns false (or the empty
 /// vector) and leaves the string empty. So a caller tells "refused" (non-empty reason) from "nothing to do".
 /// Every one of them runs `validateTracks` (D7) on its candidate document with the counters it will publish, after
-/// its own checks, and refuses with the validator's message when that fails (for example "At most 6 track notes
+/// its own checks, and refuses with the validator's message when that fails (for example "At most 8 track notes
 /// can sound at once"); document and counters are then published together.
 ///
 /// The chord timing edits (`appendChord`, `insertChords`, `appendProgression`, `replaceProgression`, `moveChord`,
