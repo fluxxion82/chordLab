@@ -33,8 +33,8 @@ import SwiftUI
 /// Length on the next, so the 700-pt minimum never clips a control. With the Length title at its widest the
 /// editing controls alone need a window about 795 pt wide and all of them with the playback controls about 975,
 /// so the 700-pt minimum gets the third layout and the 900-pt default the second (measured by the render
-/// harness). The third row costs 32 pt; the 600-pt minimum height (`PLUG_MIN_HEIGHT`) pays for it, keeping one
-/// full palette row (82 pt or more) in view in every state.
+/// harness). The third row costs 32 pt; the minimum height (`PLUG_MIN_HEIGHT`, 632 pt since the lane tab row) pays
+/// for it, keeping one full palette row (76 pt or more) in view in every state.
 struct TransportBarView: View {
   @EnvironmentObject var state: ChordLabState
   @State private var showingPresets = false

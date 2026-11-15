@@ -30,10 +30,23 @@ class ChordLabState: NSObject, ObservableObject {
   @Published var editingText = false
   /// What the keyboard edits (tracks design D15 "Keyboard", `KeyTarget`): the chords, or one track's notes; the key
   /// routes ask the map with it (`EditorKeyRouter`). Every applied snapshot resolves it (`KeyTarget.resolved`: a
-  /// removed track's notes fall back to the chords). The roll's mouse-down sets `.notes` and an open-lane change
-  /// resets it (`KeyTarget.afterOpenLaneChange`), both wired in M3 with `openLane` (plan Tasks 16, 18); until then
-  /// it stays `.chords`.
+  /// removed track's notes fall back to the chords), and every open-lane change resets it
+  /// (`KeyTarget.afterOpenLaneChange`, in `openLane`'s observer). The roll's mouse-down will set `.notes` (plan
+  /// Tasks 18, 20); until then it stays `.chords`.
   @Published var keyTarget: KeyTarget = .chords
+  /// The lane the editor shows (tracks design D13): Chords (suggestions, palette, home row) or one track's roll.
+  /// UI state, never saved; every applied snapshot resolves it (`Lane.resolved`: a removed track falls back to
+  /// Chords). Changing it resets the key target, so a key never acts on a lane that has just been hidden.
+  @Published var openLane: Lane = .chords {
+    didSet {
+      guard openLane != oldValue else { return }
+      let target = keyTarget.afterOpenLaneChange(from: oldValue, to: openLane)
+      if target != keyTarget { keyTarget = target }
+    }
+  }
+  /// The track ids when an `addTrack` was sent, until its answer: the next snapshot opens the one new track
+  /// (`LaneTabs.newTrackId`); a refusal (`applyError`) forgets it.
+  private var pendingAddTrackIds: [Int]?
   /// The row under the key bar (`KeyTransposeRow`): the one-time "chords kept their notes" hint after a tonic
   /// change with Transpose with key off, or the four-second "moved" note after one with it on (D8, D9).
   /// Either closes as soon as a snapshot browses a key other than the project key.
@@ -322,6 +335,72 @@ class ChordLabState: NSObject, ObservableObject {
     send(command: SelectionLogic.command(selection))
   }
 
+  // MARK: - Lanes and tracks (the lane tab row, tracks design D13)
+
+  /// A tab click: shows `lane`, resolved against the snapshot's tracks (a lane the snapshot lacks opens Chords).
+  @MainActor func open(_ lane: Lane) {
+    let resolved = lane.resolved(in: snapshot?.tracks)
+    if resolved != openLane { openLane = resolved }
+  }
+
+  /// The + menu: `addTrack {role}` (the engine names the track, D2); its answering snapshot opens the new track.
+  /// Nothing at the track limit or for an engine without tracks.
+  @MainActor func addTrack(role: TrackRole) {
+    guard LaneTabs.canAddTrack(snapshot), let tracks = snapshot?.tracks else { return }
+    pendingAddTrackIds = tracks.map(\.id)
+    send(command: LaneTabs.addCommand(role: role))
+  }
+
+  /// The track menu's Remove: `removeTrack {id}`, no confirmation (undoable); an open track falls back to Chords
+  /// with the answering snapshot.
+  @MainActor func removeTrack(id: Int) {
+    send(command: LaneTabs.removeCommand(trackId: id))
+  }
+
+  /// The inline rename's commit: `patchTrack {id, name}` under the section rename's rule
+  /// (`LaneTabs.renameCommand`); a blank or unchanged draft sends nothing.
+  @MainActor func renameTrack(id: Int, draft: String) {
+    guard let current = snapshot?.track(id: id),
+          let command = LaneTabs.renameCommand(trackId: id, draft: draft, current: current.name) else { return }
+    send(command: command)
+  }
+
+  /// The Role submenu: `patchTrack {id, role}`; the checked role sends nothing.
+  @MainActor func setTrackRole(id: Int, role: TrackRole) {
+    guard let current = snapshot?.track(id: id),
+          let command = LaneTabs.roleCommand(trackId: id, role: role, current: current.role) else { return }
+    send(command: command)
+  }
+
+  /// Move left / Move right: `moveTrack {id, index}`, `index` the track's place after the move.
+  @MainActor func moveTrack(id: Int, to index: Int) {
+    send(command: LaneTabs.moveCommand(trackId: id, index: index))
+  }
+
+  /// A tab's M toggle: `setChordsMute {on}` or `setTrackMute {id, on}`; the answering snapshot flips it.
+  @MainActor func setMute(_ lane: Lane, on: Bool) {
+    send(command: LaneTabs.muteCommand(lane: lane, on: on))
+  }
+
+  /// A tab's S toggle: `setChordsSolo {on}` or `setTrackSolo {id, on}`; the answering snapshot flips it.
+  @MainActor func setSolo(_ lane: Lane, on: Bool) {
+    send(command: LaneTabs.soloCommand(lane: lane, on: on))
+  }
+
+  /// After a snapshot is decoded: opens the track a pending add created (the next snapshot after the add decides,
+  /// `LaneTabs.newTrackId`), else keeps the open lane while its track exists and falls back to Chords otherwise.
+  private func updateOpenLane(for snapshot: Snapshot) {
+    if let before = pendingAddTrackIds {
+      pendingAddTrackIds = nil
+      if let id = LaneTabs.newTrackId(before: before, after: snapshot.tracks?.map(\.id) ?? before) {
+        openLane = .track(id)
+        return
+      }
+    }
+    let lane = openLane.resolved(in: snapshot.tracks)
+    if lane != openLane { openLane = lane }
+  }
+
   // MARK: - Project key (the Key pickers) and the transpose row
 
   /// Picking a tonic or a mode: sets the project key, spelled as the snapshot's table spells that pitch
@@ -485,6 +564,7 @@ class ChordLabState: NSObject, ObservableObject {
       lastError = nil
       let target = keyTarget.resolved(in: decoded.tracks)
       if target != keyTarget { keyTarget = target }
+      updateOpenLane(for: decoded)
       updateKeyRow(for: decoded)
     } catch {
       reportError("snapshot decode failed: \(error)")
@@ -524,9 +604,11 @@ class ChordLabState: NSObject, ObservableObject {
   }
 
   /// `kMsgTagError` payload. A key change still waiting for its snapshot was most likely the refused
-  /// command: it is dropped, so a later snapshot with that tonic (an undo, a redo) shows nothing.
+  /// command: it is dropped, so a later snapshot with that tonic (an undo, a redo) shows nothing. So is a pending
+  /// track add (a refused add opens nothing).
   func applyError(json: Data) {
     pendingKeyChange = nil
+    pendingAddTrackIds = nil
     if let message = try? JSONDecoder().decode(ErrorJSON.self, from: json) {
       reportError(message.error)
     } else {
