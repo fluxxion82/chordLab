@@ -47,6 +47,12 @@ class ChordLabState: NSObject, ObservableObject {
   /// The pending `addTrack`, until its answer: the next snapshot opens the one new track (`LaneOpener`,
   /// `LaneTabs.laneAfterSnapshot`); a refusal (`applyError`) forgets it.
   private var laneOpener = LaneOpener()
+  /// Every track's piano roll view state (scroll, zoom, grid, snap, mode, other tracks, the gesture state) and the
+  /// roll's viewport, by track id (tracks design D14; UI-only, never saved). A separate observable object, not a
+  /// `@Published` property here: the roll scrolls at display rate, and a change published by this object would
+  /// re-run the body of every view that observes it (the key bar, the transport row, the strip, the tabs). Only the
+  /// roll observes `rolls`; it changes through the `Roll` methods below.
+  let rolls = RollViewStore()
   /// The row under the key bar (`KeyTransposeRow`): the one-time "chords kept their notes" hint after a tonic
   /// change with Transpose with key off, or the four-second "moved" note after one with it on (D8, D9).
   /// Either closes as soon as a snapshot browses a key other than the project key.
@@ -394,6 +400,96 @@ class ChordLabState: NSObject, ObservableObject {
     if lane != openLane { openLane = lane }
   }
 
+  // MARK: - Piano roll view state (tracks design D14; UI-only, nothing is sent)
+
+  /// Track `trackId`'s roll view state; the defaults before its roll first appears.
+  func rollState(trackId: Int) -> RollViewState { rolls.states[trackId] }
+
+  /// The roll of track `trackId` measured its grid (`PianoRollView`'s `onGeometryChange`): stores the viewport and
+  /// fits the track's scroll to it; the first measurement with a real size is the track's first open, which
+  /// scrolls to its role's register at bar 1 (`RollViewState.fit`). Nothing for a track the snapshot lacks.
+  @MainActor func setRollViewport(trackId: Int, _ size: CGSize) {
+    guard let snapshot, let track = snapshot.track(id: trackId) else { return }
+    var states = rolls.states
+    states.setViewport(size, trackId: trackId, role: track.role, timing: RollTiming(snapshot: snapshot))
+    publishRolls(states)
+  }
+
+  /// Changes track `trackId`'s roll view state with the current viewport and the snapshot's timing; the one path
+  /// every roll setter takes (and the input view's, plan Task 18). Nothing before the first snapshot.
+  @MainActor func editRoll(trackId: Int, _ change: (inout RollViewState, CGSize, RollTiming) -> Void) {
+    guard let snapshot else { return }
+    var states = rolls.states
+    states.edit(trackId: trackId, timing: RollTiming(snapshot: snapshot), change)
+    publishRolls(states)
+  }
+
+  /// Scrolls track `trackId`'s roll to `scroll` (content coordinates of the grid's top-left), clamped.
+  @MainActor func setRollScroll(trackId: Int, _ scroll: CGPoint) {
+    editRoll(trackId: trackId) { $0.setScroll(scroll, viewport: $1, timing: $2) }
+  }
+
+  /// Scrolls track `trackId`'s roll by `delta` points, clamped (the scroll wheel, plan Task 18).
+  @MainActor func scrollRoll(trackId: Int, by delta: CGSize) {
+    editRoll(trackId: trackId) { $0.scroll(by: delta, viewport: $1, timing: $2) }
+  }
+
+  /// Time zoom by `factor` about the grid's view x `aboutViewX` (⇧⌥-scroll, pinch; plan Task 18).
+  @MainActor func zoomRoll(trackId: Int, horizontally factor: CGFloat, aboutViewX: CGFloat) {
+    editRoll(trackId: trackId) { $0.zoom(horizontally: factor, aboutViewX: aboutViewX, viewport: $1, timing: $2) }
+  }
+
+  /// Row zoom by `factor` about the grid's view y `aboutViewY` (⌥-scroll; plan Task 18).
+  @MainActor func zoomRoll(trackId: Int, vertically factor: CGFloat, aboutViewY: CGFloat) {
+    editRoll(trackId: trackId) { $0.zoom(vertically: factor, aboutViewY: aboutViewY, viewport: $1, timing: $2) }
+  }
+
+  /// The toolbar's zoom + and −: time ×2 or ÷2 about the grid's centre.
+  @MainActor func zoomRollIn(trackId: Int) {
+    editRoll(trackId: trackId) { $0.zoomIn(viewport: $1, timing: $2) }
+  }
+
+  @MainActor func zoomRollOut(trackId: Int) {
+    editRoll(trackId: trackId) { $0.zoomOut(viewport: $1, timing: $2) }
+  }
+
+  /// The toolbar's Grid, Snap pitch, Mode and Other tracks.
+  @MainActor func setRollGrid(trackId: Int, _ grid: RollGrid) {
+    editRoll(trackId: trackId) { state, _, _ in state.grid = grid }
+  }
+
+  @MainActor func setRollSnap(trackId: Int, _ snap: PitchSnap) {
+    editRoll(trackId: trackId) { state, _, _ in state.snap = snap }
+  }
+
+  @MainActor func setRollMode(trackId: Int, _ mode: RollMode) {
+    editRoll(trackId: trackId) { state, _, _ in state.mode = mode }
+  }
+
+  @MainActor func setRollShowsOtherTracks(trackId: Int, _ on: Bool) {
+    editRoll(trackId: trackId) { state, _, _ in state.showsOtherTracks = on }
+  }
+
+  /// Replaces the gesture machine's state of track `trackId` (plan Task 18 runs `RollEditLogic.handle` and stores
+  /// the result here; the canvas draws its preview, hidden notes, rubber band and insert marker).
+  @MainActor func setRollEditState(trackId: Int, _ editState: RollEditState) {
+    editRoll(trackId: trackId) { state, _, _ in state.editState = editState }
+  }
+
+  /// Publishes `states` only when it changed, so an unchanged fit redraws nothing.
+  private func publishRolls(_ states: RollViewStates) {
+    if states != rolls.states { rolls.states = states }
+  }
+
+  /// After a snapshot: drops removed tracks' roll states and fits the open track's to the new content.
+  private func updateRolls(for snapshot: Snapshot) {
+    var openTrackId: Int?
+    if case .track(let id) = openLane { openTrackId = id }
+    var states = rolls.states
+    states.snapshotApplied(tracks: snapshot.tracks ?? [], timing: RollTiming(snapshot: snapshot), openTrackId: openTrackId)
+    publishRolls(states)
+  }
+
   // MARK: - Project key (the Key pickers) and the transpose row
 
   /// Picking a tonic or a mode: sets the project key, spelled as the snapshot's table spells that pitch
@@ -558,6 +654,7 @@ class ChordLabState: NSObject, ObservableObject {
       let target = keyTarget.resolved(in: decoded.tracks)
       if target != keyTarget { keyTarget = target }
       updateOpenLane(for: decoded)
+      updateRolls(for: decoded)
       updateKeyRow(for: decoded)
     } catch {
       reportError("snapshot decode failed: \(error)")
@@ -613,4 +710,12 @@ class ChordLabState: NSObject, ObservableObject {
     lastError = message
     errorSerial += 1
   }
+}
+
+/// The piano rolls' UI state (`ChordLabState.rolls`, tracks design D14): every track's `RollViewState` and the roll's
+/// viewport, published on their own so a scroll redraws the roll alone, plus the guide band layout cache the roll
+/// reads in its body (rebuilt per snapshot revision, zoom and track role; never published).
+final class RollViewStore: ObservableObject {
+  @Published var states = RollViewStates()
+  let bands = GuideBandsCache()
 }

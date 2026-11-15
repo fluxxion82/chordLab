@@ -274,27 +274,6 @@ private struct CappedWidth: Layout {
   }
 }
 
-/// What a track lane shows in place of the suggestions, palette and home row until the piano roll exists (plan
-/// Task 17): a dark panel naming the track. It takes the flexible height the palette viewport took, so it is the
-/// row that gives up height.
-struct RollAreaPlaceholder: View {
-  let name: String
-
-  var body: some View {
-    ZStack {
-      RoundedRectangle(cornerRadius: 6).fill(Color.black.opacity(0.25))
-      RoundedRectangle(cornerRadius: 6).strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
-      Text("Piano roll — \(name)")
-        .font(.callout)
-        .foregroundStyle(.secondary)
-    }
-    .frame(maxWidth: .infinity, maxHeight: .infinity)
-    .accessibilityElement(children: .ignore)
-    .accessibilityLabel("Piano roll — \(name)")
-    .accessibilityIdentifier("chordlab.rollArea")
-  }
-}
-
 struct LaneTabsView_Previews: PreviewProvider {
   static var previews: some View {
     LaneTabsView().environmentObject(ChordLabState(numParams: kNumParams))

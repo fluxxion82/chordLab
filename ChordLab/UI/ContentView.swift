@@ -2,8 +2,8 @@ import SwiftUI
 
 /// Key bar, the key transpose row (only while it has something to say), transport row, sequence bar, the lane
 /// tab row (`LaneTabsView`, tracks design D13) and the open lane: with Chords open the suggestions strip, palette
-/// grid and (only while another key is browsed) the home-key compare row; with a track open its roll area in
-/// their place (`RollAreaPlaceholder` until the piano roll exists, plan Task 17). A temporary status line and the
+/// grid and (only while another key is browsed) the home-key compare row; with a track open its piano roll
+/// (`PianoRollView`, tracks design D14) in their place. A temporary status line and the
 /// MIDI drag-out control run along the bottom. When the engine could not play the
 /// feel (`feelLimited`, plan D11), the bottom row says so beside the drag-out control, since the clip falls
 /// back to block chords too (in place of the counts line, which would leave the sentence too little room at
@@ -54,7 +54,9 @@ struct ContentView: View {
         // Chords open: the suggestions, the palette and the home row. A track open: its roll in their place
         // (tracks design D13), so the palette's switch row, and the Heard group in it, hide with them.
         if case .track(let id) = state.openLane, let track = state.snapshot?.track(id: id) {
-          RollAreaPlaceholder(name: LaneTabs.label(for: track))
+          // A fresh roll per track (`id`), so each one measures its grid, and first opens, when it shows.
+          PianoRollView(rolls: state.rolls, track: track)
+            .id(track.id)
         } else {
           SuggestionsView()
 

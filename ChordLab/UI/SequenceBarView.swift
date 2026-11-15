@@ -120,14 +120,10 @@ struct SequenceBarView: View {
   private var selection: [Int] { state.snapshot?.selection ?? [] }
   private var selectedEventId: Int? { state.snapshot?.selectedEventId }
 
-  /// The beat the playhead sits at, or nil when it is hidden.
+  /// The beat the playhead sits at, or nil when it is hidden (`Playhead.beat`, the rule the piano roll shares).
   private var playheadBeat: Double? {
-    guard let transport = state.transport, transport.playing, let snapshot = state.snapshot,
-          snapshot.endBeat > 0, transport.ppq >= 0 else { return nil }
-    if snapshot.progressionLoop {
-      return transport.ppq.truncatingRemainder(dividingBy: snapshot.endBeat)
-    }
-    return transport.ppq < snapshot.endBeat ? transport.ppq : nil
+    guard let snapshot = state.snapshot else { return nil }
+    return Playhead.beat(transport: state.transport, endBeat: snapshot.endBeat, loop: snapshot.progressionLoop)
   }
 
   var body: some View {
