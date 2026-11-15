@@ -1,13 +1,17 @@
 #pragma once
 
+#include "chordlab/tracks.h"
+
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
 
 namespace chordlab {
 
-// Only references cross this interface, so the definitions (document.h, palette.h) are not needed here.
+// Only references cross this interface, so the definitions (document.h, palette.h) are not needed here; tracks.h is
+// included for `NoteSelection`, which `SnapshotExtras` holds by value.
 struct Document;
 class DocumentStore;
 struct Key;
@@ -61,6 +65,15 @@ constexpr int kMaxJsonDepth = 64;
 /// reads. A member that appears twice takes its last value (nlohmann's parse policy); the UI never
 /// sends such messages, but the behaviour is pinned by a test.
 
+/// What `snapshotJson` publishes that lives in the `DocumentStore`, not the `Document` (tracks design D6): the live
+/// note selection (`DocumentStore::noteSelection`) and the content revision (`DocumentStore::revision`). The shell
+/// fills it from its store in the same critical section as the document it serialises. The default (no selection,
+/// revision 0) is for callers that have no store.
+struct SnapshotExtras {
+    NoteSelection noteSelection;
+    std::uint64_t revision = 0;
+};
+
 /// The document as the UI shows it, with the given palette (normally
 /// `buildPalette(doc.browsedKey, doc.projectKey)`), so that the UI never computes theory:
 /// ```
@@ -79,7 +92,8 @@ constexpr int kMaxJsonDepth = 64;
 ///  "events":[{"id":1,"root":0,"type":"maj","symbol":"C","roman":"I","family":"Major","function":"T",
 ///             "tension":3,"startBeat":0.0,"lengthBeats":4.0,"velocity":100,
 ///             "inversion":0,"octave":0,"manualVoicing":false,"voicing":[60,64,67],
-///             "voicingNames":["C4","E4","G4"],"outOfKey":[],"outOfKeyNames":[],"why":null}, ...],
+///             "voicingNames":["C4","E4","G4"],"outOfKey":[],"outOfKeyNames":[],"why":null,
+///             "playStart":0.0,"playEnd":4.0}, ...],
 ///  "sections":[{"id":1,"name":"Verse","colourIndex":0,"firstEventIndex":0}, ...],
 ///  "suggestions":[{"root":5,"type":"maj","symbol":"F","roman":"IV","function":"PD","score":2.35,
 ///                  "reasons":["commonTones","smooth","diatonic","predominant"],
@@ -93,6 +107,13 @@ constexpr int kMaxJsonDepth = 64;
 ///  "relationMode":"blend", "relationReference":{"eventId":3,"symbol":"F"}|null,
 ///  "presets":[{"id":"axis","name":"Axis","genre":"Pop","tonality":"Major","numerals":"I – V – vi – IV",
 ///              "fits":true}, ...],
+///  "ticksPerBeat":960, "revision":7,
+///  "tracks":[{"id":1,"name":"Bass","role":"bass","mute":false,"solo":false,"audible":true,
+///             "notes":[{"id":1,"pitch":36,"start":0,"length":960,"velocity":100,"anchor":1,"offset":0,
+///                       "active":true}, ...]}, ...],
+///  "chordsMuted":false, "chordsSolo":false, "chordsAudible":true,
+///  "noteSelection":{"trackId":1,"ids":[1]}|null,
+///  "trackLimits":{"maxTracks":4,"maxNotesPerTrack":1024,"minNoteTicks":30,"maxPolyphony":8,"maxOnsetsPerBeat":24},
 ///  "applied":[{"id":"applied-1-1","label":"V7/ii","target":"Dm","degree":1,"tier":1,"root":9,"type":"7",
 ///              "symbol":"A7","roman":"VI7","family":"Major","function":"D","tension":43,"filled":false,
 ///              "voicing":[69,73,76,79],"voicingNames":["A4","C#5","E5","G5"],"outOfKey":[1],"outOfKeyNames":["C#"],
@@ -164,7 +185,8 @@ constexpr int kMaxJsonDepth = 64;
 /// - `transposeWithKey`, `keyHintSeen`: `Document::transposeWithKey` (a tonic change transposes the
 ///   sequence) and `Document::keyHintSeen` (the one-time hint has shown); live state, false by default.
 /// - `midiThru`: `Document::midiThru` (the plug-in passes the MIDI it hears to its output); live state,
-///   true by default. With it, `selectedEventIds` and `newChordBeats` the snapshot has 29 top-level keys.
+///   true by default. With it, `selectedEventIds`, `newChordBeats` and the eight tracks keys below the snapshot has
+///   37 top-level keys.
 /// - `feel`, `meter`: `Document::feel` as seven wire-name strings (`rhythm` block|pulse|subdivided|offbeats|
 ///   lowThenUpper|arpeggio, `strum` off|down|up|downUp, `strumSpeed` tight|medium|loose, `humanise`
 ///   off|light|medium|heavy, `arpPattern` up|down|upDown|downUp|upAndDown|downAndUp|converge|diverge|
@@ -260,9 +282,32 @@ constexpr int kMaxJsonDepth = 64;
 ///   chord (`root`, `type`), the `Suggestion`'s `label` as `symbol` and its `roman`, `function` as the
 ///   events do (the chord's `functionOf` in the project key), the `score`, the `reasons` as `reasonName`
 ///   strings and the parallel `reasonTexts`.
+///
+/// Tracks fields (tracks design D6; all additive, schema still 1; ticks are JSON integers on the 960-per-beat grid):
+/// - per event, `playStart` and `playEnd`: the chord's playback span in beats, `chordPlaySpans(doc)` (compiler.h):
+///   the tick-rounded boundaries over 960 when a feel performs within budget (three 0.2506-beat chords: 241 / 960 for
+///   the second chord's start), the authored doubles otherwise, so on the block path and in the over-budget fallback
+///   they equal `startBeat` and `startBeat + lengthBeats` as accumulated. `startBeat` and `lengthBeats` stay authored
+///   (the strip draws them); what is shaded by playback (the roll's guide bands, chord lookups) uses these.
+/// - `ticksPerBeat`: 960 (`kFeelTicksPerBeat`), the grid of every tick field.
+/// - `revision`: `extras.revision`, the store's content revision (`DocumentStore::revision`, document.h: it moves
+///   with every content commit, undo, redo and state load, never with a selection or a live flag); 0 when the caller
+///   gives none. A note command's `baseRevision` names it.
+/// - `tracks`: `Document::tracks` in order, each `{id, name, role, mute, solo, audible, notes}`: `role`
+///   `trackRoleName` ("bass", "lead", "other"), `audible` `trackAudible` (tracks.h: the mute/solo outcome, so the UI
+///   never derives it), `notes` in the track's note order, each `{id, pitch, start, length, velocity, anchor,
+///   offset, active}`: `start` the derived absolute tick, `noteStart` (the anchor's boundary plus the offset, so the UI
+///   never resolves anchors), `anchor` the id of the chord it belongs to, `offset` the ticks into it, `active`
+///   `noteActive` (false once its chord is shorter than its offset: kept and drawn, not played). Empty without tracks.
+/// - `chordsMuted`, `chordsSolo`: `Document::chordsMuted` / `chordsSolo`; `chordsAudible`: `chordsAudible(doc)`.
+/// - `noteSelection`: `extras.noteSelection` as `{"trackId":n,"ids":[...]}`, normalised against `doc` as
+///   `selectedEventIds` is: the ids the track holds, in its note order, once each; null when the selection is empty,
+///   names no track of `doc`, or keeps no id.
+/// - `trackLimits`: the caps by name, `{maxTracks: kMaxTracks, maxNotesPerTrack: kMaxNotesPerTrack, minNoteTicks:
+///   kMinTrackNoteTicks, maxPolyphony: kMaxTrackPolyphony, maxOnsetsPerBeat: kMaxTrackOnsetsPerBeat}` (tracks.h).
 /// Allocates (compiles, ranks): the UI/message thread only.
 std::string snapshotJson(const Document& doc, const Palette& palette, int selectedEventId = -1,
-                         const std::vector<int>& selectedEventIds = {});
+                         const std::vector<int>& selectedEventIds = {}, const SnapshotExtras& extras = {});
 
 /// A key as the snapshot names it: the spelled tonic and the mode name, "C Ionian", "Bb HarmonicMinor"
 /// (the `projectKeyName` / `browsedKeyName` fields; the plug-in names its MIDI export after it).
@@ -460,7 +505,10 @@ bool applyCommandJson(DocumentStore& store, std::string_view json, std::string& 
 ///  "events":[{"id":1,"root":0,"type":"maj","lengthBeats":4.0,"velocity":100,
 ///             "inversion":0,"octave":0,"manualVoicing":false}, ...],
 ///  "sections":[{"id":1,"name":"Verse","colourIndex":0,"firstEventIndex":0}, ...],
-///  "nextId":2, "nextSectionId":2, "editor":{"width":900,"height":620}}
+///  "tracks":[{"id":1,"name":"Bass","role":"bass","mute":false,"solo":false,
+///             "notes":[{"id":1,"pitch":36,"anchor":1,"offset":0,"length":960,"velocity":100}, ...]}, ...],
+///  "chordsMuted":false, "chordsSolo":false,
+///  "nextId":2, "nextSectionId":2, "nextTrackId":2, "nextNoteId":2, "editor":{"width":900,"height":620}}
 /// ```
 /// `nextId` is the store's id counter (`DocumentStore::nextId`), so that a reloaded document keeps
 /// handing out ids no saved event ever had, and `nextSectionId` the section counter likewise.
@@ -471,10 +519,14 @@ bool applyCommandJson(DocumentStore& store, std::string_view json, std::string& 
 /// `Document::relationMode`, live state that is nonetheless saved with the set, R5) later, and
 /// `transposeWithKey` and `keyHintSeen` (also live state) after it, and `midiThru` (live state) after
 /// those, and `newChordBeats` (live state, the length of a chord added without one, null for one bar of the meter) after that: a reader that predates them ignores them, and `loadStateJson` defaults them when they are
-/// missing, so states cross both ways.
+/// missing, so states cross both ways. `tracks`, `chordsMuted`, `chordsSolo`, `nextTrackId` and `nextNoteId` (tracks
+/// design D7) came after all of them: the tracks in order with their live `mute` and `solo`, each note as stored
+/// (`anchor` its chord's id, `offset` and `length` in ticks, no derived start), and the two counters
+/// (`DocumentStore::nextTrackId` / `nextNoteId`) so ids stay unused after a reload; the note selection and the revision
+/// are live and not written. A build from before tracks ignores these keys and drops the tracks on its next save.
 /// Size: the largest state the store can hold (`kMaxChords` chords, a section on each, every name at
-/// `kMaxSectionNameBytes` bytes of characters that escape to two) is pinned by test_json_api.cpp at
-/// well under a tenth of `kMaxJsonBytes`, so a saved state always loads.
+/// `kMaxSectionNameBytes` bytes of characters that escape to two, `kMaxTracks` tracks of `kMaxNotesPerTrack` notes,
+/// every id ten digits) is pinned by test_json_api.cpp under `kMaxJsonBytes`, so a saved state always loads.
 std::string stateJson(const DocumentStore& store, int editorWidth = kDefaultEditorWidth,
                       int editorHeight = kDefaultEditorHeight);
 
@@ -484,9 +536,10 @@ std::string stateJson(const DocumentStore& store, int editorWidth = kDefaultEdit
 /// not above every event id, a non-positive editor size, or sections that are not `sectionsWellFormed`
 /// (document.h): not starting at 0, unsorted or sharing a start, an index outside the progression, a
 /// section id outside 1..INT_MAX-1 or repeated, a name over `kMaxSectionNameBytes` bytes; or a
-/// `nextSectionId` below 1 or not above every section id) it returns false with a description in `error` and the store, its history, its selection and the
-/// out-params are untouched. Otherwise it replaces the store's document and both id counters
-/// (`DocumentStore::replace`, which clears the undo/redo history and the selection), writes the editor
+/// `nextSectionId` below 1 or not above every section id; a malformed track or note, or tracks that fail
+/// `validateTracks`, below) it returns false with a description in `error` and the store, its history, its selection and the
+/// out-params are untouched. Otherwise it replaces the store's document and its four id counters
+/// (`DocumentStore::replace`, which clears the undo/redo history and both selections and moves the revision), writes the editor
 /// size into the out-params that are non-null, and returns true with `error` cleared.
 /// Lengths, velocities, inversions, octaves and section colours are clamped to the store's ranges
 /// rather than rejected (a mistyped value is still rejected). Optional, with their defaults: `editor`
@@ -498,7 +551,19 @@ std::string stateJson(const DocumentStore& store, int editorWidth = kDefaultEdit
 /// ("blend"; when given, one of the five `relationModeName` strings, anything else rejecting the state),
 /// `sections` (none) and `nextSectionId`
 /// (derived, one past the largest section id, 1 without sections; when given it must be at least that and
-/// is kept, like `nextId`). Every other field is required.
+/// is kept, like `nextId`), `tracks` (none), `chordsMuted` and `chordsSolo` (false; when given, booleans), and
+/// `nextTrackId` / `nextNoteId` (derived, one past the largest track / note id, 1 without; when given, at least that
+/// and kept, like `nextSectionId`). Every other field is required.
+/// Tracks: `tracks` must be an array of objects with every member `stateJson` writes: `id` an integer in
+/// 1..INT_MAX-1, `name` a string, `role` "bass", "lead" or "other", `mute` and `solo` booleans, `notes` an array of
+/// objects `{id, pitch, anchor, offset, length, velocity}`: `id` an integer in 1..INT_MAX-1, `pitch`, `anchor` and
+/// `velocity` integers that fit an `int`, `offset` and `length` read at 64 bits and required to fit an `int32_t`
+/// (anything else, 2^63 included, is an error naming the field, never a wrapped value). Nothing of a track is clamped:
+/// after the chords are read and clamped, the candidate document runs `validateTracks` (tracks.h) with the candidate
+/// counters (given or derived), and any failure (a note anchored to no chord, a pitch, velocity, offset or length
+/// outside D1's domain, repeated ids, notes out of their (start, pitch, id) order, a name over `kMaxTrackNameBytes`,
+/// more than `kMaxTracks` tracks or `kMaxNotesPerTrack` notes, or the playback limits over the active notes of every
+/// track, muted ones included) rejects the whole state as `"tracks" rejected: <validateTracks' reason>`.
 bool loadStateJson(DocumentStore& store, std::string_view json, std::string& error, int* editorWidth = nullptr,
                    int* editorHeight = nullptr) noexcept;
 

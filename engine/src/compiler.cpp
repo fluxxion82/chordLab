@@ -1,6 +1,7 @@
 #include "chordlab/compiler.h"
 
 #include "chordlab/feel.h"
+#include "chordlab/tracks.h"
 #include "chordlab/voicing.h"
 
 #include <algorithm>
@@ -8,6 +9,7 @@
 #include <climits>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <tuple>
 #include <utility>
@@ -160,6 +162,36 @@ Compiled compileSection(const Document& doc, int sectionIndex) {
     const int end = at + 1 < doc.sections.size() ? doc.sections[at + 1].firstEventIndex : size;
     assert(first >= 0 && first < end && end <= size);
     return compileRange(doc, first, end - first);
+}
+
+std::vector<PlaySpan> chordPlaySpans(const Document& doc, const Compiled& compiled) {
+    std::vector<PlaySpan> spans;
+    spans.reserve(doc.events.size());
+    if (feelPerforms(doc.feel) && !compiled.feelLimited) {
+        // performDocument's chordTicks is chordBoundaryTicks (tracks.h), so this is the performance's own grid.
+        const std::vector<std::int32_t> ticks = chordBoundaryTicks(doc);
+        for (std::size_t i = 0; i < doc.events.size(); ++i) {
+            spans.push_back(PlaySpan{static_cast<double>(ticks[i]) / kFeelTicksPerBeat,
+                                     static_cast<double>(ticks[i + 1]) / kFeelTicksPerBeat});
+        }
+        return spans;
+    }
+    double beat = 0.0;  // the block path's accumulation (blockRange over the whole document)
+    for (const ChordEvent& event : doc.events) {
+        const double start = beat;
+        beat += event.lengthBeats;
+        spans.push_back(PlaySpan{start, beat});
+    }
+    return spans;
+}
+
+std::vector<PlaySpan> chordPlaySpans(const Document& doc) {
+    if (!feelPerforms(doc.feel)) {
+        return chordPlaySpans(doc, Compiled{});  // the block path; nothing to perform
+    }
+    Compiled verdict;
+    verdict.feelLimited = performDocument(doc).feelLimited;
+    return chordPlaySpans(doc, verdict);
 }
 
 }  // namespace chordlab

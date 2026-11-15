@@ -69,4 +69,28 @@ Compiled compileRange(const Document& doc, int firstEvent, int count);
 /// in 0..sections.size()-1. The section invariants of `Document::sections` are preconditions (asserted).
 Compiled compileSection(const Document& doc, int sectionIndex);
 
+/// One chord's playback span in beats, half-open: [start, end).
+struct PlaySpan {
+    double start;
+    double end;
+};
+
+/// Each chord's span as playback uses it (tracks design D8), one per event in playback order (empty for an empty
+/// document): the one helper for the snapshot's `playStart`/`playEnd`, the harmonic guides, section slicing and the
+/// generator, so their boundaries are exactly the ones `compile` sounds.
+/// - With a feel that performs (`feelPerforms(doc.feel)`) and is within budget, `chordTicks[i] / 960.0` to
+///   `chordTicks[i + 1] / 960.0` of `performDocument` (that is `chordBoundaryTicks(doc)`, tracks.h): the beats
+///   `compile` gives the performed notes of chord i, all of which lie inside it, and the last end is `compile`'s
+///   `endBeat`.
+/// - Otherwise (block chords, and the over-budget fallback, `Compiled::feelLimited`) the authored boundaries,
+///   accumulated left to right exactly as `compile`'s block path does (`Document::startBeatOf`): chord i's ons sit at
+///   `start` and its offs at `end`, bit for bit, and adjacent spans share their boundary value.
+/// So for a fractional length the two paths differ by under half a tick (three 0.2506-beat chords: 0.2506 authored,
+/// 241 / 960 performed). Same preconditions as `compile`; runs `performDocument` when the feel performs.
+std::vector<PlaySpan> chordPlaySpans(const Document& doc);
+
+/// `chordPlaySpans(doc)` for a caller that already holds `compiled == compile(doc)`, whose `feelLimited` verdict it
+/// reuses instead of performing the document again (the snapshot compiles once for both).
+std::vector<PlaySpan> chordPlaySpans(const Document& doc, const Compiled& compiled);
+
 }  // namespace chordlab

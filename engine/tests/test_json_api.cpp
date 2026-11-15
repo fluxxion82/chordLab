@@ -1182,9 +1182,9 @@ TEST_CASE("rejection: transpose commands with missing, mistyped or out-of-range 
     CHECK(error.find("in -11..11") != std::string::npos);
 }
 
-TEST_CASE("snapshot: twenty-nine top-level keys, with the transpose flags, the feel, midiThru, the selection and the new-chord length") {
+TEST_CASE("snapshot: thirty-seven top-level keys, with the transpose flags, the feel, midiThru, the selection, the new-chord length and the tracks keys") {
     DocumentStore store = threeChords();
-    CHECK(snapshot(store).size() == 29);
+    CHECK(snapshot(store).size() == 37);
 }
 
 // --- Feel and meter --------------------------------------------------------------------------
@@ -2857,46 +2857,89 @@ TEST_CASE("capacity: a state with more than kMaxChords chords is rejected whole;
 
 namespace {
 
-/// The largest state the engine can produce: kMaxChords chords, a section on every one of them, each
-/// name at the byte bound and made of the characters JSON escapes to two bytes, and the relation mode with
-/// the longest name, and the longest new-chord length.
+/// The largest state the engine can produce: kMaxChords chords and kMaxTracks full tracks, every value at its
+/// widest printing form, built as a document and installed with `replace` (the store's own ids start at 1):
+/// - ids at the top of their ranges (chords, sections, tracks and notes at INT_MAX - n .. INT_MAX - 1, every counter
+///   INT_MAX), so each prints ten digits;
+/// - chords: maj7#11 (the longest type id) on root 11, octave -1, lengthBeats 63.99999999999999 (the longest
+///   printing length under the cap), a section on every one, each name at `kMaxSectionNameBytes` bytes of the
+///   characters JSON escapes to two;
+/// - tracks: names of `kMaxTrackNameBytes` such characters; `kMaxNotesPerTrack` notes each, 16 per chord taking turns
+///   over the four tracks, at offsets 10000 + 2200 k (k = 0..15, five digits), each 17599 ticks long (five digits),
+///   so at most eight sound at once (starts 2200 apart, lengths under 8 x 2200: `kMaxTrackPolyphony`), at most one
+///   starts per beat (`kMaxTrackOnsetsPerBeat`) and the last chord's last note ends inside the note domain (43000 +
+///   17599 < 61440 ticks per chord), pitches and velocities 100..127 (three digits);
+/// - the relation mode with the longest name, the longest new-chord length.
 DocumentStore worstCaseStore() {
-    DocumentStore store = fullStore();
-    store.setRelationMode(RelationMode::VoiceLeading);
+    REQUIRE(kMaxTracks * kMaxNotesPerTrack == 16 * kMaxChords);  // 16 notes per chord, as laid out below
+    REQUIRE(kMaxTrackPolyphony >= 8);
+    REQUIRE(kMaxTrackOnsetsPerBeat >= 1);
+    Document doc;
+    doc.relationMode = RelationMode::VoiceLeading;
+    doc.newChordBeats = 63.75;  // the longest value, five characters
     std::string name;
     for (int i = 0; i < kMaxSectionNameBytes; ++i) {
         name.push_back(i % 2 == 0 ? '"' : '\\');
     }
     for (int i = 0; i < kMaxChords; ++i) {
-        REQUIRE(store.addSection(i, name) == i + 1);
+        doc.events.push_back(ChordEvent{INT_MAX - kMaxChords + i, chord(11, "maj7#11"), 63.99999999999999, 127, 0, -1, false});
+        doc.sections.push_back(Section{INT_MAX - kMaxChords + i, name, 0, i});
     }
-    store.setNewChordLength(63.75);  // the longest value, five characters
+    std::string trackName;
+    for (int i = 0; i < kMaxTrackNameBytes; ++i) {
+        trackName.push_back(i % 2 == 0 ? '"' : '\\');
+    }
+    for (int t = 0; t < kMaxTracks; ++t) {
+        doc.tracks.push_back(Track{INT_MAX - kMaxTracks + t, trackName, TrackRole::Other, false, false, {}});
+    }
+    int noteId = INT_MAX - kMaxTracks * kMaxNotesPerTrack;
+    for (int i = 0; i < kMaxChords; ++i) {
+        for (int k = 0; k < 16; ++k) {
+            doc.tracks[static_cast<std::size_t>(k % kMaxTracks)].notes.push_back(
+                TrackNote{noteId++, 100 + (k + i) % 28, INT_MAX - kMaxChords + i, 10000 + 2200 * k, 17599, 100 + k});
+        }
+    }
+    REQUIRE(noteId == INT_MAX);
+    std::string error;
+    REQUIRE_MESSAGE(validateTracks(doc, INT_MAX, INT_MAX, error), error);
+    DocumentStore store;
+    store.replace(std::move(doc), INT_MAX, INT_MAX, INT_MAX, INT_MAX);
     return store;
 }
 
 /// `stateJson` of `worstCaseStore()` at the default editor size, measured; pinned so that a change to the
 /// state's shape shows up here against `kMaxJsonBytes` (1 MiB) before it shows up as a state that will
 /// not load.
-constexpr std::size_t kWorstCaseStateBytes = 77047;
+constexpr std::size_t kWorstCaseStateBytes = 476028;
 
 }  // namespace
 
-TEST_CASE("capacity: the largest possible state is well under kMaxJsonBytes and round-trips") {
+TEST_CASE("capacity: the largest possible state is under kMaxJsonBytes and round-trips") {
     const DocumentStore original = worstCaseStore();
     REQUIRE(original.doc().events.size() == static_cast<std::size_t>(kMaxChords));
     REQUIRE(original.doc().sections.size() == static_cast<std::size_t>(kMaxChords));
+    REQUIRE(original.doc().tracks.size() == static_cast<std::size_t>(kMaxTracks));
+    for (const Track& t : original.doc().tracks) {
+        REQUIRE(t.notes.size() == static_cast<std::size_t>(kMaxNotesPerTrack));
+    }
+    CHECK(trackPolyphony(original.doc()) <= kMaxTrackPolyphony);
+    CHECK(densestOnsetWindow(original.doc()) <= kMaxTrackOnsetsPerBeat);
     const std::string text = stateJson(original);
     MESSAGE("worst-case state: " << text.size() << " bytes");
     CHECK(text.size() == kWorstCaseStateBytes);
-    CHECK(text.size() <= kMaxJsonBytes / 8);
+    CHECK(text.size() < kMaxJsonBytes);
 
     DocumentStore loaded;
     std::string error;
     REQUIRE_MESSAGE(loadStateJson(loaded, text, error), error);
     CHECK(loaded.doc() == original.doc());
-    CHECK(loaded.nextId() == kMaxChords + 1);
-    CHECK(loaded.nextSectionId() == kMaxChords + 1);
+    CHECK(loaded.nextId() == INT_MAX);
+    CHECK(loaded.nextSectionId() == INT_MAX);
+    CHECK(loaded.nextTrackId() == INT_MAX);
+    CHECK(loaded.nextNoteId() == INT_MAX);
     CHECK(loaded.doc().sections.back().name.size() == static_cast<std::size_t>(kMaxSectionNameBytes));
+    CHECK(loaded.doc().tracks.back().name.size() == static_cast<std::size_t>(kMaxTrackNameBytes));
+    CHECK(stateJson(loaded) == text);
 }
 
 TEST_CASE("keyName: the spelled tonic and the mode name, as the snapshot's key names") {
@@ -5193,4 +5236,469 @@ TEST_CASE("insertChords: the largest clipboard message the bounds allow is under
         total += track.notes.size();
     }
     CHECK(total == static_cast<std::size_t>(kMaxTracks * kMaxNotesPerTrack));
+}
+
+// --- Tracks in the snapshot and the state (tracks design D6, D7) ---
+
+namespace {
+
+/// The snapshot as the shell builds it (`ChordLab.mm`, `PushSnapshot`): the live chord selection and the
+/// `SnapshotExtras` of the store's note selection and revision, parsed back.
+json shellSnapshot(const DocumentStore& store) {
+    const Document& d = store.doc();
+    return json::parse(snapshotJson(d, buildPalette(d.browsedKey, d.projectKey), store.selectedEventId(),
+                                    store.selectedEventIds(), SnapshotExtras{store.noteSelection(), store.revision()}));
+}
+
+/// Every track field non-default: C, F, G7 (threeChords, ids 1..3); track 1 "Bass" (bass, muted) and track 2 "Melody"
+/// (lead, soloed); the chords lane muted and soloed; F shortened to two beats after its bass note at offset 2880 went
+/// in, so that note (id 3) is inactive; a removed third track and a removed note (id 6), so both counters run ahead of
+/// the largest ids (nextTrackId 4, nextNoteId 7); the lead notes selected; the chord F selected.
+DocumentStore trackedStore() {
+    DocumentStore store = threeChords();
+    REQUIRE(store.addTrack(TrackRole::Bass) == 1);
+    REQUIRE(store.addTrack(TrackRole::Lead, std::string("Melody")) == 2);
+    REQUIRE(store.addTrack(TrackRole::Other) == 3);
+    REQUIRE(store.insertNotes(1, {NoteSpec{36, 0, 960, 100}, NoteSpec{43, 1920, 960, 90},
+                                  NoteSpec{41, kBarTicks + 2880, 480, 80}}) == std::vector<int>{1, 2, 3});
+    REQUIRE(store.insertNotes(2, {NoteSpec{72, 960, 480, 110}, NoteSpec{76, 2 * kBarTicks + 500, 600, 127},
+                                  NoteSpec{79, 2 * kBarTicks + 500, 600, 1}}) == std::vector<int>{4, 5, 6});
+    REQUIRE(store.removeNotes(2, {6}));
+    REQUIRE(store.removeTrack(3));
+    std::string refusal;
+    REQUIRE_MESSAGE(store.setLength(2, 2.0, &refusal), refusal);
+    REQUIRE(store.setTrackMute(1, true));
+    REQUIRE(store.setTrackSolo(2, true));
+    REQUIRE(store.setChordsMute(true));
+    REQUIRE(store.setChordsSolo(true));
+    store.setNoteSelection(2, {5, 4});
+    store.setSelectedEvent(2);
+    REQUIRE(store.nextTrackId() == 4);
+    REQUIRE(store.nextNoteId() == 7);
+    return store;
+}
+
+/// `trackedStore`'s tracks as `stateJson` writes them.
+const json kTrackedStateTracks = json::parse(R"([
+  {"id":1,"name":"Bass","role":"bass","mute":true,"solo":false,"notes":[
+    {"id":1,"pitch":36,"anchor":1,"offset":0,"length":960,"velocity":100},
+    {"id":2,"pitch":43,"anchor":1,"offset":1920,"length":960,"velocity":90},
+    {"id":3,"pitch":41,"anchor":2,"offset":2880,"length":480,"velocity":80}]},
+  {"id":2,"name":"Melody","role":"lead","mute":false,"solo":true,"notes":[
+    {"id":4,"pitch":72,"anchor":1,"offset":960,"length":480,"velocity":110},
+    {"id":5,"pitch":76,"anchor":3,"offset":500,"length":600,"velocity":127}]}])");
+
+/// `trackedStore`'s tracks as the snapshot publishes them: F is two beats, so G7 starts at 5760 and note 3 (offset
+/// 2880 in a 1920-tick chord) is inactive; only the soloed lead is audible.
+const json kTrackedSnapshotTracks = json::parse(R"([
+  {"id":1,"name":"Bass","role":"bass","mute":true,"solo":false,"audible":false,"notes":[
+    {"id":1,"pitch":36,"start":0,"length":960,"velocity":100,"anchor":1,"offset":0,"active":true},
+    {"id":2,"pitch":43,"start":1920,"length":960,"velocity":90,"anchor":1,"offset":1920,"active":true},
+    {"id":3,"pitch":41,"start":6720,"length":480,"velocity":80,"anchor":2,"offset":2880,"active":false}]},
+  {"id":2,"name":"Melody","role":"lead","mute":false,"solo":true,"audible":true,"notes":[
+    {"id":4,"pitch":72,"start":960,"length":480,"velocity":110,"anchor":1,"offset":960,"active":true},
+    {"id":5,"pitch":76,"start":6260,"length":600,"velocity":127,"anchor":3,"offset":500,"active":true}]}])");
+
+const std::string kStateTracksRejected = "\"tracks\" rejected: ";
+
+std::string polyphonyMessage() {
+    return "At most " + std::to_string(kMaxTrackPolyphony) + " track notes can sound at once";
+}
+
+std::string onsetMessage() {
+    return "At most " + std::to_string(kMaxTrackOnsetsPerBeat) + " notes can start within one beat across all tracks";
+}
+
+/// Checks that `text` is rejected whole: false with an error (equal to `expected` when given), and the document, the
+/// history (the same undo), every id counter, the revision and both selections exactly as they were.
+void checkTrackStateRejected(DocumentStore& store, const std::string& text, const std::string& expected = "") {
+    CAPTURE(text.substr(0, 300));
+    const DocumentStore before = store;
+    std::string error;
+    CHECK_FALSE(loadStateJson(store, text, error));
+    CHECK_FALSE(error.empty());
+    if (!expected.empty()) {
+        CHECK(error == expected);
+    }
+    CHECK(store.doc() == before.doc());
+    CHECK(store.nextId() == before.nextId());
+    CHECK(store.nextSectionId() == before.nextSectionId());
+    CHECK(store.nextTrackId() == before.nextTrackId());
+    CHECK(store.nextNoteId() == before.nextNoteId());
+    CHECK(store.revision() == before.revision());
+    CHECK(store.selectedEventId() == before.selectedEventId());
+    CHECK(store.selectedEventIds() == before.selectedEventIds());
+    CHECK(store.noteSelection() == before.noteSelection());
+    DocumentStore undone = store;
+    DocumentStore reference = before;
+    CHECK(undone.undo());
+    REQUIRE(reference.undo());
+    CHECK(undone.doc() == reference.doc());
+}
+
+/// `trackedStore`'s state with `edit` applied.
+std::string editedTrackedState(const std::function<void(json&)>& edit) {
+    json state = json::parse(stateJson(trackedStore()));
+    edit(state);
+    return state.dump();
+}
+
+/// A state of C, F, G7 (threeChords) with one MUTED bass track holding `notes`, each {pitch, anchor, offset, length}
+/// at velocity 100, ids 1..n in the given order, the counters one past.
+std::string stateWithMutedNotes(const std::vector<std::vector<int>>& notes) {
+    json state = json::parse(stateJson(threeChords()));
+    json list = json::array();
+    int id = 0;
+    for (const std::vector<int>& n : notes) {
+        list.push_back({{"id", ++id}, {"pitch", n.at(0)}, {"anchor", n.at(1)}, {"offset", n.at(2)}, {"length", n.at(3)},
+                        {"velocity", 100}});
+    }
+    state["tracks"] = json::array({json{{"id", 1}, {"name", "Bass"}, {"role", "bass"}, {"mute", true}, {"solo", false},
+                                        {"notes", std::move(list)}}});
+    state["nextTrackId"] = 2;
+    state["nextNoteId"] = id + 1;
+    return state.dump();
+}
+
+}  // namespace
+
+TEST_CASE("snapshot: tracks, the chords lane, the note selection, the revision, ticksPerBeat and trackLimits") {
+    const DocumentStore store = trackedStore();
+    const json snap = shellSnapshot(store);
+    CHECK(snap.at("ticksPerBeat") == 960);
+    CHECK(snap.at("ticksPerBeat") == kFeelTicksPerBeat);
+    CHECK(snap.at("revision") == store.revision());
+    CHECK(snap.at("tracks") == kTrackedSnapshotTracks);
+    CHECK(snap.at("chordsMuted") == true);
+    CHECK(snap.at("chordsSolo") == true);
+    CHECK(snap.at("chordsAudible") == true);  // soloed, so muting it does not count
+    CHECK(snap.at("noteSelection") == json({{"trackId", 2}, {"ids", {4, 5}}}));
+    CHECK(snap.at("trackLimits") == json({{"maxTracks", kMaxTracks},
+                                          {"maxNotesPerTrack", kMaxNotesPerTrack},
+                                          {"minNoteTicks", kMinTrackNoteTicks},
+                                          {"maxPolyphony", kMaxTrackPolyphony},
+                                          {"maxOnsetsPerBeat", kMaxTrackOnsetsPerBeat}}));
+    CHECK(snap.at("selectedEventId") == 2);
+
+    // Without the extras (every caller but the shell): revision 0 and no note selection; the rest is the same.
+    const json plain = snapshot(store);
+    CHECK(plain.at("revision") == 0);
+    CHECK(plain.at("noteSelection").is_null());
+    CHECK(plain.at("tracks") == kTrackedSnapshotTracks);
+
+    // An empty document: no tracks, the lane flags false and audible.
+    const json empty = shellSnapshot(DocumentStore{});
+    CHECK(empty.at("tracks") == json::array());
+    CHECK(empty.at("chordsMuted") == false);
+    CHECK(empty.at("chordsSolo") == false);
+    CHECK(empty.at("chordsAudible") == true);
+    CHECK(empty.at("noteSelection").is_null());
+    CHECK(empty.at("revision") == 1);
+}
+
+TEST_CASE("snapshot: noteSelection names only notes the track holds, in its note order; null otherwise") {
+    const DocumentStore store = trackedStore();
+    const Document& d = store.doc();
+    const Palette palette = buildPalette(d.browsedKey, d.projectKey);
+    const auto selectionOf = [&](const NoteSelection& selection) {
+        return json::parse(snapshotJson(d, palette, kNoEventId, {}, SnapshotExtras{selection, 9})).at("noteSelection");
+    };
+    CHECK(selectionOf(NoteSelection{2, {5, 99, 4}}) == json({{"trackId", 2}, {"ids", {4, 5}}}));
+    CHECK(selectionOf(NoteSelection{2, {99}}).is_null());
+    CHECK(selectionOf(NoteSelection{7, {1}}).is_null());
+    CHECK(selectionOf(NoteSelection{}).is_null());
+}
+
+TEST_CASE("snapshot: tracks[].audible and chordsAudible follow mute and solo") {
+    DocumentStore store = threeChords();
+    REQUIRE(store.addTrack(TrackRole::Bass) == 1);
+    REQUIRE(store.addTrack(TrackRole::Lead) == 2);
+    const auto audible = [&]() {
+        const json snap = shellSnapshot(store);
+        return std::vector<bool>{snap.at("chordsAudible").get<bool>(), snap.at("tracks").at(0).at("audible").get<bool>(),
+                                 snap.at("tracks").at(1).at("audible").get<bool>()};
+    };
+    CHECK(audible() == std::vector<bool>{true, true, true});
+    REQUIRE(store.setTrackMute(1, true));
+    CHECK(audible() == std::vector<bool>{true, false, true});
+    REQUIRE(store.setTrackSolo(2, true));
+    CHECK(audible() == std::vector<bool>{false, false, true});
+    REQUIRE(store.setChordsSolo(true));
+    CHECK(audible() == std::vector<bool>{true, false, true});
+    REQUIRE(store.setTrackSolo(1, true));  // a soloed lane sounds even when muted
+    CHECK(audible() == std::vector<bool>{true, true, true});
+    REQUIRE(store.setChordsMute(true));
+    CHECK(audible() == std::vector<bool>{true, true, true});
+    REQUIRE(store.setChordsSolo(false));
+    CHECK(audible() == std::vector<bool>{false, true, true});
+}
+
+TEST_CASE("snapshot: each event's playStart and playEnd are chordPlaySpans on block, performing and over-budget documents") {
+    const auto checkSpans = [](const DocumentStore& store) {
+        const json events = shellSnapshot(store).at("events");
+        const std::vector<PlaySpan> spans = chordPlaySpans(store.doc());
+        REQUIRE(events.size() == spans.size());
+        for (std::size_t i = 0; i < spans.size(); ++i) {
+            CAPTURE(i);
+            CHECK(events[i].at("playStart").get<double>() == spans[i].start);
+            CHECK(events[i].at("playEnd").get<double>() == spans[i].end);
+        }
+        return events;
+    };
+
+    DocumentStore block;
+    for (int i = 0; i < 3; ++i) block.appendChord(kC, 0.2506, 100);
+    const json blockEvents = checkSpans(block);
+    CHECK(blockEvents[1].at("playStart") == 0.2506);
+    CHECK(blockEvents[2].at("playEnd") == 0.2506 + 0.2506 + 0.2506);
+
+    DocumentStore performing = block;
+    performing.setFeel(Feel{Rhythm::Pulse});
+    const json performingEvents = checkSpans(performing);
+    CHECK(performingEvents[1].at("playStart") == 241 / 960.0);
+    CHECK(performingEvents[1].at("playEnd") == 481 / 960.0);
+    CHECK(performingEvents[2].at("playEnd") == 722 / 960.0);
+    CHECK(performingEvents[1].at("startBeat") == 0.2506);  // the strip keeps the authored positions
+    CHECK(performingEvents[1].at("lengthBeats") == 0.2506);
+
+    DocumentStore limited;
+    for (int i = 0; i < 64; ++i) limited.appendChord(chord(0, "9"), 4.0, 100);
+    limited.appendChord(kC, 0.2506, 100);
+    limited.setFeel(Feel{Rhythm::Subdivided, Strum::Down, StrumSpeed::Medium, Humanise::Light});
+    REQUIRE(shellSnapshot(limited).at("feelLimited") == true);
+    const json limitedEvents = checkSpans(limited);
+    CHECK(limitedEvents[64].at("playStart") == 256.0);
+    CHECK(limitedEvents[64].at("playEnd") == 256.0 + 0.2506);
+}
+
+TEST_CASE("snapshot: the revision through the shell's snapshotJson across edits, undo, redo, a load and selection echoes") {
+    DocumentStore store = threeChords();
+    applyOk(store, {{"cmd", "addTrack"}, {"role", "bass"}});
+    const std::uint64_t r0 = store.revision();
+    json snap = shellSnapshot(store);
+    CHECK(snap.at("revision") == r0);
+    CHECK(snap.at("noteSelection").is_null());
+
+    applyOk(store, {{"cmd", "insertNotes"}, {"trackId", 1}, {"notes", {noteJson(36, 0, 960), noteJson(38, 960, 960)}}});
+    snap = shellSnapshot(store);
+    CHECK(snap.at("revision") == r0 + 1);  // an edit bumps
+    CHECK(snap.at("noteSelection") == json({{"trackId", 1}, {"ids", {1, 2}}}));
+
+    applyOk(store, {{"cmd", "selectNotes"}, {"trackId", 1}, {"ids", {2}}});
+    snap = shellSnapshot(store);
+    CHECK(snap.at("revision") == r0 + 1);  // a selection echo: same revision, the new selection
+    CHECK(snap.at("noteSelection") == json({{"trackId", 1}, {"ids", {2}}}));
+    applyOk(store, {{"cmd", "selectNotes"}, {"trackId", nullptr}, {"ids", json::array()}});
+    snap = shellSnapshot(store);
+    CHECK(snap.at("revision") == r0 + 1);
+    CHECK(snap.at("noteSelection").is_null());
+
+    std::string error;
+    CHECK_FALSE(apply(store, {{"cmd", "updateNotes"}, {"trackId", 1}, {"baseRevision", r0}, {"notes", {{{"id", 1}, {"pitch", 40}}}}},
+                      error));
+    CHECK(shellSnapshot(store).at("revision") == r0 + 1);  // a stale guarded edit is refused: unchanged
+
+    applyOk(store, {{"cmd", "undo"}});
+    snap = shellSnapshot(store);
+    CHECK(snap.at("revision") == r0 + 2);
+    CHECK(snap.at("tracks").at(0).at("notes") == json::array());
+    applyOk(store, {{"cmd", "redo"}});
+    snap = shellSnapshot(store);
+    CHECK(snap.at("revision") == r0 + 3);
+    CHECK(snap.at("tracks").at(0).at("notes").size() == 2);
+
+    applyOk(store, {{"cmd", "selectNotes"}, {"trackId", 1}, {"ids", {1}}});
+    REQUIRE_MESSAGE(loadStateJson(store, stateJson(store), error), error);
+    snap = shellSnapshot(store);
+    CHECK(snap.at("revision") == r0 + 4);  // a state load bumps and clears the selection
+    CHECK(snap.at("noteSelection").is_null());
+
+    applyOk(store, {{"cmd", "undo"}});  // nothing to undo after a load
+    applyOk(store, {{"cmd", "redo"}});
+    CHECK(shellSnapshot(store).at("revision") == r0 + 4);
+}
+
+TEST_CASE("state: tracks, the chords lane flags and the track and note counters round-trip; ids are never reused") {
+    const DocumentStore original = trackedStore();
+    const std::string text = stateJson(original);
+    const json state = json::parse(text);
+    CHECK(state.at("tracks") == kTrackedStateTracks);
+    CHECK(state.at("chordsMuted") == true);
+    CHECK(state.at("chordsSolo") == true);
+    CHECK(state.at("nextTrackId") == 4);
+    CHECK(state.at("nextNoteId") == 7);
+    CHECK_FALSE(state.contains("noteSelection"));  // live state, never saved
+    CHECK_FALSE(state.contains("revision"));
+
+    DocumentStore loaded;
+    std::string error;
+    REQUIRE_MESSAGE(loadStateJson(loaded, text, error), error);
+    CHECK(loaded.doc() == original.doc());
+    CHECK(loaded.nextTrackId() == 4);
+    CHECK(loaded.nextNoteId() == 7);
+    CHECK(loaded.noteSelection() == NoteSelection{});
+    CHECK(stateJson(loaded) == text);
+    const json snap = shellSnapshot(loaded);
+    CHECK(snap.at("tracks") == kTrackedSnapshotTracks);  // published with the derived start, anchor, offset, active
+    CHECK(snap.at("noteSelection").is_null());
+
+    // The counters were restored, not derived: the removed track 3 and note 6 are never handed out again.
+    CHECK(loaded.addTrack(TrackRole::Other) == 4);
+    CHECK(loaded.insertNotes(4, {NoteSpec{60, 0, 480}}) == std::vector<int>{7});
+}
+
+TEST_CASE("state: without the track keys a state loads no tracks, unmuted unsoloed chords and derived counters") {
+    json bare = json::parse(stateJson(threeChords()));
+    for (const char* name : {"tracks", "chordsMuted", "chordsSolo", "nextTrackId", "nextNoteId"}) {
+        REQUIRE(bare.contains(name));
+        bare.erase(name);
+    }
+    DocumentStore store = trackedStore();
+    std::string error;
+    REQUIRE_MESSAGE(loadStateJson(store, bare.dump(), error), error);
+    CHECK(store.doc().tracks.empty());
+    CHECK_FALSE(store.doc().chordsMuted);
+    CHECK_FALSE(store.doc().chordsSolo);
+    CHECK(store.nextTrackId() == 1);
+    CHECK(store.nextNoteId() == 1);
+    CHECK(store.doc().events == threeChords().doc().events);
+
+    // Tracks without counters: one past the largest ids (track 2, note 5), not the saved 4 and 7.
+    json noCounters = json::parse(stateJson(trackedStore()));
+    noCounters.erase("nextTrackId");
+    noCounters.erase("nextNoteId");
+    noCounters.erase("chordsMuted");
+    noCounters.erase("chordsSolo");
+    REQUIRE_MESSAGE(loadStateJson(store, noCounters.dump(), error), error);
+    CHECK(store.doc().tracks == trackedStore().doc().tracks);
+    CHECK(store.nextTrackId() == 3);
+    CHECK(store.nextNoteId() == 6);
+    CHECK_FALSE(store.doc().chordsMuted);
+    CHECK_FALSE(store.doc().chordsSolo);
+}
+
+TEST_CASE("state: a note anchored to a missing chord rejects the whole state; everything is kept") {
+    DocumentStore store = trackedStore();
+    checkTrackStateRejected(store, editedTrackedState([](json& s) { s["tracks"][0]["notes"][0]["anchor"] = 99; }),
+                            kStateTracksRejected + "Note 1 belongs to no chord");
+}
+
+TEST_CASE("state: a malformed track rejects the whole state naming the field; everything is kept") {
+    DocumentStore store = trackedStore();
+    const std::string int32Range = "must be an integer in -2147483648..2147483647";
+    const std::vector<std::pair<std::function<void(json&)>, std::string>> cases = {
+        {[](json& s) { s["tracks"] = json::object(); }, "\"tracks\" must be an array"},
+        {[](json& s) { s["tracks"][0] = 5; }, "tracks[0] must be an object"},
+        {[](json& s) { s["tracks"][0]["id"] = "1"; }, "tracks[0].id must be an integer in 1..2147483646"},
+        {[](json& s) { s["tracks"][0]["id"] = INT_MAX; }, "tracks[0].id must be an integer in 1..2147483646"},
+        {[](json& s) { s["tracks"][0]["name"] = 3; }, "tracks[0].name must be a string"},
+        {[](json& s) { s["tracks"][1]["role"] = "Lead"; }, "tracks[1].role " + kRoleMessage},
+        {[](json& s) { s["tracks"][1]["role"] = "drums"; }, "tracks[1].role " + kRoleMessage},
+        {[](json& s) { s["tracks"][1]["role"] = 1; }, "tracks[1].role " + kRoleMessage},
+        {[](json& s) { s["tracks"][0]["mute"] = "yes"; }, "tracks[0].mute must be true or false"},
+        {[](json& s) { s["tracks"][0]["solo"] = nullptr; }, "tracks[0].solo must be true or false"},
+        {[](json& s) { s["tracks"][0].erase("notes"); }, "missing tracks[0].notes"},
+        {[](json& s) { s["tracks"][0]["notes"] = nullptr; }, "tracks[0].notes must be an array"},
+        {[](json& s) { s["tracks"][0]["notes"][1] = "note"; }, "tracks[0].notes[1] must be an object"},
+        {[](json& s) { s["tracks"][0]["notes"][0]["pitch"] = 60.5; }, "tracks[0].notes[0].pitch must be an integer"},
+        {[](json& s) { s["tracks"][0]["notes"][0]["pitch"] = 2147483648LL; }, "tracks[0].notes[0].pitch must be an integer"},
+        {[](json& s) { s["tracks"][0]["notes"][0]["velocity"] = true; }, "tracks[0].notes[0].velocity must be an integer"},
+        {[](json& s) { s["tracks"][0]["notes"][0]["anchor"] = "1"; }, "tracks[0].notes[0].anchor must be an integer"},
+        {[](json& s) { s["tracks"][0]["notes"][0]["id"] = 0; }, "tracks[0].notes[0].id must be an integer in 1..2147483646"},
+        {[](json& s) { s["tracks"][0]["notes"][0].erase("length"); }, "missing tracks[0].notes[0].length"},
+        {[](json& s) { s["tracks"][0]["notes"][0]["offset"] = 9223372036854775808ULL; },
+         "tracks[0].notes[0].offset " + int32Range},
+        {[](json& s) { s["tracks"][0]["notes"][0]["offset"] = 2147483648LL; }, "tracks[0].notes[0].offset " + int32Range},
+        {[](json& s) { s["tracks"][0]["notes"][0]["length"] = std::numeric_limits<std::int64_t>::min(); },
+         "tracks[0].notes[0].length " + int32Range},
+        {[](json& s) { s["tracks"][0]["notes"][0]["length"] = 1e3; }, "tracks[0].notes[0].length " + int32Range},
+        {[](json& s) { s["chordsMuted"] = "yes"; }, "\"chordsMuted\" must be true or false"},
+        {[](json& s) { s["chordsSolo"] = 1; }, "\"chordsSolo\" must be true or false"},
+        {[](json& s) { s["nextTrackId"] = 2; }, "\"nextTrackId\" must exceed every track id (2)"},
+        {[](json& s) { s["nextTrackId"] = 0; }, "\"nextTrackId\" must be an integer >= 1"},
+        {[](json& s) { s["nextTrackId"] = "4"; }, "\"nextTrackId\" must be an integer >= 1"},
+        {[](json& s) { s["nextNoteId"] = 5; }, "\"nextNoteId\" must exceed every note id (5)"},
+        {[](json& s) { s["nextNoteId"] = 2147483648LL; }, "\"nextNoteId\" must be an integer >= 1"},
+    };
+    for (const auto& [edit, expected] : cases) {
+        checkTrackStateRejected(store, editedTrackedState(edit), expected);
+    }
+    // A value past what an int64 holds is not an integer at all; the 64-bit reader refuses it before any narrowing.
+    std::string text = stateJson(trackedStore());
+    const std::string offset = "\"offset\":1920";
+    REQUIRE(text.find(offset) != std::string::npos);
+    std::string huge = text;
+    huge.replace(huge.find(offset), offset.size(), "\"offset\":-9223372036854775809");
+    checkTrackStateRejected(store, huge, "tracks[0].notes[1].offset " + int32Range);
+    huge = text;
+    huge.replace(huge.find(offset), offset.size(), "\"offset\":18446744073709551616");
+    checkTrackStateRejected(store, huge, "tracks[0].notes[1].offset " + int32Range);
+}
+
+TEST_CASE("state: notes outside the domain, repeated ids, a long name and a fifth track are rejected by validateTracks") {
+    DocumentStore store = trackedStore();
+    const std::vector<std::function<void(json&)>> cases = {
+        [](json& s) { s["tracks"][0]["notes"][0]["pitch"] = 128; },
+        [](json& s) { s["tracks"][0]["notes"][0]["pitch"] = -1; },
+        [](json& s) { s["tracks"][0]["notes"][0]["velocity"] = 0; },
+        [](json& s) { s["tracks"][0]["notes"][0]["velocity"] = 128; },
+        [](json& s) { s["tracks"][0]["notes"][0]["offset"] = -1; },
+        [](json& s) { s["tracks"][0]["notes"][0]["length"] = kMinTrackNoteTicks - 1; },
+        [](json& s) { s["tracks"][0]["notes"][0]["length"] = kMaxNoteTick + 1; },
+        [](json& s) { s["tracks"][1]["notes"][0]["id"] = 1; },              // a note id used twice across tracks
+        [](json& s) { s["tracks"][1]["id"] = 1; },                          // a track id used twice
+        [](json& s) { std::swap(s["tracks"][0]["notes"][0], s["tracks"][0]["notes"][1]); },  // not in note order
+        [](json& s) { s["tracks"][0]["name"] = std::string(static_cast<std::size_t>(kMaxTrackNameBytes) + 1, 'x'); },
+        [](json& s) {
+            for (int id = 3; id <= kMaxTracks + 1; ++id) {
+                s["tracks"].push_back({{"id", id}, {"name", "T"}, {"role", "other"}, {"mute", false}, {"solo", false},
+                                       {"notes", json::array()}});
+            }
+            s["nextTrackId"] = kMaxTracks + 2;
+        },
+    };
+    for (const auto& edit : cases) {
+        const std::string text = editedTrackedState(edit);
+        checkTrackStateRejected(store, text);
+        std::string error;
+        DocumentStore probe;
+        CHECK_FALSE(loadStateJson(probe, text, error));
+        CHECK(error.rfind(kStateTracksRejected, 0) == 0);
+    }
+    // At the bounds the same edits load.
+    std::string error;
+    DocumentStore probe;
+    CHECK_MESSAGE(loadStateJson(probe, editedTrackedState([](json& s) {
+                      s["tracks"][0]["notes"][0]["pitch"] = 127;
+                      s["tracks"][0]["notes"][0]["velocity"] = 1;
+                      s["tracks"][0]["notes"][0]["length"] = kMinTrackNoteTicks;
+                      s["tracks"][0]["name"] = std::string(static_cast<std::size_t>(kMaxTrackNameBytes), 'x');
+                  }),
+                                error),
+                  error);
+}
+
+TEST_CASE("state: over the polyphony cap or the onset cap on a MUTED track is rejected whole; at the caps it loads") {
+    DocumentStore store = trackedStore();
+    std::vector<std::vector<int>> chord;  // pitches 40.. all at tick 0 for a beat
+    for (int i = 0; i <= kMaxTrackPolyphony; ++i) {
+        chord.push_back({40 + i, 1, 0, 960});
+    }
+    checkTrackStateRejected(store, stateWithMutedNotes(chord), kStateTracksRejected + polyphonyMessage());
+    chord.pop_back();
+    std::string error;
+    DocumentStore probe;
+    REQUIRE_MESSAGE(loadStateJson(probe, stateWithMutedNotes(chord), error), error);
+    CHECK(probe.doc().tracks.at(0).mute);
+    CHECK(trackPolyphony(probe.doc()) == kMaxTrackPolyphony);
+
+    std::vector<std::vector<int>> run;  // touching 30-tick notes, so polyphony stays 1
+    for (int i = 0; i <= kMaxTrackOnsetsPerBeat; ++i) {
+        run.push_back({60, 1, i * kMinTrackNoteTicks, kMinTrackNoteTicks});
+    }
+    REQUIRE((kMaxTrackOnsetsPerBeat + 1) * kMinTrackNoteTicks <= 960);
+    checkTrackStateRejected(store, stateWithMutedNotes(run), kStateTracksRejected + onsetMessage());
+    run.pop_back();
+    REQUIRE_MESSAGE(loadStateJson(probe, stateWithMutedNotes(run), error), error);
+    CHECK(densestOnsetWindow(probe.doc()) == kMaxTrackOnsetsPerBeat);
 }

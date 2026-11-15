@@ -307,6 +307,65 @@ json sectionsJson(const Document& doc) {
     return sections;
 }
 
+/// The snapshot's `tracks` (tracks design D6): each track with its audibility, each note with its derived start, its
+/// anchor and offset and whether it is active. The chord timeline is built once for all notes.
+json snapshotTracksJson(const Document& doc) {
+    const ChordTimeline timeline = chordTimeline(doc);
+    json tracks = json::array();
+    for (std::size_t i = 0; i < doc.tracks.size(); ++i) {
+        const Track& t = doc.tracks[i];
+        json notes = json::array();
+        for (const TrackNote& n : t.notes) {
+            notes.push_back({{"id", n.id},
+                             {"pitch", n.pitch},
+                             {"start", noteStart(timeline, n)},
+                             {"length", n.lengthTicks},
+                             {"velocity", n.velocity},
+                             {"anchor", n.anchorEventId},
+                             {"offset", n.offsetTick},
+                             {"active", noteActive(timeline, n)}});
+        }
+        tracks.push_back({{"id", t.id},
+                          {"name", t.name},
+                          {"role", trackRoleName(t.role)},
+                          {"mute", t.mute},
+                          {"solo", t.solo},
+                          {"audible", trackAudible(doc, i)},
+                          {"notes", std::move(notes)}});
+    }
+    return tracks;
+}
+
+/// The snapshot's `noteSelection`: `selection` normalised against `doc` (the ids its track holds, in the track's note
+/// order, once each), or null when that leaves nothing or the track is not in `doc`.
+json noteSelectionJson(const Document& doc, const NoteSelection& selection) {
+    const auto track = std::find_if(doc.tracks.begin(), doc.tracks.end(),
+                                    [&](const Track& t) { return t.id == selection.trackId; });
+    if (selection.trackId == kNoTrackId || track == doc.tracks.end()) {
+        return json();
+    }
+    const std::set<int> wanted(selection.ids.begin(), selection.ids.end());
+    json ids = json::array();
+    for (const TrackNote& n : track->notes) {
+        if (wanted.count(n.id) != 0) {
+            ids.push_back(n.id);
+        }
+    }
+    if (ids.empty()) {
+        return json();
+    }
+    return {{"trackId", selection.trackId}, {"ids", std::move(ids)}};
+}
+
+/// The snapshot's `trackLimits`: the track caps by name (tracks.h).
+json trackLimitsJson() {
+    return {{"maxTracks", kMaxTracks},
+            {"maxNotesPerTrack", kMaxNotesPerTrack},
+            {"minNoteTicks", kMinTrackNoteTicks},
+            {"maxPolyphony", kMaxTrackPolyphony},
+            {"maxOnsetsPerBeat", kMaxTrackOnsetsPerBeat}};
+}
+
 /// The snapshot's `presets`: every record of `allPresets()` in table order, with `fits` read against
 /// `projectKey`.
 json presetsJson(const Key& projectKey) {
@@ -2025,11 +2084,97 @@ bool parseSections(Fields& fields, Document& doc, int& maxSectionId, std::string
     return true;
 }
 
-/// Phase A of `loadStateJson`: parses and validates `text` into a document, the two id counters and an
+/// A state note's tick field (`offset`, `length`): read at 64 bits over the whole of `int32_t` (`getInt64In`, so 2^63
+/// or a fraction is an error, never a wrapped value) and only then narrowed. The domain is `validateTracks`' to check.
+bool getStateTicks(Fields& fields, const char* name, std::int32_t& out) {
+    std::int64_t value = 0;
+    if (!fields.getInt64In(name, std::numeric_limits<std::int32_t>::min(), std::numeric_limits<std::int32_t>::max(),
+                           value)) {
+        return false;
+    }
+    out = static_cast<std::int32_t>(value);
+    return true;
+}
+
+/// Reads the optional `tracks` array of a state into `doc.tracks` (tracks design D7): each entry needs `id` (1..INT_MAX-1,
+/// so a derived counter cannot overflow), `name`, `role`, `mute`, `solo` and `notes`, each note `id` (1..INT_MAX-1),
+/// `pitch`, `anchor`, `offset`, `length` and `velocity`. Types only: nothing is clamped, and the invariant (anchors,
+/// domain, ids, order, names, counts, playback limits) is `validateTracks`', run by `parseState` on the whole.
+/// `maxTrackId` / `maxNoteId` are the largest ids read (0 without any).
+bool parseTracks(Fields& fields, Document& doc, int& maxTrackId, int& maxNoteId, std::string& error) {
+    maxTrackId = 0;
+    maxNoteId = 0;
+    if (!fields.has("tracks")) {
+        return true;
+    }
+    const json* tracks = fields.getArray("tracks");
+    if (tracks == nullptr) {
+        return false;
+    }
+    for (std::size_t i = 0; i < tracks->size(); ++i) {
+        const std::string where = "tracks[" + std::to_string(i) + "]";
+        const json& trackObject = (*tracks)[i];
+        if (!trackObject.is_object()) {
+            error = where + " must be an object";
+            return false;
+        }
+        Fields trackFields(trackObject, where, error);
+        Track track{0, std::string(), TrackRole::Other, false, false, {}};
+        if (!trackFields.getIntIn("id", 1, INT_MAX - 1, track.id) || !trackFields.getString("name", track.name) ||
+            !parseRoleField(trackFields, "role", track.role) || !trackFields.getBool("mute", track.mute) ||
+            !trackFields.getBool("solo", track.solo)) {
+            return false;
+        }
+        const json* notes = trackFields.getArray("notes");
+        if (notes == nullptr) {
+            return false;
+        }
+        track.notes.reserve(notes->size());
+        for (std::size_t j = 0; j < notes->size(); ++j) {
+            const std::string noteWhere = trackFields.label("notes") + "[" + std::to_string(j) + "]";
+            const json& noteObject = (*notes)[j];
+            if (!noteObject.is_object()) {
+                error = noteWhere + " must be an object";
+                return false;
+            }
+            Fields noteFields(noteObject, noteWhere, error);
+            TrackNote note{0, 0, 0, 0, 0, 0};
+            if (!noteFields.getIntIn("id", 1, INT_MAX - 1, note.id) || !noteFields.getInt("pitch", note.pitch) ||
+                !noteFields.getInt("anchor", note.anchorEventId) || !getStateTicks(noteFields, "offset", note.offsetTick) ||
+                !getStateTicks(noteFields, "length", note.lengthTicks) || !noteFields.getInt("velocity", note.velocity)) {
+                return false;
+            }
+            maxNoteId = std::max(maxNoteId, note.id);
+            track.notes.push_back(note);
+        }
+        maxTrackId = std::max(maxTrackId, track.id);
+        doc.tracks.push_back(std::move(track));
+    }
+    return true;
+}
+
+/// Reads the optional id counter `name` of a state: absent leaves `out` 0 (`replace` derives one past the largest
+/// id); present it must be an integer in 1..INT_MAX greater than `maxId`, as `nextSectionId` (`what` names the ids in
+/// the message: "track", "note").
+bool parseCounter(Fields& fields, const char* name, int maxId, const char* what, int& out) {
+    out = 0;
+    if (!fields.has(name)) {
+        return true;
+    }
+    if (!fields.getIntIn(name, 1, INT_MAX, out)) {
+        return false;
+    }
+    if (out <= maxId) {
+        return fields.fail(name, std::string("must exceed every ") + what + " id (" + std::to_string(maxId) + ")");
+    }
+    return true;
+}
+
+/// Phase A of `loadStateJson`: parses and validates `text` into a document, the four id counters and an
 /// editor size. `Document` holds vectors and strings, whose destruction frees but never allocates.
-/// `nextSectionId` is 0 when the state carries none: `replace` then derives it.
-bool parseState(std::string_view text, Document& doc, int& nextId, int& nextSectionId, int& width, int& height,
-                std::string& error) {
+/// `nextSectionId`, `nextTrackId` and `nextNoteId` are 0 when the state carries none: `replace` then derives them.
+bool parseState(std::string_view text, Document& doc, int& nextId, int& nextSectionId, int& nextTrackId,
+                int& nextNoteId, int& width, int& height, std::string& error) {
     json message;
     if (!parseMessage(text, message, error)) {
         return false;
@@ -2088,6 +2233,11 @@ bool parseState(std::string_view text, Document& doc, int& nextId, int& nextSect
     }
     // Optional (states saved before the relation modes have none): the default, blend.
     if (fields.has("relationMode") && !parseRelationModeField(fields, "relationMode", doc.relationMode)) {
+        return false;
+    }
+    // Optional (states saved before tracks have neither): the chords lane neither muted nor soloed.
+    if ((fields.has("chordsMuted") && !fields.getBool("chordsMuted", doc.chordsMuted)) ||
+        (fields.has("chordsSolo") && !fields.getBool("chordsSolo", doc.chordsSolo))) {
         return false;
     }
 
@@ -2158,6 +2308,24 @@ bool parseState(std::string_view text, Document& doc, int& nextId, int& nextSect
         if (nextSectionId <= maxSectionId) {
             return fields.fail("nextSectionId", "must exceed every section id (" + std::to_string(maxSectionId) + ")");
         }
+    }
+
+    // Tracks (optional: states saved before tracks have none) after the chords, whose ids the anchors name and whose
+    // clamped lengths place the notes. Read for types only; the invariant runs on the whole candidate below.
+    int maxTrackId = 0;
+    int maxNoteId = 0;
+    if (!parseTracks(fields, doc, maxTrackId, maxNoteId, error) ||
+        !parseCounter(fields, "nextTrackId", maxTrackId, "track", nextTrackId) ||
+        !parseCounter(fields, "nextNoteId", maxNoteId, "note", nextNoteId)) {
+        return false;
+    }
+    // The track invariant (D7) with the counters `replace` will publish: given, or one past the largest id (the ids
+    // are below INT_MAX, so neither overflows). A failure rejects the whole state; nothing of a track is clamped.
+    std::string reason;
+    if (!validateTracks(doc, nextTrackId != 0 ? nextTrackId : maxTrackId + 1, nextNoteId != 0 ? nextNoteId : maxNoteId + 1,
+                        reason)) {
+        error = "\"tracks\" rejected: " + reason;
+        return false;
     }
 
     width = kDefaultEditorWidth;
@@ -2244,7 +2412,7 @@ std::string heardJson(const Listener& listener, const Key& projectKey) {
 static_assert(kNoEventId == -1, "snapshotJson's default selectedEventId must be kNoEventId");
 
 std::string snapshotJson(const Document& doc, const Palette& palette, int selectedEventId,
-                         const std::vector<int>& selectedEventIds) {
+                         const std::vector<int>& selectedEventIds, const SnapshotExtras& extras) {
     // The selection and its anchor, normalised together (strip editing design D2): the given ids that name an
     // event, in strip order; when none does, the anchor alone if it names one. A non-empty selection whose
     // anchor is absent, unknown or not one of its blocks takes its last block as the anchor. The suggestions and
@@ -2279,6 +2447,8 @@ std::string snapshotJson(const Document& doc, const Palette& palette, int select
     // performing feel the period is the last chord's end tick / 960 (tick-rounded), otherwise, and in the
     // over-budget fallback, the authored sum. Event positions below stay authored.
     const Compiled compiled = compile(doc);
+    // Each chord's playback span, from the same compile's verdict (tracks design D8).
+    const std::vector<PlaySpan> spans = chordPlaySpans(doc, compiled);
     json events = json::array();
     double beat = 0.0;  // accumulated left to right, exactly as Document::startBeatOf does
     for (std::size_t i = 0; i < doc.events.size(); ++i) {
@@ -2301,7 +2471,9 @@ std::string snapshotJson(const Document& doc, const Palette& palette, int select
                       {"voicingNames", voicingNamesJson(e.chord, compiledVoicings[i], doc.projectKey)},
                       {"outOfKey", outOfKeyJson(e.chord, doc.projectKey)},
                       {"outOfKeyNames", outOfKeyNamesJson(e.chord, doc.projectKey, doc.projectKey)},
-                      {"why", i == 0 ? json() : whyJson(doc.events[i - 1].chord, e.chord, doc.projectKey)}};
+                      {"why", i == 0 ? json() : whyJson(doc.events[i - 1].chord, e.chord, doc.projectKey)},
+                      {"playStart", spans[i].start},
+                      {"playEnd", spans[i].end}};
         events.push_back(std::move(event));
         beat += e.lengthBeats;
     }
@@ -2375,9 +2547,45 @@ std::string snapshotJson(const Document& doc, const Palette& palette, int select
                            {"relationReference", std::move(relationReference)},
                            {"presets", presetsJson(doc.projectKey)},
                            {"applied", appliedJson(doc, applied, appliedCellList, appliedRelations)},
-                           {"palette", {{"tiers", palette.tiers}, {"cells", std::move(cells)}}}};
+                           {"palette", {{"tiers", palette.tiers}, {"cells", std::move(cells)}}},
+                           {"ticksPerBeat", kFeelTicksPerBeat},
+                           {"revision", extras.revision},
+                           {"tracks", snapshotTracksJson(doc)},
+                           {"chordsMuted", doc.chordsMuted},
+                           {"chordsSolo", doc.chordsSolo},
+                           {"chordsAudible", chordsAudible(doc)},
+                           {"noteSelection", noteSelectionJson(doc, extras.noteSelection)},
+                           {"trackLimits", trackLimitsJson()}};
     return snapshot.dump();
 }
+
+namespace {
+
+/// The state's `tracks` (tracks design D7): every track with its live flags, each note as stored (anchor and offset,
+/// no derived start), in the track's note order.
+json stateTracksJson(const Document& doc) {
+    json tracks = json::array();
+    for (const Track& t : doc.tracks) {
+        json notes = json::array();
+        for (const TrackNote& n : t.notes) {
+            notes.push_back({{"id", n.id},
+                             {"pitch", n.pitch},
+                             {"anchor", n.anchorEventId},
+                             {"offset", n.offsetTick},
+                             {"length", n.lengthTicks},
+                             {"velocity", n.velocity}});
+        }
+        tracks.push_back({{"id", t.id},
+                          {"name", t.name},
+                          {"role", trackRoleName(t.role)},
+                          {"mute", t.mute},
+                          {"solo", t.solo},
+                          {"notes", std::move(notes)}});
+    }
+    return tracks;
+}
+
+}  // namespace
 
 std::string stateJson(const DocumentStore& store, int editorWidth, int editorHeight) {
     const Document& doc = store.doc();
@@ -2408,8 +2616,13 @@ std::string stateJson(const DocumentStore& store, int editorWidth, int editorHei
                         {"relationMode", relationModeName(doc.relationMode)},
                         {"events", std::move(events)},
                         {"sections", sectionsJson(doc)},
+                        {"tracks", stateTracksJson(doc)},
+                        {"chordsMuted", doc.chordsMuted},
+                        {"chordsSolo", doc.chordsSolo},
                         {"nextId", store.nextId()},
                         {"nextSectionId", store.nextSectionId()},
+                        {"nextTrackId", store.nextTrackId()},
+                        {"nextNoteId", store.nextNoteId()},
                         {"editor", {{"width", editorWidth}, {"height", editorHeight}}}};
     return state.dump();
 }
@@ -2489,12 +2702,16 @@ bool loadStateJson(DocumentStore& store, std::string_view text, std::string& err
         Document doc;
         int nextId = 0;
         int nextSectionId = 0;
+        int nextTrackId = 0;
+        int nextNoteId = 0;
         int width = kDefaultEditorWidth;
         int height = kDefaultEditorHeight;
-        if (!parseState(text, doc, nextId, nextSectionId, width, height, error)) {  // Phase A: the tree is destroyed on return
+        // Phase A: the tree is destroyed on return; the tracks have passed validateTracks with the counters below.
+        if (!parseState(text, doc, nextId, nextSectionId, nextTrackId, nextNoteId, width, height, error)) {
             return false;
         }
-        store.replace(std::move(doc), nextId, nextSectionId);  // Phase B: cannot throw, nor can the writes below
+        // Phase B: cannot throw, nor can the writes below
+        store.replace(std::move(doc), nextId, nextSectionId, nextTrackId, nextNoteId);
         if (editorWidth != nullptr) {
             *editorWidth = width;
         }

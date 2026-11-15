@@ -1053,3 +1053,104 @@ TEST_CASE("feel: an over-budget document compiles as block chords everywhere, se
     CHECK(compileSection(dense.doc(), 1).feelLimited);
     checkIdentical(compileSection(dense.doc(), 1), compileSection(denseBlock, 1));
 }
+
+// --- chordPlaySpans (tracks design D8) ---------------------------------------------------
+
+TEST_CASE("chordPlaySpans: block chords span their authored boundaries, the doubles compile uses") {
+    DocumentStore store;
+    for (int i = 0; i < 3; ++i) store.appendChord(kC, 0.2506, 100);
+    store.appendChord(kAm, 1.75, 100);
+    const Document& doc = store.doc();
+    const std::vector<PlaySpan> spans = chordPlaySpans(doc);
+    REQUIRE(spans.size() == 4);
+    double beat = 0.0;  // accumulated as compile and Document::startBeatOf do
+    for (std::size_t i = 0; i < spans.size(); ++i) {
+        CAPTURE(i);
+        CHECK(bitsOf(spans[i].start) == bitsOf(beat));
+        beat += doc.events[i].lengthBeats;
+        CHECK(bitsOf(spans[i].end) == bitsOf(beat));
+        if (i + 1 < spans.size()) CHECK(bitsOf(spans[i].end) == bitsOf(spans[i + 1].start));
+    }
+    CHECK(spans[1].start == 0.2506);
+    CHECK(bitsOf(spans.back().end) == bitsOf(compile(doc).endBeat));
+    // Every chord's ons sit exactly at its span's start and its offs at its end, as compile emits them.
+    const Compiled compiled = compile(doc);
+    for (const NoteEvent& e : compiled.events) {
+        const bool atBoundary = std::any_of(spans.begin(), spans.end(), [&](const PlaySpan& s) {
+            return bitsOf(e.on ? s.start : s.end) == bitsOf(e.beat);
+        });
+        CHECK(atBoundary);
+    }
+    // A feel that does not perform (strum off, block rhythm) is the block path too.
+    Document plain = doc;
+    plain.feel = Feel{Rhythm::Block, Strum::Off, StrumSpeed::Loose, Humanise::Off};
+    const std::vector<PlaySpan> plainSpans = chordPlaySpans(plain);
+    REQUIRE(plainSpans.size() == spans.size());
+    for (std::size_t i = 0; i < spans.size(); ++i) {
+        CHECK(bitsOf(plainSpans[i].start) == bitsOf(spans[i].start));
+        CHECK(bitsOf(plainSpans[i].end) == bitsOf(spans[i].end));
+    }
+}
+
+TEST_CASE("chordPlaySpans: a performing feel spans the tick-rounded boundaries over 960") {
+    DocumentStore store;
+    for (int i = 0; i < 3; ++i) store.appendChord(kC, 0.2506, 100);
+    store.setFeel(Feel{Rhythm::Pulse});
+    const Document& doc = store.doc();
+    const Compiled compiled = compile(doc);
+    REQUIRE_FALSE(compiled.feelLimited);
+    const std::vector<PlaySpan> spans = chordPlaySpans(doc);
+    REQUIRE(spans.size() == 3);
+    const int ticks[] = {0, 241, 481, 722};  // round both ways: 240.576 -> 241, 481.152 -> 481, 721.728 -> 722
+    for (std::size_t i = 0; i < 3; ++i) {
+        CAPTURE(i);
+        CHECK(bitsOf(spans[i].start) == bitsOf(ticks[i] / 960.0));
+        CHECK(bitsOf(spans[i].end) == bitsOf(ticks[i + 1] / 960.0));
+    }
+    CHECK(bitsOf(spans.back().end) == bitsOf(compiled.endBeat));
+    // Each performed note lies inside its chord's span, in the beats compile gives it.
+    const Performance performance = performDocument(doc);
+    for (const PerformedEvent& e : performance.events) {
+        const double beat = static_cast<double>(e.tick) / 960.0;
+        const PlaySpan& span = spans[static_cast<std::size_t>(e.chord)];
+        CHECK(beat >= span.start);
+        CHECK(beat <= span.end);
+    }
+    // The overload that reuses a compile agrees.
+    const std::vector<PlaySpan> reused = chordPlaySpans(doc, compiled);
+    REQUIRE(reused.size() == spans.size());
+    for (std::size_t i = 0; i < spans.size(); ++i) {
+        CHECK(bitsOf(reused[i].start) == bitsOf(spans[i].start));
+        CHECK(bitsOf(reused[i].end) == bitsOf(spans[i].end));
+    }
+}
+
+TEST_CASE("chordPlaySpans: an over-budget feel falls back to the authored boundaries, as compile does") {
+    DocumentStore store;
+    for (int i = 0; i < 64; ++i) store.appendChord(chord(0, "9"), 4.0, 100);
+    store.appendChord(kC, 0.2506, 100);
+    store.appendChord(kC, 0.2506, 100);
+    store.setFeel(Feel{Rhythm::Subdivided, Strum::Down, StrumSpeed::Medium, Humanise::Light});
+    const Document& doc = store.doc();
+    const Compiled compiled = compile(doc);
+    REQUIRE(compiled.feelLimited);
+    const std::vector<PlaySpan> spans = chordPlaySpans(doc);
+    REQUIRE(spans.size() == 66);
+    double beat = 0.0;
+    for (std::size_t i = 0; i < spans.size(); ++i) {
+        CHECK(bitsOf(spans[i].start) == bitsOf(beat));
+        beat += doc.events[i].lengthBeats;
+        CHECK(bitsOf(spans[i].end) == bitsOf(beat));
+    }
+    CHECK(spans[64].start == 256.0);
+    CHECK(bitsOf(spans.back().end) == bitsOf(compiled.endBeat));
+    const std::vector<PlaySpan> reused = chordPlaySpans(doc, compiled);
+    CHECK(bitsOf(reused.back().end) == bitsOf(spans.back().end));
+}
+
+TEST_CASE("chordPlaySpans: an empty document has no spans") {
+    CHECK(chordPlaySpans(Document{}).empty());
+    Document empty;
+    empty.feel = Feel{Rhythm::Pulse};
+    CHECK(chordPlaySpans(empty).empty());
+}

@@ -6,8 +6,9 @@
 //     CHORDLAB_UPDATE_FIXTURES=1 build/engine_tests -tc="golden fixtures*"
 // (the test rewrites the files, still passes, and a second run without the variable proves equality).
 //
-// The two *-legacy-phase1.json files are hand-written Phase 1 shapes, state-legacy-feel.json a pre-arpeggio feel
-// and state-legacy-length.json a state from before the new-chord length; they are never rewritten.
+// The two *-legacy-phase1.json files are hand-written Phase 1 shapes, state-legacy-feel.json a pre-arpeggio feel,
+// state-legacy-length.json a state from before the new-chord length and state-legacy-tracks.json a state from before
+// tracks (a copy of state-progression.json as it was then); they are never rewritten.
 
 #include "doctest.h"
 
@@ -72,7 +73,7 @@ Chord chordOf(PitchClass root, const char* typeId) {
     return Chord{root, &chordType(typeId)};
 }
 
-/// Every top-level member of a snapshot, as documented in json_api.h (29 of them). A contract change updates
+/// Every top-level member of a snapshot, as documented in json_api.h (37 of them). A contract change updates
 /// this list and the fixtures together: the snapshot's key set must equal it, so an undocumented key and a
 /// missing documented one both fail.
 const std::set<std::string> kSnapshotKeys = {
@@ -81,7 +82,9 @@ const std::set<std::string> kSnapshotKeys = {
     "modes",          "tonics",         "events",       "sections",       "suggestions",
     "palette",        "homeTriads",     "relationMode", "relationReference", "presets",
     "applied",        "transposeWithKey", "keyHintSeen",    "feel",           "meter",
-    "feelLimited",    "midiThru",       "selectedEventIds", "newChordBeats"};
+    "feelLimited",    "midiThru",       "selectedEventIds", "newChordBeats", "ticksPerBeat",
+    "revision",       "tracks",         "chordsMuted",  "chordsSolo",     "chordsAudible",
+    "noteSelection",  "trackLimits"};
 
 void checkSnapshotShape(const std::string& text) {
     const json j = json::parse(text);
@@ -127,9 +130,11 @@ DocumentStore progressionStore(const Key* browsed) {
     return store;
 }
 
+/// The snapshot as the shell builds it: the live chord selection plus the note selection and the revision.
 std::string snapshotOf(const DocumentStore& store) {
     const Document& d = store.doc();
-    return snapshotJson(d, buildPalette(d.browsedKey, d.projectKey), store.selectedEventId(), store.selectedEventIds());
+    return snapshotJson(d, buildPalette(d.browsedKey, d.projectKey), store.selectedEventId(), store.selectedEventIds(),
+                        SnapshotExtras{store.noteSelection(), store.revision()});
 }
 
 std::string homeEmpty() {
@@ -169,6 +174,33 @@ std::string snapshotFeel() {
     return snapshotOf(feelStore());
 }
 
+/// The progression fixture with tracks (tracks design D1, D3): track 1 "Bass" (bass, muted) with notes 1-3 and
+/// track 2 "Lead" (lead, soloed) with notes 4-5. Note 3 went in at offset 1440 of F, which was then shortened to one
+/// beat, so it is inactive and G7 (with note 5 at offset 480) moved one beat earlier. Notes 4 and 5 are selected.
+DocumentStore tracksStore() {
+    DocumentStore store = progressionStore(nullptr);
+    REQUIRE(store.addTrack(TrackRole::Bass) == 1);
+    REQUIRE(store.addTrack(TrackRole::Lead) == 2);
+    REQUIRE(store.insertNotes(1, {NoteSpec{36, 0, 960, 100}, NoteSpec{45, 3840, 1920, 90},
+                                  NoteSpec{41, 7680 + 1440, 480, 80}}) == std::vector<int>{1, 2, 3});
+    REQUIRE(store.insertNotes(2, {NoteSpec{72, 960, 480, 110}, NoteSpec{79, 9600 + 480, 720, 127}}) ==
+            std::vector<int>{4, 5});
+    std::string refusal;
+    REQUIRE_MESSAGE(store.setLength(3, 1.0, &refusal), refusal);
+    REQUIRE(store.setTrackMute(1, true));
+    REQUIRE(store.setTrackSolo(2, true));
+    store.setNoteSelection(2, {4, 5});
+    return store;
+}
+
+std::string stateTracks() {
+    return stateJson(tracksStore(), 900, 600);
+}
+
+std::string snapshotTracks() {
+    return snapshotOf(tracksStore());
+}
+
 }  // namespace
 
 TEST_CASE("golden fixtures: snapshots and state match the committed files byte for byte") {
@@ -178,6 +210,8 @@ TEST_CASE("golden fixtures: snapshots and state match the committed files byte f
     const std::string state = stateProgression();
     const std::string stateWithFeel = stateFeel();
     const std::string snapshotWithFeel = snapshotFeel();
+    const std::string stateWithTracks = stateTracks();
+    const std::string snapshotWithTracks = snapshotTracks();
 
     checkGolden("snapshot-home-empty.json", empty);
     checkGolden("snapshot-home-progression.json", home);
@@ -185,10 +219,12 @@ TEST_CASE("golden fixtures: snapshots and state match the committed files byte f
     checkGolden("state-progression.json", state);
     checkGolden("state-feel.json", stateWithFeel);
     checkGolden("snapshot-feel.json", snapshotWithFeel);
+    checkGolden("state-tracks.json", stateWithTracks);
+    checkGolden("snapshot-tracks.json", snapshotWithTracks);
 }
 
 TEST_CASE("golden fixtures: generated snapshots carry the documented top-level keys") {
-    for (const std::string& text : {homeEmpty(), homeProgression(), browsingProgression(), snapshotFeel()}) {
+    for (const std::string& text : {homeEmpty(), homeProgression(), browsingProgression(), snapshotFeel(), snapshotTracks()}) {
         checkSnapshotShape(text);
     }
     const json empty = json::parse(homeEmpty());
@@ -271,6 +307,60 @@ TEST_CASE("golden fixtures: the state fixture round-trips") {
     CHECK(loaded.nextId() == original.nextId());
     CHECK(loaded.nextSectionId() == original.nextSectionId());
     CHECK(stateJson(loaded, 900, 600) == stateProgression());
+}
+
+TEST_CASE("golden fixtures: the tracks fixtures carry mixed mute and solo, an inactive note and a note selection") {
+    const json snap = json::parse(snapshotTracks());
+    const DocumentStore store = tracksStore();
+    CHECK(snap.at("revision") == store.revision());
+    CHECK(snap.at("ticksPerBeat") == 960);
+    CHECK(snap.at("noteSelection") == json({{"trackId", 2}, {"ids", {4, 5}}}));
+    const json& tracks = snap.at("tracks");
+    REQUIRE(tracks.size() == 2);
+    CHECK(tracks[0].at("mute") == true);
+    CHECK(tracks[0].at("audible") == false);
+    CHECK(tracks[1].at("solo") == true);
+    CHECK(tracks[1].at("audible") == true);
+    CHECK(snap.at("chordsAudible") == false);  // a track is soloed and the chords are not
+    CHECK(tracks[0].at("notes").at(2) == json({{"id", 3}, {"pitch", 41}, {"start", 7680 + 1440}, {"length", 480},
+                                               {"velocity", 80}, {"anchor", 3}, {"offset", 1440}, {"active", false}}));
+    CHECK(tracks[1].at("notes").at(1).at("start") == 8640 + 480);  // G7 moved a beat earlier with its note
+    CHECK(snap.at("events").at(3).at("playStart") == 9.0);
+
+    DocumentStore loaded;
+    std::string error;
+    REQUIRE_MESSAGE(loadStateJson(loaded, stateTracks(), error), error);
+    CHECK(loaded.doc() == store.doc());
+    CHECK(loaded.nextTrackId() == store.nextTrackId());
+    CHECK(loaded.nextNoteId() == store.nextNoteId());
+    CHECK(stateJson(loaded, 900, 600) == stateTracks());
+}
+
+TEST_CASE("legacy fixture: state-legacy-tracks.json is a state saved before tracks") {
+    // Hand-kept, never regenerated: state-progression.json as it was before the tracks fields.
+    std::string text;
+    REQUIRE_MESSAGE(readFile("state-legacy-tracks.json", text), "state-legacy-tracks.json missing");
+    const json raw = json::parse(text);
+    for (const char* absent : {"tracks", "chordsMuted", "chordsSolo", "nextTrackId", "nextNoteId"}) {
+        CHECK_FALSE(raw.contains(absent));
+    }
+    DocumentStore store;
+    std::string error;
+    REQUIRE_MESSAGE(loadStateJson(store, text, error), error);
+    CHECK(store.doc().tracks.empty());
+    CHECK_FALSE(store.doc().chordsMuted);
+    CHECK_FALSE(store.doc().chordsSolo);
+    CHECK(store.nextTrackId() == 1);
+    CHECK(store.nextNoteId() == 1);
+    CHECK(store.doc().events == progressionStore(nullptr).doc().events);
+    CHECK(store.doc().sections == progressionStore(nullptr).doc().sections);
+    // Saved again, it carries the tracks keys at their defaults and loads back equal.
+    const json saved = json::parse(stateJson(store, 900, 600));
+    CHECK(saved.at("tracks") == json::array());
+    CHECK(saved.at("nextTrackId") == 1);
+    DocumentStore again;
+    REQUIRE_MESSAGE(loadStateJson(again, saved.dump(), error), error);
+    CHECK(again.doc() == store.doc());
 }
 
 TEST_CASE("legacy fixture: state-legacy-feel.json is a state saved before the arpeggio fields") {
