@@ -4210,3 +4210,122 @@ TEST_CASE("applyCommandJson: documentChanged says whether the document differs f
         CHECK(store.doc().events[0].lengthBeats == 2.0);
     }
 }
+
+// --- Chord timing commands carry notes and can be refused by the track limits (tracks Task 2a) -----------
+
+namespace {
+
+constexpr std::int32_t kBarTicks = 4 * kFeelTicksPerBeat;
+
+const std::string kPolyphonyLimit =
+    "At most " + std::to_string(kMaxTrackPolyphony) + " track notes can sound at once";
+
+/// `threeChords` with a Bass track (id 1): kMaxTrackPolyphony notes held from tick 0 into the second chord (to
+/// kBar + 3000) and one note at the start of the third chord, after they end. Moving the third chord earlier, or
+/// shortening or removing the second, would put that note under the held ones.
+DocumentStore heldNotes() {
+    DocumentStore store = threeChords();
+    REQUIRE(store.addTrack(TrackRole::Bass) == 1);
+    std::vector<NoteSpec> held;
+    for (int i = 0; i < kMaxTrackPolyphony; ++i) {
+        held.push_back(NoteSpec{40 + i, 0, kBarTicks + 3000});
+    }
+    REQUIRE(store.insertNotes(1, held).size() == static_cast<std::size_t>(kMaxTrackPolyphony));
+    REQUIRE(store.insertNotes(1, {NoteSpec{70, 2 * kBarTicks, 480}}).size() == 1);
+    return store;
+}
+
+/// Sends `cmd` and checks the track-limit refusal: false, the error `"<wire>" refused: <the polyphony message>`,
+/// `documentChanged` false, and the store as it was (document, revision, history, counters, selection).
+void checkTrackRefusal(DocumentStore& store, json cmd, const std::string& wire) {
+    CAPTURE(cmd.dump());
+    cmd["schema"] = kJsonSchema;
+    const DocumentStore reference = store;
+    std::string error;
+    bool changed = true;
+    CHECK_FALSE(applyCommandJson(store, cmd.dump(), error, &changed));
+    CHECK_FALSE(changed);
+    CHECK(error == "\"" + wire + "\" refused: " + kPolyphonyLimit);
+    CHECK(store.doc() == reference.doc());
+    CHECK(store.revision() == reference.revision());
+    CHECK(store.nextId() == reference.nextId());
+    CHECK(store.selectedEventIds() == reference.selectedEventIds());
+    CHECK(store.noteSelection() == reference.noteSelection());
+    DocumentStore a = store;
+    DocumentStore b = reference;
+    CHECK(a.undo() == b.undo());
+    CHECK(a.doc() == b.doc());  // no history pushed
+}
+
+}  // namespace
+
+TEST_CASE("chord timing commands: a refusal by the track limits names the command and the limit and changes nothing") {
+    DocumentStore store = heldNotes();
+    checkTrackRefusal(store, {{"cmd", "moveChord"}, {"id", 3}, {"index", 1}}, "moveChord");
+    checkTrackRefusal(store, {{"cmd", "setLength"}, {"id", 2}, {"lengthBeats", 1.0}}, "setLength");
+    checkTrackRefusal(store, {{"cmd", "setLengths"}, {"ids", {2}}, {"lengthBeats", 1.0}}, "setLengths");
+    checkTrackRefusal(store, {{"cmd", "removeChord"}, {"id", 2}}, "removeChord");
+    checkTrackRefusal(store, {{"cmd", "removeChords"}, {"ids", {2, 99}}}, "removeChords");
+    // The same commands that fit go through, and no-ops stay successes.
+    CHECK(changes(store, {{"cmd", "setLength"}, {"id", 2}, {"lengthBeats", 3.5}}));  // chord 3 at 7200, after 6840
+    CHECK_FALSE(changes(store, {{"cmd", "setLength"}, {"id", 2}, {"lengthBeats", 3.5}}));
+    CHECK_FALSE(changes(store, {{"cmd", "removeChord"}, {"id", 99}}));
+    CHECK_FALSE(changes(store, {{"cmd", "moveChord"}, {"id", 1}, {"index", 0}}));
+}
+
+TEST_CASE("insertChords: a refusal by the track limits names the command and the limit and changes nothing") {
+    // X, A, B of 0.2506 beats and C of four; note 1 on B's last tick goes inactive when X is removed, and C's notes
+    // then start where it lies: inserting a 0.2506-beat chord at 0 again would widen B by a tick and reactivate it.
+    DocumentStore store;
+    const int x = store.appendChord(kC, 0.2506);
+    store.appendChord(kF, 0.2506);
+    store.appendChord(kG7, 0.2506);
+    store.appendChord(kC, 4.0);
+    REQUIRE(store.addTrack(TrackRole::Bass) == 1);
+    REQUIRE(store.insertNotes(1, {NoteSpec{36, 721, 480}}) == std::vector<int>{1});
+    REQUIRE(store.removeChord(x));
+    std::vector<NoteSpec> onC;
+    for (int i = 0; i < kMaxTrackPolyphony; ++i) {
+        onC.push_back(NoteSpec{60 + i, 481, 480});
+    }
+    REQUIRE(store.insertNotes(1, onC).size() == static_cast<std::size_t>(kMaxTrackPolyphony));
+    checkTrackRefusal(store,
+                      {{"cmd", "insertChords"}, {"index", 0}, {"chords", {{{"root", 0}, {"type", "maj"}, {"lengthBeats", 0.2506}}}}},
+                      "insertChords");
+    CHECK(changes(store, {{"cmd", "insertChords"}, {"index", 0}, {"chords", {{{"root", 0}, {"type", "maj"}, {"lengthBeats", 0.25}}}}}));
+}
+
+TEST_CASE("chord timing commands carry the notes: later chords' notes move, removed chords' notes go") {
+    DocumentStore store = threeChords();
+    REQUIRE(store.addTrack(TrackRole::Bass) == 1);
+    REQUIRE(store.insertNotes(1, {NoteSpec{36, 100, 480}, NoteSpec{38, kBarTicks + 200, 480},
+                                  NoteSpec{40, 2 * kBarTicks + 300, 480}}) == std::vector<int>{1, 2, 3});
+    const std::vector<TrackNote> notes = store.doc().tracks.at(0).notes;
+    CHECK(changes(store, {{"cmd", "setLength"}, {"id", 1}, {"lengthBeats", 2.0}}));
+    CHECK(store.doc().tracks.at(0).notes == notes);
+    CHECK(noteStart(store.doc(), store.doc().tracks.at(0).notes.at(2)) == 1920 + kBarTicks + 300);
+    CHECK(changes(store, {{"cmd", "removeChord"}, {"id", 2}}));
+    CHECK(store.doc().tracks.at(0).notes == std::vector<TrackNote>{notes.at(0), notes.at(2)});
+    CHECK(noteStart(store.doc(), store.doc().tracks.at(0).notes.at(1)) == 1920 + 300);
+}
+
+TEST_CASE("loadPreset: append keeps every note; replace removes every note and keeps the tracks") {
+    DocumentStore store = threeChords();
+    REQUIRE(store.addTrack(TrackRole::Bass) == 1);
+    REQUIRE(store.addTrack(TrackRole::Lead) == 2);
+    REQUIRE(store.insertNotes(1, {NoteSpec{36, 100, 480}, NoteSpec{38, kBarTicks + 200, 480}}).size() == 2);
+    REQUIRE(store.setTrackMute(2, true));
+    const std::vector<Track> tracks = store.doc().tracks;
+    CHECK(changes(store, {{"cmd", "loadPreset"}, {"id", "axis"}, {"mode", "append"}}));
+    CHECK(store.doc().events.size() == 7);
+    CHECK(store.doc().tracks == tracks);
+    CHECK(changes(store, {{"cmd", "loadPreset"}, {"id", "axis"}, {"mode", "replace"}}));
+    CHECK(store.doc().events.size() == 4);
+    REQUIRE(store.doc().tracks.size() == 2);
+    CHECK(store.doc().tracks.at(0).notes.empty());
+    CHECK(store.doc().tracks.at(1).notes.empty());
+    CHECK(store.doc().tracks.at(0).name == "Bass");
+    CHECK(store.doc().tracks.at(1).mute);
+    REQUIRE(store.undo());
+    CHECK(store.doc().tracks == tracks);
+}

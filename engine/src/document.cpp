@@ -322,7 +322,8 @@ std::string noOwnerReason(const Document& doc) {
 
 /// Refuses, with `validateTracks`' message, when a note of `notes` anchors no chord of `timeline` (true then):
 /// a note edit derives starts from the anchors before the validator runs, and must not derive one from a
-/// dangling anchor. Defence: chord removal is meant to take the notes it owned along.
+/// dangling anchor. A defence only: chord removal takes the notes it owned along (D3), so no store document
+/// holds a dangling anchor.
 bool refuseDanglingAnchor(const std::vector<TrackNote>& notes, const ChordTimeline& timeline,
                           std::string* refusal) {
     for (const TrackNote& n : notes) {
@@ -332,6 +333,35 @@ bool refuseDanglingAnchor(const std::vector<TrackNote>& notes, const ChordTimeli
         }
     }
     return false;
+}
+
+/// Removes from every track of `doc` the notes whose chord is in `removedIds`, inactive ones included (D3:
+/// ownership follows the start only, so a note of another chord sounding into a removed one stays).
+void dropNotesOf(Document& doc, const std::set<int>& removedIds) {
+    for (Track& t : doc.tracks) {
+        t.notes.erase(std::remove_if(t.notes.begin(), t.notes.end(),
+                                     [&](const TrackNote& n) { return removedIds.count(n.anchorEventId) != 0; }),
+                      t.notes.end());
+    }
+}
+
+/// The reason `progressionRefusal` stands for, as the store writes it to `refusal`.
+std::string progressionRefusalReason(ProgressionRefusal why) {
+    switch (why) {
+        case ProgressionRefusal::None:
+            break;
+        case ProgressionRefusal::Empty:
+            return "The progression is empty";
+        case ProgressionRefusal::NonFiniteLength:
+            return "Chord lengths must be finite";
+        case ProgressionRefusal::DocumentFull:
+            return "At most " + std::to_string(kMaxChords) + " chords";
+        case ProgressionRefusal::EventIdsExhausted:
+            return "No event ids are left";
+        case ProgressionRefusal::SectionIdsExhausted:
+            return "No section ids are left";
+    }
+    return {};
 }
 
 }  // namespace
@@ -450,7 +480,7 @@ bool DocumentStore::commit(Document next) {
 
 bool DocumentStore::commitTracks(Document next, int nextTrackId, int nextNoteId, std::string* refusal) {
     if (next == doc_) {
-        return false;  // a no-op stays one, even on a document a chord edit has put past the invariant
+        return false;  // a no-op stays one
     }
     std::string error;
     if (!validateTracks(next, nextTrackId, nextNoteId, error)) {
@@ -458,6 +488,17 @@ bool DocumentStore::commitTracks(Document next, int nextTrackId, int nextNoteId,
         return false;
     }
     return commit(std::move(next));
+}
+
+bool DocumentStore::commitTiming(Document next, std::string* refusal) {
+    // The notes keep their anchors and offsets (D3): only their derived starts moved, which may reorder a track.
+    if (std::any_of(next.tracks.begin(), next.tracks.end(), [](const Track& t) { return !t.notes.empty(); })) {
+        const ChordTimeline timeline = chordTimeline(next);
+        for (Track& t : next.tracks) {
+            sortTrackNotes(t.notes, timeline);
+        }
+    }
+    return commitTracks(std::move(next), nextTrackId_, nextNoteId_, refusal);
 }
 
 void DocumentStore::dropStaleSelection() noexcept {
@@ -535,11 +576,12 @@ void DocumentStore::setSelectedEvents(const std::vector<int>& ids, int anchor) {
     anchorEventId_ = newAnchor;
 }
 
-int DocumentStore::appendChord(Chord chord, std::optional<double> lengthBeats, int velocity, std::optional<int> inversion) {
+int DocumentStore::appendChord(Chord chord, std::optional<double> lengthBeats, int velocity, std::optional<int> inversion,
+                               std::string* refusal) {
     // One entry at the end: insertChords' clamps, refusals, selection and single commit. The entry is built
     // before anything changes, so a failed allocation leaves the store as it was.
     const std::vector<int> ids =
-        insertChords(static_cast<int>(doc_.events.size()), {ChordSpec{chord, lengthBeats, velocity, inversion}});
+        insertChords(static_cast<int>(doc_.events.size()), {ChordSpec{chord, lengthBeats, velocity, inversion}}, refusal);
     return ids.empty() ? kNoEventId : ids.front();
 }
 
@@ -578,8 +620,11 @@ ProgressionRefusal DocumentStore::progressionRefusal(const std::vector<std::pair
 }
 
 bool DocumentStore::loadProgression(const std::vector<std::pair<Chord, double>>& steps, std::string sectionName,
-                                    ProgressionLoad how) {
-    if (progressionRefusal(steps, how) != ProgressionRefusal::None) {
+                                    ProgressionLoad how, std::string* refusal) {
+    clearRefusal(refusal);
+    const ProgressionRefusal why = progressionRefusal(steps, how);
+    if (why != ProgressionRefusal::None) {
+        refuse(refusal, progressionRefusalReason(why));
         return false;
     }
     const int sectionIds = sectionIdsForLoad(doc_, how);
@@ -587,6 +632,9 @@ bool DocumentStore::loadProgression(const std::vector<std::pair<Chord, double>>&
     if (how == ProgressionLoad::Replace) {
         next.events.clear();
         next.sections.clear();
+        for (Track& t : next.tracks) {
+            t.notes.clear();  // every note goes with the chords it belonged to; the tracks stay (D3)
+        }
     }
     const int join = static_cast<int>(next.events.size());
     next.events.reserve(next.events.size() + steps.size());
@@ -604,8 +652,9 @@ bool DocumentStore::loadProgression(const std::vector<std::pair<Chord, double>>&
     }
     next.sections.push_back(makeSection(sectionId, sectionNameOr(std::move(sectionName), next.sections), join));
     assert(sectionsWellFormed(next));
-    [[maybe_unused]] const bool changed = commit(std::move(next));
-    assert(changed);  // fresh ids always make the sequence differ
+    if (!commitTiming(std::move(next), refusal)) {
+        return false;  // fresh ids always make the sequence differ, so this is a refusal
+    }
     // Only now: a throw above leaves both counters, like the rest of the store, untouched.
     nextId_ += static_cast<int>(steps.size());
     nextSectionId_ += sectionIds;
@@ -614,22 +663,25 @@ bool DocumentStore::loadProgression(const std::vector<std::pair<Chord, double>>&
     return true;
 }
 
-bool DocumentStore::appendProgression(const std::vector<std::pair<Chord, double>>& steps, std::string sectionName) {
-    return loadProgression(steps, std::move(sectionName), ProgressionLoad::Append);
+bool DocumentStore::appendProgression(const std::vector<std::pair<Chord, double>>& steps, std::string sectionName,
+                                      std::string* refusal) {
+    return loadProgression(steps, std::move(sectionName), ProgressionLoad::Append, refusal);
 }
 
-bool DocumentStore::replaceProgression(const std::vector<std::pair<Chord, double>>& steps, std::string sectionName) {
-    return loadProgression(steps, std::move(sectionName), ProgressionLoad::Replace);
+bool DocumentStore::replaceProgression(const std::vector<std::pair<Chord, double>>& steps, std::string sectionName,
+                                       std::string* refusal) {
+    return loadProgression(steps, std::move(sectionName), ProgressionLoad::Replace, refusal);
 }
 
-void DocumentStore::moveChord(int id, int newIndex) {
+bool DocumentStore::moveChord(int id, int newIndex, std::string* refusal) {
+    clearRefusal(refusal);
     const int from = findIndex(id);
     if (from < 0) {
-        return;
+        return false;
     }
     const int to = std::clamp(newIndex, 0, static_cast<int>(doc_.events.size()) - 1);
     if (to == from) {
-        return;
+        return false;
     }
     Document next = doc_;
     // Each section follows the chord it starts on: remember that chord, move, then look it up again.
@@ -661,17 +713,18 @@ void DocumentStore::moveChord(int id, int newIndex) {
         }
     }
     std::sort(next.sections.begin(), next.sections.end(), sectionLess);
-    commit(std::move(next));
+    return commitTiming(std::move(next), refusal);
 }
 
-void DocumentStore::setLength(int id, double lengthBeats) {
+bool DocumentStore::setLength(int id, double lengthBeats, std::string* refusal) {
+    clearRefusal(refusal);
     const int index = findIndex(id);
     if (index < 0 || !std::isfinite(lengthBeats)) {
-        return;
+        return false;
     }
     Document next = doc_;
     next.events[static_cast<std::size_t>(index)].lengthBeats = clampLength(lengthBeats);
-    commit(std::move(next));
+    return commitTiming(std::move(next), refusal);  // the current length: no step
 }
 
 void DocumentStore::setVelocity(int id, int velocity) {
@@ -721,25 +774,37 @@ void DocumentStore::resetVoicing(int id) {
     commit(std::move(next));
 }
 
-void DocumentStore::removeChord(int id) {
+bool DocumentStore::removeChord(int id, std::string* refusal) {
+    clearRefusal(refusal);
     const int index = findIndex(id);
     if (index < 0) {
-        return;
+        return false;
     }
     Document next = doc_;
     reindexSectionsForRemove(next.sections, index, static_cast<int>(next.events.size()));
     next.events.erase(next.events.begin() + index);
-    commit(std::move(next));
+    dropNotesOf(next, {id});
+    return commitTiming(std::move(next), refusal);
 }
 
-std::vector<int> DocumentStore::insertChords(int index, const std::vector<ChordSpec>& chords) {
-    if (chords.empty() || chords.size() > static_cast<std::size_t>(kMaxChords) - doc_.events.size() ||
-        nextId_ > INT_MAX - static_cast<int>(chords.size())) {  // n <= kMaxChords here: no overflow
+std::vector<int> DocumentStore::insertChords(int index, const std::vector<ChordSpec>& chords, std::string* refusal) {
+    clearRefusal(refusal);
+    if (chords.empty()) {
+        refuse(refusal, "No chords to insert");
+        return {};
+    }
+    if (chords.size() > static_cast<std::size_t>(kMaxChords) - doc_.events.size()) {
+        refuse(refusal, progressionRefusalReason(ProgressionRefusal::DocumentFull));
+        return {};
+    }
+    if (nextId_ > INT_MAX - static_cast<int>(chords.size())) {  // n <= kMaxChords here: no overflow
+        refuse(refusal, progressionRefusalReason(ProgressionRefusal::EventIdsExhausted));
         return {};
     }
     for (const ChordSpec& c : chords) {
         assertValidChord(c.chord);
         if (c.lengthBeats.has_value() && !std::isfinite(*c.lengthBeats)) {
+            refuse(refusal, progressionRefusalReason(ProgressionRefusal::NonFiniteLength));
             return {};
         }
     }
@@ -772,15 +837,17 @@ std::vector<int> DocumentStore::insertChords(int index, const std::vector<ChordS
     }
     assert(sectionsWellFormed(next));
     std::vector<int> selection = ids;  // before the commit, as appendChord
-    [[maybe_unused]] const bool changed = commit(std::move(next));
-    assert(changed);   // fresh ids always make the sequence differ
+    if (!commitTiming(std::move(next), refusal)) {
+        return {};  // fresh ids always make the sequence differ, so this is a refusal
+    }
     nextId_ += count;  // only now: a throw above leaves the counter, like the rest of the store, untouched
     selectedEventIds_.swap(selection);  // live state: the inserted chords, the last the anchor (D2)
     anchorEventId_ = ids.back();
     return ids;
 }
 
-bool DocumentStore::removeChords(const std::vector<int>& ids) {
+bool DocumentStore::removeChords(const std::vector<int>& ids, std::string* refusal) {
+    clearRefusal(refusal);
     const std::set<int> wanted(ids.begin(), ids.end());
     std::vector<int> indices;  // ascending: the chords that exist, once each
     for (std::size_t i = 0; i < doc_.events.size(); ++i) {
@@ -797,10 +864,12 @@ bool DocumentStore::removeChords(const std::vector<int>& ids) {
         reindexSectionsForRemove(next.sections, index, static_cast<int>(next.events.size()));
         next.events.erase(next.events.begin() + index);
     }
-    return commit(std::move(next));
+    dropNotesOf(next, wanted);  // an id no chord had anchors no note either
+    return commitTiming(std::move(next), refusal);
 }
 
-bool DocumentStore::setLengths(const std::vector<int>& ids, double lengthBeats) {
+bool DocumentStore::setLengths(const std::vector<int>& ids, double lengthBeats, std::string* refusal) {
+    clearRefusal(refusal);
     if (!std::isfinite(lengthBeats)) {
         return false;
     }
@@ -812,7 +881,7 @@ bool DocumentStore::setLengths(const std::vector<int>& ids, double lengthBeats) 
             e.lengthBeats = length;
         }
     }
-    return commit(std::move(next));  // nothing changed: no history
+    return commitTiming(std::move(next), refusal);  // nothing changed: no history
 }
 
 void DocumentStore::setProjectKey(Key key) {

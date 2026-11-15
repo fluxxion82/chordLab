@@ -187,8 +187,9 @@ std::string defaultTrackName(const Document& doc, TrackRole role);
 ///   being the constants'.
 /// The chords must satisfy the store's chord invariants (lengths in [kMinLengthBeats, kMaxLengthBeats], at most
 /// `kMaxChords`, distinct ids); the tracks may be anything (dangling anchors, extreme offsets and lengths): the
-/// tick arithmetic is 64-bit, so a malformed track is reported, never undefined. Every track and note edit of
-/// `DocumentStore` runs it on its candidate, and a state loader runs it before `DocumentStore::replace`.
+/// tick arithmetic is 64-bit, so a malformed track is reported, never undefined. Every track and note edit and
+/// every chord timing edit of `DocumentStore` runs it on its candidate, and a state loader runs it before
+/// `DocumentStore::replace`.
 /// O(n log n) in the number of notes.
 bool validateTracks(const Document& doc, int nextTrackId, int nextNoteId, std::string& error);
 

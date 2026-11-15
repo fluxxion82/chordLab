@@ -297,9 +297,16 @@ std::string heardJson(const Listener& listener, const Key& projectKey);
 ///   without, root position and not manual. The new chord is selected (document.h), so the next
 ///   snapshot's `selectedEventId`, `suggestions` and `relationReference` follow it. Refused (false, an
 ///   error naming the reason, no change) when the document already holds `kMaxChords` chords or the id
-///   counter is exhausted.
+///   counter is exhausted, and, like every chord timing command, by the track invariant (below).
 /// - `moveChord {id,index}`, `setLength {id,lengthBeats}`, `setVelocity {id,velocity}`,
-///   `removeChord {id}`: the matching store call.
+///   `removeChord {id}`: the matching store call. An unknown id or a move to the current place is a valid no-op.
+/// - **Chord timing commands carry the notes** (tracks design D3): `appendChord`, `insertChords`, `loadPreset`,
+///   `moveChord`, `setLength`, `setLengths`, `removeChord` and `removeChords` move each note with its chord (a
+///   shorter chord leaves the notes past its end inactive, a longer one reactivates them), a removed chord takes
+///   its notes along and a "replace" preset removes every note, keeping the tracks (document.h). Each is refused
+///   (false, no change, no history, `documentChanged` false) when the result would break the track invariant,
+///   with the store's reason in the error: `"<command>" refused: <reason>`, for example `"setLength" refused: At
+///   most 8 track notes can sound at once` (`validateTracks`, tracks.h, with the constants' numbers).
 /// - `setProgressionLoop {on}`, `setFollowHost {on}`: the matching live-state setter.
 /// - `setInversion {id,inversion}`, `setOctave {id,octave}`, `resetVoicing {id}`: the matching store
 ///   call (the values are clamped by the store and the event is marked manual; see document.h).
@@ -342,11 +349,11 @@ std::string heardJson(const Listener& listener, const Key& projectKey);
 ///   validated before anything changes, and an error names the field with its index ("chords[2].root must be an
 ///   integer in 0..11"). The inserted chords become the selection, the last the anchor. Refused (false, an
 ///   error naming the reason, no change, no id consumed) when the result would hold more than `kMaxChords`
-///   chords or the id counter cannot hand out one id per chord.
+///   chords or the id counter cannot hand out one id per chord, and by the track invariant (above).
 /// - `removeChords {ids}`, `setLengths {ids, lengthBeats}`: the store calls, ONE undo step each; `ids` a
 ///   non-empty array of integers (repeats count once; ids no event has are skipped, and a call that finds none,
 ///   or changes nothing, is a valid no-op that pushes no history); `lengthBeats` a finite number, clamped by
-///   the store.
+///   the store. Both can be refused by the track invariant (above).
 /// - `setNewChordLength {lengthBeats}`: `setNewChordLength`, live state (never history, kept across undo and
 ///   redo, persisted by `stateJson`); `lengthBeats` (required) a finite number, snapped to the quarter-beat grid
 ///   and clamped to 0.25..64 by the store, or null for one bar of the meter.
@@ -365,7 +372,8 @@ std::string heardJson(const Listener& listener, const Key& projectKey);
 ///   anchor. Refused (false, an error
 ///   naming the reason, no change, no id consumed) for the store's reasons (`progressionRefusal`,
 ///   document.h): the result would hold more than `kMaxChords` chords, or the event or section id
-///   counter cannot hand out the ids the load needs.
+///   counter cannot hand out the ids the load needs; and by the track invariant (above). "append" keeps every
+///   note, "replace" removes every note of every track (the tracks stay).
 /// - `undo`, `redo`: no fields. A browsed key that is the project key stays so when they restore another
 ///   project key (document.h), so the UI never has to follow them with `browseKey {home}`.
 ///
@@ -376,7 +384,8 @@ std::string heardJson(const Listener& listener, const Key& projectKey);
 /// range-checked beyond that: lengths, velocities, inversions, octaves, colours and move targets are
 /// clamped by the store, exactly as the direct calls do.
 ///
-/// Returns true for every accepted command, including ones that change nothing: an edit naming an id no
+/// Returns true for every accepted command (a refusal by the store, listed above, is not one), including ones that
+/// change nothing: an edit naming an id no
 /// event or section has, a move to the chord's current position, and `undo`/`redo` with nothing to undo
 /// or redo are valid no-ops, not errors. `error` is cleared on success.
 ///

@@ -65,7 +65,11 @@ Three mechanisms, chosen by who can get it wrong:
   leave the store untouched; `appendChord` returns `kNoEventId` when the document is full or the ids
   are exhausted, `appendProgression` / `replaceProgression` return false for the cases
   `progressionRefusal` names, and `addSection` returns `kNoSectionId` for an index that is not a chord position or
-  already starts a section (through JSON that index is a no-op and only exhausted ids are refused);
+  already starts a section (through JSON that index is a no-op and only exhausted ids are refused); the track and
+  note edits and every chord timing edit (which carry the notes, tracks design D3) report a refusal through a
+  trailing `std::string* refusal`, a non-empty reason with the failure value (the track invariant's message, such as
+  "At most 8 track notes can sound at once"), an empty one for a mere no-op, and JSON reports it as
+  `"<command>" refused: <reason>`;
   `writeSmf0` returns an empty vector and `writeFile` false; `pushPreview` returns false
   on a full queue and `process` returns false for a block it could not complete.
 - **Assertions for programmer preconditions.** A `Chord` with a null type, a `Key` with a bad letter, a

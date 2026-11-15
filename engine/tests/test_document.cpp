@@ -2915,3 +2915,98 @@ TEST_CASE("revision: replace moves it, even to an equal document") {
     store.replace(Document{}, 1);
     CHECK(store.revision() == r + 2);
 }
+
+// --- chord timing edits: status returns and reasons (tracks Task 2a) ---------------------------------
+
+TEST_CASE("chord timing edits return whether they changed the document; a no-op is false with no reason") {
+    DocumentStore store = threeChords();
+    std::string refusal = "stale";
+    const auto noOp = [&](bool result) {
+        CHECK_FALSE(result);
+        CHECK(refusal.empty());
+        refusal = "stale";
+    };
+    noOp(store.moveChord(99, 0, &refusal));  // unknown id
+    noOp(store.moveChord(1, -5, &refusal));  // clamped to its own index
+    noOp(store.setLength(99, 2.0, &refusal));
+    noOp(store.setLength(1, kNaN, &refusal));
+    noOp(store.setLength(1, 4.0, &refusal));  // the current length
+    noOp(store.removeChord(99, &refusal));
+    noOp(store.removeChords({}, &refusal));
+    noOp(store.removeChords({98, 99}, &refusal));
+    noOp(store.setLengths({1, 2, 3}, 4.0, &refusal));
+    noOp(store.setLengths({1}, kInf, &refusal));
+    CHECK(store.moveChord(1, 2, &refusal));
+    CHECK(refusal.empty());
+    CHECK(store.setLength(2, 2.0, &refusal));
+    CHECK(store.setLengths({2, 3}, 1.0, &refusal));
+    CHECK(store.removeChords({2, 99}, &refusal));
+    CHECK(store.removeChord(3, &refusal));
+    CHECK(refusal.empty());
+    CHECK(store.doc().events.size() == 1);
+    // The refusal channel is optional.
+    CHECK(store.setLength(1, 3.0));
+    CHECK_FALSE(store.moveChord(1, 0));
+    CHECK_FALSE(store.removeChord(42));
+}
+
+TEST_CASE("insertChords / appendChord: their own refusals carry a reason and leave no history") {
+    std::string refusal;
+    {
+        DocumentStore store = threeChords();
+        const DocumentStore reference = store;
+        CHECK(store.insertChords(0, {}, &refusal).empty());
+        CHECK(refusal == "No chords to insert");
+        CHECK(store.insertChords(0, {ChordSpec{kC, kNaN}}, &refusal).empty());
+        CHECK(refusal == "Chord lengths must be finite");
+        CHECK(store.appendChord(kC, kNaN, 100, std::nullopt, &refusal) == kNoEventId);
+        CHECK(refusal == "Chord lengths must be finite");
+        CHECK(store.doc() == reference.doc());
+        CHECK(sameHistoryTop(store, reference));
+        CHECK(store.nextId() == reference.nextId());
+    }
+    {
+        DocumentStore store;
+        for (int i = 0; i < kMaxChords; ++i) {
+            REQUIRE(store.appendChord(kC, 1.0) != kNoEventId);
+        }
+        const DocumentStore reference = store;
+        CHECK(store.appendChord(kC, 1.0, 100, std::nullopt, &refusal) == kNoEventId);
+        CHECK(refusal == "At most " + std::to_string(kMaxChords) + " chords");
+        CHECK(store.insertChords(0, {ChordSpec{kC}}, &refusal).empty());
+        CHECK(refusal == "At most " + std::to_string(kMaxChords) + " chords");
+        CHECK(store.doc() == reference.doc());
+        CHECK(sameHistoryTop(store, reference));
+    }
+    {
+        DocumentStore store(INT_MAX);
+        CHECK(store.appendChord(kC, 1.0, 100, std::nullopt, &refusal) == kNoEventId);
+        CHECK(refusal == "No event ids are left");
+        CHECK(store.doc().events.empty());
+        CHECK_FALSE(store.undo());
+    }
+}
+
+TEST_CASE("appendProgression / replaceProgression: the progressionRefusal pre-checks carry a reason") {
+    std::string refusal;
+    DocumentStore store = threeChords();
+    const DocumentStore reference = store;
+    CHECK_FALSE(store.appendProgression({}, "A", &refusal));
+    CHECK(refusal == "The progression is empty");
+    CHECK_FALSE(store.replaceProgression({{kC, kNaN}}, "A", &refusal));
+    CHECK(refusal == "Chord lengths must be finite");
+    const std::vector<std::pair<Chord, double>> tooMany(static_cast<std::size_t>(kMaxChords) - 2, {kC, 1.0});
+    CHECK_FALSE(store.appendProgression(tooMany, "A", &refusal));
+    CHECK(refusal == "At most " + std::to_string(kMaxChords) + " chords");
+    CHECK(store.doc() == reference.doc());
+    CHECK(sameHistoryTop(store, reference));
+    CHECK(store.replaceProgression(tooMany, "A", &refusal));  // alone they fit
+    CHECK(refusal.empty());
+    DocumentStore noIds(INT_MAX - 1);
+    CHECK_FALSE(noIds.replaceProgression({{kC, 1.0}, {kF, 1.0}}, "A", &refusal));
+    CHECK(refusal == "No event ids are left");
+    DocumentStore noSections;
+    noSections.replace(Document{}, 1, INT_MAX);
+    CHECK_FALSE(noSections.appendProgression({{kC, 1.0}}, "A", &refusal));
+    CHECK(refusal == "No section ids are left");
+}
