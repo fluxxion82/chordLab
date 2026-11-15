@@ -232,7 +232,9 @@ std::string sectionNameOr(std::string name, const std::vector<Section>& sections
 /// key the progression is in, not on the key it just left. A browse elsewhere is kept as it is.
 /// `autoVoiceLead`, `feel` and `meter` are deliberately absent: they change the notes `compile`
 /// produces, so they are restored with the progression (see `Document`).
-void keepLiveState(Document& target, const Document& current) {
+/// The lane flags too: the chords lane's, and each track's `mute` and `solo` by track id, so a restored track that
+/// `current` holds takes its current flags and one it does not hold (an undone `removeTrack`) keeps its stored ones.
+void keepLiveState(Document& target, const Document& current) noexcept {
     target.browsedKey = current.browsedKey == current.projectKey ? target.projectKey : current.browsedKey;
     target.progressionLoop = current.progressionLoop;
     target.followHost = current.followHost;
@@ -243,6 +245,15 @@ void keepLiveState(Document& target, const Document& current) {
     target.newChordBeats = current.newChordBeats;
     target.chordsMuted = current.chordsMuted;
     target.chordsSolo = current.chordsSolo;
+    for (Track& restored : target.tracks) {  // at most kMaxTracks each way
+        for (const Track& now : current.tracks) {
+            if (now.id == restored.id) {
+                restored.mute = now.mute;
+                restored.solo = now.solo;
+                break;
+            }
+        }
+    }
 }
 
 /// One past the largest track id in `doc`, or 1 when it has none. Ids are below INT_MAX (`replace`'s
@@ -266,27 +277,25 @@ int noteIdAfter(const Document& doc) {
     return next;
 }
 
-/// What `replace` asserts of the tracks: at most `kMaxTracks`, track and note ids in 1..INT_MAX-1 and unique
-/// (note ids across all tracks), every anchor an existing chord. Debug-only; the full invariant (domain,
-/// limits) is the loader's to check.
-[[maybe_unused]] bool tracksFitStore(const Document& doc) {
-    if (doc.tracks.size() > static_cast<std::size_t>(kMaxTracks)) {
-        return false;
-    }
-    std::set<int> trackIds;
-    std::set<int> noteIds;
-    for (const Track& t : doc.tracks) {
-        if (t.id < 1 || t.id >= INT_MAX || !trackIds.insert(t.id).second) {
-            return false;
+/// Puts `ids` into the order of `notes` and drops the ids no note has (and repeats), in place and without
+/// allocating, so the stale drop after a commit can stay noexcept: sorted by id, then each note in order pulls its
+/// id (found by binary search in the still-sorted rest) to the front of that rest. O(n log k + k^2) for n notes
+/// and k ids, k <= kMaxNotesPerTrack.
+void orderLikeNotes(std::vector<int>& ids, const std::vector<TrackNote>& notes) noexcept {
+    std::sort(ids.begin(), ids.end());
+    ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+    auto placed = ids.begin();  // [begin, placed) is in note order, [placed, end) sorted by id
+    for (const TrackNote& n : notes) {
+        if (placed == ids.end()) {
+            break;
         }
-        for (const TrackNote& n : t.notes) {
-            if (n.id < 1 || n.id >= INT_MAX || !noteIds.insert(n.id).second ||
-                indexOfEvent(doc.events, n.anchorEventId) < 0) {
-                return false;
-            }
+        const auto found = std::lower_bound(placed, ids.end(), n.id);
+        if (found != ids.end() && *found == n.id) {
+            std::rotate(placed, found, found + 1);  // keeps the rest sorted
+            ++placed;
         }
     }
-    return true;
+    ids.erase(placed, ids.end());
 }
 
 /// Writes `reason` to `refusal` when the caller asked for one (the refusal channel, see `DocumentStore`).
@@ -341,13 +350,20 @@ void DocumentStore::replace(Document doc, int nextId, int nextSectionId, int nex
     assert(doc.events.size() <= static_cast<std::size_t>(kMaxChords));
     assert(sectionsWellFormed(doc));
     assert(nextSectionId == 0 || nextSectionId >= sectionIdAfter(doc));
-    assert(tracksFitStore(doc));
-    assert(nextTrackId >= 0 && (nextTrackId == 0 || nextTrackId >= trackIdAfter(doc)));
-    assert(nextNoteId >= 0 && (nextNoteId == 0 || nextNoteId >= noteIdAfter(doc)));
+    assert(nextTrackId >= 0);
+    assert(nextNoteId >= 0);
+    const int trackCounter = nextTrackId == 0 ? trackIdAfter(doc) : nextTrackId;
+    const int noteCounter = nextNoteId == 0 ? noteIdAfter(doc) : nextNoteId;
+#ifndef NDEBUG
+    {
+        std::string error;
+        assert(validateTracks(doc, trackCounter, noteCounter, error));  // the loader validates first (D7)
+    }
+#endif
     // Nothing below can throw: `doc` arrived fully built, and the moves and clears are noexcept.
     nextSectionId_ = nextSectionId == 0 ? sectionIdAfter(doc) : nextSectionId;
-    nextTrackId_ = nextTrackId == 0 ? trackIdAfter(doc) : nextTrackId;
-    nextNoteId_ = nextNoteId == 0 ? noteIdAfter(doc) : nextNoteId;
+    nextTrackId_ = trackCounter;
+    nextNoteId_ = noteCounter;
     ++revision_;
     doc_ = std::move(doc);
     undoStack_.clear();
@@ -355,6 +371,8 @@ void DocumentStore::replace(Document doc, int nextId, int nextSectionId, int nex
     nextId_ = nextId;
     selectedEventIds_.clear();
     anchorEventId_ = kNoEventId;
+    noteSelection_.ids.clear();
+    noteSelection_.trackId = kNoTrackId;
 }
 
 int DocumentStore::nextId() const {
@@ -416,6 +434,18 @@ bool DocumentStore::commit(Document next) {
     return true;
 }
 
+bool DocumentStore::commitTracks(Document next, int nextTrackId, int nextNoteId, std::string* refusal) {
+    if (next == doc_) {
+        return false;  // a no-op stays one, even on a document a chord edit has put past the invariant
+    }
+    std::string error;
+    if (!validateTracks(next, nextTrackId, nextNoteId, error)) {
+        refuse(refusal, std::move(error));
+        return false;
+    }
+    return commit(std::move(next));
+}
+
 void DocumentStore::dropStaleSelection() noexcept {
     const auto exists = [this](int id) { return indexOfEvent(doc_.events, id) >= 0; };
     // The anchor first, while the list still has the strip order of the document before the change: the
@@ -443,6 +473,19 @@ void DocumentStore::dropStaleSelection() noexcept {
     // and without allocating, so this stays noexcept.
     std::sort(selectedEventIds_.begin(), selectedEventIds_.end(),
               [this](int a, int b) { return indexOfEvent(doc_.events, a) < indexOfEvent(doc_.events, b); });
+    // The note selection: ids gone dropped, the rest in the track's note order now; the track gone, or nothing
+    // left, clears it.
+    if (noteSelection_.trackId != kNoTrackId) {
+        const int track = findTrackIndex(noteSelection_.trackId);
+        if (track >= 0) {
+            orderLikeNotes(noteSelection_.ids, doc_.tracks[static_cast<std::size_t>(track)].notes);
+        } else {
+            noteSelection_.ids.clear();
+        }
+        if (noteSelection_.ids.empty()) {
+            noteSelection_.trackId = kNoTrackId;
+        }
+    }
 }
 
 int DocumentStore::selectedEventId() const {
@@ -942,9 +985,11 @@ int DocumentStore::addTrack(TrackRole role, std::optional<std::string> name, std
                                                                : boundedName(std::move(*name), kMaxTrackNameBytes);
     Document next = doc_;
     next.tracks.push_back(Track{nextTrackId_, std::move(trackName), role, false, false, {}});
-    [[maybe_unused]] const bool changed = commit(std::move(next));
-    assert(changed);  // a fresh id always makes the list differ
-    return nextTrackId_++;  // only now: a throw above leaves the counter untouched
+    // Validated with the counter it will publish: the new track's id is today's counter.
+    if (!commitTracks(std::move(next), nextTrackId_ + 1, nextNoteId_, refusal)) {
+        return kNoTrackId;  // a fresh id always makes the list differ, so this is a refusal
+    }
+    return nextTrackId_++;  // only now, with the document: a throw above leaves the counter untouched
 }
 
 bool DocumentStore::removeTrack(int id, std::string* refusal) {
@@ -956,7 +1001,7 @@ bool DocumentStore::removeTrack(int id, std::string* refusal) {
     }
     Document next = doc_;
     next.tracks.erase(next.tracks.begin() + index);
-    return commit(std::move(next));
+    return commitTracks(std::move(next), nextTrackId_, nextNoteId_, refusal);
 }
 
 bool DocumentStore::patchTrack(int id, std::optional<std::string> name, std::optional<TrackRole> role,
@@ -980,7 +1025,7 @@ bool DocumentStore::patchTrack(int id, std::optional<std::string> name, std::opt
     if (role.has_value()) {
         track.role = *role;
     }
-    return commit(std::move(next));  // equal to the current track: no step
+    return commitTracks(std::move(next), nextTrackId_, nextNoteId_, refusal);  // equal to the current: no step
 }
 
 bool DocumentStore::moveTrack(int id, int newIndex, std::string* refusal) {
@@ -1003,7 +1048,7 @@ bool DocumentStore::moveTrack(int id, int newIndex, std::string* refusal) {
     } else {
         std::rotate(target, first, first + 1);
     }
-    return commit(std::move(next));
+    return commitTracks(std::move(next), nextTrackId_, nextNoteId_, refusal);
 }
 
 std::vector<int> DocumentStore::insertNotes(int trackId, const std::vector<NoteSpec>& specs, std::string* refusal) {
@@ -1052,9 +1097,23 @@ std::vector<int> DocumentStore::insertNotes(int trackId, const std::vector<NoteS
         ids.push_back(id++);
     }
     sortTrackNotes(notes, timeline);
-    [[maybe_unused]] const bool changed = commit(std::move(next));
-    assert(changed);  // fresh ids always make the track differ
-    nextNoteId_ += static_cast<int>(specs.size());  // only now: a throw above leaves the counter untouched
+    // The inserted notes become the selection (D5), in the track's note order: built before the commit, so
+    // that nothing after it can throw.
+    std::vector<int> selection;
+    selection.reserve(specs.size());
+    for (const TrackNote& n : notes) {
+        if (n.id >= nextNoteId_) {
+            selection.push_back(n.id);
+        }
+    }
+    // Validated with the counter it will publish: the new ids run up to today's counter + n - 1.
+    const int publishedNoteId = nextNoteId_ + static_cast<int>(specs.size());
+    if (!commitTracks(std::move(next), nextTrackId_, publishedNoteId, refusal)) {
+        return {};  // fresh ids always make the track differ, so this is a refusal
+    }
+    nextNoteId_ = publishedNoteId;  // only now, with the document: a throw above leaves the counter untouched
+    noteSelection_.ids.swap(selection);
+    noteSelection_.trackId = trackId;
     return ids;
 }
 
@@ -1071,7 +1130,7 @@ bool DocumentStore::removeNotes(int trackId, const std::vector<int>& ids, std::s
     // Removal keeps the remaining notes in their sorted order.
     notes.erase(std::remove_if(notes.begin(), notes.end(), [&](const TrackNote& n) { return wanted.count(n.id) != 0; }),
                 notes.end());
-    return commit(std::move(next));  // none of them in the track: no step
+    return commitTracks(std::move(next), nextTrackId_, nextNoteId_, refusal);  // none in the track: no step
 }
 
 bool DocumentStore::updateNotes(int trackId, const std::vector<NoteEdit>& edits, std::string* refusal) {
@@ -1136,7 +1195,7 @@ bool DocumentStore::updateNotes(int trackId, const std::vector<NoteEdit>& edits,
         note.lengthTicks = clampNoteLength(e.lengthTicks.value_or(note.lengthTicks), start);
     }
     sortTrackNotes(notes, timeline);
-    return commit(std::move(next));  // nothing changed: no step
+    return commitTracks(std::move(next), nextTrackId_, nextNoteId_, refusal);  // nothing changed: no step
 }
 
 bool DocumentStore::undo() {
@@ -1165,6 +1224,54 @@ bool DocumentStore::redo() {
     ++revision_;
     dropStaleSelection();
     return true;
+}
+
+// --- live lane state and the note selection (tracks design D4, D5, D8) --------------------------
+
+bool DocumentStore::setTrackMute(int id, bool on) {
+    const int index = findTrackIndex(id);
+    if (index < 0 || doc_.tracks[static_cast<std::size_t>(index)].mute == on) {
+        return false;
+    }
+    doc_.tracks[static_cast<std::size_t>(index)].mute = on;
+    return true;
+}
+
+bool DocumentStore::setTrackSolo(int id, bool on) {
+    const int index = findTrackIndex(id);
+    if (index < 0 || doc_.tracks[static_cast<std::size_t>(index)].solo == on) {
+        return false;
+    }
+    doc_.tracks[static_cast<std::size_t>(index)].solo = on;
+    return true;
+}
+
+void DocumentStore::setChordsMute(bool on) {
+    doc_.chordsMuted = on;
+}
+
+void DocumentStore::setChordsSolo(bool on) {
+    doc_.chordsSolo = on;
+}
+
+const NoteSelection& DocumentStore::noteSelection() const {
+    return noteSelection_;
+}
+
+void DocumentStore::setNoteSelection(int trackId, const std::vector<int>& ids) {
+    if (trackId == kNoTrackId) {
+        noteSelection_.ids.clear();
+        noteSelection_.trackId = kNoTrackId;
+        return;
+    }
+    const int index = findTrackIndex(trackId);
+    if (index < 0) {
+        return;
+    }
+    std::vector<int> selection = ids;  // built aside: a throw leaves the selection as it was
+    orderLikeNotes(selection, doc_.tracks[static_cast<std::size_t>(index)].notes);
+    noteSelection_.ids.swap(selection);
+    noteSelection_.trackId = noteSelection_.ids.empty() ? kNoTrackId : trackId;
 }
 
 }  // namespace chordlab

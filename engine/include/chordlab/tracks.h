@@ -2,6 +2,7 @@
 
 #include "chordlab/meter.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -43,7 +44,8 @@ constexpr bool operator!=(const TrackNote& a, const TrackNote& b) noexcept {
 /// A lane of notes over the progression (D1). `id` is in 1..INT_MAX-1, unique within a `DocumentStore` and
 /// never reused. `name` is any UTF-8 string of at most `kMaxTrackNameBytes` bytes (it may be empty, see
 /// `DocumentStore::patchTrack`). `notes` are sorted by (derived start, pitch, id) after every store edit.
-/// `mute` and `solo` are live state (set by later tasks' setters), the rest is undoable content.
+/// `mute` and `solo` are live state (`DocumentStore::setTrackMute` / `setTrackSolo`: no history, kept by undo and
+/// redo by track id), the rest is undoable content.
 struct Track {
     int id;
     std::string name;
@@ -81,6 +83,30 @@ constexpr int kMaxTrackNameBytes = 64;
 
 /// The id `DocumentStore::addTrack` returns when it added nothing. No track ever has this id.
 constexpr int kNoTrackId = -1;
+
+/// The most track notes that may sound at once, over the active notes of all tracks, muted ones included (D10):
+/// authored intervals [start, start + length), so a note ending where another starts does not overlap it.
+/// `validateTracks` enforces it. Provisional: Task 8's capacity proof fixes the value.
+constexpr int kMaxTrackPolyphony = 8;
+
+/// The most track-note starts any 960-tick window [t, t + 960) may hold, over the active notes of all tracks,
+/// muted ones included (D10). `validateTracks` enforces it. Provisional: Task 8's capacity proof fixes the value.
+constexpr int kMaxTrackOnsetsPerBeat = 24;
+
+/// The note selection (D5): live state of `DocumentStore`, one track at a time. `ids` are notes of track
+/// `trackId`, in that track's note order, without repeats; empty exactly when `trackId` is `kNoTrackId`.
+struct NoteSelection {
+    int trackId = kNoTrackId;
+    std::vector<int> ids;
+};
+
+inline bool operator==(const NoteSelection& a, const NoteSelection& b) noexcept {
+    return a.trackId == b.trackId && a.ids == b.ids;
+}
+
+inline bool operator!=(const NoteSelection& a, const NoteSelection& b) noexcept {
+    return !(a == b);
+}
 
 /// The canonical chord boundaries in ticks (D3): size `doc.events.size() + 1` ({0} for an empty progression),
 /// entry i the start of chord i and the last entry the end. The cumulative authored beats, accumulated exactly
@@ -142,5 +168,52 @@ std::int32_t clampNoteLength(std::int64_t length, std::int32_t start);
 /// `Other`; when a track of `doc` already has it, " 2", " 3", ... is appended, the first that no track has (as
 /// `defaultSectionName` steps over taken names). Only names count, not roles.
 std::string defaultTrackName(const Document& doc, TrackRole role);
+
+/// The track invariant (D7), checked on a whole document with the id counters that go with it (`nextTrackId`,
+/// `nextNoteId`: the candidate counters an edit will publish, or a loaded state's). True when all of these hold,
+/// else false with a short reason in `error` (cleared on entry, so empty exactly when true), the first failure
+/// in this order:
+/// - both counters >= 1; at most `kMaxTracks` tracks; track ids >= 1, unique and below `nextTrackId`; roles
+///   declared `TrackRole`s; names of at most `kMaxTrackNameBytes` bytes; at most `kMaxNotesPerTrack` notes per
+///   track, inactive ones included;
+/// - note ids >= 1, unique across all tracks and below `nextNoteId`; every anchor an existing chord (checked
+///   before any start is derived); every note in D1's domain: pitch 0..127, velocity 1..127, offset >= 0,
+///   derived start in [0, kMaxNoteTick - kMinTrackNoteTicks], length in [kMinTrackNoteTicks, kMaxNoteTick -
+///   start]; each track's notes sorted by (derived start, pitch, id);
+/// - D10's limits over the active notes of all tracks, muted ones included: `trackPolyphony` at most
+///   `kMaxTrackPolyphony` ("At most 8 track notes can sound at once") and `densestOnsetWindow` at most
+///   `kMaxTrackOnsetsPerBeat` ("At most 24 notes can start within one beat across all tracks"), the numbers
+///   being the constants'.
+/// The chords must satisfy the store's chord invariants (lengths in [kMinLengthBeats, kMaxLengthBeats], at most
+/// `kMaxChords`, distinct ids); the tracks may be anything (dangling anchors, extreme offsets and lengths): the
+/// tick arithmetic is 64-bit, so a malformed track is reported, never undefined. Every track and note edit of
+/// `DocumentStore` runs it on its candidate, and a state loader runs it before `DocumentStore::replace`.
+/// O(n log n) in the number of notes.
+bool validateTracks(const Document& doc, int nextTrackId, int nextNoteId, std::string& error);
+
+/// The most active track notes of all tracks (muted ones included) sounding at one tick: authored intervals
+/// [start, start + length), so touching notes (one ends where the next starts) do not overlap. Notes whose anchor
+/// is not a chord of `doc` are skipped. O(n log n).
+int trackPolyphony(const Document& doc);
+
+/// The most active track-note starts of all tracks (muted ones included) within any 960-tick window [t, t + 960);
+/// coincident starts count separately. Notes whose anchor is not a chord of `doc` are skipped. O(n log n).
+int densestOnsetWindow(const Document& doc);
+
+/// Whether a lane sounds (D8), the one rule for the chords lane and every track alike: with no solo anywhere
+/// (`anySolo` false: neither the chords nor any track), every unmuted lane; with any solo, only the soloed lanes,
+/// mute being ignored on a soloed lane.
+constexpr bool laneAudible(bool muted, bool soloed, bool anySolo) noexcept {
+    return anySolo ? soloed : !muted;
+}
+
+/// Whether the chords lane or any track is soloed: the `anySolo` of `laneAudible`.
+bool anyLaneSoloed(const Document& doc) noexcept;
+
+/// `laneAudible` for the chords lane (`chordsMuted`, `chordsSolo`).
+bool chordsAudible(const Document& doc) noexcept;
+
+/// `laneAudible` for the track at `trackIndex`, which must be a position of `doc.tracks` (asserted).
+bool trackAudible(const Document& doc, std::size_t trackIndex) noexcept;
 
 }  // namespace chordlab

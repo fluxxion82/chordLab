@@ -567,11 +567,16 @@ TEST_CASE("insertNotes: empty specs and an unknown track are refused") {
 }
 
 TEST_CASE("insertNotes: at most kMaxNotesPerTrack per track; exactly the limit is allowed") {
-    DocumentStore store = threeChordsAndBass();
+    // One note per beat, so the onset and polyphony limits stay out of it: kMaxNotesPerTrack beats of chords.
+    DocumentStore store;
+    for (int i = 0; i < kMaxNotesPerTrack / 64; ++i) {
+        REQUIRE(store.appendChord(kC, kMaxLengthBeats) == i + 1);
+    }
+    REQUIRE(store.addTrack(TrackRole::Bass) == 1);
     REQUIRE(store.addTrack(TrackRole::Lead) == 2);
     std::vector<NoteSpec> specs;
     for (int i = 0; i < kMaxNotesPerTrack - 1; ++i) {
-        specs.push_back(ns(40 + i % 40, i * 10, 30));
+        specs.push_back(ns(40 + i % 40, std::int64_t{i} * kFeelTicksPerBeat, 30));
     }
     REQUIRE(store.insertNotes(1, specs).size() == static_cast<std::size_t>(kMaxNotesPerTrack - 1));
     const DocumentStore reference = store;
@@ -775,9 +780,10 @@ TEST_CASE("updateNotes: an unchanged start at or after the end is accepted; only
     checkRefused(store, reference);
 }
 
-TEST_CASE("updateNotes: a derived start pushed past the start domain keeps its anchor; a length clamps to the minimum") {
+TEST_CASE("updateNotes: a derived start pushed past the start domain breaks the invariant; only a move back commits") {
     // 256 chords, the first one beat short: the last starts 960 ticks early, so a note 5 ticks before the end
-    // of its 64 beats fits the start domain; growing the first chord then moves it to kMaxNoteTick - 5.
+    // of its 64 beats fits the start domain; growing the first chord then moves it to kMaxNoteTick - 5. (Task 2a
+    // validates chord timing edits and will refuse that growth; until then it is the one way to get here.)
     DocumentStore store;
     const int first = store.appendChord(kC, kMaxLengthBeats - 1.0);
     int last = first;
@@ -790,15 +796,26 @@ TEST_CASE("updateNotes: a derived start pushed past the start domain keeps its a
     REQUIRE(notesOf(store) == std::vector<TrackNote>{TrackNote{1, 60, last, offset, 480, 100}});
     store.setLength(first, kMaxLengthBeats);
     REQUIRE(noteStart(store.doc(), notesOf(store).at(0)) == kMaxNoteTick - 5);
+    std::string error;
+    REQUIRE_FALSE(validateTracks(store.doc(), store.nextTrackId(), store.nextNoteId(), error));
+    const DocumentStore reference = store;
     NoteEdit pitch = edit(1);
     pitch.pitch = 62;
-    pitch.startTick = kMaxNoteTick - 5;  // unchanged, though outside the start domain
-    CHECK(store.updateNotes(1, {pitch}));
-    CHECK(notesOf(store) == std::vector<TrackNote>{TrackNote{1, 62, last, offset, 480, 100}});
+    pitch.startTick = kMaxNoteTick - 5;  // unchanged: the note keeps its anchor, and the candidate still fails
+    std::string refusal;
+    CHECK_FALSE(store.updateNotes(1, {pitch}, &refusal));
+    CHECK(refusal == error);
+    checkRefused(store, reference);
     NoteEdit length = edit(1);
     length.lengthTicks = 5000;
-    CHECK(store.updateNotes(1, {length}));
-    CHECK(notesOf(store) == std::vector<TrackNote>{TrackNote{1, 62, last, offset, kMinTrackNoteTicks, 100}});
+    CHECK_FALSE(store.updateNotes(1, {length}, &refusal));
+    CHECK(refusal == error);
+    checkRefused(store, reference);
+    NoteEdit moved = edit(1);
+    moved.startTick = kMaxNoteTick - 100;  // back inside the domain: the length clamps to the space left
+    CHECK(store.updateNotes(1, {moved}, &refusal));
+    CHECK(refusal.empty());
+    CHECK(notesOf(store) == std::vector<TrackNote>{TrackNote{1, 60, last, 64 * kFeelTicksPerBeat - 100, 100, 100}});
 }
 
 TEST_CASE("updateNotes: a start at or after the end, an unknown id or a repeated id refuses the whole edit") {
@@ -939,4 +956,552 @@ TEST_CASE("revision: every track and note edit moves it once; refusals and no-op
     bumped(true);
     CHECK_FALSE(store.removeTrack(2));
     bumped(false);
+}
+
+// --- the track invariant (D7) and the playback limits (D10) ---------------------------------
+
+namespace {
+
+/// A store of `n` four-beat C chords (ids 1..n): boundaries at multiples of kBar.
+DocumentStore bars(int n) {
+    DocumentStore store;
+    for (int i = 0; i < n; ++i) {
+        REQUIRE(store.appendChord(kC, 4.0, 100) == i + 1);
+    }
+    return store;
+}
+
+/// `threeChords()`'s chords (ids 1..3, boundaries 0, 3840, 7680, 11520) with `tracks`: a hand-built document.
+Document threeChordDoc(std::vector<Track> tracks) {
+    Document doc = threeChords().doc();
+    doc.tracks = std::move(tracks);
+    return doc;
+}
+
+/// kMaxChords chords of kMaxLengthBeats (ids 1..kMaxChords), ending at kMaxNoteTick, with `tracks`.
+Document fullDoc(std::vector<Track> tracks) {
+    Document doc;
+    for (int i = 0; i < kMaxChords; ++i) {
+        doc.events.push_back(ChordEvent{i + 1, kC, kMaxLengthBeats, 100});
+    }
+    doc.tracks = std::move(tracks);
+    return doc;
+}
+
+TrackNote tn(int id, int pitch, int anchor, std::int32_t offset, std::int32_t length, int velocity = 100) {
+    return TrackNote{id, pitch, anchor, offset, length, velocity};
+}
+
+Track track(int id, std::vector<TrackNote> notes = {}) {
+    return Track{id, "T", TrackRole::Other, false, false, std::move(notes)};
+}
+
+/// validateTracks with generous counters, returning the message ("" when valid).
+std::string whyInvalid(const Document& doc, int nextTrackId = 1000, int nextNoteId = 100000) {
+    std::string error = "stale";
+    const bool ok = validateTracks(doc, nextTrackId, nextNoteId, error);
+    CHECK(ok == error.empty());
+    return error;
+}
+
+const std::string kPolyphonyMessage =
+    "At most " + std::to_string(kMaxTrackPolyphony) + " track notes can sound at once";
+const std::string kOnsetMessage =
+    "At most " + std::to_string(kMaxTrackOnsetsPerBeat) + " notes can start within one beat across all tracks";
+
+}  // namespace
+
+TEST_CASE("validateTracks: a document the store built is valid with the store's counters, not with lower ones") {
+    DocumentStore store = threeChordsAndBass();
+    REQUIRE(store.addTrack(TrackRole::Lead) == 2);
+    REQUIRE(store.insertNotes(1, {ns(36, 0, 480), ns(38, 480, 480)}) == std::vector<int>{1, 2});
+    REQUIRE(store.insertNotes(2, {ns(72, 0, 480)}) == std::vector<int>{3});
+    std::string error = "stale";
+    CHECK(validateTracks(store.doc(), store.nextTrackId(), store.nextNoteId(), error));
+    CHECK(error.empty());
+    CHECK_FALSE(validateTracks(store.doc(), store.nextTrackId(), 3, error));  // note 3 at the counter
+    CHECK_FALSE(error.empty());
+    CHECK_FALSE(validateTracks(store.doc(), 2, store.nextNoteId(), error));  // track 2 at the counter
+    CHECK_FALSE(error.empty());
+    CHECK(whyInvalid(Document{}, 1, 1).empty());
+    CHECK_FALSE(whyInvalid(Document{}, 0, 1).empty());  // counters start at 1
+    CHECK_FALSE(whyInvalid(Document{}, 1, 0).empty());
+}
+
+TEST_CASE("addTrack / insertNotes: validate against the counters they will publish, not today's") {
+    DocumentStore store = threeChords();
+    const int firstTrack = store.nextTrackId();
+    REQUIRE(store.addTrack(TrackRole::Bass) == firstTrack);  // id == today's counter: valid only with the next one
+    CHECK(store.nextTrackId() == firstTrack + 1);
+    const int firstNote = store.nextNoteId();
+    REQUIRE(store.insertNotes(firstTrack, {ns(36, 0, 480), ns(38, 480, 480), ns(40, 960, 480)}) ==
+            std::vector<int>{firstNote, firstNote + 1, firstNote + 2});
+    CHECK(store.nextNoteId() == firstNote + 3);
+    std::string error;
+    CHECK(validateTracks(store.doc(), store.nextTrackId(), store.nextNoteId(), error));
+    CHECK_FALSE(validateTracks(store.doc(), store.nextTrackId(), firstNote, error));  // today's counter refuses it
+    CHECK_FALSE(validateTracks(store.doc(), firstTrack, store.nextNoteId(), error));
+}
+
+TEST_CASE("validateTracks: track and note ids from 1, unique (note ids across all tracks), below the counters") {
+    CHECK(whyInvalid(threeChordDoc({track(1, {tn(1, 36, 1, 0, 480)}), track(2, {tn(2, 72, 1, 0, 480)})})).empty());
+    CHECK_FALSE(
+        whyInvalid(threeChordDoc({track(1, {tn(1, 36, 1, 0, 480)}), track(2, {tn(1, 72, 1, 0, 480)})})).empty());
+    CHECK_FALSE(whyInvalid(threeChordDoc({track(1, {tn(1, 36, 1, 0, 480), tn(1, 38, 1, 0, 480)})})).empty());
+    CHECK_FALSE(whyInvalid(threeChordDoc({track(1), track(1)})).empty());
+    CHECK_FALSE(whyInvalid(threeChordDoc({track(0)})).empty());
+    CHECK_FALSE(whyInvalid(threeChordDoc({track(-3)})).empty());
+    CHECK_FALSE(whyInvalid(threeChordDoc({track(1, {tn(0, 36, 1, 0, 480)})})).empty());
+    CHECK_FALSE(whyInvalid(threeChordDoc({track(1, {tn(-1, 36, 1, 0, 480)})})).empty());
+    // At or past the counters.
+    const Document doc = threeChordDoc({track(4, {tn(9, 36, 1, 0, 480)})});
+    CHECK(whyInvalid(doc, 5, 10).empty());
+    CHECK_FALSE(whyInvalid(doc, 4, 10).empty());
+    CHECK_FALSE(whyInvalid(doc, 5, 9).empty());
+    CHECK_FALSE(whyInvalid(doc, 5, 2).empty());
+}
+
+TEST_CASE("validateTracks: a dangling anchor is rejected without deriving a start; extreme values never overflow") {
+    constexpr std::int32_t big = std::numeric_limits<std::int32_t>::max();
+    CHECK_FALSE(whyInvalid(threeChordDoc({track(1, {tn(1, 36, 99, 0, 480)})})).empty());
+    CHECK_FALSE(whyInvalid(threeChordDoc({track(1, {tn(1, 36, 99, big, big)})})).empty());
+    CHECK_FALSE(whyInvalid(threeChordDoc({track(1, {tn(1, 36, kNoEventId, 0, 480)})})).empty());
+    Document noChords;
+    noChords.tracks.push_back(track(1, {tn(1, 36, 1, 0, 480)}));
+    CHECK_FALSE(whyInvalid(noChords).empty());
+    noChords.tracks.front().notes.clear();
+    CHECK(whyInvalid(noChords).empty());  // tracks need no chords, notes do
+    CHECK_FALSE(whyInvalid(threeChordDoc({track(1, {tn(1, 36, 3, big, 480)})})).empty());
+    CHECK_FALSE(whyInvalid(threeChordDoc({track(1, {tn(1, 36, 3, 0, big)})})).empty());
+    CHECK_FALSE(whyInvalid(threeChordDoc({track(1, {tn(1, 36, 3, big, big)})})).empty());
+    CHECK_FALSE(whyInvalid(threeChordDoc({track(1, {tn(1, 36, 3, std::numeric_limits<std::int32_t>::min(), 480)})}))
+                    .empty());
+    CHECK_FALSE(whyInvalid(threeChordDoc({track(1, {tn(1, 36, 3, 0, std::numeric_limits<std::int32_t>::min())})}))
+                    .empty());
+    CHECK(trackPolyphony(threeChordDoc({track(1, {tn(1, 36, 99, 0, 480)})})) == 0);  // the helpers skip it too
+    CHECK(densestOnsetWindow(threeChordDoc({track(1, {tn(1, 36, 99, 0, 480)})})) == 0);
+}
+
+TEST_CASE("validateTracks: notes outside D1's domain are rejected; its edges are accepted") {
+    const auto one = [](TrackNote n) { return whyInvalid(threeChordDoc({track(1, {n})})); };
+    CHECK(one(tn(1, 0, 1, 0, kMinTrackNoteTicks, 1)).empty());
+    CHECK(one(tn(1, 127, 1, 0, kMinTrackNoteTicks, 127)).empty());
+    CHECK_FALSE(one(tn(1, -1, 1, 0, 480)).empty());
+    CHECK_FALSE(one(tn(1, 128, 1, 0, 480)).empty());
+    CHECK_FALSE(one(tn(1, 60, 1, 0, 480, 0)).empty());
+    CHECK_FALSE(one(tn(1, 60, 1, 0, 480, 128)).empty());
+    CHECK_FALSE(one(tn(1, 60, 1, -1, 480)).empty());
+    CHECK_FALSE(one(tn(1, 60, 1, 0, kMinTrackNoteTicks - 1)).empty());
+    CHECK(one(tn(1, 60, 1, 0, kMaxNoteTick)).empty());  // the whole domain from 0
+    CHECK_FALSE(one(tn(1, 60, 1, 0, kMaxNoteTick + 1)).empty());
+    CHECK(one(tn(1, 60, 2, 3000, 480)).empty());  // an inactive note (past its chord) inside the domain is fine
+    // The end of the domain, in the longest document: the last chord starts at kMaxNoteTick - 64 beats.
+    constexpr std::int32_t lastChord = kMaxNoteTick - 64 * kFeelTicksPerBeat;
+    const auto atEnd = [](std::int32_t offset, std::int32_t length) {
+        return whyInvalid(fullDoc({track(1, {tn(1, 60, kMaxChords, offset, length)})}));
+    };
+    CHECK(atEnd(kMaxNoteTick - kMinTrackNoteTicks - lastChord, kMinTrackNoteTicks).empty());
+    CHECK_FALSE(atEnd(kMaxNoteTick - kMinTrackNoteTicks - lastChord + 1, kMinTrackNoteTicks).empty());
+    CHECK_FALSE(atEnd(kMaxNoteTick - kMinTrackNoteTicks - lastChord, kMinTrackNoteTicks + 1).empty());
+    CHECK(atEnd(0, 64 * kFeelTicksPerBeat).empty());
+    CHECK_FALSE(atEnd(0, 64 * kFeelTicksPerBeat + 1).empty());
+}
+
+TEST_CASE("validateTracks: at most kMaxTracks tracks, names within kMaxTrackNameBytes, notes in order") {
+    std::vector<Track> tracks;
+    for (int i = 1; i <= kMaxTracks; ++i) {
+        tracks.push_back(track(i));
+    }
+    CHECK(whyInvalid(threeChordDoc(tracks)).empty());
+    tracks.push_back(track(kMaxTracks + 1));
+    CHECK_FALSE(whyInvalid(threeChordDoc(tracks)).empty());
+    Track named = track(1);
+    named.name = std::string(static_cast<std::size_t>(kMaxTrackNameBytes), 'x');
+    CHECK(whyInvalid(threeChordDoc({named})).empty());
+    named.name.push_back('x');
+    CHECK_FALSE(whyInvalid(threeChordDoc({named})).empty());
+    // Sorted by (derived start, pitch, id): a later chord with a smaller offset comes later.
+    CHECK(whyInvalid(threeChordDoc({track(1, {tn(2, 40, 1, 100, 30), tn(1, 36, 2, 0, 30)})})).empty());
+    CHECK_FALSE(whyInvalid(threeChordDoc({track(1, {tn(1, 36, 2, 0, 30), tn(2, 40, 1, 100, 30)})})).empty());
+    CHECK(whyInvalid(threeChordDoc({track(1, {tn(2, 36, 1, 0, 30), tn(1, 40, 1, 0, 30)})})).empty());
+    CHECK_FALSE(whyInvalid(threeChordDoc({track(1, {tn(1, 40, 1, 0, 30), tn(2, 36, 1, 0, 30)})})).empty());
+    CHECK(whyInvalid(threeChordDoc({track(1, {tn(1, 36, 1, 0, 30), tn(2, 36, 1, 0, 30)})})).empty());
+    CHECK_FALSE(whyInvalid(threeChordDoc({track(1, {tn(2, 36, 1, 0, 30), tn(1, 36, 1, 0, 30)})})).empty());
+}
+
+TEST_CASE("validateTracks: at most kMaxNotesPerTrack per track, inactive notes counted; the limits skip them") {
+    // A one-bar chord and a long one; every note is anchored to the first past its end, so inactive.
+    Document doc;
+    doc.events.push_back(ChordEvent{1, kC, 4.0, 100});
+    doc.events.push_back(ChordEvent{2, kF, kMaxLengthBeats, 100});
+    std::vector<TrackNote> notes;
+    for (int i = 0; i < kMaxNotesPerTrack; ++i) {
+        notes.push_back(tn(i + 1, 60, 1, kBar + i, 960));  // all starting within a few beats, overlapping
+    }
+    doc.tracks.push_back(track(1, notes));
+    CHECK(whyInvalid(doc).empty());
+    CHECK(trackPolyphony(doc) == 0);
+    CHECK(densestOnsetWindow(doc) == 0);
+    doc.tracks.front().notes.push_back(tn(kMaxNotesPerTrack + 1, 60, 1, kBar + kMaxNotesPerTrack, 960));
+    CHECK_FALSE(whyInvalid(doc).empty());
+
+    // The store counts them too: a full track of inactive notes refuses one more.
+    doc.tracks.front().notes.pop_back();
+    DocumentStore store;
+    store.replace(doc, 3);
+    const DocumentStore reference = store;
+    std::string refusal;
+    CHECK(store.insertNotes(1, {ns(60, kBar, 30)}, &refusal).empty());
+    CHECK(refusal == "At most " + std::to_string(kMaxNotesPerTrack) + " notes per track");
+    checkRefused(store, reference);
+}
+
+TEST_CASE("polyphony: at the cap accepted, one more refused, across tracks and muted included; touching notes don't overlap") {
+    // Note i starts at beat i and lasts kMaxTrackPolyphony beats: all of them sound in the last beat before the
+    // first ends, at most one starts in any beat.
+    constexpr int cap = kMaxTrackPolyphony;
+    DocumentStore store = bars(cap / 4 + 4);
+    REQUIRE(store.addTrack(TrackRole::Bass) == 1);
+    REQUIRE(store.addTrack(TrackRole::Lead) == 2);
+    for (int i = 0; i < cap; ++i) {
+        REQUIRE(store.insertNotes(1 + i % 2, {ns(40 + i, i * kFeelTicksPerBeat, cap * kFeelTicksPerBeat)}).size() == 1);
+    }
+    CHECK(trackPolyphony(store.doc()) == cap);
+    REQUIRE(store.setTrackMute(2, true));  // muted notes still count (un-muting must never break the limit)
+    const DocumentStore reference = store;
+    constexpr std::int32_t firstEnd = cap * kFeelTicksPerBeat;
+    std::string refusal;
+    CHECK(store.insertNotes(1, {ns(100, firstEnd - 1, 30)}, &refusal).empty());
+    CHECK(refusal == kPolyphonyMessage);
+    checkRefused(store, reference);
+    CHECK(store.insertNotes(2, {ns(100, firstEnd - 1, 30)}, &refusal).empty());
+    CHECK(refusal == kPolyphonyMessage);
+    checkRefused(store, reference);
+    // Starting exactly where the first note ends (end == start): no overlap, still at the cap.
+    const std::vector<int> touching = store.insertNotes(1, {ns(100, firstEnd, 30)}, &refusal);
+    REQUIRE(touching.size() == 1);
+    CHECK(refusal.empty());
+    CHECK(trackPolyphony(store.doc()) == cap);
+    // updateNotes validates too: moving it one tick earlier, or the first note one tick longer, is refused.
+    const DocumentStore touchingRef = store;
+    NoteEdit earlier = edit(touching.front());
+    earlier.startTick = firstEnd - 1;
+    CHECK_FALSE(store.updateNotes(1, {earlier}, &refusal));
+    CHECK(refusal == kPolyphonyMessage);
+    checkRefused(store, touchingRef);
+    NoteEdit longer = edit(1);
+    longer.lengthTicks = firstEnd + 1;
+    CHECK_FALSE(store.updateNotes(1, {longer}, &refusal));
+    CHECK(refusal == kPolyphonyMessage);
+    checkRefused(store, touchingRef);
+}
+
+TEST_CASE("onsets: at the cap within one beat accepted, one more refused; the window slides across a bar line") {
+    constexpr int cap = kMaxTrackOnsetsPerBeat;
+    constexpr std::int32_t step = kFeelTicksPerBeat / cap;
+    static_assert(step >= kMinTrackNoteTicks, "the notes below must not overlap, so polyphony stays out of it");
+    constexpr std::int32_t base = kBar - kFeelTicksPerBeat / 2;  // the beat straddles the first bar line
+    DocumentStore store = threeChordsAndBass();
+    REQUIRE(store.addTrack(TrackRole::Lead) == 2);
+    for (int j = 0; j < cap; ++j) {
+        REQUIRE(store.insertNotes(1 + j % 2, {ns(60 + j % 12, base + j * step, kMinTrackNoteTicks)}).size() == 1);
+    }
+    CHECK(densestOnsetWindow(store.doc()) == cap);
+    CHECK(notesOf(store, 0).front().anchorEventId == 1);
+    CHECK(notesOf(store, 0).back().anchorEventId == 2);  // both chords share the window
+    REQUIRE(store.setTrackMute(2, true));
+    const DocumentStore reference = store;
+    std::string refusal;
+    CHECK(store.insertNotes(1, {ns(90, base + kFeelTicksPerBeat - 1, 30)}, &refusal).empty());  // [base, base + 960)
+    CHECK(refusal == kOnsetMessage);
+    checkRefused(store, reference);
+    CHECK(store.insertNotes(2, {ns(90, base - 1, 30)}, &refusal).empty());  // [base - 1, base + 959)
+    CHECK(refusal == kOnsetMessage);
+    checkRefused(store, reference);
+    // One beat after the first start: the window [base + step, base + step + 960) holds the others and it.
+    CHECK(store.insertNotes(1, {ns(90, base + kFeelTicksPerBeat, 30)}, &refusal).size() == 1);
+    CHECK(refusal.empty());
+    CHECK(densestOnsetWindow(store.doc()) == cap);
+}
+
+TEST_CASE("the limits count active notes only: notes a shorter chord made inactive leave room") {
+    constexpr int cap = kMaxTrackPolyphony;
+    DocumentStore store = threeChordsAndBass();
+    std::vector<NoteSpec> chord;
+    for (int i = 0; i < cap; ++i) {
+        chord.push_back(ns(40 + i, 2000, 480));
+    }
+    REQUIRE(store.insertNotes(1, chord).size() == static_cast<std::size_t>(cap));
+    std::string refusal;
+    CHECK(store.insertNotes(1, {ns(90, 2000, 480)}, &refusal).empty());
+    CHECK(refusal == kPolyphonyMessage);
+    store.setLength(1, 2.0);  // boundaries 0, 1920, ...: offset 2000 is past the first chord now
+    CHECK(trackPolyphony(store.doc()) == 0);
+    CHECK(densestOnsetWindow(store.doc()) == 0);
+    REQUIRE(store.insertNotes(1, chord, &refusal).size() == static_cast<std::size_t>(cap));  // tick 2000 again
+    CHECK(refusal.empty());
+    CHECK(trackPolyphony(store.doc()) == cap);
+    std::string error;
+    CHECK(validateTracks(store.doc(), store.nextTrackId(), store.nextNoteId(), error));
+}
+
+TEST_CASE("trackPolyphony / densestOnsetWindow: 0 without notes; touching notes don't stack; coincident starts do") {
+    CHECK(trackPolyphony(Document{}) == 0);
+    CHECK(densestOnsetWindow(Document{}) == 0);
+    const Document doc = threeChordDoc({track(1, {tn(1, 36, 1, 0, 480), tn(2, 38, 1, 480, 480), tn(3, 40, 1, 480, 30)}),
+                                        track(2, {tn(4, 72, 1, 470, 20), tn(5, 74, 2, 0, 30)})});
+    CHECK(trackPolyphony(doc) == 3);       // at 480..489: 2, 3 and 4 (1 has ended)
+    CHECK(densestOnsetWindow(doc) == 4);   // [0, 960): 0, 470, 480, 480
+    CHECK(densestOnsetWindow(threeChordDoc({track(1, {tn(1, 36, 1, 0, 30), tn(2, 36, 1, 960, 30)})})) == 1);
+    CHECK(densestOnsetWindow(threeChordDoc({track(1, {tn(1, 36, 1, 0, 30), tn(2, 36, 1, 959, 30)})})) == 2);
+}
+
+TEST_CASE("every track edit validates its candidate: on a document past a cap, only an edit that fixes it commits") {
+    // Lengthening a chord reactivates notes (Task 2a will validate that edit; until then it is the one way in).
+    constexpr int cap = kMaxTrackPolyphony;
+    DocumentStore store = threeChordsAndBass();
+    std::vector<NoteSpec> early;
+    std::vector<NoteSpec> late;
+    for (int i = 0; i < cap; ++i) {
+        early.push_back(ns(40 + i, 2000, 3000));
+        late.push_back(ns(60 + i, 2000, 480));
+    }
+    const std::vector<int> earlyIds = store.insertNotes(1, early);
+    REQUIRE(earlyIds.size() == static_cast<std::size_t>(cap));
+    store.setLength(1, 2.0);  // the early notes go inactive
+    REQUIRE(store.insertNotes(1, late).size() == static_cast<std::size_t>(cap));  // offset 80 in the second chord
+    store.setLength(1, 4.0);  // the early ones sound again, 2000..5000, over the late ones at 3920
+    REQUIRE(trackPolyphony(store.doc()) == 2 * cap);
+    const DocumentStore reference = store;
+    std::string refusal;
+    CHECK(store.addTrack(TrackRole::Lead, std::nullopt, &refusal) == kNoTrackId);
+    CHECK(refusal == kPolyphonyMessage);
+    checkRefused(store, reference);
+    CHECK_FALSE(store.patchTrack(1, std::string{"Low"}, std::nullopt, &refusal));
+    CHECK(refusal == kPolyphonyMessage);
+    checkRefused(store, reference);
+    CHECK_FALSE(store.removeNotes(1, {earlyIds.front()}, &refusal));  // still past the cap
+    CHECK(refusal == kPolyphonyMessage);
+    checkRefused(store, reference);
+    CHECK(store.removeNotes(1, earlyIds, &refusal));
+    CHECK(refusal.empty());
+    CHECK(trackPolyphony(store.doc()) == cap);
+}
+
+// --- lane mute and solo (D8, live state) ----------------------------------------------------
+
+TEST_CASE("laneAudible: no solo anywhere, every unmuted lane; any solo, only soloed lanes, mute ignored on them") {
+    CHECK(laneAudible(false, false, false));
+    CHECK_FALSE(laneAudible(true, false, false));
+    CHECK_FALSE(laneAudible(false, false, true));
+    CHECK_FALSE(laneAudible(true, false, true));
+    CHECK(laneAudible(false, true, true));
+    CHECK(laneAudible(true, true, true));
+}
+
+TEST_CASE("chordsAudible / trackAudible: the audibility table over chords and tracks") {
+    DocumentStore store = threeChordsAndBass();
+    REQUIRE(store.addTrack(TrackRole::Lead) == 2);
+    REQUIRE(store.addTrack(TrackRole::Other) == 3);
+    const auto audible = [&store]() {
+        std::vector<bool> lanes{chordsAudible(store.doc())};
+        for (std::size_t i = 0; i < store.doc().tracks.size(); ++i) {
+            lanes.push_back(trackAudible(store.doc(), i));
+        }
+        return lanes;
+    };
+    using Lanes = std::vector<bool>;
+    CHECK(audible() == Lanes{true, true, true, true});  // no solo, nothing muted
+    REQUIRE(store.setTrackMute(1, true));
+    CHECK(audible() == Lanes{true, false, true, true});
+    REQUIRE(store.setTrackSolo(2, true));  // one solo: only it
+    CHECK(audible() == Lanes{false, false, true, false});
+    REQUIRE(store.setTrackMute(2, true));  // muted and soloed: the solo wins
+    CHECK(audible() == Lanes{false, false, true, false});
+    store.setChordsSolo(true);  // chords soloed too
+    CHECK(audible() == Lanes{true, false, true, false});
+    REQUIRE(store.setTrackSolo(2, false));  // chords alone soloed
+    CHECK(audible() == Lanes{true, false, false, false});
+    REQUIRE(store.setTrackSolo(1, true));  // a muted track soloed
+    CHECK(audible() == Lanes{true, true, false, false});
+    REQUIRE(store.setTrackSolo(1, false));
+    store.setChordsSolo(false);
+    store.setChordsMute(true);
+    REQUIRE(store.setTrackMute(3, true));  // everything muted, no solo
+    CHECK(audible() == Lanes{false, false, false, false});
+}
+
+TEST_CASE("setTrackMute / setTrackSolo: false for an unknown id or no change; live: no history, no revision") {
+    DocumentStore store = threeChordsAndBass();
+    REQUIRE(store.insertNotes(1, {ns(36, 0, 480)}).size() == 1);
+    const DocumentStore reference = store;
+    const Document before = store.doc();
+    CHECK_FALSE(store.setTrackMute(7, true));
+    CHECK_FALSE(store.setTrackSolo(7, true));
+    CHECK_FALSE(store.setTrackMute(1, false));
+    CHECK_FALSE(store.setTrackSolo(1, false));
+    CHECK(store.doc() == before);
+    CHECK(store.setTrackMute(1, true));
+    CHECK_FALSE(store.setTrackMute(1, true));
+    CHECK(store.setTrackSolo(1, true));
+    CHECK(trackAt(store, 0).mute);
+    CHECK(trackAt(store, 0).solo);
+    CHECK(store.doc() != before);  // live changes count for equality (they dirty the host, D17)
+    CHECK(store.revision() == reference.revision());
+    // Not history: the one undo step is still the insert, and it keeps the flags.
+    REQUIRE(store.undo());
+    CHECK(notesOf(store).empty());
+    CHECK(trackAt(store, 0).mute);
+    CHECK(trackAt(store, 0).solo);
+    REQUIRE(store.undo());  // the addTrack
+    CHECK(store.doc().tracks.empty());
+    REQUIRE(store.undo());
+    REQUIRE(store.undo());
+    REQUIRE(store.undo());  // the three chords
+    CHECK_FALSE(store.undo());
+}
+
+TEST_CASE("track mute and solo survive undo and redo by track id; a track absent now keeps its stored flags") {
+    DocumentStore store = threeChordsAndBass();
+    REQUIRE(store.addTrack(TrackRole::Lead) == 2);
+    REQUIRE(store.insertNotes(1, {ns(36, 0, 480)}).size() == 1);
+    REQUIRE(store.moveTrack(2, 0));  // order Lead, Bass: flags follow ids, not positions
+    REQUIRE(store.setTrackMute(1, true));
+    REQUIRE(store.setTrackSolo(2, true));
+    REQUIRE(store.undo());  // the move: Bass, Lead again
+    CHECK(trackIdsOf(store) == std::vector<int>{1, 2});
+    CHECK(trackAt(store, 0).mute);
+    CHECK_FALSE(trackAt(store, 0).solo);
+    CHECK_FALSE(trackAt(store, 1).mute);
+    CHECK(trackAt(store, 1).solo);
+    REQUIRE(store.setTrackMute(1, false));
+    REQUIRE(store.redo());
+    CHECK(trackIdsOf(store) == std::vector<int>{2, 1});
+    CHECK_FALSE(trackAt(store, 1).mute);
+    CHECK(trackAt(store, 0).solo);
+    // Removing a muted track and undoing brings it back with the flags it had.
+    REQUIRE(store.setTrackMute(2, true));
+    REQUIRE(store.removeTrack(2));
+    REQUIRE(store.undo());
+    CHECK(trackIdsOf(store) == std::vector<int>{2, 1});
+    CHECK(trackAt(store, 0).mute);
+    CHECK(trackAt(store, 0).solo);
+}
+
+TEST_CASE("setChordsMute / setChordsSolo: live, kept by undo and redo, no history, no revision") {
+    DocumentStore store = threeChordsAndBass();
+    const std::uint64_t r = store.revision();
+    const Document before = store.doc();
+    store.setChordsMute(true);
+    store.setChordsSolo(true);
+    CHECK(store.doc().chordsMuted);
+    CHECK(store.doc().chordsSolo);
+    CHECK(store.doc() != before);
+    CHECK(store.revision() == r);
+    REQUIRE(store.undo());  // the addTrack, not a flag
+    CHECK(store.doc().tracks.empty());
+    CHECK(store.doc().chordsMuted);
+    CHECK(store.doc().chordsSolo);
+    store.setChordsMute(false);
+    REQUIRE(store.redo());
+    CHECK(store.doc().tracks.size() == 1);
+    CHECK_FALSE(store.doc().chordsMuted);
+    CHECK(store.doc().chordsSolo);
+}
+
+// --- note selection (D5, live state) --------------------------------------------------------
+
+TEST_CASE("insertNotes selects exactly the ids it inserted, in note order, replacing any selection") {
+    DocumentStore store = threeChordsAndBass();
+    REQUIRE(store.addTrack(TrackRole::Lead) == 2);
+    CHECK(store.noteSelection().trackId == kNoTrackId);
+    CHECK(store.noteSelection().ids.empty());
+    REQUIRE(store.insertNotes(1, {ns(40, 960, 30), ns(36, 0, 30), ns(38, 480, 30)}) == std::vector<int>{1, 2, 3});
+    CHECK(store.noteSelection().trackId == 1);
+    CHECK(store.noteSelection().ids == std::vector<int>{2, 3, 1});
+    REQUIRE(store.insertNotes(1, {ns(37, 240, 30)}) == std::vector<int>{4});
+    CHECK(store.noteSelection().ids == std::vector<int>{4});
+    REQUIRE(store.insertNotes(2, {ns(72, 0, 30)}) == std::vector<int>{5});
+    CHECK(store.noteSelection().trackId == 2);  // one track at a time
+    CHECK(store.noteSelection().ids == std::vector<int>{5});
+    const DocumentStore reference = store;
+    CHECK(store.insertNotes(2, {ns(72, 99999, 30)}).empty());  // a refusal leaves the selection
+    CHECK(store.noteSelection().trackId == 2);
+    CHECK(store.noteSelection().ids == std::vector<int>{5});
+}
+
+TEST_CASE("setNoteSelection: unknown ids dropped, repeats collapsed, note order; empty or kNoTrackId clears") {
+    DocumentStore store = threeChordsAndBass();
+    REQUIRE(store.addTrack(TrackRole::Lead) == 2);
+    REQUIRE(store.insertNotes(1, {ns(40, 960, 30), ns(36, 0, 30), ns(38, 480, 30)}) == std::vector<int>{1, 2, 3});
+    REQUIRE(store.insertNotes(2, {ns(72, 0, 30)}) == std::vector<int>{4});
+    const std::uint64_t r = store.revision();
+    store.setNoteSelection(1, {1, 99, 3, 1, 4, 2, 3});  // 4 is in another track
+    CHECK(store.noteSelection().trackId == 1);
+    CHECK(store.noteSelection().ids == std::vector<int>{2, 3, 1});
+    store.setNoteSelection(5, {4});  // an unknown track: no-op
+    CHECK(store.noteSelection().trackId == 1);
+    CHECK(store.noteSelection().ids == std::vector<int>{2, 3, 1});
+    store.setNoteSelection(2, {4});
+    CHECK(store.noteSelection().trackId == 2);
+    CHECK(store.noteSelection().ids == std::vector<int>{4});
+    store.setNoteSelection(1, {99});  // nothing left: cleared
+    CHECK(store.noteSelection().trackId == kNoTrackId);
+    CHECK(store.noteSelection().ids.empty());
+    store.setNoteSelection(1, {1});
+    store.setNoteSelection(1, {});
+    CHECK(store.noteSelection().trackId == kNoTrackId);
+    store.setNoteSelection(1, {1});
+    store.setNoteSelection(kNoTrackId, {1});
+    CHECK(store.noteSelection().trackId == kNoTrackId);
+    CHECK(store.noteSelection().ids.empty());
+    CHECK(store.revision() == r);  // never history, never the revision
+    REQUIRE(store.undo());
+    CHECK(store.doc().tracks.at(1).notes.empty());
+}
+
+TEST_CASE("note selection: stale ids dropped after removeNotes, cleared after removeTrack, re-sorted after a move") {
+    DocumentStore store = threeChordsAndBass();
+    REQUIRE(store.addTrack(TrackRole::Lead) == 2);
+    REQUIRE(store.insertNotes(1, {ns(36, 0, 30), ns(38, 480, 30), ns(40, 960, 30)}) == std::vector<int>{1, 2, 3});
+    REQUIRE(store.removeNotes(1, {2}));
+    CHECK(store.noteSelection().trackId == 1);
+    CHECK(store.noteSelection().ids == std::vector<int>{1, 3});
+    NoteEdit move = edit(1);
+    move.startTick = 2000;  // now after note 3
+    REQUIRE(store.updateNotes(1, {move}));
+    CHECK(store.noteSelection().ids == std::vector<int>{3, 1});
+    REQUIRE(store.removeNotes(1, {1, 3}));
+    CHECK(store.noteSelection().trackId == kNoTrackId);  // nothing left
+    CHECK(store.noteSelection().ids.empty());
+    REQUIRE(store.undo());  // the notes come back, the selection does not
+    CHECK(store.noteSelection().trackId == kNoTrackId);
+    store.setNoteSelection(1, {1, 3});
+    REQUIRE(store.removeTrack(1));
+    CHECK(store.noteSelection().trackId == kNoTrackId);
+    CHECK(store.noteSelection().ids.empty());
+}
+
+TEST_CASE("note selection: an undone insert drops its ids; replace clears it; changes leave the revision alone") {
+    DocumentStore store = threeChordsAndBass();
+    REQUIRE(store.insertNotes(1, {ns(36, 0, 30)}) == std::vector<int>{1});
+    REQUIRE(store.insertNotes(1, {ns(38, 480, 30), ns(40, 960, 30)}) == std::vector<int>{2, 3});
+    store.setNoteSelection(1, {1, 2, 3});
+    const std::uint64_t r = store.revision();
+    REQUIRE(store.undo());
+    CHECK(store.revision() == r + 1);
+    CHECK(store.noteSelection().trackId == 1);
+    CHECK(store.noteSelection().ids == std::vector<int>{1});
+    REQUIRE(store.redo());  // the ids exist again, but the selection is not restored
+    CHECK(store.noteSelection().ids == std::vector<int>{1});
+    REQUIRE(store.undo());
+    REQUIRE(store.undo());
+    CHECK(store.noteSelection().trackId == kNoTrackId);
+    CHECK(store.noteSelection().ids.empty());
+    REQUIRE(store.redo());
+    store.setNoteSelection(1, {1});
+    const Document doc = store.doc();
+    store.replace(doc, store.nextId());
+    CHECK(store.noteSelection().trackId == kNoTrackId);
+    CHECK(store.noteSelection().ids.empty());
 }

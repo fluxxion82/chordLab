@@ -256,7 +256,9 @@ enum class ProgressionRefusal { None, Empty, NonFiniteLength, DocumentFull, Even
 /// the anchor (`selectedEventId`), kept across edits, undo and redo for as long as each selected event exists
 /// (an id whose event goes is dropped; a dropped anchor moves to the nearest selected block that is left, the
 /// next one in strip order, else the one before), never restored by undo and never persisted (`stateJson`
-/// leaves it out).
+/// leaves it out). The lane flags (tracks design D8: `chordsMuted`, `chordsSolo` and each track's `mute` and
+/// `solo`, kept by track id) are live state too, and so is the note selection (D5, `noteSelection`), kept as the
+/// chord selection is.
 /// The history holds at most `kMaxUndoDepth` snapshots; beyond that the oldest is dropped.
 /// Event ids are handed out from a counter that starts at `firstId` (1 by default), only ever increases
 /// and is not part of the undoable state, so an id is never reused even after undo or redo. Section ids,
@@ -274,6 +276,9 @@ enum class ProgressionRefusal { None, Empty, NonFiniteLength, DocumentFull, Even
 /// (false, an empty vector or `kNoTrackId`), changes nothing (no history, no counter, no revision) and writes a
 /// short human-readable reason; on a mere no-op (valid, but nothing would change) it returns false (or the empty
 /// vector) and leaves the string empty. So a caller tells "refused" (non-empty reason) from "nothing to do".
+/// Every one of them runs `validateTracks` (D7) on its candidate document with the counters it will publish, after
+/// its own checks, and refuses with the validator's message when that fails (for example "At most 8 track notes
+/// can sound at once"); document and counters are then published together.
 ///
 /// Sections follow the chords they start on, except that the first section is pinned to the start of the
 /// sequence: `moveChord` keeps every section on its start chord and re-sorts the list by the new indices,
@@ -553,8 +558,10 @@ public:
     /// `updateNotes`, for which an empty list is a silent no-op), more than `kMaxNotesPerTrack` notes in the track
     /// afterwards, a note id counter that cannot hand out `specs.size()` ids below INT_MAX, an empty
     /// progression ("Add chords first"), or any start no chord owns (at or after the end: "A note must start
-    /// before the end of the progression"). Every note already in the track must anchor an existing chord (the
-    /// sort reads every note's derived start).
+    /// before the end of the progression"), and when the result fails `validateTracks` (the playback limits, D10).
+    /// Every note already in the track must anchor an existing chord (the sort reads every note's derived start).
+    /// The inserted notes become the note selection, exactly them, in the track's note order (live state, set
+    /// after the commit).
     std::vector<int> insertNotes(int trackId, const std::vector<NoteSpec>& specs, std::string* refusal = nullptr);
 
     /// Removes the notes of `ids` that track `trackId` holds, as ONE undoable step; ids it does not hold are
@@ -580,6 +587,30 @@ public:
     /// reads every note's derived start).
     bool updateNotes(int trackId, const std::vector<NoteEdit>& edits, std::string* refusal = nullptr);
 
+    /// Live state (tracks design D4, D8): mutes or soloes track `id`. Never recorded in the history and leaves the
+    /// revision alone; undo and redo keep each track's current flags by track id (a restored track that the
+    /// current document does not hold, such as one an undone `removeTrack` brings back, keeps the flags it was
+    /// stored with). The flags count for `Document` equality, so a toggle dirties the host (D17). Returns false,
+    /// changing nothing, for an unknown id or a value the track already has.
+    bool setTrackMute(int id, bool on);
+    bool setTrackSolo(int id, bool on);
+
+    /// Live state, as `setTrackMute`: mutes or soloes the chords lane (`Document::chordsMuted` / `chordsSolo`).
+    void setChordsMute(bool on);
+    void setChordsSolo(bool on);
+
+    /// The note selection (D5): live state, one track at a time, its ids in the track's note order. Kept across
+    /// edits, undo and redo for as long as each note exists: after every commit, undo and redo, ids no longer in
+    /// the track are dropped and the rest re-sorted into its note order, and the selection is cleared when the
+    /// track is gone or no id is left. `insertNotes` selects exactly what it inserted; `replace` clears it. Never
+    /// recorded in the history, never moves the revision, never persisted.
+    const NoteSelection& noteSelection() const;
+
+    /// Selects the notes of `ids` that track `trackId` holds (unknown ids dropped, repeats collapsed), in its note
+    /// order. An empty result, or `kNoTrackId`, clears the selection; a track id no track has is a no-op (as
+    /// `setSelectedEvent` with an unknown id). Never recorded in the history.
+    void setNoteSelection(int trackId, const std::vector<int>& ids);
+
     /// Restores the undoable state from before the most recent change, keeping the live state (a browsed
     /// key that is the project key stays so: it follows the restored key). Returns false, changing nothing,
     /// when there is nothing to undo.
@@ -590,8 +621,8 @@ public:
     bool redo();
 
     /// Replaces the whole document, live state included, and restarts the id counters: what a load does.
-    /// Clears the undo and redo history and the selection (a loaded document starts unselected, even
-    /// when it holds an event with the selected id) and changes nothing else.
+    /// Clears the undo and redo history and both selections, chords and notes (a loaded document starts
+    /// unselected, even when it holds an event with the selected id) and changes nothing else.
     /// `doc` must satisfy the store's invariants (valid chords and keys, finite lengths within
     /// [kMinLengthBeats, kMaxLengthBeats], velocities within [kMinVelocity, kMaxVelocity], inversions
     /// within 0..`inversionCount(chord) - 1`, octaves within [kMinVoicingOctave, kMaxVoicingOctave],
@@ -604,8 +635,8 @@ public:
     /// documents from outside the process (`loadStateJson`) validate before calling.
     /// `nextTrackId` and `nextNoteId` follow `nextSectionId`'s rule: >= 1 and greater than every track id
     /// (respectively every note id of every track), or 0 to derive one past the largest (1 when there is none).
-    /// Track and note ids must be in 1..INT_MAX-1 and unique (note ids across all tracks), and every note must
-    /// anchor an existing chord. Moves the revision.
+    /// The tracks must pass `validateTracks` with the counters `replace` publishes (asserted in debug builds; a
+    /// loader validates first). Moves the revision.
     void replace(Document doc, int nextId, int nextSectionId = 0, int nextTrackId = 0, int nextNoteId = 0);
 
     /// The id the next successful append will get. Persisted by `stateJson` so that a reloaded document
@@ -640,14 +671,21 @@ private:
     /// revision. Returns whether anything changed.
     bool commit(Document next);
 
+    /// `commit` for the track and note edits (D7): a candidate equal to the current document is a no-op (false, no
+    /// reason); otherwise it must pass `validateTracks` with the counters the edit will publish (`nextTrackId`,
+    /// `nextNoteId`), else nothing changes and the validator's message goes to `refusal`. The caller publishes
+    /// those counters right after a true return, with no throwing step in between.
+    bool commitTracks(Document next, int nextTrackId, int nextNoteId, std::string* refusal);
+
     /// The one body of `appendProgression` and `replaceProgression`: checks `progressionRefusal`, builds
     /// the next document (events and sections) and commits it once.
     bool loadProgression(const std::vector<std::pair<Chord, double>>& steps, std::string sectionName,
                          ProgressionLoad how);
 
     /// Drops the selected ids no event of the current document has, moving a dropped anchor as
-    /// `selectedEventIds` says, and re-sorts the rest into the document's strip order. Called after every change
-    /// of `doc_` (a commit, an undo, a redo); `replace` clears unconditionally.
+    /// `selectedEventIds` says, and re-sorts the rest into the document's strip order; does the same for the note
+    /// selection against its track's notes (clearing it when the track is gone or nothing is left). Called after
+    /// every change of `doc_` (a commit, an undo, a redo); `replace` clears both unconditionally.
     void dropStaleSelection() noexcept;
 
     Document doc_;
@@ -660,6 +698,7 @@ private:
     std::uint64_t revision_ = 1;
     std::vector<int> selectedEventIds_;  // strip order; empty: nothing selected
     int anchorEventId_ = kNoEventId;     // one of selectedEventIds_, or kNoEventId when it is empty
+    NoteSelection noteSelection_;        // the track's note order; empty ids exactly when trackId is kNoTrackId
 };
 
 }  // namespace chordlab
