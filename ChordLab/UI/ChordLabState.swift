@@ -233,10 +233,15 @@ class ChordLabState: NSObject, ObservableObject {
   /// chip); Delete removes every selected chord in one step; ⌘C copies the selection, ⌘X cuts it, ⌘V pastes
   /// after the anchor (else at the end), ⌘D duplicates the selection after its last block, ⌘A selects every
   /// block (strip editing design D5, D6); undo and redo are the key bar's commands; an arrow nudge (mapped only
-  /// with a track's notes targeted, tracks design D15) does nothing yet (plan Task 20). Each does nothing when it
-  /// has nothing to act on, and the router consumes every mapped key whether or not it did anything, so the
-  /// host never acts on it (see `KeyCommandMap`, `EditorKeyRouter`).
+  /// with a track's notes targeted, tracks design D15) does nothing yet (plan Task 20); with notes targeted only
+  /// undo and redo run (`KeyCommand.runsBeforeNoteDispatch`). Each does nothing when it has nothing to act on,
+  /// and the router consumes every mapped key whether or not it did anything, so the host never acts on it (see
+  /// `KeyCommandMap`, `EditorKeyRouter`).
   @MainActor func perform(_ command: KeyCommand) {
+    // Everything below acts on the chords. With a track's notes targeted only the shared undo history runs, so
+    // a key meant for the notes never edits the chords the open track hides; plan Task 20 replaces this guard
+    // with the dispatch by target.
+    guard command.runsBeforeNoteDispatch(target: keyTarget) else { return }
     let selection = snapshot?.selection ?? []
     switch command {
     case .appendSuggestion(let n):

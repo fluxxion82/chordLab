@@ -359,8 +359,9 @@ bool ChordLab::OnKeyDown(const IKeyPress& key)
   // Main thread: the host calls IPlugView::onKeyDown on the UI thread, between OpenWindow and
   // CloseWindow, so mViewController is valid or null. iPlug2's IKeyPress: utf8 text, a Windows virtual
   // key (kVK_BACK 0x08, kVK_DELETE 0x2E, digits 0x30..0x39, arrows kVK_LEFT 0x25 / kVK_UP 0x26 /
-  // kVK_RIGHT 0x27 / kVK_DOWN 0x28 with empty text), S = shift, C = command on macOS
-  // (IPlugVST3_View.h TranslateKeyMessage reads kCommandKey into C), A = alt; Control is not carried.
+  // kVK_RIGHT 0x27 / kVK_DOWN 0x28, normally with empty text; the VK decides), S = shift, C = command
+  // on macOS (IPlugVST3_View.h TranslateKeyMessage reads kCommandKey into C), A = alt; Control is not
+  // carried.
   // Every key goes to the router unfiltered; it reads arrows from the VK and consumes a key only when
   // the map has a command for it with the current key target (arrows: only with notes targeted).
   // Live 12 never calls this route (it delivers keys to the plug-in window, route A; tracks design S0);

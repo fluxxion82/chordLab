@@ -198,6 +198,74 @@ final class KeyCommandTests: XCTestCase {
     XCTAssertEqual(KeyTarget.notes(trackId: 1).afterOpenLaneChange(from: .track(1), to: .track(1)), .notes(trackId: 1))
   }
 
+  // MARK: - What perform may run before notes get their own dispatch (plan Task 20)
+
+  private let everyCommand: [KeyCommand] = [
+    .appendSuggestion(1), .deleteSelection, .undo, .redo, .copy, .cut, .paste, .duplicate, .selectAll,
+    .nudge(.up, octave: false), .nudge(.left, octave: true),
+  ]
+
+  func testEveryCommandRunsWithTheChordsTargeted() {
+    for command in everyCommand {
+      XCTAssertTrue(command.runsBeforeNoteDispatch(target: .chords), "\(command)")
+    }
+  }
+
+  func testOnlyUndoAndRedoRunWithNotesTargeted() {
+    for command in everyCommand {
+      let expected = command == .undo || command == .redo
+      XCTAssertEqual(command.runsBeforeNoteDispatch(target: .notes(trackId: 3)), expected,
+                     "\(command) must never act on the hidden chords")
+    }
+  }
+
+  // MARK: - The AppKit adapter's key (route A: macOS key code and charactersIgnoringModifiers)
+
+  private func mac(_ keyCode: UInt16, _ text: String?) -> KeyInput.Key {
+    KeyInput.Key(macKeyCode: keyCode, charactersIgnoringModifiers: text)
+  }
+
+  func testMacKeyCodesForTheDeleteKeys() {
+    XCTAssertEqual(mac(51, "\u{7F}"), .delete, "delete")
+    XCTAssertEqual(mac(51, ""), .delete)
+    XCTAssertEqual(mac(117, "\u{F728}"), .forwardDelete, "NSDeleteFunctionKey")
+    XCTAssertEqual(mac(117, nil), .forwardDelete)
+  }
+
+  func testMacKeyCodesForTheArrowsWhateverTheirText() {
+    // Live 12 sends arrows with empty text (S0); AppKit elsewhere gives the private-use function-key characters.
+    XCTAssertEqual(mac(123, ""), .arrow(.left))
+    XCTAssertEqual(mac(124, ""), .arrow(.right))
+    XCTAssertEqual(mac(125, ""), .arrow(.down))
+    XCTAssertEqual(mac(126, ""), .arrow(.up))
+    XCTAssertEqual(mac(123, "\u{F702}"), .arrow(.left), "NSLeftArrowFunctionKey")
+    XCTAssertEqual(mac(124, "\u{F703}"), .arrow(.right), "NSRightArrowFunctionKey")
+    XCTAssertEqual(mac(125, "\u{F701}"), .arrow(.down), "NSDownArrowFunctionKey")
+    XCTAssertEqual(mac(126, "\u{F700}"), .arrow(.up), "NSUpArrowFunctionKey")
+    XCTAssertEqual(mac(126, nil), .arrow(.up))
+    XCTAssertEqual(mac(123, "1"), .arrow(.left), "a digit's text must not append a chip")
+  }
+
+  func testMacKeypadDigitIsItsCharacter() {
+    XCTAssertEqual(mac(84, "2"), .character("2"), "keypad 2")
+  }
+
+  func testAnArrowCharacterWithAnotherKeyCodeIsACharacter() {
+    // Only the key code makes an arrow; the text never does.
+    XCTAssertEqual(mac(0, "\u{F702}"), .character("\u{F702}"))
+  }
+
+  func testMacTextThatIsNotOneCharacterIsOther() {
+    XCTAssertEqual(mac(0, ""), .other)
+    XCTAssertEqual(mac(0, nil), .other)
+    XCTAssertEqual(mac(0, "ab"), .other)
+  }
+
+  func testMacLetterIsItsCharacter() {
+    XCTAssertEqual(mac(6, "z"), .character("z"))
+    XCTAssertEqual(chords(input(mac(6, "z"), command: true)), .undo)
+  }
+
   // MARK: - The VST3 adapter (iPlug2 IKeyPress: utf8 text, Windows virtual key, S / C=command / A)
 
   func testVirtualKeyNormalisation() {

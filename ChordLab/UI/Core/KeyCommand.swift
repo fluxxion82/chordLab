@@ -1,11 +1,5 @@
 import Foundation
 
-/// An arrow key's direction. One type for the key (`KeyInput.Key.arrow`), the command (`KeyCommand.nudge`) and
-/// the nudge itself (`RollGroupMath.NudgeDirection` is this type).
-enum ArrowDirection: Hashable {
-  case left, right, up, down
-}
-
 /// A key press as either native route reports it, reduced to what the shortcuts need: the key
 /// (a character, one of the two delete keys, an arrow, or something else) and the four modifiers.
 /// Arrows are always read from the key code or virtual key, never from the text (route A's arrow text is a
@@ -17,6 +11,27 @@ struct KeyInput: Hashable {
     case forwardDelete   // fn-delete / "⌦"
     case arrow(ArrowDirection)
     case other
+
+    /// The route-A key (`KeyInput(event:)` passes the event's `keyCode` and `charactersIgnoringModifiers`):
+    /// macOS hardware key codes for the delete keys (51 = delete, 117 = forward delete) and the arrows (123 ←,
+    /// 124 →, 125 ↓, 126 ↑; layout-independent, unlike AppKit's `specialKey`, which is derived from the text),
+    /// whatever text comes with them (Live 12 sends arrows with none, tracks design S0; AppKit elsewhere gives
+    /// the private-use function-key characters U+F700…U+F703); any other key with exactly one character is that
+    /// character (a keypad digit included, and a private-use arrow character on a non-arrow key code too: only
+    /// the key code makes an arrow); no text, or more than one character, is `.other`.
+    init(macKeyCode: UInt16, charactersIgnoringModifiers: String?) {
+      switch macKeyCode {
+      case 51: self = .delete
+      case 117: self = .forwardDelete
+      case 123: self = .arrow(.left)
+      case 124: self = .arrow(.right)
+      case 125: self = .arrow(.down)
+      case 126: self = .arrow(.up)
+      default:
+        let text = charactersIgnoringModifiers ?? ""
+        self = text.count == 1 ? .character(text.first!) : .other
+      }
+    }
   }
 
   var key: Key
@@ -69,6 +84,18 @@ enum KeyCommand: Equatable {
   case nudge(ArrowDirection, octave: Bool)
 }
 
+extension KeyCommand {
+  /// Whether `ChordLabState.perform` runs this command with `target` while it acts only on the chords (until plan
+  /// Task 20 dispatches by target): every command with `.chords`; with `.notes` only `.undo` and `.redo` (the
+  /// shared undo history), since anything else would act on the chords the open track hides.
+  func runsBeforeNoteDispatch(target: KeyTarget) -> Bool {
+    switch target {
+    case .chords: return true
+    case .notes: return self == .undo || self == .redo
+    }
+  }
+}
+
 /// What the keyboard edits (tracks design D15 "Keyboard"): the chord strip, or one track's notes in the roll.
 /// UI state in `ChordLabState.keyTarget`, set by the last mouse-down (strip, palette, suggestions → chords; the
 /// roll → that track's notes), never saved.
@@ -96,7 +123,8 @@ enum KeyTarget: Equatable {
 /// suggestion chip; Delete and Forward Delete remove the selected chords; ⌘Z and ⇧⌘Z undo and redo; ⌘C, ⌘X, ⌘V,
 /// ⌘D and ⌘A copy, cut, paste, duplicate and select all, without Shift (⇧⌘C and the like stay the host's); every
 /// arrow, with any modifiers, is nil (the host keeps it: Live moves its own selection). With `.notes(trackId)`
-/// targeted: the same Delete, ⌘Z/⇧⌘Z and ⌘C ⌘X ⌘V ⌘D ⌘A entries (`ChordLabState.perform` sends them to the notes);
+/// targeted: the same Delete, ⌘Z/⇧⌘Z and ⌘C ⌘X ⌘V ⌘D ⌘A entries (`ChordLabState.perform` will send Delete and
+/// ⌘C ⌘X ⌘V ⌘D ⌘A to the notes, plan Task 20; ⌘Z/⇧⌘Z stay the shared undo);
 /// a bare arrow is `.nudge(direction, octave: false)` and a ⇧-arrow `.nudge(direction, octave: true)`; an arrow
 /// with ⌘, ⌥ or ⌃ (⇧ or not) is nil; bare digits are nil (the suggestion chips are hidden while a track is open,
 /// design D13). For both targets everything else (Space, letters, 9, 0, digits or deletes with a modifier, ⌥ or

@@ -48,7 +48,7 @@ struct RollLimits: Equatable {
 /// that `updateNotes` / `insertNotes` whole and the roll shows the refusal like any other, leaving every note as it
 /// was. The roll does not pre-filter such groups.
 ///
-/// Depends on nothing but Foundation and Core's `ArrowDirection` (KeyCommand.swift); unit-tested by the
+/// Depends on nothing but Foundation and Core's `ArrowDirection` (ArrowDirection.swift); unit-tested by the
 /// `ChordLabUICore` package (Tests/ChordLabUICoreTests/RollGroupMathTests.swift).
 enum RollGroupMath {
   /// Which edge a resize drags: the start (the end stays) or the end (the start stays).
