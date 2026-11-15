@@ -233,9 +233,6 @@ bool fail(std::string& error, std::string reason) {
 
 bool validateTracks(const Document& doc, int nextTrackId, int nextNoteId, std::string& error, TrackFault* fault) {
     error.clear();
-    if (fault != nullptr) {
-        *fault = TrackFault::None;
-    }
     // Every failure below is a Structure fault unless the domain and the playback limits say otherwise.
     const auto failAs = [&](TrackFault kind, std::string reason) {
         if (fault != nullptr) {
@@ -304,8 +301,10 @@ bool validateTracks(const Document& doc, int nextTrackId, int nextNoteId, std::s
                 return failAs(TrackFault::Domain, which() + " starts past the end of the note range");
             }
             if (n.lengthTicks < kMinTrackNoteTicks || n.lengthTicks > kMaxNoteTick - start) {
-                return failAs(TrackFault::Domain, which() + " has a length outside " + std::to_string(kMinTrackNoteTicks) +
-                                                      ".." + std::to_string(kMaxNoteTick - start) + " ticks");
+                // A too-short length is the note's own fault; only a length past the end is the domain's.
+                const TrackFault kind = n.lengthTicks < kMinTrackNoteTicks ? TrackFault::Structure : TrackFault::Domain;
+                return failAs(kind, which() + " has a length outside " + std::to_string(kMinTrackNoteTicks) + ".." +
+                                        std::to_string(kMaxNoteTick - start) + " ticks");
             }
             if (previous != nullptr && std::tie(start, n.pitch, n.id) <=
                                            std::tie(previousStart, previous->pitch, previous->id)) {

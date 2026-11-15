@@ -204,7 +204,8 @@ enum class TrackFault { None, Structure, Domain, Polyphony, Onsets };
 /// O(n log n) in the number of notes.
 ///
 /// `fault`, when given, classifies the failure so a caller can word it for its own edit (D17a): `None` on success;
-/// `Domain` for a derived start past `kMaxNoteTick - kMinTrackNoteTicks` or a length past `kMaxNoteTick - start`;
+/// `Domain` for a derived start past `kMaxNoteTick - kMinTrackNoteTicks` or a length past `kMaxNoteTick - start` (a
+/// length below `kMinTrackNoteTicks` is `Structure`);
 /// `Polyphony` and `Onsets` for the two D10 limits; `Structure` for everything else. `error` is the validator's
 /// precise text whatever the class.
 bool validateTracks(const Document& doc, int nextTrackId, int nextNoteId, std::string& error,

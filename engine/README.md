@@ -67,8 +67,9 @@ Three mechanisms, chosen by who can get it wrong:
   `progressionRefusal` names, and `addSection` returns `kNoSectionId` for an index that is not a chord position or
   already starts a section (through JSON that index is a no-op and only exhausted ids are refused); the track and
   note edits and every chord timing edit (which carry the notes, tracks design D3) report a refusal through a
-  trailing `std::string* refusal`, a non-empty reason with the failure value (the track invariant's message, such as
-  "At most 8 track notes can sound at once"), an empty one for a mere no-op, and JSON reports it as
+  trailing `std::string* refusal`, a non-empty reason with the failure value (a chord timing edit words a track-limit refusal in chord terms, such
+  as "That change would leave more than 8 track notes sounding at once"; the track and note edits and state loads
+  keep the validator's text, such as "At most 8 track notes can sound at once"), an empty one for a mere no-op, and JSON reports it as
   `"<command>" refused: <reason>`;
   `writeSmf0` returns an empty vector and `writeFile` false; `pushPreview` returns false
   on a full queue and `process` returns false for a block it could not complete.

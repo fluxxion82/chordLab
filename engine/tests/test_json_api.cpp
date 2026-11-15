@@ -5872,3 +5872,19 @@ TEST_CASE("state: tracks are validated against the clamped chord lengths, not th
     CHECK_FALSE(loadStateJson(same, inside.dump(), error));
     CHECK(error.rfind(kStateTracksRejected, 0) == 0);
 }
+
+TEST_CASE("insertChords: a chord carrying a note into a full track is refused with the validator's text") {
+    // The per-track note limit is a structure fault, not a chord-term one (D17a): the text passes through whole.
+    DocumentStore store;
+    REQUIRE(store.appendChord(kC, kMaxLengthBeats) == 1);
+    REQUIRE(store.addTrack(TrackRole::Bass) == 1);
+    std::vector<NoteSpec> notes;
+    for (int i = 0; i < kMaxNotesPerTrack; ++i) {
+        notes.push_back(NoteSpec{40, i * 40, 30});  // 24 onsets a beat, none overlapping: only the count is at its cap
+    }
+    REQUIRE(store.insertNotes(1, notes).size() == static_cast<std::size_t>(kMaxNotesPerTrack));
+    const json one = json::array({chordNoteJson(laneJson("Bass", "bass", 1), 0, 480, 40)});
+    const json cmd = insertWith(1, one);
+    REQUIRE(cmd.dump().size() < kMaxJsonBytes);
+    checkTrackRefusal(store, cmd, "insertChords", "At most " + std::to_string(kMaxNotesPerTrack) + " notes per track");
+}

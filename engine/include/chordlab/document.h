@@ -372,10 +372,11 @@ public:
     /// Returns false and changes nothing (no chord, no section, no history, no id consumed, the selection
     /// as it was) when `progressionRefusal(steps, ProgressionLoad::Append)` is not `None` (a reason naming it
     /// in `refusal`: "The progression is empty", "Chord lengths must be finite", "At most 256 chords", "No event
-    /// ids are left", "No section ids are left"), and when the candidate fails `validateTracks` (the validator's
-    /// message). That check never refuses an append, which moves no chord boundary, nor a replace, which leaves no
-    /// note; it is kept so that every timing edit validates its candidate (totality). Every chord must satisfy the `Chord`
-    /// preconditions (chord.h), as for `appendChord`. Both counters advance only once the load is committed.
+    /// ids are left", "No section ids are left"), and when the candidate fails `validateTracks` (refused in chord terms,
+    /// D17a, see the class comment). That check never refuses an append, which moves no chord boundary, nor a
+    /// replace, which leaves no note; it is kept so that every timing edit validates its candidate (totality). Every
+    /// chord must satisfy the `Chord` preconditions (chord.h), as for `appendChord`. Both counters advance only once
+    /// the load is committed.
     bool appendProgression(const std::vector<std::pair<Chord, double>>& steps, std::string sectionName,
                            std::string* refusal = nullptr);
 
@@ -411,7 +412,7 @@ public:
     /// there because the first chord moved away from in front of it, that section becomes the first and
     /// the old first follows its chord. The moved chord's notes go with it and the chords it passes shift with
     /// theirs (D3); the tracks are re-sorted. Returns true when it moved the chord. Unknown id, or the chord's
-    /// current index: a no-op (false, no reason). Refused (false, the validator's reason) when the moved notes
+    /// current index: a no-op (false, no reason). Refused (false, in chord terms, D17a) when the moved notes
     /// would break the track invariant (see the class comment). A move that narrows a fractional chord by a rounded
     /// tick deactivates its last-offset notes, which never count; it can still be refused, like any timing edit,
     /// when the shifted chords' notes land under an earlier long note or among an earlier chord's onsets, or when a
@@ -422,7 +423,7 @@ public:
     /// with their chords; the chord's own notes keep their offsets, so a shorter chord makes the ones past its new
     /// end inactive and a longer one brings them back (D3). Returns true when the length changed. Unknown id, a NaN
     /// or infinite `lengthBeats`, or the current length after clamping: a no-op (false, no reason). Refused (false,
-    /// the validator's reason) when the moved or reactivated notes would break the track invariant (see the class
+    /// in chord terms, D17a) when the moved or reactivated notes would break the track invariant (see the class
     /// comment). A shorten is no exception (D10): the notes it makes inactive never count against it, but the later
     /// chords' notes move up and can land under an earlier long note or among an earlier chord's onsets, and a later
     /// fractional chord can gain a rounded tick and reactivate a note at its last offset.
@@ -451,7 +452,7 @@ public:
     /// becomes the first) or no chord is left (then no section is). Every note the chord owns (its
     /// `anchorEventId`), inactive ones included, goes with it, from every track; a note of an earlier chord that
     /// sounds into it stays, and the later chords' notes move up with their chords (D3). Returns true when it
-    /// removed the chord. Unknown id: a no-op (false, no reason). Refused (false, the validator's reason) when the
+    /// removed the chord. Unknown id: a no-op (false, no reason). Refused (false, in chord terms, D17a) when the
     /// notes that move up would break the track invariant (see the class comment).
     bool removeChord(int id, std::string* refusal = nullptr);
 
@@ -467,10 +468,10 @@ public:
     /// than `kMaxChords` chords, or when the id counter cannot hand out `chords.size()` ids below INT_MAX, each
     /// with a reason in `refusal` ("No chords to insert", "Chord lengths must be finite", "At most 256 chords",
     /// "No event ids are left"). The notes keep their chords and offsets, so those of the chords after `index`
-    /// move with them (D3); refused too (the validator's reason) when the candidate fails `validateTracks`: a note
-    /// pushed later can leave the note range (D1; "Note <id> has a length outside ..." for one sounding to
-    /// `kMaxNoteTick`), and a fractional chord pushed along may gain a rounded tick and reactivate a note at its
-    /// last offset over a cap (see the class comment).
+    /// move with them (D3); refused too (in chord terms, D17a) when the candidate fails `validateTracks`: a note
+    /// pushed later can leave the note range (D1; "That change would move a track note past the end of what
+    /// ChordLab can hold" for one sounding to `kMaxNoteTick`), and a fractional chord pushed along may gain a
+    /// rounded tick and reactivate a note at its last offset over a cap (see the class comment).
     /// The inserted chords become the selection, the last of them the anchor (live state, set after the commit).
     /// Every chord must satisfy the `Chord` preconditions (chord.h). The counter advances only once the insert
     /// is committed.
@@ -484,8 +485,9 @@ public:
     /// and role ("Lane \"Bass\" (bass) matches more than one track"), no room for a new track ("At most 4 tracks"),
     /// the track or note id counter unable to hand out the ids the batch needs ("No track ids are left", "No note
     /// ids are left"); and the whole candidate (chords, moved notes, new tracks and notes) is validated by
-    /// `validateTracks` with the counters it publishes, so a track over its note limit or the playback caps refuses
-    /// the insert with the validator's message and leaves no track behind. The note selection is unchanged (the stale
+    /// `validateTracks` with the counters it publishes, so a track over its note limit refuses the insert with the
+    /// validator's text ("At most N notes per track"), the playback caps and the note range read in chord terms
+    /// (D17a), and no track is left behind. The note selection is unchanged (the stale
     /// drop apart); a refusal changes nothing.
     std::vector<int> insertChords(int index, const std::vector<ChordSpec>& chords, std::string* refusal = nullptr);
 
@@ -494,15 +496,14 @@ public:
     /// at 0, exactly as successive `removeChord` calls from the front would), and with `removeChord`'s note rules:
     /// every note the removed chords own goes, inactive ones included. Ids no event has are skipped and a
     /// repeated id counts once. Returns true when it removed something; false and pushes nothing when no listed id
-    /// exists (a no-op, no reason), or when the candidate fails `validateTracks` (refused, the validator's
-    /// reason).
+    /// exists (a no-op, no reason), or when the candidate fails `validateTracks` (refused, in chord terms, D17a).
     bool removeChords(const std::vector<int>& ids, std::string* refusal = nullptr);
 
     /// Sets the length of every chord of `ids` that exists to `lengthBeats`, clamped as `setLength` clamps it,
     /// as ONE undoable step, with `setLength`'s note rules; unknown ids are skipped. Returns true when a length
     /// changed; false and pushes nothing when `lengthBeats` is NaN or infinite, or when no length changed (no
     /// listed id exists, or each already has the clamped value): a no-op, no reason; or when the candidate fails
-    /// `validateTracks` (refused, the validator's reason), which a shorten can do too, as `setLength` says.
+    /// `validateTracks` (refused, in chord terms, D17a), which a shorten can do too, as `setLength` says.
     bool setLengths(const std::vector<int>& ids, double lengthBeats, std::string* refusal = nullptr);
 
     /// Undoable. `key.tonic` must satisfy the `Tonic` preconditions of pitch.h and `key.mode` be a
@@ -776,10 +777,11 @@ private:
 
     /// `commit` for the track and note edits (D7): a candidate equal to the current document is a no-op (false, no
     /// reason); otherwise it must pass `validateTracks` with the counters the edit will publish (`nextTrackId`,
-    /// `nextNoteId`), else nothing changes and the validator's message goes to `refusal`. The caller publishes
+    /// `nextNoteId`), else nothing changes and the refusal goes to `refusal`. The caller publishes
     /// those counters right after a true return, with no throwing step in between.
-    /// `inChordTerms` (the chord timing edits only, via `commitTimingWithIds`) words a track-limit refusal in chord
-    /// terms (D17a) instead of with the validator's per-note text.
+    /// Used by the track and note edits and, through `commitTimingWithIds`, the chord timing edits; with
+    /// `inChordTerms`, a Domain, Polyphony or Onsets fault is worded in chord terms (D17a); any other fault keeps
+    /// the validator's text.
     bool commitTracks(Document next, int nextTrackId, int nextNoteId, std::string* refusal, bool inChordTerms = false);
 
     /// `commitTracks` for the chord timing edits (D3): first re-sorts every track's notes by (derived start, pitch,

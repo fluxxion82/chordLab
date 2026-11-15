@@ -2593,3 +2593,49 @@ TEST_CASE("transposeProgression: two notes that fold onto the same pitch keep D4
     REQUIRE(store.undo());
     CHECK(store.doc() == before);
 }
+
+TEST_CASE("validateTracks: the fault classifies the failure (D17a); a null pointer is fine") {
+    const auto faultOf = [](const Document& doc, int nextTrackId = 1000, int nextNoteId = 100000) {
+        std::string error;
+        TrackFault fault = TrackFault::Onsets;  // overwritten whatever the outcome
+        const bool ok = validateTracks(doc, nextTrackId, nextNoteId, error, &fault);
+        CHECK(ok == error.empty());
+        // The same call without a pointer agrees.
+        std::string again;
+        CHECK(validateTracks(doc, nextTrackId, nextNoteId, again) == ok);
+        CHECK(again == error);
+        return fault;
+    };
+    CHECK(faultOf(threeChordDoc({track(1, {tn(1, 36, 1, 0, 480)})})) == TrackFault::None);
+    CHECK(faultOf(Document{}, 1, 1) == TrackFault::None);
+
+    // Structure: everything that is not the domain or a playback limit.
+    CHECK(faultOf(threeChordDoc({track(1, {tn(1, 36, 99, 0, 480)})})) == TrackFault::Structure);  // belongs to no chord
+    CHECK(faultOf(Document{}, 0, 1) == TrackFault::Structure);                                      // a bad counter
+    CHECK(faultOf(threeChordDoc({track(1, {tn(1, 36, 1, 0, kMinTrackNoteTicks - 1)})})) == TrackFault::Structure);
+    CHECK(faultOf(threeChordDoc({track(1, {tn(1, 36, 1, 0, 480)})}), 1) == TrackFault::Structure);  // track id at counter
+
+    // Domain: a derived start past the end, a length past kMaxNoteTick - start.
+    CHECK(faultOf(threeChordDoc({track(1, {tn(1, 36, 1, kMaxNoteTick, 480)})})) == TrackFault::Domain);
+    CHECK(faultOf(threeChordDoc({track(1, {tn(1, 36, 1, 0, kMaxNoteTick + 1)})})) == TrackFault::Domain);
+    CHECK(faultOf(threeChordDoc({track(1, {tn(1, 36, 1, 100, kMaxNoteTick - 99)})})) == TrackFault::Domain);
+    CHECK(faultOf(threeChordDoc({track(1, {tn(1, 36, 1, 100, kMaxNoteTick - 100)})})) == TrackFault::None);
+
+    // Polyphony: one note more than the cap sounding at once.
+    std::vector<TrackNote> stacked;
+    for (int i = 0; i <= kMaxTrackPolyphony; ++i) {
+        stacked.push_back(tn(i + 1, 36 + i, 1, 0, 480));
+    }
+    CHECK(faultOf(threeChordDoc({track(1, stacked)})) == TrackFault::Polyphony);
+    stacked.pop_back();
+    CHECK(faultOf(threeChordDoc({track(1, stacked)})) == TrackFault::None);
+
+    // Onsets: one note more than the cap starting within a beat, none of them overlapping.
+    std::vector<TrackNote> burst;
+    for (int i = 0; i <= kMaxTrackOnsetsPerBeat; ++i) {
+        burst.push_back(tn(i + 1, 36, 1, i * kMinTrackNoteTicks, kMinTrackNoteTicks));
+    }
+    CHECK(faultOf(threeChordDoc({track(1, burst)})) == TrackFault::Onsets);
+    burst.pop_back();
+    CHECK(faultOf(threeChordDoc({track(1, burst)})) == TrackFault::None);
+}
