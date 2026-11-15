@@ -1,0 +1,83 @@
+import Foundation
+
+/// A lane of the editor (tracks design D13): the open tab is `chords` (suggestions, palette, home row) or one
+/// track's piano roll. UI state in `ChordLabState`, never saved; a removed track falls back to `chords`.
+enum Lane: Hashable {
+  case chords
+  case track(Int)
+}
+
+/// A track's role (tracks design D2): it sets defaults only (name, register, colour, guide emphasis,
+/// generator), never what the user may write. The raw values are the wire names the commands send
+/// (`addTrack`, `patchTrack`) and the snapshot carries.
+///
+/// Decoding is tolerant: a role this UI does not know (a newer plug-in's) is `.other`, so one unfamiliar track
+/// never loses the whole snapshot. Encoding writes the raw value.
+enum TrackRole: String, Codable {
+  case bass, lead, other
+
+  init(from decoder: Decoder) throws {
+    let text = try decoder.singleValueContainer().decode(String.self)
+    self = TrackRole(rawValue: text) ?? .other
+  }
+
+  func encode(to encoder: Encoder) throws {
+    var container = encoder.singleValueContainer()
+    try container.encode(rawValue)
+  }
+
+  /// The MIDI notes the roll scrolls to when the track first opens (design D2): Bass E1-G3 (28...55), Lead
+  /// C4-C6 (60...84), Other C3-C5 (48...72). A scroll target only; every pitch 0...127 stays writable.
+  var register: ClosedRange<Int> {
+    switch self {
+    case .bass: return 28...55
+    case .lead: return 60...84
+    case .other: return 48...72
+    }
+  }
+
+  /// The role's name as a menu item or tab default shows it: "Bass", "Lead", "Other".
+  var displayName: String {
+    switch self {
+    case .bass: return "Bass"
+    case .lead: return "Lead"
+    case .other: return "Other"
+    }
+  }
+}
+
+/// One note of a track as the roll uses it, built on demand from `TrackNotesJSON`'s columns. Ticks are
+/// integers on the snapshot's `ticksPerBeat` grid; `start` is the derived absolute tick (the engine resolves
+/// the anchor, the UI never does); `anchor` is the id of the chord the note belongs to, `offset` the ticks
+/// into it. An inactive note (its chord is shorter than its offset) is kept and drawn but not played.
+struct RollNote: Equatable, Identifiable {
+  let id: Int
+  let pitch: Int
+  let start: Int
+  let length: Int
+  let velocity: Int
+  let anchor: Int
+  let offset: Int
+  let active: Bool
+
+  /// The tick the note ends on: `start + length`.
+  var end: Int { start + length }
+}
+
+extension Snapshot {
+  /// The track with this id, nil for none (or when the snapshot has no `tracks`).
+  func track(id: Int) -> TrackJSON? { tracks?.first { $0.id == id } }
+
+  /// The tick grid of every tick field: `ticksPerBeat`, or 960 (the engine's `kFeelTicksPerBeat`) when an
+  /// older plug-in build sends none.
+  var ticksPerBeatOrDefault: Int { ticksPerBeat ?? 960 }
+}
+
+extension TrackJSON {
+  /// The ids of this track's selected notes: the selection's `ids` when its `trackId` is this track, else
+  /// empty (the selection lives in one track at a time, design D5; nil is no selection).
+  func selectedIds(in selection: NoteSelectionJSON?) -> Set<Int> {
+    guard let selection, selection.trackId == id else { return [] }
+    return Set(selection.ids)
+  }
+}
