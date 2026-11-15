@@ -106,17 +106,63 @@ bool spanOf(const Document& doc, const std::vector<PlaySpan>& spans, int section
     return true;
 }
 
+/// The performance's tick grid and a span on it, for a performing feel that is within budget (`chordPlaySpans`'s
+/// `chordTicks / 960.0` case). The span's ends are boundary ticks of the whole document; `docEnd` is the last one.
+struct TickGrid {
+    std::int64_t spanStart = 0;
+    std::int64_t spanEnd = 0;
+    std::int64_t docEnd = 0;
+};
+
+/// `spanOf` in boundary ticks (`ticks` is `chordBoundaryTicks(doc)`, one more entry than there are chords), false
+/// when the index names no section or the document is empty.
+bool tickSpanOf(const Document& doc, const std::vector<std::int32_t>& ticks, int sectionIndex, TickGrid& out) {
+    out = TickGrid{};
+    if (ticks.size() < 2) {
+        return false;
+    }
+    out.docEnd = ticks.back();
+    if (sectionIndex < 0 || doc.sections.empty()) {
+        if (sectionIndex > 0) {
+            return false;
+        }
+        out.spanStart = ticks.front();
+        out.spanEnd = ticks.back();
+        return true;
+    }
+    const std::size_t index = static_cast<std::size_t>(sectionIndex);
+    if (index >= doc.sections.size()) {
+        return false;
+    }
+    const std::size_t first = static_cast<std::size_t>(doc.sections[index].firstEventIndex);
+    const std::size_t end = index + 1 < doc.sections.size()
+                                ? static_cast<std::size_t>(doc.sections[index + 1].firstEventIndex)
+                                : ticks.size() - 1;
+    assert(first < end && end < ticks.size());
+    out.spanStart = ticks[first];
+    out.spanEnd = ticks[end];
+    return true;
+}
+
 /// The sort `compile` uses: (beat, off before on, pitch).
 bool eventLess(const NoteEvent& a, const NoteEvent& b) {
     return std::make_tuple(a.beat, a.on ? 1 : 0, a.pitch) < std::make_tuple(b.beat, b.on ? 1 : 0, b.pitch);
 }
 
-/// `compileTrack` once the chords are compiled and the spans known.
+/// `compileTrack` once the chords are compiled and the spans known. `grid` is non-null on the performing path: the
+/// span's ends and the document's end are then integer boundary ticks, and the intersection, the cuts, the minimum
+/// length and the re-basing are done in integer ticks, so a note on a chord's onset tick lands on the very beat the
+/// chord's own note-on has in `compileSection` (`(tick - spanStart) / 960.0`, `sliceRange`'s expression). Otherwise
+/// (block chords, a feel over budget) they are done in the accumulated beats.
 Compiled trackClip(const Document& doc, const Track& track, const Compiled& chords, const PlaySpan& span,
-                   bool wholeProgression) {
+                   bool wholeProgression, const TickGrid* grid) {
     Compiled clip;
     clip.feelLimited = chords.feelLimited;
-    clip.endBeat = wholeProgression ? chords.endBeat : span.end - span.start;
+    if (grid != nullptr) {
+        clip.endBeat = static_cast<double>(grid->spanEnd - grid->spanStart) / kFeelTicksPerBeat;
+    } else {
+        clip.endBeat = wholeProgression ? chords.endBeat : span.end - span.start;
+    }
     const double endBeat = chords.endBeat;
 
     // (1) Active notes only, from their derived starts, as beats; no clipping yet.
@@ -134,6 +180,40 @@ Compiled trackClip(const Document& doc, const Track& track, const Compiled& chor
     const std::vector<LaneNote> merged = mergeLaneNotes(std::move(notes));
 
     clip.events.reserve(2 * merged.size());
+    if (grid != nullptr) {
+        for (const LaneNote& note : merged) {
+            // The merged notes' beats are tick / 960.0 (an input's value, never a computed one): the ticks come back.
+            std::int64_t start = std::llround(note.start * kFeelTicksPerBeat);
+            std::int64_t end = std::llround(note.end * kFeelTicksPerBeat);
+            bool shortened = note.shortened;
+            // (3) Clipped to [0, docEnd).
+            if (start >= grid->docEnd) continue;
+            if (end > grid->docEnd) {
+                end = grid->docEnd;
+                shortened = true;
+            }
+            // (4) Cut to the span at both ends.
+            if (!(start < grid->spanEnd && end > grid->spanStart)) continue;
+            if (start < grid->spanStart) {
+                start = grid->spanStart;
+                shortened = true;
+            }
+            if (end > grid->spanEnd) {
+                end = grid->spanEnd;
+                shortened = true;
+            }
+            // (6) Judged in the ticks the cut left it.
+            if (shortened && end - start < kMinNoteTicks) continue;
+            if (!(start < end)) continue;  // impossible for valid input: never an off before its on
+            // (5) Re-based to the span's start, in integer ticks.
+            clip.events.push_back(NoteEvent{static_cast<double>(start - grid->spanStart) / kFeelTicksPerBeat, true,
+                                            note.pitch, note.velocity});
+            clip.events.push_back(NoteEvent{static_cast<double>(end - grid->spanStart) / kFeelTicksPerBeat, false,
+                                            note.pitch, 0});
+        }
+        std::sort(clip.events.begin(), clip.events.end(), eventLess);
+        return clip;
+    }
     for (LaneNote note : merged) {
         // (3) Clipped to [0, endBeat): one starting at or after it is skipped, one ending after it is cut.
         if (note.start >= endBeat) continue;
@@ -196,7 +276,10 @@ Compiled compileTrack(const Document& doc, int trackId, int sectionIndex) {
     if (!spanOf(doc, chordPlaySpans(doc, chords), sectionIndex, span)) {
         return {};
     }
-    return trackClip(doc, *track, chords, span, sectionIndex < 0 || doc.sections.empty());
+    TickGrid grid;
+    const bool onGrid = feelPerforms(doc.feel) && !chords.feelLimited &&
+                        tickSpanOf(doc, chordBoundaryTicks(doc), sectionIndex, grid);
+    return trackClip(doc, *track, chords, span, sectionIndex < 0 || doc.sections.empty(), onGrid ? &grid : nullptr);
 }
 
 std::string trackClipName(const Document& doc, int trackId, int sectionIndex) {
@@ -214,6 +297,9 @@ std::string trackClipName(const Document& doc, int trackId, int sectionIndex) {
     const std::string section = exportClipName(doc, sectionIndex);  // the section's name, or its chords
     if (section.empty()) {
         return track->name;
+    }
+    if (track->name.empty()) {
+        return section;  // no dash after nothing
     }
     return track->name + " \xE2\x80\x93 " + section;  // an EN DASH, U+2013, between single spaces
 }
@@ -238,11 +324,14 @@ std::vector<std::uint8_t> exportClip(const Document& doc, const ClipSpec& spec, 
         return {};
     }
     const bool wholeProgression = sectionIndex < 0 || doc.sections.empty();
+    TickGrid grid;
+    const bool onGrid = feelPerforms(doc.feel) && !whole.feelLimited &&
+                        tickSpanOf(doc, chordBoundaryTicks(doc), sectionIndex, grid);
 
     const auto chordsLane = [&]() { return ResolvedLane{exportClipName(doc, sectionIndex), chords}; };
     const auto trackLane = [&](const Track& track) {
         return ResolvedLane{trackClipName(doc, track.id, sectionIndex),
-                            trackClip(doc, track, whole, span, wholeProgression)};
+                            trackClip(doc, track, whole, span, wholeProgression, onGrid ? &grid : nullptr)};
     };
 
     std::vector<ResolvedLane> lanes;

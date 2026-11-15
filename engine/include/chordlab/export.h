@@ -58,24 +58,30 @@ struct ClipSpec {
 /// progression `[0, compile(doc).endBeat)` for `sectionIndex` < 0 (and for index 0 of a document without
 /// sections). `{0, 0}` (an empty span) for an empty document or an index that names no section. Same preconditions
 /// as `compile`.
-/// Its length is `compileSection`'s `endBeat` under a performing feel that is within budget (both are tick
-/// differences over 960, so they agree to the last bit or one ulp; at 480 ppq they always round to the same
-/// tick). On the block path the span is cut from the whole document's accumulated beats while `compileSection`
-/// accumulates from 0 over the section, so the two lengths can differ in the last bit; writing either at 480 ppq
-/// gives the same tick unless a length lies exactly on a half tick. Runs `performDocument` when the feel performs.
+/// Under a performing feel that is within budget both ends are boundary ticks over 960 (`chordTicks[i] / 960.0`),
+/// the very beats `compileSection` gives the performed notes, so a span's ends are exact on the tick grid. Its length
+/// as a difference of the two doubles agrees with `compileSection`'s `endBeat` (`(endTick - startTick) / 960.0`) only
+/// to within an ulp or two (two correctly rounded values subtracted: no pair of doubles in general has a difference
+/// that is that quotient), so a caller needing the tick count rounds the difference at 960, or at 480 where odd
+/// tick counts are half ticks and the ulp decides; `compileTrack` and `exportClip` never subtract: they work in the
+/// integer ticks and give `endBeat` the exact quotient. On the block path the span is cut from the whole document's
+/// accumulated beats while `compileSection` accumulates from 0 over the section, so the two lengths can differ in
+/// the last bit; writing either at 480 ppq gives the same tick unless a length lies exactly on a half tick. Runs
+/// `performDocument` when the feel performs.
 PlaySpan sectionSpanBeats(const Document& doc, int sectionIndex);
 
 /// The notes of track `trackId` over `sectionIndex` (< 0: the whole progression; the same convention as
 /// `sectionSpanBeats`), as a track's own clip holds them: independent of the other lanes, mute and solo ignored
 /// (D12). In this order:
 ///  1. the active notes only (`noteActive`), each from `noteStart` (D3) as the beats `[start / 960.0, (start +
-///     lengthTicks) / 960.0)`;
+///     lengthTicks) / 960.0)` (tick values over 960, exactly recoverable);
 ///  2. the **whole track's** same-pitch overlaps resolved by D8's paired rule (`compilePlayback`'s merge, the same
 ///     code): per pitch, notes in (rounded start tick, id) order; equal rounded starts become one note at the first
 ///     start with the latest end and the highest velocity; otherwise a note still sounding when the next of its
 ///     pitch starts ends there. A note this shortens is "shortened"; a merged equal-start group is not;
 ///  3. clipped to `[0, endBeat)` with `endBeat = compile(doc).endBeat`: a note starting at or after it is skipped, one
-///     ending after it ends there (and is "shortened");
+///     ending after it ends there (and is "shortened"). Under a performing feel within budget the end is the last
+///     boundary tick;
 ///  4. for a section (and for the whole progression, whose span is `[0, endBeat)`), every note that **intersects**
 ///     `sectionSpanBeats` (starts before its end and ends after its start) cut to it at both ends (a cut note is
 ///     "shortened"); merging before cutting is deliberate: same-pitch `[0, 8)` and `[3, 5)` over a `[4, 6)` section
@@ -84,6 +90,14 @@ PlaySpan sectionSpanBeats(const Document& doc, int sectionIndex);
 ///  5. re-based to the span's start;
 ///  6. a shortened note (steps 2 to 4) whose length in rounded ticks, `llround((end - start) * 960)`, is under
 ///     `kMinNoteTicks` (feel.h) is dropped; a note none of those steps touched is never dropped.
+/// Steps 3 to 6 run in **integer ticks** under a performing feel within budget (`feelPerforms(doc.feel)` and not
+/// `feelLimited`, exactly when `chordPlaySpans` uses `chordTicks / 960.0`): the span is `[spanStartTick,
+/// spanEndTick)` of the chord boundaries, a note's emitted beats are `(tick - spanStartTick) / 960.0` (`sliceRange`'s
+/// own expression, so a note on a chord's onset tick lands on the beat of the chord's note-on in `compileSection`,
+/// bit for bit) and the section's `endBeat` is `(spanEndTick - spanStartTick) / 960.0`, bit for bit
+/// `compileSection(doc, section).endBeat`. On the block path (and when the feel is over budget) they run on the beats
+/// as written, `note.start - span.start` and `span.end - span.start`, which differ from the chords' own re-basing by
+/// under half a tick (D3's acknowledged sub-tick difference).
 /// Events are on at the start (the note's velocity) and off at the end (velocity 0), sorted by (beat, off before
 /// on, pitch) as `compile`'s are. `endBeat` is the span's length (`compile(doc).endBeat` for the whole
 /// progression); `feelLimited` is `compile(doc).feelLimited`.
@@ -95,8 +109,10 @@ Compiled compileTrack(const Document& doc, int trackId, int sectionIndex);
 /// The name Live gives a track's clip: the track's name for the whole progression (`sectionIndex` < 0, or 0 in a
 /// document without sections); for a section, the track's name, a space, an EN DASH (U+2013, the UTF-8 bytes
 /// `E2 80 93`), a space and the section's name; a section with an empty name takes `exportClipName`'s summary of
-/// its chords instead (the fallback the chords lane's own clip name uses). Empty for an unknown track id or an
-/// invalid section index; the track's name, even an empty one, for the whole progression of a known track.
+/// its chords instead (the fallback the chords lane's own clip name uses). A track with an empty name has no
+/// separator to put before the section: the name is the section part alone ("F G7", or the section's name). Empty
+/// for an unknown track id or an invalid section index; the track's name, even an empty one, for the whole
+/// progression of a known track.
 std::string trackClipName(const Document& doc, int trackId, int sectionIndex);
 
 /// The .mid bytes of a clip (tracks design D12): the lanes of `spec` over the span `spec.sectionIndex` names, at
@@ -116,10 +132,12 @@ std::string trackClipName(const Document& doc, int trackId, int sectionIndex);
 ///   `trackClipName`.
 /// - **Several lanes**: a format 1 file (`writeSmf1`) at 480 ppq, ntrks = lanes + 1, the conductor carrying the
 ///   tempo and the meter. Every lane ends at one end beat: the chords lane's `endBeat`, that of `compile` for the
-///   whole progression or of `compileSection` for a section, the very value `exportMidi` writes, whether or not the
-///   chords are among the lanes. Track lanes have their own length in beats (the span's, which can differ from it in
-///   the last bit on the block path, see `sectionSpanBeats`), but the writer rounds both to the same 480-ppq tick
-///   and extends an end past a lane's last event, so no lane is ever shorter or longer than another.
+///   whole progression or of `compileSection` for a section (the value `exportMidi` writes, so the file ends at
+///   the tick `exportMidi`'s does), whether or not the chords are among the lanes. A track lane's own `endBeat` is
+///   the span's length: under a performing feel within budget bit for bit the same value (both are a tick
+///   difference over 960, `compileTrack`), so a one-lane track clip is as long as the chords clip of its section;
+///   on the block path it can differ from it in the last bit (see `sectionSpanBeats`), and the writer, which
+///   extends an end past a lane's last event, still ends every MTrk at the one shared tick.
 /// - **Empty** (no bytes): no resolved lane has an event, a tempo or meter the writer refuses, or the cases above.
 /// Same preconditions as `compile`. Allocates: never on the audio thread.
 std::vector<std::uint8_t> exportClip(const Document& doc, const ClipSpec& spec, double bpm);

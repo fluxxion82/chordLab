@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <utility>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -271,6 +272,23 @@ DocumentStore narrowMiddle() {
 
 const double kBpm = 120.0;
 
+/// Twelve chords of fractional lengths (0.5 to 0.63 beats, steps of 0.00131) in four sections of three, under a
+/// strummed feel (the first strummed note of each chord sits on its onset tick): boundaries on odd ticks, so a section's length at 960 is often odd and a half tick at 480. `seed`
+/// shifts the lengths; the sweep over seeds is what keeps a case from passing by luck of its inputs.
+DocumentStore oddTickDoc(int seed) {
+    DocumentStore store;
+    for (int j = 0; j < 12; ++j) {
+        store.appendChord(chord(static_cast<PitchClass>(j % 12), "min"), 0.5 + ((seed * 31 + j * 17) % 101) * 0.00131, 100);
+    }
+    for (int first : {3, 6, 9}) REQUIRE(store.addSection(first, "") != kNoSectionId);
+    store.setFeel(Feel{Rhythm::Block, Strum::Down, StrumSpeed::Tight});
+    REQUIRE(feelPerforms(store.doc().feel));
+    REQUIRE_FALSE(compile(store.doc()).feelLimited);
+    return store;
+}
+
+constexpr int kSweep = 120;
+
 }  // namespace
 
 // --- exportMidi is untouched by tracks -----------------------------------------------------------------------
@@ -329,27 +347,25 @@ TEST_CASE("sectionSpanBeats: the whole progression, each section, and what names
     CHECK(sectionSpanBeats(Document{}, 0).end == 0.0);
 }
 
-TEST_CASE("sectionSpanBeats: under a performing feel its length is compileSection's endBeat") {
-    for (const std::vector<double>& lengths : {std::vector<double>{4.0, 4.0, 4.0, 4.0, 4.0, 4.0}, std::vector<double>{0.2506, 1.0013, 0.7497, 2.0, 0.2504, 3.0}}) {
-        DocumentStore store;
-        for (std::size_t i = 0; i < lengths.size(); ++i) store.appendChord(chord(static_cast<PitchClass>(i), "min"), lengths[i], 100);
-        REQUIRE(store.addSection(2, "B") != kNoSectionId);
-        REQUIRE(store.addSection(4, "C") != kNoSectionId);
-        store.setFeel(Feel{Rhythm::Pulse});
+TEST_CASE("sectionSpanBeats: under a performing feel its ends are the section's boundary ticks over 960") {
+    for (int seed = 0; seed < kSweep; ++seed) {
+        const DocumentStore store = oddTickDoc(seed);
         const Document& doc = store.doc();
-        REQUIRE(feelPerforms(doc.feel));
-        REQUIRE_FALSE(compile(doc).feelLimited);
-        for (int section = 0; section < 3; ++section) {
+        const std::vector<std::int32_t> ticks = chordBoundaryTicks(doc);
+        for (int section = 0; section < 4; ++section) {
+            CAPTURE(seed);
             CAPTURE(section);
-            const PlaySpan span = sectionSpanBeats(doc, section);
-            const Compiled compiled = compileSection(doc, section);
-            CHECK(near(span.end - span.start, compiled.endBeat));
-            // At the export's 480 ppq both give the same tick.
-            CHECK(std::lround((span.end - span.start) * 480) == std::lround(compiled.endBeat * 480));
-            // Its start is the section's first boundary, in the performance's own ticks.
-            const std::vector<std::int32_t> ticks = chordBoundaryTicks(doc);
             const std::size_t first = static_cast<std::size_t>(doc.sections[static_cast<std::size_t>(section)].firstEventIndex);
+            const std::size_t end = section + 1 < 4 ? static_cast<std::size_t>(doc.sections[static_cast<std::size_t>(section) + 1].firstEventIndex) : doc.events.size();
+            const PlaySpan span = sectionSpanBeats(doc, section);
             CHECK(span.start == ticks[first] / kTicks);
+            CHECK(span.end == ticks[end] / kTicks);
+            // The difference of the two ends is the tick count over 960 to within an ulp or two (two correctly
+            // rounded values subtracted), and exactly that many ticks when rounded back.
+            const Compiled compiled = compileSection(doc, section);
+            CHECK(compiled.endBeat == (ticks[end] - ticks[first]) / kTicks);
+            CHECK(std::fabs((span.end - span.start) - compiled.endBeat) < 1e-12);
+            CHECK(std::lround((span.end - span.start) * kTicks) == ticks[end] - ticks[first]);
         }
         CHECK(sectionSpanBeats(doc, -1).end == compile(doc).endBeat);
     }
@@ -599,13 +615,16 @@ TEST_CASE("trackClipName: unknown track or section is empty; no sections means i
     CHECK(trackClipName(twoSec.doc(), t, 7).empty());
 }
 
-TEST_CASE("trackClipName: an empty track name is carried as it is") {
+TEST_CASE("trackClipName: an empty track name is carried as it is, with no dash before a section") {
     DocumentStore store = twoSections();
     const int id = addTrackWith(store, {}, TrackRole::Other);
     REQUIRE(store.patchTrack(id, std::string(), std::nullopt));
     const Document& doc = store.doc();
     CHECK(trackClipName(doc, id, -1).empty());
-    CHECK(trackClipName(doc, id, 1) == " \xE2\x80\x93 F G7");
+    CHECK(trackClipName(doc, id, 1) == "F G7");  // no dash after nothing: the section part alone
+    CHECK(trackClipName(doc, id, 0) == "Section 1");
+    store.renameSection(doc.sections[1].id, "Out");
+    CHECK(trackClipName(store.doc(), id, 1) == "Out");
 }
 
 // --- exportClip ----------------------------------------------------------------------------------------------
@@ -841,8 +860,132 @@ TEST_CASE("exportClip: every lane of a file ends at the same tick, on the block 
             REQUIRE(f.tracks.size() == 4);
             const Compiled chords = section < 0 ? compile(store.doc()) : compileSection(store.doc(), section);
             for (const FileTrack& t : f.tracks) CHECK(endTickOf(t) == std::lround(chords.endBeat * 480));
+            // ... which is the tick exportMidi writes for the same section.
+            CHECK(endTickOf(f.tracks[0]) == endTickOf(requireFile(exportMidi(store.doc(), section, kBpm)).tracks[0]));
         }
     }
+}
+
+// --- Performing sections are re-based in integer ticks -------------------------------------------------------
+
+namespace {
+
+/// `oddTickDoc(seed)` with a bass note of 60 ticks on every chord's onset tick, pitch 30 + chord index.
+DocumentStore oddTickDocWithBass(int seed, int& bass) {
+    DocumentStore store = oddTickDoc(seed);
+    const std::vector<std::int32_t> ticks = chordBoundaryTicks(store.doc());
+    std::vector<NoteSpec> specs;
+    for (std::size_t i = 0; i < 12; ++i) specs.push_back(ns(30 + static_cast<int>(i), ticks[i], 60));
+    bass = addTrackWith(store, specs, TrackRole::Bass);
+    return store;
+}
+
+/// The chord index range [first, end) of `section` (-1: all twelve) of `oddTickDoc`.
+std::pair<std::size_t, std::size_t> chordRange(const Document& doc, int section) {
+    if (section < 0) return {0, doc.events.size()};
+    const std::size_t at = static_cast<std::size_t>(section);
+    return {static_cast<std::size_t>(doc.sections[at].firstEventIndex),
+            at + 1 < doc.sections.size() ? static_cast<std::size_t>(doc.sections[at + 1].firstEventIndex) : doc.events.size()};
+}
+
+}  // namespace
+
+TEST_CASE("exportClip: under a feel a track note on a chord's onset tick exports at the chord's own 480-ppq tick") {
+    for (int seed = 0; seed < kSweep; ++seed) {
+        int bass = kNoTrackId;
+        const DocumentStore store = oddTickDocWithBass(seed, bass);
+        const Document& doc = store.doc();
+        const std::vector<std::int32_t> ticks = chordBoundaryTicks(doc);
+        for (int section = -1; section < 4; ++section) {
+            const auto [first, end] = chordRange(doc, section);
+            const File g = requireFile(exportClip(doc, ClipSpec{{ClipLane::chordsLane(), ClipLane::trackLane(bass)}, false, section}, kBpm));
+            REQUIRE(g.tracks.size() == 3);
+            ClipSpec all;
+            all.allLanes = true;
+            all.sectionIndex = section;
+            const File f = requireFile(exportClip(doc, all, kBpm));
+            REQUIRE(f.tracks.size() == 3);
+            const Compiled chords = section < 0 ? compile(doc) : compileSection(doc, section);
+            for (std::size_t i = first; i < end; ++i) {
+                CAPTURE(seed);
+                CAPTURE(section);
+                CAPTURE(i);
+                // The chord's note-on tick: its first on event, at (tick - base) / 960.0 exactly as sliceRange gives it.
+                const double onBeat = static_cast<double>(ticks[i] - ticks[first]) / kTicks;
+                long chordOn = -1;
+                for (const NoteEvent& e : chords.events) {
+                    if (e.on && e.beat == onBeat) {
+                        chordOn = std::lround(e.beat * 480);
+                        break;
+                    }
+                }
+                REQUIRE(chordOn >= 0);
+                for (const File* file : {&f, &g}) {
+                    const FileTrack& lane = file->tracks.back();
+                    long trackOn = -1;
+                    for (const N& n : notesOf(lane)) {
+                        if (n.status == 0x90 && n.pitch == 30 + static_cast<int>(i)) trackOn = n.tick;
+                    }
+                    CHECK(trackOn == chordOn);
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("exportClip: under a feel a one-lane track clip is as long as the chords clip of its section, and a format 1 file ends where exportMidi does") {
+    for (int seed = 0; seed < kSweep; ++seed) {
+        int bass = kNoTrackId;
+        const DocumentStore store = oddTickDocWithBass(seed, bass);
+        const Document& doc = store.doc();
+        for (int section = -1; section < 4; ++section) {
+            CAPTURE(seed);
+            CAPTURE(section);
+            const File chordsOnly = requireFile(exportClip(doc, ClipSpec{{ClipLane::chordsLane()}, false, section}, kBpm));
+            const File trackOnly = requireFile(exportClip(doc, ClipSpec{{ClipLane::trackLane(bass)}, false, section}, kBpm));
+            REQUIRE(chordsOnly.format == 0);
+            REQUIRE(trackOnly.format == 0);
+            CHECK(endTickOf(trackOnly.tracks[0]) == endTickOf(chordsOnly.tracks[0]));
+            const Compiled chords = section < 0 ? compile(doc) : compileSection(doc, section);
+            CHECK(compileTrack(doc, bass, section).endBeat == chords.endBeat);  // bit for bit
+            ClipSpec all;
+            all.allLanes = true;
+            all.sectionIndex = section;
+            const File both = requireFile(exportClip(doc, all, kBpm));
+            REQUIRE(both.format == 1);
+            const File midi = requireFile(exportMidi(doc, section, kBpm));
+            for (const FileTrack& t : both.tracks) CHECK(endTickOf(t) == endTickOf(midi.tracks[0]));
+        }
+    }
+}
+
+TEST_CASE("compileTrack: under a feel the cut and the minimum length are judged in the integer ticks") {
+    // Boundaries 0, 965, 1687, 2647: chords of 1.0052, 0.7526 and 1.0 beats; section "B" is [965, 1687).
+    DocumentStore store;
+    store.appendChord(chord(0, "maj"), 1.0052, 100);
+    store.appendChord(chord(5, "maj"), 0.7526, 100);
+    store.appendChord(chord(7, "7"), 1.0, 100);
+    REQUIRE(store.addSection(1, "B") != kNoSectionId);
+    REQUIRE(store.addSection(2, "C") != kNoSectionId);
+    store.setFeel(Feel{Rhythm::Pulse});
+    REQUIRE_FALSE(compile(store.doc()).feelLimited);
+    REQUIRE(chordBoundaryTicks(store.doc()) == std::vector<std::int32_t>({0, 965, 1687, 2647}));
+    // [900, 970) runs 5 ticks into the section (kMinNoteTicks: kept), [880, 966) 1 tick (dropped); [1000, 1700) and
+    // [1680, 1780) are cut at the section's end 1687.
+    const int id = addTrackWith(store, {ns(40, 900, 70), ns(41, 880, 86), ns(42, 1000, 700), ns(43, 1680, 100)});
+    const Compiled one = compileTrack(store.doc(), id, 1);
+    CHECK(one.endBeat == 722 / kTicks);
+    const std::vector<S> got = soundings(one);
+    REQUIRE(got.size() == 3);
+    CHECK(got[0].pitch == 40);
+    CHECK(got[0].start == 0.0);
+    CHECK(got[0].end == 5 / kTicks);
+    CHECK(got[1].pitch == 42);
+    CHECK(got[1].start == 35 / kTicks);
+    CHECK(got[1].end == 722 / kTicks);
+    CHECK(got[2].pitch == 43);
+    CHECK(got[2].start == 715 / kTicks);
+    CHECK(got[2].end == 722 / kTicks);
 }
 
 TEST_CASE("exportClip: a lane listed twice is written twice") {
