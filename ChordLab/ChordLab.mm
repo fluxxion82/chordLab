@@ -768,6 +768,12 @@ bool ChordLab::OnMessage(int msgTag, int ctrlTag, int dataSize, const void* pDat
     return true;
   }
 
+  if (msgTag == kMsgTagExportClip)
+  {
+    HandleExportClip((pData && dataSize > 0) ? std::string_view((const char*) pData, (size_t) dataSize) : std::string_view());
+    return true;
+  }
+
   return CocoaEditorDelegate::OnMessage(msgTag, ctrlTag, dataSize, pData);
 }
 
@@ -868,6 +874,75 @@ void ChordLab::HandleExportSection(std::string_view text)
   if (!found)
   {
     PushError("no such section");                                // outside the lock, like every call into the UI
+    return;
+  }
+  WriteExport(bytes, label);
+  }
+}
+
+void ChordLab::HandleExportClip(std::string_view text)
+{
+  // Main thread. {"schema":1,"lanes":...,"sectionId":...}: lanes are independent clips of their own notes
+  // (tracks design D12). exportClip answers an unknown track or section with empty bytes ("nothing to
+  // export"), so the ids are resolved here, under the same lock as the export, for an error that says
+  // which is wrong (the section is checked first; the first problem found is the one reported).
+  @autoreleasepool
+  {
+  const std::optional<chordlab::bridge::ClipExportRequest> request = chordlab::bridge::parseClipExportRequest(text);
+  if (!request)
+  {
+    PushError("clip export message needs schema 1, lanes and a section id or null");
+    return;
+  }
+  const double bpm = HostBpm();
+  std::vector<uint8_t> bytes;
+  std::string label;
+  const char* problem = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(mModelMutex);
+    const chordlab::Document& doc = mStore.doc();
+    chordlab::ClipSpec spec;
+    spec.allLanes = request->allLanes;
+    spec.lanes = request->lanes;
+    spec.sectionIndex = -1;
+    std::string sectionName;
+    if (request->sectionId)
+    {
+      const int index = mStore.findSectionIndex(*request->sectionId);
+      if (index < 0)
+        problem = "no such section";
+      else
+      {
+        spec.sectionIndex = index;
+        sectionName = doc.sections[(size_t) index].name;
+      }
+    }
+    std::vector<std::string> laneNames;
+    for (const chordlab::ClipLane& lane : request->lanes)
+    {
+      if (lane.chords)
+      {
+        laneNames.push_back("Chords");
+        continue;
+      }
+      const int index = mStore.findTrackIndex(lane.trackId);
+      if (index < 0)
+      {
+        if (!problem)
+          problem = "no such track";
+      }
+      else
+        laneNames.push_back(doc.tracks[(size_t) index].name);
+    }
+    if (!problem)
+    {
+      bytes = chordlab::exportClip(doc, spec, bpm);
+      label = chordlab::bridge::clipExportLabel(chordlab::keyName(doc.projectKey), laneNames, request->allLanes, sectionName);
+    }
+  }
+  if (problem)
+  {
+    PushError(problem);                                          // outside the lock, like every call into the UI
     return;
   }
   WriteExport(bytes, label);

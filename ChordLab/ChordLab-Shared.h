@@ -22,6 +22,7 @@ static const NSInteger kMsgTagPreview = 12;          // payload: {"schema":1,"id
 static const NSInteger kMsgTagPanic = 13;            // no payload: silence everything on the next audio block
 static const NSInteger kMsgTagExport = 14;           // no payload: write the progression as a .mid file; answered by kMsgTagExportReady or kMsgTagError
 static const NSInteger kMsgTagExportSection = 15;    // payload: {"schema":1,"id":<sectionId>}: write that section alone as a .mid file; same answers
+static const NSInteger kMsgTagExportClip = 17;       // payload: {"schema":1,"lanes":["chords"|<trackId>,...]|"all","sectionId":<id>|null}: write those lanes (the whole progression, or one section) as a .mid file, format 0 for one lane, format 1 for several; answered by kMsgTagExportReady or kMsgTagError
 static const NSInteger kMsgTagClearHeard = 16;       // no payload: forget what the listener heard (the chip's x); answered by kMsgTagHeard
 // plugin -> UI
 static const NSInteger kMsgTagSnapshot = 20;         // payload: snapshotJson (document + palette)
