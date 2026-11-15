@@ -1,12 +1,21 @@
 import Foundation
 
+/// An arrow key's direction. One type for the key (`KeyInput.Key.arrow`), the command (`KeyCommand.nudge`) and
+/// the nudge itself (`RollGroupMath.NudgeDirection` is this type).
+enum ArrowDirection: Hashable {
+  case left, right, up, down
+}
+
 /// A key press as either native route reports it, reduced to what the shortcuts need: the key
-/// (a character, one of the two delete keys, or something else) and the four modifiers.
+/// (a character, one of the two delete keys, an arrow, or something else) and the four modifiers.
+/// Arrows are always read from the key code or virtual key, never from the text (route A's arrow text is a
+/// private-use function-key character, route B's is empty).
 struct KeyInput: Hashable {
   enum Key: Hashable {
     case character(Character)
     case delete          // Backspace / the Mac "delete" key
     case forwardDelete   // fn-delete / "⌦"
+    case arrow(ArrowDirection)
     case other
   }
 
@@ -22,8 +31,10 @@ struct KeyInput: Hashable {
 
   /// The VST3 route: iPlug2's `IKeyPress` carries the key's UTF-8 text, a Windows virtual key and
   /// three modifiers (S, C = command on macOS, A); it drops Control, so the caller supplies it from
-  /// the live modifier flags. `kVK_BACK` 0x08 and `kVK_DELETE` 0x2E are the delete keys; any other key
-  /// with exactly one character is that character; a keypad digit (`kVK_NUMPAD0`…`9`, 0x60…0x69) without
+  /// the live modifier flags. `kVK_BACK` 0x08 and `kVK_DELETE` 0x2E are the delete keys; `kVK_LEFT` 0x25,
+  /// `kVK_UP` 0x26, `kVK_RIGHT` 0x27 and `kVK_DOWN` 0x28 are the arrows, whatever text comes with them
+  /// (iPlug2's translation gives them none: VST3's `VirtualKeyCodeToChar` has no character for them); any other
+  /// key with exactly one character is that character; a keypad digit (`kVK_NUMPAD0`…`9`, 0x60…0x69) without
   /// text is that digit, because the VST3 translation leaves the text empty for keypad codes it cannot
   /// turn into a character; the rest is `.other`.
   init(characters: String, virtualKey: Int, shift: Bool, command: Bool, option: Bool, control: Bool) {
@@ -31,6 +42,10 @@ struct KeyInput: Hashable {
     switch virtualKey {
     case 0x08: key = .delete
     case 0x2E: key = .forwardDelete
+    case 0x25: key = .arrow(.left)
+    case 0x26: key = .arrow(.up)
+    case 0x27: key = .arrow(.right)
+    case 0x28: key = .arrow(.down)
     case 0x60...0x69 where characters.isEmpty: key = .character(Character(String(virtualKey - 0x60)))
     default: key = characters.count == 1 ? .character(characters.first!) : .other
     }
@@ -49,19 +64,52 @@ enum KeyCommand: Equatable {
   case paste       // ⌘V: the clipboard's chords after the anchor, else at the end
   case duplicate   // ⌘D: the selection's chords again, after its last block
   case selectAll   // ⌘A: every block, the last the anchor
+  /// An arrow with the notes targeted (tracks design D15): ↑/↓ a semitone, or an octave with `octave` (⇧);
+  /// ←/→ one grid step. ⇧←/⇧→ carry `octave` too and `RollGroupMath.nudge` ignores it horizontally.
+  case nudge(ArrowDirection, octave: Bool)
 }
 
-/// The one key map, for both routes: bare digits 1–8 append that suggestion chip; Delete and Forward Delete
-/// remove the selected chords; ⌘Z and ⇧⌘Z undo and redo; ⌘C, ⌘X, ⌘V, ⌘D and ⌘A copy, cut, paste, duplicate
-/// and select all, without Shift (⇧⌘C and the like stay the host's). Everything else (Space, letters, 9, 0,
-/// digits or deletes with a modifier, ⌥ or ⌃ with ⌘, digits of other scripts such as "٢" or "²") is nil: not
-/// ours, the host keeps it.
+/// What the keyboard edits (tracks design D15 "Keyboard"): the chord strip, or one track's notes in the roll.
+/// UI state in `ChordLabState.keyTarget`, set by the last mouse-down (strip, palette, suggestions → chords; the
+/// roll → that track's notes), never saved.
+enum KeyTarget: Equatable {
+  case chords
+  case notes(trackId: Int)
+
+  /// The target given the snapshot's tracks: `.notes(id)` while a track with that id exists, else `.chords`
+  /// (a removed track's notes fall back to the chords, so Delete never acts on a hidden track; so do notes
+  /// while no `tracks` have arrived); `.chords` stays `.chords`. The same rule as `Lane.resolved(in:)`.
+  func resolved(in tracks: [TrackJSON]?) -> KeyTarget {
+    guard case .notes(let trackId) = self else { return self }
+    return tracks?.contains { $0.id == trackId } == true ? self : .chords
+  }
+
+  /// The target after the open lane (`ChordLabState.openLane`, design D13) goes from `old` to `new`: `.chords`
+  /// whenever the lane changes (opening a track does not target its notes; a mouse-down in its roll does), the
+  /// target unchanged when the "change" reopens the same lane.
+  func afterOpenLaneChange(from old: Lane, to new: Lane) -> KeyTarget {
+    old == new ? self : .chords
+  }
+}
+
+/// The one key map, for both routes and both targets. With `.chords` targeted: bare digits 1–8 append that
+/// suggestion chip; Delete and Forward Delete remove the selected chords; ⌘Z and ⇧⌘Z undo and redo; ⌘C, ⌘X, ⌘V,
+/// ⌘D and ⌘A copy, cut, paste, duplicate and select all, without Shift (⇧⌘C and the like stay the host's); every
+/// arrow, with any modifiers, is nil (the host keeps it: Live moves its own selection). With `.notes(trackId)`
+/// targeted: the same Delete, ⌘Z/⇧⌘Z and ⌘C ⌘X ⌘V ⌘D ⌘A entries (`ChordLabState.perform` sends them to the notes);
+/// a bare arrow is `.nudge(direction, octave: false)` and a ⇧-arrow `.nudge(direction, octave: true)`; an arrow
+/// with ⌘, ⌥ or ⌃ (⇧ or not) is nil; bare digits are nil (the suggestion chips are hidden while a track is open,
+/// design D13). For both targets everything else (Space, letters, 9, 0, digits or deletes with a modifier, ⌥ or
+/// ⌃ with ⌘, digits of other scripts such as "٢" or "²") is nil: not ours, the host keeps it.
 enum KeyCommandMap {
-  static func command(for input: KeyInput) -> KeyCommand? {
+  static func command(for input: KeyInput, target: KeyTarget) -> KeyCommand? {
     let anyModifier = input.command || input.shift || input.option || input.control
     switch input.key {
+    case .arrow(let direction):
+      guard case .notes = target, !input.command, !input.option, !input.control else { return nil }
+      return .nudge(direction, octave: input.shift)
     case .character(let c) where !anyModifier:
-      guard c.isASCII, ("1"..."8").contains(c), let n = c.wholeNumberValue else { return nil }
+      guard target == .chords, c.isASCII, ("1"..."8").contains(c), let n = c.wholeNumberValue else { return nil }
       return .appendSuggestion(n)
     case .character(let c) where input.command && !input.option && !input.control:
       switch c.lowercased() {

@@ -48,18 +48,17 @@ struct RollLimits: Equatable {
 /// that `updateNotes` / `insertNotes` whole and the roll shows the refusal like any other, leaving every note as it
 /// was. The roll does not pre-filter such groups.
 ///
-/// Depends on nothing but Foundation; unit-tested by the `ChordLabUICore` package
-/// (Tests/ChordLabUICoreTests/RollGroupMathTests.swift).
+/// Depends on nothing but Foundation and Core's `ArrowDirection` (KeyCommand.swift); unit-tested by the
+/// `ChordLabUICore` package (Tests/ChordLabUICoreTests/RollGroupMathTests.swift).
 enum RollGroupMath {
   /// Which edge a resize drags: the start (the end stays) or the end (the start stays).
   enum Edge: Equatable {
     case start, end
   }
 
-  /// An arrow nudge (design D15 "Keyboard"): ↑/↓ a semitone (an octave with ⇧), ←/→ one grid step.
-  enum NudgeDirection: Equatable {
-    case up, down, left, right
-  }
+  /// An arrow nudge (design D15 "Keyboard"): ↑/↓ a semitone (an octave with ⇧), ←/→ one grid step. The arrow
+  /// key's own direction type, so `KeyCommand.nudge` passes straight through.
+  typealias NudgeDirection = ArrowDirection
 
   /// `value` clamped into `low...high` widened to contain 0 (see the type comment).
   private static func clamp(_ value: Int, low: Int, high: Int) -> Int {
