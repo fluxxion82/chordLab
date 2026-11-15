@@ -989,13 +989,41 @@ bool DocumentStore::setLengths(const std::vector<int>& ids, double lengthBeats, 
     return commitTiming(std::move(next), refusal);  // nothing changed: no history
 }
 
+namespace {
+
+/// Whether any track of `doc` holds a note.
+bool hasTrackNotes(const Document& doc) {
+    return std::any_of(doc.tracks.begin(), doc.tracks.end(), [](const Track& t) { return !t.notes.empty(); });
+}
+
+/// Moves the notes of every track of `next` by `interval` (`transposeNotes`, D18) and re-sorts each track: a pitch
+/// change can reorder notes that start together. The chords' timing is untouched, so `next`'s boundaries are the
+/// ones the notes were sorted against. Only pitches change, so the candidate stays valid (`validateTracks`).
+void carryTracks(Document& next, int interval) {
+    if (interval == 0 || !hasTrackNotes(next)) {
+        return;
+    }
+    transposeNotes(next.tracks, interval);
+    const ChordTimeline timeline = chordTimeline(next);
+    for (Track& t : next.tracks) {
+        sortTrackNotes(t.notes, timeline);
+    }
+}
+
+}  // namespace
+
 void DocumentStore::setProjectKey(Key key) {
     assertValidKey(key);
     Document next = doc_;
     const int interval = wrapPitchClass(key.tonicPc() - doc_.projectKey.tonicPc());
-    if (doc_.transposeWithKey && interval != 0 && !doc_.events.empty()) {
-        // The chords move in the same commit as the key: one undo step restores both.
-        transposeEvents(next.events, chooseKeyTranspose(doc_.events, interval));
+    if (doc_.transposeWithKey && interval != 0) {
+        // The chords and the tracks move in the same commit as the key: one undo step restores all three. The
+        // notes follow the chords' direction; with no chords there is none to weigh (D18: the smaller move).
+        const int move = doc_.events.empty() ? trackOnlyInterval(interval) : chooseKeyTranspose(doc_.events, interval);
+        if (!doc_.events.empty()) {
+            transposeEvents(next.events, move);
+        }
+        carryTracks(next, move);
     }
     if (doc_.browsedKey == doc_.projectKey) {
         next.browsedKey = key;  // a home browse follows the project key, as under undo and redo (keepLiveState)
@@ -1006,20 +1034,24 @@ void DocumentStore::setProjectKey(Key key) {
 
 bool DocumentStore::transposeFromKey(PitchClass fromTonic) {
     const int interval = wrapPitchClass(doc_.projectKey.tonicPc() - fromTonic);
-    if (doc_.events.empty() || interval == 0) {
+    // Notes only exist on chords, so "nothing to move" is no chords (and then no notes either).
+    if ((doc_.events.empty() && !hasTrackNotes(doc_)) || interval == 0) {
         return false;
     }
     Document next = doc_;
-    transposeEvents(next.events, chooseKeyTranspose(doc_.events, interval));
+    const int move = doc_.events.empty() ? trackOnlyInterval(interval) : chooseKeyTranspose(doc_.events, interval);
+    transposeEvents(next.events, move);
+    carryTracks(next, move);
     return commit(std::move(next));
 }
 
 bool DocumentStore::transposeProgression(int semitones) {
-    if (doc_.events.empty() || semitones == 0 || semitones < -11 || semitones > 11) {
+    if ((doc_.events.empty() && !hasTrackNotes(doc_)) || semitones == 0 || semitones < -11 || semitones > 11) {
         return false;
     }
     Document next = doc_;
     transposeEvents(next.events, semitones);
+    carryTracks(next, semitones);
     return commit(std::move(next));
 }
 

@@ -331,7 +331,9 @@ std::string heardJson(const Listener& listener, const Key& projectKey);
 
 /// Applies one UI command, `{"schema":1,"cmd":"<name>", ...fields}`, to the store:
 /// - `setKey {letter,alter,mode}`: `setProjectKey` (a browsed key equal to the project key follows it, so
-///   the palette stays home; any other browsed key is left alone).
+///   the palette stays home; any other browsed key is left alone). With `transposeWithKey` on and a tonic
+///   change, the track notes move with the chords in the same undo step (D18, see `setProjectKey`); with it
+///   off, or for a mode-only change, no note moves.
 /// - `browseKey` with exactly one of `{"steps":n}` (`fifthsNeighbour` of the current browsed key),
 ///   `{"mode":"<Mode>"}` (the parallel mode on the same tonic pitch class, canonically spelled) or
 ///   `{"home":true}` (browsed key = project key).
@@ -366,9 +368,12 @@ std::string heardJson(const Listener& listener, const Key& projectKey);
 ///   2, 4 or 8. Both are undoable (`DocumentStore::setFeel` / `setMeter`); an equal value pushes no history.
 /// - `transposeFromKey {fromTonicPc}` (0..11): `transposeFromKey`, every chord moved from that tonic to the
 ///   project tonic, one undo step; `transposeProgression {semitones}` (-11..11): `transposeProgression`,
-///   every chord moved by the signed interval, one undo step. Neither changes the key. A move of nothing
-///   (interval 0, no chords) is a valid no-op that pushes no history. An out-of-range value is rejected.
-///   With `transposeWithKey` on, `setKey` also transposes the chords (document.h), in the same undo step.
+///   every chord moved by the signed interval, one undo step. Both carry the track notes in the same step
+///   (pitches only; D18): `transposeFromKey` by the interval the chords take, `transposeProgression` by
+///   exactly `semitones`. Neither changes the key. A move of nothing (interval 0, no chords) is a valid no-op
+///   that pushes no history and leaves the revision. An out-of-range value is rejected.
+///   With `transposeWithKey` on, `setKey` also transposes the chords and the notes (document.h), in the
+///   same undo step.
 /// - `addSection {index,name?}`: `addSection(index, name)`; `name` defaults to the store's "Section <n>"
 ///   and, given, must be at most `kMaxSectionNameBytes` UTF-8 bytes (longer is rejected, not cut: the UI
 ///   limits its field and a longer name is a malformed message). An `index` that is no chord position,

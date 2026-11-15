@@ -505,22 +505,30 @@ public:
     /// declared `Mode`. When `Document::transposeWithKey` is on and the tonic's pitch class changes (a
     /// mode-only change or an enharmonic respelling does not), every chord of the sequence moves by the
     /// interval between the two tonics in the same commit, so key and chords are one undo step: the
-    /// direction is `chooseKeyTranspose`'s, the move `transposeEvents`' (transpose.h). A browsed key equal
+    /// direction is `chooseKeyTranspose`'s, the move `transposeEvents`' (transpose.h). The track notes move in
+    /// that commit too (tracks design D18), by the same signed interval (`transposeNotes`: pitches only, a note
+    /// that would leave 0..127 lands an octave off; the notes are re-sorted and the note selection follows their
+    /// new order); with no chords to weigh, by `trackOnlyInterval` (-5..+6), which can only matter for a
+    /// document whose tracks hold notes, and notes need a chord to anchor. With the switch off, or for a
+    /// mode-only change or an enharmonic respelling, no note moves. A browsed key equal
     /// to the current project key (home) becomes `key` too, so the palette follows the project; any other
     /// browsed key is left alone. Sections, ids, the selection and the id counters are untouched.
     void setProjectKey(Key key);
 
     /// Moves every chord from `fromTonic` (a pitch class; reduced modulo 12) to the current project key's
     /// tonic, as a key change with the switch on would (direction by `chooseKeyTranspose`), as ONE
-    /// undoable step. The key itself does not change. Returns false and changes nothing (no history)
-    /// when the sequence is empty or the two tonics are the same pitch class. What the one-time hint's
+    /// undoable step; the track notes move in that step by the same signed interval (D18, see `setProjectKey`).
+    /// The key itself does not change. Returns false and changes nothing (no history, no revision) when there
+    /// are neither chords nor notes or the two tonics are the same pitch class. What the one-time hint's
     /// "Move once" does after a tonic change made with the switch off.
     bool transposeFromKey(PitchClass fromTonic);
 
     /// Moves every chord by `semitones` (-11..11, signed, exactly as given: no direction choice) as ONE
-    /// undoable step; see `transposeEvents` (transpose.h) for how the octaves follow. The key does not
-    /// change. Returns false and changes nothing (no history) when the sequence is empty, `semitones` is
-    /// 0 or outside -11..11.
+    /// undoable step; see `transposeEvents` (transpose.h) for how the octaves follow. The track notes move by
+    /// exactly `semitones` in the same step (D18: no direction choice for them either; a note leaving 0..127
+    /// lands an octave off, `transposeNotes`), re-sorted, the note selection following. The key does not
+    /// change. Returns false and changes nothing (no history, no revision) when there are neither chords nor
+    /// notes, `semitones` is 0 or outside -11..11.
     bool transposeProgression(int semitones);
 
     /// Undoable: the flag changes what `compile` produces (see `Document`).

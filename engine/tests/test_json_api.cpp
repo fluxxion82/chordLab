@@ -1154,6 +1154,76 @@ TEST_CASE("setKey with transposeWithKey on: event roots and symbols move, in one
     CHECK(undone.at("transposeWithKey") == true);  // live state survives
 }
 
+/// threeChords (C F G7, four beats each) with a Bass track (id 1) holding pitches 2 and 6 on C (ids 1 and 2), 40 on F
+/// (id 3) and 125 on G7 (id 4).
+DocumentStore threeChordsWithBassNotes() {
+    DocumentStore store = threeChords();
+    REQUIRE(store.addTrack(TrackRole::Bass) == 1);
+    REQUIRE(store.insertNotes(1, {NoteSpec{2, 0, 480}, NoteSpec{6, 0, 480}, NoteSpec{40, 3840, 480},
+                                  NoteSpec{125, 7680, 480}}) == std::vector<int>{1, 2, 3, 4});
+    return store;
+}
+
+std::vector<std::pair<int, int>> bassIdAndPitch(const DocumentStore& store) {
+    std::vector<std::pair<int, int>> out;
+    for (const TrackNote& n : store.doc().tracks.at(0).notes) {
+        out.emplace_back(n.id, n.pitch);
+    }
+    return out;
+}
+
+using IdPitches = std::vector<std::pair<int, int>>;
+
+TEST_CASE("setKey with transposeWithKey on carries the track notes by the chords' interval, one undo step") {
+    DocumentStore store = threeChordsWithBassNotes();
+    applyOk(store, {{"cmd", "setTransposeWithKey"}, {"on", true}});
+    const Document before = store.doc();
+    const std::uint64_t revision = store.revision();
+
+    applyOk(store, {{"cmd", "setKey"}, {"letter", "G"}, {"alter", 0}, {"mode", "Ionian"}});
+
+    CHECK(snapshot(store).at("events")[0].at("root") == 7);  // C -> G, down a fourth (-5)
+    CHECK(bassIdAndPitch(store) == IdPitches{{2, 1}, {1, 9}, {3, 35}, {4, 120}});  // -5, 2 and 6 folded up and re-sorted
+    CHECK(store.revision() == revision + 1);
+    const Document after = store.doc();
+
+    REQUIRE(store.undo());
+    CHECK(store.doc() == before);
+    CHECK(bassIdAndPitch(store) == IdPitches{{1, 2}, {2, 6}, {3, 40}, {4, 125}});
+    REQUIRE(store.redo());
+    CHECK(store.doc() == after);
+}
+
+TEST_CASE("setKey with transposeWithKey off, and a mode-only setKey, leave the track notes alone") {
+    DocumentStore off = threeChordsWithBassNotes();
+    applyOk(off, {{"cmd", "setKey"}, {"letter", "G"}, {"alter", 0}, {"mode", "Ionian"}});
+    CHECK(bassIdAndPitch(off) == IdPitches{{1, 2}, {2, 6}, {3, 40}, {4, 125}});
+
+    DocumentStore on = threeChordsWithBassNotes();
+    applyOk(on, {{"cmd", "setTransposeWithKey"}, {"on", true}});
+    applyOk(on, {{"cmd", "setKey"}, {"letter", "C"}, {"alter", 0}, {"mode", "Aeolian"}});
+    CHECK(bassIdAndPitch(on) == IdPitches{{1, 2}, {2, 6}, {3, 40}, {4, 125}});
+    CHECK(on.doc().events == threeChords().doc().events);
+}
+
+TEST_CASE("transposeFromKey and transposeProgression carry the track notes, the explicit interval exactly") {
+    DocumentStore store = threeChordsWithBassNotes();
+    applyOk(store, {{"cmd", "setKey"}, {"letter", "G"}, {"alter", 0}, {"mode", "Ionian"}});  // switch off
+    applyOk(store, {{"cmd", "transposeFromKey"}, {"fromTonicPc", 0}});
+    CHECK(bassIdAndPitch(store) == IdPitches{{2, 1}, {1, 9}, {3, 35}, {4, 120}});  // the chords' -5
+    REQUIRE(store.undo());
+    CHECK(bassIdAndPitch(store) == IdPitches{{1, 2}, {2, 6}, {3, 40}, {4, 125}});
+
+    DocumentStore explicitUp = threeChordsWithBassNotes();
+    applyOk(explicitUp, {{"cmd", "transposeProgression"}, {"semitones", 7}});  // +7, not -5
+    CHECK(bassIdAndPitch(explicitUp) == IdPitches{{1, 9}, {2, 13}, {3, 47}, {4, 120}});
+    CHECK(snapshot(explicitUp).at("events")[0].at("root") == 7);
+
+    DocumentStore explicitDown = threeChordsWithBassNotes();
+    applyOk(explicitDown, {{"cmd", "transposeProgression"}, {"semitones", -7}});
+    CHECK(bassIdAndPitch(explicitDown) == IdPitches{{1, 7}, {2, 11}, {3, 33}, {4, 118}});
+}
+
 TEST_CASE("rejection: transpose commands with missing, mistyped or out-of-range fields are refused whole") {
     DocumentStore store = threeChords();
     checkRejected(store, {{"cmd", "setTransposeWithKey"}});

@@ -24,4 +24,17 @@ int transposeEvents(std::vector<ChordEvent>& events, int semitones);
 /// interval of 0 (modulo 12). Pure: reads `events`, changes nothing.
 int chooseKeyTranspose(const std::vector<ChordEvent>& events, int interval);
 
+/// The signed move that carries track notes for a key change of `interval` pitch classes (reduced modulo 12)
+/// when there are no chords to weigh (tracks design D18): `interval` for 1..6, `interval - 12` for 7..11, so
+/// -5..+6, the smaller move, and the tritone goes up (+6). 0 for an interval of 0 (modulo 12). Pure.
+int trackOnlyInterval(int interval);
+
+/// Moves the pitch of every note of every track by `interval` (signed, -11..11), D18's pitches-only rule:
+/// a result outside 0..127 moves by `interval` -/+ 12 instead (an octave down past 127, up below 0), so the
+/// note keeps its pitch class and, with |interval| <= 11, always lands inside 0..127. Anchors, offsets,
+/// lengths, velocities, ids, names and the order of the notes are untouched: the caller re-sorts, because
+/// the notes' order is by (derived start, pitch, id) and a pitch change can reorder equal starts. An interval
+/// of 0 changes nothing. Returns how many notes were folded by an octave.
+int transposeNotes(std::vector<Track>& tracks, int interval);
+
 }  // namespace chordlab

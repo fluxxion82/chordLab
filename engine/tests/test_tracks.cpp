@@ -5,7 +5,9 @@
 #include "chordlab/feel.h"
 #include "chordlab/meter.h"
 #include "chordlab/tracks.h"
+#include "chordlab/transpose.h"
 
+#include <algorithm>
 #include <climits>
 #include <cstddef>
 #include <cstdint>
@@ -13,6 +15,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 using namespace chordlab;
@@ -2243,4 +2246,271 @@ TEST_CASE("insertChords with notes: an exhausted track or note id counter refuse
         CHECK(refusal == "No track ids are left");
         checkRefused(store, reference);
     }
+}
+
+// --- transpose on all three paths (tracks design D18) --------------------------------------------------
+
+namespace {
+
+Key keyOf(char letter, int alter, Mode mode) {
+    return Key{Tonic{letter, alter}, mode};
+}
+
+/// `pitch` + `interval`, an octave off when that leaves 0..127 (D18), written out independently of the engine.
+int expectedPitch(int pitch, int interval) {
+    const int direct = pitch + interval;
+    if (direct > 127) {
+        return direct - 12;
+    }
+    if (direct < 0) {
+        return direct + 12;
+    }
+    return direct;
+}
+
+/// C, F, G7 (ids 1..3, four beats) with a Bass track (id 1: notes 1..4) and a Lead track (id 2: note 5).
+/// Bass: pitch 2 (id 1) and 6 (id 2) start together on C, 40 on F, 125 on G7; Lead: 60 on C. Under a move of
+/// -5 the notes 2 and 6 cross (9 and 1), so the bass order changes.
+DocumentStore transposeFixture() {
+    DocumentStore store = threeChords();
+    REQUIRE(store.addTrack(TrackRole::Bass) == 1);
+    REQUIRE(store.addTrack(TrackRole::Lead) == 2);
+    REQUIRE(store.insertNotes(1, {ns(2, 0, 480), ns(6, 0, 480), ns(40, kBar, 480, 90), ns(125, 2 * kBar, 480, 80)}) ==
+            std::vector<int>{1, 2, 3, 4});
+    REQUIRE(store.insertNotes(2, {ns(60, 0, 960, 70)}) == std::vector<int>{5});
+    return store;
+}
+
+/// Every track note of `store`, id to pitch.
+std::unordered_map<int, int> pitchById(const DocumentStore& store) {
+    std::unordered_map<int, int> pitches;
+    for (const Track& t : store.doc().tracks) {
+        for (const TrackNote& n : t.notes) {
+            pitches[n.id] = n.pitch;
+        }
+    }
+    return pitches;
+}
+
+/// Checks `after` is `before` with every note pitch moved by `interval` (folded) and nothing else of a note or
+/// a track changed, and that the notes of each track of `after` are in D4's order.
+void checkNotesMoved(const Document& before, const Document& after, int interval) {
+    REQUIRE(after.tracks.size() == before.tracks.size());
+    const ChordTimeline timeline = chordTimeline(after);
+    for (std::size_t t = 0; t < before.tracks.size(); ++t) {
+        const Track& a = after.tracks[t];
+        const Track& b = before.tracks[t];
+        CHECK(a.id == b.id);
+        CHECK(a.name == b.name);
+        CHECK(a.role == b.role);
+        CHECK(a.mute == b.mute);
+        CHECK(a.solo == b.solo);
+        REQUIRE(a.notes.size() == b.notes.size());
+        for (const TrackNote& old : b.notes) {
+            const auto it = std::find_if(a.notes.begin(), a.notes.end(), [&](const TrackNote& n) { return n.id == old.id; });
+            REQUIRE(it != a.notes.end());
+            CHECK(it->pitch == expectedPitch(old.pitch, interval));
+            CHECK(it->anchorEventId == old.anchorEventId);
+            CHECK(it->offsetTick == old.offsetTick);
+            CHECK(it->lengthTicks == old.lengthTicks);
+            CHECK(it->velocity == old.velocity);
+        }
+        std::vector<TrackNote> sorted = a.notes;
+        sortTrackNotes(sorted, timeline);
+        CHECK(sorted == a.notes);
+    }
+}
+
+std::vector<ChordEvent> movedBy(std::vector<ChordEvent> events, int semitones) {
+    transposeEvents(events, semitones);
+    return events;
+}
+
+}  // namespace
+
+TEST_CASE("setProjectKey with the switch on: the notes move by chooseKeyTranspose's interval with the chords, one undo step") {
+    DocumentStore store = transposeFixture();
+    store.setTransposeWithKey(true);
+    const int interval = chooseKeyTranspose(store.doc().events, 7);
+    REQUIRE(interval == -5);  // the direction the chords take, not +7
+    const std::vector<ChordEvent> movedChords = movedBy(store.doc().events, interval);
+    const Document before = store.doc();
+    const std::uint64_t revision = store.revision();
+
+    store.setProjectKey(keyOf('G', 0, Mode::Ionian));
+
+    const Document after = store.doc();
+    CHECK(after.events == movedChords);
+    checkNotesMoved(before, after, interval);
+    CHECK(pitchById(store) == std::unordered_map<int, int>{{1, 9}, {2, 1}, {3, 35}, {4, 120}, {5, 55}});
+    CHECK(store.revision() == revision + 1);  // one successful commit
+    std::string error;
+    CHECK(validateTracks(after, store.nextTrackId(), store.nextNoteId(), error));
+
+    REQUIRE(store.undo());
+    CHECK(store.doc() == before);  // chords, key and notes, one step
+    REQUIRE(store.redo());
+    CHECK(store.doc() == after);
+    CHECK_FALSE(store.redo());
+}
+
+TEST_CASE("setProjectKey with the switch on: the notes are re-sorted and the note selection names the same ids in the new order") {
+    DocumentStore store = transposeFixture();
+    store.setTransposeWithKey(true);
+    REQUIRE(noteIdsOf(store) == std::vector<int>{1, 2, 3, 4});  // pitch 2 before pitch 6 on the first chord
+    store.setNoteSelection(1, {1, 2, 4});
+    REQUIRE(store.noteSelection() == NoteSelection{1, {1, 2, 4}});
+
+    store.setProjectKey(keyOf('G', 0, Mode::Ionian));
+
+    CHECK(noteIdsOf(store) == std::vector<int>{2, 1, 3, 4});  // pitch 1 (was 6) now before pitch 9 (was 2)
+    CHECK(store.noteSelection() == NoteSelection{1, {2, 1, 4}});
+
+    REQUIRE(store.undo());
+    CHECK(noteIdsOf(store) == std::vector<int>{1, 2, 3, 4});
+    CHECK(store.noteSelection() == NoteSelection{1, {1, 2, 4}});
+}
+
+TEST_CASE("setProjectKey with the switch off moves no note") {
+    DocumentStore store = transposeFixture();
+    const std::vector<Track> tracks = store.doc().tracks;
+    const std::uint64_t revision = store.revision();
+    store.setProjectKey(keyOf('G', 0, Mode::Ionian));
+    CHECK(store.doc().projectKey == keyOf('G', 0, Mode::Ionian));
+    CHECK(store.doc().tracks == tracks);
+    CHECK(store.revision() == revision + 1);  // the key change itself
+}
+
+TEST_CASE("setProjectKey: a mode-only change and an enharmonic respelling move no note, switch on") {
+    DocumentStore store = transposeFixture();
+    store.setTransposeWithKey(true);
+    const std::vector<Track> tracks = store.doc().tracks;
+    const std::vector<ChordEvent> events = store.doc().events;
+    store.setProjectKey(keyOf('C', 0, Mode::Aeolian));
+    CHECK(store.doc().tracks == tracks);
+    CHECK(store.doc().events == events);
+    store.setProjectKey(keyOf('B', 1, Mode::Aeolian));  // B# is C again
+    CHECK(store.doc().tracks == tracks);
+    CHECK(store.doc().events == events);
+}
+
+TEST_CASE("setProjectKey: a tonic and mode change together moves the notes by the tonic interval") {
+    DocumentStore store = transposeFixture();
+    store.setTransposeWithKey(true);
+    const Document before = store.doc();
+    const int interval = chooseKeyTranspose(before.events, 2);
+    store.setProjectKey(keyOf('D', 0, Mode::Dorian));
+    checkNotesMoved(before, store.doc(), interval);
+    CHECK(store.doc().events == movedBy(before.events, interval));
+}
+
+TEST_CASE("setProjectKey with no chords: the tracks are empty and stay so, only the key changes") {
+    DocumentStore store;
+    REQUIRE(store.addTrack(TrackRole::Bass) == 1);
+    store.setTransposeWithKey(true);
+    const std::vector<Track> tracks = store.doc().tracks;
+    store.setProjectKey(keyOf('F', 0, Mode::Ionian));
+    CHECK(store.doc().projectKey == keyOf('F', 0, Mode::Ionian));
+    CHECK(store.doc().tracks == tracks);
+}
+
+TEST_CASE("transposeFromKey carries the notes by the chords' interval in the same step") {
+    DocumentStore store = transposeFixture();
+    store.setProjectKey(keyOf('G', 0, Mode::Ionian));  // switch off: nothing moved yet
+    const int interval = chooseKeyTranspose(store.doc().events, 7);
+    REQUIRE(interval == -5);
+    const std::vector<ChordEvent> movedChords = movedBy(store.doc().events, interval);
+    const Document before = store.doc();
+    store.setNoteSelection(1, {1, 2});
+    const std::uint64_t revision = store.revision();
+
+    REQUIRE(store.transposeFromKey(0));
+
+    CHECK(store.doc().events == movedChords);
+    checkNotesMoved(before, store.doc(), interval);
+    CHECK(noteIdsOf(store) == std::vector<int>{2, 1, 3, 4});
+    CHECK(store.noteSelection() == NoteSelection{1, {2, 1}});
+    CHECK(store.revision() == revision + 1);
+
+    REQUIRE(store.undo());
+    CHECK(store.doc() == before);
+    CHECK(noteIdsOf(store) == std::vector<int>{1, 2, 3, 4});
+}
+
+TEST_CASE("transposeFromKey: the same tonic changes nothing, and neither does a document with no chords or notes") {
+    DocumentStore store = transposeFixture();
+    const DocumentStore reference = store;
+    CHECK_FALSE(store.transposeFromKey(0));  // the project tonic is C
+    checkRefused(store, reference);
+
+    DocumentStore empty;
+    empty.addTrack(TrackRole::Bass);
+    empty.setProjectKey(keyOf('G', 0, Mode::Ionian));
+    const DocumentStore emptyReference = empty;
+    CHECK_FALSE(empty.transposeFromKey(0));
+    checkRefused(empty, emptyReference);
+}
+
+TEST_CASE("transposeProgression moves chords and notes by exactly the supplied interval, +7 stays +7 and -7 stays -7") {
+    for (const int semitones : {7, -7, 1, -1, 11, -11, 5}) {
+        CAPTURE(semitones);
+        DocumentStore store = transposeFixture();
+        const Document before = store.doc();
+        const std::vector<ChordEvent> movedChords = movedBy(before.events, semitones);
+        const std::uint64_t revision = store.revision();
+
+        REQUIRE(store.transposeProgression(semitones));
+
+        CHECK(store.doc().events == movedChords);
+        checkNotesMoved(before, store.doc(), semitones);
+        CHECK(store.revision() == revision + 1);
+    }
+    // Where chooseKeyTranspose would go the other way, the supplied interval still wins.
+    DocumentStore store = transposeFixture();
+    REQUIRE(chooseKeyTranspose(store.doc().events, 7) == -5);
+    REQUIRE(store.transposeProgression(7));
+    CHECK(pitchById(store) == std::unordered_map<int, int>{{1, 9}, {2, 13}, {3, 47}, {4, 120}, {5, 67}});
+}
+
+TEST_CASE("transposeProgression: a note at 125 moved +7 lands at 120 and one at 2 moved -7 lands at 7") {
+    DocumentStore up = transposeFixture();
+    REQUIRE(up.transposeProgression(7));
+    CHECK(pitchById(up).at(4) == 120);
+    DocumentStore down = transposeFixture();
+    REQUIRE(down.transposeProgression(-7));
+    CHECK(pitchById(down).at(1) == 7);
+    CHECK(pitchById(down).at(2) == 11);  // 6 - 7 = -1, folded up
+}
+
+TEST_CASE("transposeProgression: one undo step restores chords and notes, redo applies both, a refusal leaves everything") {
+    DocumentStore store = transposeFixture();
+    store.setNoteSelection(1, {1, 2});
+    const Document before = store.doc();
+    checkOneStep(store, [](DocumentStore& s) { REQUIRE(s.transposeProgression(-7)); });
+    CHECK(store.doc().events != before.events);
+    CHECK(store.doc().tracks != before.tracks);
+
+    for (const int refused : {0, 12, -12, 100}) {
+        CAPTURE(refused);
+        const DocumentStore reference = store;
+        CHECK_FALSE(store.transposeProgression(refused));
+        checkRefused(store, reference);
+    }
+}
+
+TEST_CASE("transposeProgression with no chords moves nothing and pushes no history, tracks or not") {
+    DocumentStore store;
+    REQUIRE(store.addTrack(TrackRole::Lead) == 1);
+    const DocumentStore reference = store;
+    CHECK_FALSE(store.transposeProgression(7));
+    checkRefused(store, reference);
+}
+
+TEST_CASE("transpose: an inactive note (past its shortened chord) moves too, and only its pitch") {
+    DocumentStore store = threeChordsAndBass();
+    REQUIRE(store.insertNotes(1, {ns(50, 2000, 480)}) == std::vector<int>{1});
+    REQUIRE(store.setLength(1, 1.0));  // the note now starts past its chord's end: inactive, kept (D3)
+    const Document before = store.doc();
+    REQUIRE(store.transposeProgression(3));
+    checkNotesMoved(before, store.doc(), 3);
 }

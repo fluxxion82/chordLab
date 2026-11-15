@@ -92,4 +92,28 @@ int chooseKeyTranspose(const std::vector<ChordEvent>& events, int interval) {
     return scoreOf(events, down) < scoreOf(events, up) ? down : up;
 }
 
+int trackOnlyInterval(int interval) {
+    const int up = wrapPitchClass(interval);
+    return up > kOctave / 2 ? up - kOctave : up;  // 1..6 stay, 7..11 go down, the tritone (6) goes up
+}
+
+int transposeNotes(std::vector<Track>& tracks, int interval) {
+    constexpr int kMaxPitch = 127;
+    int folded = 0;
+    for (Track& track : tracks) {
+        for (TrackNote& note : track.notes) {
+            int pitch = note.pitch + interval;
+            if (pitch > kMaxPitch) {
+                pitch -= kOctave;
+                ++folded;
+            } else if (pitch < 0) {
+                pitch += kOctave;
+                ++folded;
+            }
+            note.pitch = pitch;
+        }
+    }
+    return folded;
+}
+
 }  // namespace chordlab
