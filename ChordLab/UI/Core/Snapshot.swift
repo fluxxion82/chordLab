@@ -357,6 +357,9 @@ struct TrackLimitsJSON: Codable, Equatable {
   let minNoteTicks: Int
   let maxPolyphony: Int
   let maxOnsetsPerBeat: Int
+
+  /// The shortest track note when the snapshot carries no `trackLimits` (`kMinTrackNoteTicks`, a 1/32 beat).
+  static let defaultMinNoteTicks = 30
 }
 
 /// The whole document as the UI shows it, plus the palette of the browsed key.

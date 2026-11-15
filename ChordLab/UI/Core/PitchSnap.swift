@@ -1,7 +1,7 @@
 import Foundation
 
 /// The roll's Snap pitch option (tracks design D14, D15): which pitch classes a drawn or moved note may land on,
-/// judged by the chord sounding at its start. It applies to a single-note move and to an insert only; a group
+/// judged by the chord sounding at its start (`PlaySpans.event(atTick:in:ticksPerBeat:)` finds it). It applies to a single-note move and to an insert only; a group
 /// moves by exact rows (design D15).
 ///
 /// - `off`: every pitch.
@@ -58,28 +58,5 @@ enum PitchSnap: CaseIterable {
       if down >= 0, allows(pc: down, guide: guide) { return down }
     }
     return pitch
-  }
-
-  /// The chord sounding at `tick`: the event whose playback span `[playStart, playEnd)` contains it (design D6:
-  /// the roll's chord lookups use the span, so they match what sounds, not the authored positions). The span is
-  /// half-open, so a tick exactly on a boundary belongs to the NEXT chord; nil before the first span, in a gap,
-  /// at or past the last `playEnd`, and for every event of an older snapshot that carries no spans (an event
-  /// without a span never matches). Boundaries are the spans in beats times `ticksPerBeat`, rounded to the
-  /// nearest tick (the engine's boundaries are tick-rounded already), so the comparison is on integers.
-  /// `events` are in playback order, so the search is binary: O(log n).
-  static func event(atTick tick: Int, in events: [EventJSON], ticksPerBeat: Int) -> EventJSON? {
-    func ticks(_ beats: Double?) -> Int? {
-      guard let beats, beats.isFinite else { return nil }
-      return Int((beats * Double(max(1, ticksPerBeat))).rounded())
-    }
-    // The last event whose start is at or before `tick` (an event without a span counts as starting later).
-    var low = 0
-    var high = events.count
-    while low < high {
-      let middle = (low + high) / 2
-      if let start = ticks(events[middle].playStart), start <= tick { low = middle + 1 } else { high = middle }
-    }
-    guard low > 0, let end = ticks(events[low - 1].playEnd), tick < end else { return nil }
-    return events[low - 1]
   }
 }

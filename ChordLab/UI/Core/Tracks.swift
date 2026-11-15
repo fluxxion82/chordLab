@@ -80,6 +80,48 @@ extension Snapshot {
   /// The tick grid of every tick field: `ticksPerBeat`, or 960 (the engine's `kFeelTicksPerBeat`) when an
   /// older plug-in build sends none.
   var ticksPerBeatOrDefault: Int { ticksPerBeat ?? 960 }
+
+  /// One bar in ticks: `RollGrid.barTicks` of the snapshot's meter at `ticksPerBeatOrDefault`; 4/4 (3840 at
+  /// 960) when an older plug-in build sends no meter.
+  var barTicksOrDefault: Int {
+    RollGrid.barTicks(num: meter?.num ?? 4, den: meter?.den ?? 4, ticksPerBeat: ticksPerBeatOrDefault)
+  }
+
+  /// The shortest note the engine accepts: `trackLimits.minNoteTicks`, or 30 (`TrackLimitsJSON.defaultMinNoteTicks`)
+  /// when an older plug-in build sends no limits.
+  var minNoteTicksOrDefault: Int { trackLimits?.minNoteTicks ?? TrackLimitsJSON.defaultMinNoteTicks }
+}
+
+/// The tick quantities the roll's snapping, insert and drag rules share, read once from a snapshot so that no
+/// caller can pass the grid one meter and the clamp another (tracks design D14, D15). Every field is an integer
+/// tick count at `ticksPerBeat`; an older plug-in build that sends none of the keys gets 960 ticks per beat,
+/// 4/4 (3840), the minimum 30, and its `endBeat` converted at 960.
+struct RollTiming: Equatable {
+  /// The snapshot's tick grid (at least 1); 960 in the engine.
+  let ticksPerBeat: Int
+  /// One bar in ticks, `num × 4 × ticksPerBeat / den` (the engine's `barTicks`): the grid counts from each bar
+  /// start (`RollGrid`).
+  let barTicks: Int
+  /// The progression's end, `round(endBeat × ticksPerBeat)` (a negative or non-finite `endBeat` is 0).
+  let endTick: Int
+  /// The shortest note: `trackLimits.minNoteTicks`.
+  let minNoteTicks: Int
+
+  init(ticksPerBeat: Int, barTicks: Int, endTick: Int, minNoteTicks: Int) {
+    self.ticksPerBeat = ticksPerBeat
+    self.barTicks = barTicks
+    self.endTick = endTick
+    self.minNoteTicks = minNoteTicks
+  }
+
+  init(snapshot: Snapshot) {
+    let rate = max(1, snapshot.ticksPerBeatOrDefault)
+    let end = snapshot.endBeat * Double(rate)
+    ticksPerBeat = rate
+    barTicks = snapshot.barTicksOrDefault
+    endTick = end.isFinite && end > 0 ? Int(min(end, 1e15).rounded()) : 0
+    minNoteTicks = snapshot.minNoteTicksOrDefault
+  }
 }
 
 extension TrackJSON {

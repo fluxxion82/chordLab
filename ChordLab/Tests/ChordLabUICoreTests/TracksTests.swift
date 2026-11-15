@@ -305,4 +305,82 @@ final class TracksTests: XCTestCase {
     XCTAssertEqual(decoded.tracks?[2].notes[5].pitch, 41)
     XCTAssertEqual(decoded.tracks?[3].notes.index(ofId: 40_000 + 1023), 1023)
   }
+
+  // MARK: - The minimum note length from the snapshot
+
+  func testTheMinimumNoteLengthComesFromTheSnapshotsLimits() throws {
+    let url = try SnapshotTests.fixturesDirectory().appendingPathComponent("snapshot-tracks.json")
+    var snapshot = try JSONDecoder().decode(Snapshot.self, from: Data(contentsOf: url))
+    XCTAssertEqual(snapshot.minNoteTicksOrDefault, 30)
+    snapshot.trackLimits = TrackLimitsJSON(maxTracks: 4, maxNotesPerTrack: 1024, minNoteTicks: 60, maxPolyphony: 8,
+                                           maxOnsetsPerBeat: 15)
+    XCTAssertEqual(snapshot.minNoteTicksOrDefault, 60)
+  }
+
+  func testTheMinimumNoteLengthIs30WithoutLimits() throws {
+    let url = try SnapshotTests.fixturesDirectory().appendingPathComponent("snapshot-legacy-phase1.json")
+    let snapshot = try JSONDecoder().decode(Snapshot.self, from: Data(contentsOf: url))
+    XCTAssertNil(snapshot.trackLimits)
+    XCTAssertEqual(snapshot.minNoteTicksOrDefault, 30)
+    XCTAssertEqual(TrackLimitsJSON.defaultMinNoteTicks, 30)
+  }
+
+  // MARK: - RollTiming
+
+  private func fixtureSnapshot(_ name: String, meter: (Int, Int)? = nil) throws -> Snapshot {
+    let url = try SnapshotTests.fixturesDirectory().appendingPathComponent(name)
+    var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+    if let meter { object["meter"] = ["num": meter.0, "den": meter.1] }
+    return try JSONDecoder().decode(Snapshot.self, from: JSONSerialization.data(withJSONObject: object))
+  }
+
+  func testTheBarLengthFollowsTheSnapshotsMeterAndDefaultsTo44() throws {
+    XCTAssertEqual(try fixtureSnapshot("snapshot-tracks.json").barTicksOrDefault, 3840)
+    XCTAssertEqual(try fixtureSnapshot("snapshot-tracks.json", meter: (7, 8)).barTicksOrDefault, 3360)
+    XCTAssertEqual(try fixtureSnapshot("snapshot-tracks.json", meter: (3, 4)).barTicksOrDefault, 2880)
+    XCTAssertEqual(try fixtureSnapshot("snapshot-feel.json").barTicksOrDefault, 2880, "6/8")
+    let legacy = try fixtureSnapshot("snapshot-legacy-phase1.json")
+    XCTAssertNil(legacy.meter)
+    XCTAssertEqual(legacy.barTicksOrDefault, 3840)
+  }
+
+  func testRollTimingOfTheTracksFixture() throws {
+    let snapshot = try fixtureSnapshot("snapshot-tracks.json")
+    XCTAssertEqual(snapshot.endBeat, 15)
+    XCTAssertEqual(snapshot.meter, MeterJSON(num: 4, den: 4))
+    let timing = RollTiming(snapshot: snapshot)
+    XCTAssertEqual(timing, RollTiming(ticksPerBeat: 960, barTicks: 3840, endTick: 14400, minNoteTicks: 30))
+  }
+
+  func testRollTimingTakesTheMeterAndTheLimitsFromTheSnapshot() throws {
+    var snapshot = try fixtureSnapshot("snapshot-tracks.json", meter: (7, 8))
+    snapshot.trackLimits = TrackLimitsJSON(maxTracks: 4, maxNotesPerTrack: 1024, minNoteTicks: 60, maxPolyphony: 8,
+                                           maxOnsetsPerBeat: 15)
+    let timing = RollTiming(snapshot: snapshot)
+    XCTAssertEqual(timing.barTicks, 3360)
+    XCTAssertEqual(timing.minNoteTicks, 60)
+    XCTAssertEqual(timing.endTick, 14400)
+  }
+
+  func testRollTimingOfALegacySnapshotUsesTheDefaults() throws {
+    let snapshot = try fixtureSnapshot("snapshot-legacy-phase1.json")
+    XCTAssertNil(snapshot.ticksPerBeat)
+    let timing = RollTiming(snapshot: snapshot)
+    XCTAssertEqual(timing.ticksPerBeat, 960)
+    XCTAssertEqual(timing.barTicks, 3840)
+    XCTAssertEqual(timing.minNoteTicks, 30)
+    XCTAssertEqual(timing.endTick, Int((snapshot.endBeat * 960).rounded()))
+  }
+
+  func testRollTimingEndTickIsRoundedFromBeatsAtTheSnapshotsTickRate() throws {
+    var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf:
+      SnapshotTests.fixturesDirectory().appendingPathComponent("snapshot-tracks.json"))) as? [String: Any])
+    object["ticksPerBeat"] = 480
+    object["endBeat"] = 15.0004   // 7200.19 ticks
+    let snapshot = try JSONDecoder().decode(Snapshot.self, from: JSONSerialization.data(withJSONObject: object))
+    let timing = RollTiming(snapshot: snapshot)
+    XCTAssertEqual(timing.ticksPerBeat, 480)
+    XCTAssertEqual(timing.endTick, 7200)
+    XCTAssertEqual(timing.barTicks, 1920)
+  }
 }

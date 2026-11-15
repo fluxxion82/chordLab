@@ -3,10 +3,13 @@ import Foundation
 /// The roll's grid (tracks design D14, D15): the step a drawn, inserted or moved note's start snaps to, and the
 /// length an insert takes. Seven options; the default is the eighth.
 ///
-/// Steps are fractions of a beat, and every one divides 960 (the engine's ticks per beat), so the grid counts
-/// from tick 0 and is beat-aligned in every meter: a bar of 3/4, 6/8 or 7/8 starts on a beat, hence on a step of
-/// every grid. `off` is not truly off: it snaps to 10 ticks (1/96 of a beat), the finest the roll offers, so
-/// every start is an integer and a note can still be placed freely by eye.
+/// Steps are fractions of a beat, and every one divides 960 (the engine's ticks per beat). The grid is counted
+/// from each BAR's start, not from tick 0 (`snapDown`, `snapNearest`): a bar is `num × 3840 / den` ticks, which
+/// is not a whole number of quarters in 7/8 (3360), 5/8 (2400) or 3/8 (1440), nor of eighth triplets (320) in
+/// those, so a grid from tick 0 would miss their bar lines; the bar line is always a grid point and no
+/// snap crosses the next one. `off` is not truly off: it snaps to 10 ticks (1/96 of a beat), the finest the roll
+/// offers, so every start is an integer and a note can still be placed freely by eye (every valid meter's bar is
+/// a multiple of 10 ticks at 960).
 ///
 /// Depends on nothing but Foundation; unit-tested by the `ChordLabUICore` package
 /// (Tests/ChordLabUICoreTests/RollGridTests.swift).
@@ -15,9 +18,6 @@ enum RollGrid: CaseIterable {
 
   /// The grid a track's roll starts with (design D14's Grid control).
   static let `default`: RollGrid = .eighth
-
-  /// The shortest track note when the snapshot carries no `trackLimits` (`kMinTrackNoteTicks`, a 1/32 beat).
-  static let defaultMinNoteTicks = 30
 
   /// The menu title: "1/4", "1/8", "1/16", "1/32", "1/8T", "1/16T", "Off".
   var title: String {
@@ -48,32 +48,49 @@ enum RollGrid: CaseIterable {
     return max(1, max(1, ticksPerBeat) / divisor)
   }
 
-  /// The grid step at or before `tick`, counted from tick 0 (a tick below 0 is 0): where a click's cell starts.
-  func floor(_ tick: Int, ticksPerBeat: Int = 960) -> Int {
-    let step = ticks(ticksPerBeat: ticksPerBeat)
-    let tick = max(0, tick)
-    return tick - tick % step
+  /// One bar in ticks, the engine's `barTicks` (meter.cpp): `num × 4 × ticksPerBeat / den` by integer division
+  /// (3840 in 4/4 at 960, 2880 in 3/4 and 6/8, 3360 in 7/8, 2400 in 5/8, 1440 in 3/8). A non-positive `num` or
+  /// `den` counts as 4/4 (the snapshot's default meter), and `ticksPerBeat` as at least 1.
+  static func barTicks(num: Int, den: Int, ticksPerBeat: Int) -> Int {
+    guard num > 0, den > 0 else { return 4 * max(1, ticksPerBeat) }
+    return max(1, num * 4 * max(1, ticksPerBeat) / den)
   }
 
-  /// The grid step nearest to `tick`, counted from tick 0 (a tick below 0 is 0); a tick exactly halfway between
-  /// two steps goes to the later one ("ties up", as `PitchSnap`).
-  func round(_ tick: Int, ticksPerBeat: Int = 960) -> Int {
+  /// The grid point at or before `tick`: where a click's cell starts. A tick below 0 is 0.
+  ///
+  /// The grid is counted from each bar's start, not from tick 0: `barTicks` is the bar length (`barTicks(num:den:
+  /// ticksPerBeat:)`, below 1 counts as 1), the bar of `tick` starts at `tick / barTicks × barTicks`, and the
+  /// points are that start plus whole steps. The two coincide when a bar is a whole number of steps (4/4, 3/4
+  /// and 6/8 on every grid), but not in 7/8 (3360), 5/8 (2400) or 3/8 (1440) on a quarter or eighth-triplet grid.
+  /// The last point of a bar is its last whole step, so the result never reaches the next bar's start (that is
+  /// the next bar's own first point).
+  func snapDown(_ tick: Int, barTicks: Int, ticksPerBeat: Int = 960) -> Int {
     let step = ticks(ticksPerBeat: ticksPerBeat)
     let tick = max(0, tick)
-    let remainder = tick % step
-    return tick - remainder + (remainder * 2 >= step ? step : 0)
+    let bar = max(1, barTicks)
+    let start = tick / bar * bar
+    let inBar = tick - start
+    return start + inBar - inBar % step
+  }
+
+  /// The grid point nearest to `tick`, bar-relative as `snapDown` (a tick below 0 is 0); a tick exactly halfway
+  /// between two points goes to the later one ("ties up", as `PitchSnap`). The bar line is itself a grid point:
+  /// the candidates are the point at or before `tick` and the one after it: the next whole step in the bar or,
+  /// when that would reach the next bar, the next bar's start. So the result never passes the next bar start (7/8 on a quarter grid
+  /// takes 3300 to 3360, not to 3840).
+  func snapNearest(_ tick: Int, barTicks: Int, ticksPerBeat: Int = 960) -> Int {
+    let step = ticks(ticksPerBeat: ticksPerBeat)
+    let tick = max(0, tick)
+    let bar = max(1, barTicks)
+    let earlier = snapDown(tick, barTicks: bar, ticksPerBeat: ticksPerBeat)
+    let later = min(earlier + step, (tick / bar + 1) * bar)
+    return later - tick <= tick - earlier ? later : earlier
   }
 
   /// The length of a note an insert draws (design D15): the last used length when there is one, else one grid
   /// step, and never below `minNoteTicks` (the snapshot's `trackLimits.minNoteTicks`, see
-  /// `Snapshot.minNoteTicksOrDefault`); so Off with nothing used yet gives `minNoteTicks` (30 beside Off's 10).
+  /// `Snapshot.minNoteTicksOrDefault`, or `RollTiming`); so Off with nothing used yet gives `minNoteTicks` (30 beside Off's 10).
   func insertLength(lastLength: Int?, minNoteTicks: Int, ticksPerBeat: Int = 960) -> Int {
     max(minNoteTicks, lastLength ?? ticks(ticksPerBeat: ticksPerBeat))
   }
-}
-
-extension Snapshot {
-  /// The shortest note the engine accepts: `trackLimits.minNoteTicks`, or 30 (`RollGrid.defaultMinNoteTicks`)
-  /// when an older plug-in build sends no limits.
-  var minNoteTicksOrDefault: Int { trackLimits?.minNoteTicks ?? RollGrid.defaultMinNoteTicks }
 }

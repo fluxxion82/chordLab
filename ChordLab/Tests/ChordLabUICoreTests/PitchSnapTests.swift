@@ -1,7 +1,7 @@
 import XCTest
 @testable import ChordLabUICore
 
-/// Snap pitch and the chord-at-a-position lookup (UI/Core/PitchSnap.swift, tracks design D14, D15).
+/// Snap pitch (UI/Core/PitchSnap.swift, tracks design D14, D15).
 final class PitchSnapTests: XCTestCase {
   /// E7 in C major, from engine/tests/test_guide.cpp ("Rt.tca.ct.c." read from the root E): E root; G#, B, D chord
   /// tones; F, G, C tensions (G by the dominant exception); A avoid; C#, D#, F#, A# outside. The chord scale is
@@ -190,101 +190,12 @@ final class PitchSnapTests: XCTestCase {
     return try JSONDecoder().decode(Snapshot.self, from: Data(contentsOf: url)).events
   }
 
-  func testTheFixtureSpansAreWhatTheseTestsAssume() throws {
-    let events = try fixtureEvents()
-    XCTAssertEqual(events.map(\.symbol), ["C", "Am", "F", "G7"])
-    XCTAssertEqual(events.map { $0.playStart }, [0, 4, 8, 9])
-    XCTAssertEqual(events.map { $0.playEnd }, [4, 8, 9, 15])
-  }
-
-  func testEventAtATickInsideEachSpan() throws {
-    let events = try fixtureEvents()
-    func symbol(_ tick: Int) -> String? { PitchSnap.event(atTick: tick, in: events, ticksPerBeat: 960)?.symbol }
-    XCTAssertEqual(symbol(0), "C")
-    XCTAssertEqual(symbol(1), "C")
-    XCTAssertEqual(symbol(3839), "C")
-    XCTAssertEqual(symbol(5000), "Am")
-    XCTAssertEqual(symbol(8 * 960 + 100), "F")
-    XCTAssertEqual(symbol(9 * 960 + 100), "G7")
-    XCTAssertEqual(symbol(15 * 960 - 1), "G7")
-  }
-
-  func testASpanIsHalfOpenSoABoundaryTickBelongsToTheNextChord() throws {
-    let events = try fixtureEvents()
-    func symbol(_ tick: Int) -> String? { PitchSnap.event(atTick: tick, in: events, ticksPerBeat: 960)?.symbol }
-    XCTAssertEqual(symbol(3840), "Am")
-    XCTAssertEqual(symbol(3840 - 1), "C")
-    XCTAssertEqual(symbol(7680), "F")
-    XCTAssertEqual(symbol(8 * 960 + 960), "G7")
-    XCTAssertEqual(symbol(8 * 960 + 959), "F")
-  }
-
-  func testNoEventPastTheLastPlayEndOrBeforeTickZero() throws {
-    let events = try fixtureEvents()
-    XCTAssertNil(PitchSnap.event(atTick: 15 * 960, in: events, ticksPerBeat: 960))
-    XCTAssertNil(PitchSnap.event(atTick: 15 * 960 + 5000, in: events, ticksPerBeat: 960))
-    XCTAssertNil(PitchSnap.event(atTick: -1, in: events, ticksPerBeat: 960))
-    XCTAssertNil(PitchSnap.event(atTick: 0, in: [], ticksPerBeat: 960))
-  }
-
-  func testEveryEventIsFoundAtItsOwnStartAndLastTick() throws {
-    let events = try fixtureEvents()
-    for event in events {
-      let start = Int(try XCTUnwrap(event.playStart) * 960)
-      let end = Int(try XCTUnwrap(event.playEnd) * 960)
-      XCTAssertEqual(PitchSnap.event(atTick: start, in: events, ticksPerBeat: 960)?.id, event.id)
-      XCTAssertEqual(PitchSnap.event(atTick: end - 1, in: events, ticksPerBeat: 960)?.id, event.id)
-    }
-  }
-
-  func testAnOlderSnapshotWithoutSpansFindsNothing() throws {
-    let url = try SnapshotTests.fixturesDirectory().appendingPathComponent("snapshot-legacy-phase1.json")
-    let events = try JSONDecoder().decode(Snapshot.self, from: Data(contentsOf: url)).events
-    XCTAssertFalse(events.isEmpty)
-    XCTAssertTrue(events.allSatisfy { $0.playStart == nil && $0.playEnd == nil })
-    for tick in [0, 960, 100_000] { XCTAssertNil(PitchSnap.event(atTick: tick, in: events, ticksPerBeat: 960)) }
-  }
-
-  func testTheLookupUsesThePlaybackSpanNotTheAuthoredOne() throws {
-    // A feel moved the C's playback end to 3.9 beats, though the strip still draws it to 4.
-    let events = try fixtureEvents()
-    var shifted = events
-    shifted[0] = withSpan(events[0], start: 0, end: 3.9)
-    shifted[1] = withSpan(events[1], start: 3.9, end: 8)
-    XCTAssertEqual(PitchSnap.event(atTick: 3744, in: shifted, ticksPerBeat: 960)?.symbol, "Am", "3744 = 3.9 beats")
-    XCTAssertEqual(PitchSnap.event(atTick: 3743, in: shifted, ticksPerBeat: 960)?.symbol, "C")
-    XCTAssertEqual(PitchSnap.event(atTick: 3800, in: events, ticksPerBeat: 960)?.symbol, "C", "authored span of the original")
-  }
-
-  func testAGapBetweenSpansFindsNothing() throws {
-    var events = try fixtureEvents()
-    events[1] = withSpan(events[1], start: 5, end: 8)   // beats 4..5 are in no span
-    XCTAssertEqual(PitchSnap.event(atTick: 3839, in: events, ticksPerBeat: 960)?.symbol, "C")
-    XCTAssertNil(PitchSnap.event(atTick: 3840, in: events, ticksPerBeat: 960))
-    XCTAssertNil(PitchSnap.event(atTick: 4799, in: events, ticksPerBeat: 960))
-    XCTAssertEqual(PitchSnap.event(atTick: 4800, in: events, ticksPerBeat: 960)?.symbol, "Am")
-  }
-
-  func testTheLookupFollowsTheSnapshotsTicksPerBeat() throws {
-    let events = try fixtureEvents()
-    XCTAssertEqual(PitchSnap.event(atTick: 1920, in: events, ticksPerBeat: 480)?.symbol, "Am", "1920 ticks = 4 beats at 480")
-    XCTAssertEqual(PitchSnap.event(atTick: 1919, in: events, ticksPerBeat: 480)?.symbol, "C")
-  }
-
   func testTheLookupFindsTheGuideForSnapping() throws {
     let events = try fixtureEvents()
     // In the G7 (beats 9-15) the guide is the fixture's own: chord tones D, F, B, root G.
-    let guide = try XCTUnwrap(PitchSnap.event(atTick: 10 * 960, in: events, ticksPerBeat: 960)?.guide)
+    let guide = try XCTUnwrap(PlaySpans.event(atTick: 10 * 960, in: events, ticksPerBeat: 960)?.guide)
     XCTAssertEqual(PitchSnap.chordTones.snap(pitch: 71, guide: guide), 71)
     XCTAssertEqual(PitchSnap.chordTones.snap(pitch: 69, guide: guide), 71, "A: G (67) and B (71) tie, up")
     XCTAssertEqual(PitchSnap.chordTones.snap(pitch: 64, guide: guide), 65, "E is a tension of G7: F (65) is one up")
-  }
-
-  /// `event` with its playback span replaced.
-  private func withSpan(_ event: EventJSON, start: Double, end: Double) -> EventJSON {
-    var copy = event
-    copy.playStart = start
-    copy.playEnd = end
-    return copy
   }
 }

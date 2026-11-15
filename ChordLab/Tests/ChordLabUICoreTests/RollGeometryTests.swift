@@ -69,7 +69,7 @@ final class RollGeometryTests: XCTestCase {
     XCTAssertEqual(geometry.tick(atX: -0.01), 0)
     XCTAssertEqual(geometry.tick(atX: -500), 0)
     XCTAssertEqual(geometry.tick(atX: .nan), 0)
-    XCTAssertGreaterThan(geometry.tick(atX: .infinity), 15_728_640)
+    XCTAssertEqual(geometry.tick(atX: .infinity), 1_000_000_000_000, "clamped to the largest value, never an overflow")
   }
 
   // MARK: - Pitches and y
@@ -439,7 +439,11 @@ final class RollGeometryTests: XCTestCase {
       let bottom = geometry.y(pitch: role.register.lowerBound) + geometry.rowHeight
       XCTAssertEqual(scroll.y + viewport.height / 2, (top + bottom) / 2, accuracy: 1e-9, "\(role)")
     }
+    // Bass 28...55: rows from y(55) = 1008 to y(28) + 14 = 1400, centre 1204, less half the viewport (200).
     XCTAssertEqual(geometry.initialScroll(register: TrackRole.bass.register, viewport: viewport).y, 1004, accuracy: 1e-9)
+    // Lead 60...84: 602 to 952, centre 777. Other 48...72: 770 to 1120, centre 945.
+    XCTAssertEqual(geometry.initialScroll(register: TrackRole.lead.register, viewport: viewport).y, 577, accuracy: 1e-9)
+    XCTAssertEqual(geometry.initialScroll(register: TrackRole.other.register, viewport: viewport).y, 745, accuracy: 1e-9)
   }
 
   func testInitialScrollIsClampedToTheContent() {
@@ -456,7 +460,7 @@ final class RollGeometryTests: XCTestCase {
   func testInitialScrollTakesAnOutOfRangeRegisterAsClamped() {
     let scroll = RollGeometry().initialScroll(register: -10...300, viewport: CGSize(width: 700, height: 400))
     XCTAssertEqual(scroll.x, 0)
-    XCTAssertTrue((0...(128 * 14 - 400)).contains(scroll.y))
+    XCTAssertEqual(scroll.y, 696, accuracy: 1e-9, "0...127 centres at 896; less half the 400-point viewport")
   }
 
   // MARK: - Keyboard column
