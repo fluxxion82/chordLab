@@ -1,6 +1,7 @@
 #include "chordlab/smf.h"
 
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <cstddef>
 #include <fstream>
@@ -9,6 +10,7 @@
 #include <optional>
 #include <string_view>
 #include <tuple>
+#include <utility>
 
 namespace chordlab {
 
@@ -108,6 +110,80 @@ Bytes vlq(std::uint32_t value) {
     return bytes;
 }
 
+namespace {
+
+/// The meta events every file opens its first track with: tempo, `FF 51 03 tt tt tt` (microseconds per quarter
+/// note, big-endian), then the time signature, `FF 58 04 nn dd cc bb` with 24 MIDI clocks per metronome click and
+/// eight thirty-second notes per quarter, the conventional values.
+void appendTempoAndMeter(Bytes& track, long tempo, int num, int denPower) {
+    append(track, {0x00, 0xFF, 0x51, 0x03});
+    track.push_back(static_cast<std::uint8_t>((tempo >> 16) & 0xFF));
+    track.push_back(static_cast<std::uint8_t>((tempo >> 8) & 0xFF));
+    track.push_back(static_cast<std::uint8_t>(tempo & 0xFF));
+    append(track, {0x00, 0xFF, 0x58, 0x04, static_cast<std::uint8_t>(num), static_cast<std::uint8_t>(denPower), 0x18,
+                   0x08});
+}
+
+/// Every event of `events` quantised to a tick and re-sorted, or nothing when one cannot be encoded. Two events
+/// distinct in beats may share a tick, and at a shared tick an off must still precede an on; the stable sort keeps
+/// input order for exact ties.
+std::optional<std::vector<TickEvent>> quantise(const std::vector<NoteEvent>& source, int tpqn) {
+    std::vector<TickEvent> events;
+    events.reserve(source.size());
+    for (const NoteEvent& e : source) {
+        const std::optional<long> tick = tickOf(e.beat, tpqn);
+        if (!tick || e.pitch < 0 || e.pitch > 127 || e.velocity < 0 || e.velocity > 127) {
+            return std::nullopt;
+        }
+        events.push_back(TickEvent{*tick, e.on, e.pitch, e.velocity});
+    }
+    std::stable_sort(events.begin(), events.end(), keyLess);
+    return events;
+}
+
+/// The tick of the last event, 0 for none.
+long lastTick(const std::vector<TickEvent>& events) {
+    return events.empty() ? 0 : events.back().tick;
+}
+
+/// One track's body after any tempo and meter: the name event when `name` is not empty (`FF 03 len bytes`), every
+/// event as a channel message with an explicit status byte, and the end-of-track at `endTick`, which must not be
+/// before the last event. Appended to `track`.
+void appendNameEventsAndEnd(Bytes& track, std::string_view name, const std::vector<TickEvent>& events, int channel,
+                            long endTick) {
+    if (!name.empty()) {
+        append(track, {0x00, 0xFF, 0x03});
+        append(track, vlq(static_cast<std::uint32_t>(name.size())));
+        track.insert(track.end(), name.begin(), name.end());
+    }
+    long previous = 0;
+    for (const TickEvent& e : events) {
+        append(track, vlq(static_cast<std::uint32_t>(e.tick - previous)));
+        previous = e.tick;
+        track.push_back(static_cast<std::uint8_t>((e.on ? kNoteOn : kNoteOff) | channel));
+        track.push_back(static_cast<std::uint8_t>(e.pitch));
+        track.push_back(static_cast<std::uint8_t>(e.velocity));
+    }
+    assert(endTick >= previous);
+    append(track, vlq(static_cast<std::uint32_t>(endTick - previous)));
+    append(track, {0xFF, 0x2F, 0x00});
+}
+
+/// An `MTrk` chunk around `body`, appended to `file`.
+void appendTrackChunk(Bytes& file, const Bytes& body) {
+    append(file, {'M', 'T', 'r', 'k'});
+    appendBe32(file, static_cast<std::uint32_t>(body.size()));
+    append(file, body);
+}
+
+/// The MTrk length is four bytes. Reaching this needs some 600 million events (each at most seven bytes), which no
+/// document produces in practice; it is a guard, not a path the tests exercise.
+bool fitsChunk(const Bytes& body) {
+    return body.size() <= std::numeric_limits<std::uint32_t>::max();
+}
+
+}  // namespace
+
 Bytes writeSmf0(const Compiled& compiled, double bpm, int num, int den, int tpqn, int channel,
                 std::string_view trackName) {
     const std::optional<long> tempo = tempoOf(bpm);
@@ -120,54 +196,16 @@ Bytes writeSmf0(const Compiled& compiled, double bpm, int num, int den, int tpqn
     if (!endTick) {
         return {};
     }
-
-    // Quantise every beat first, then re-sort: two events distinct in beats may share a tick, and at a
-    // shared tick an off must still precede an on. The stable sort keeps input order for exact ties.
-    std::vector<TickEvent> events;
-    events.reserve(compiled.events.size());
-    for (const NoteEvent& e : compiled.events) {
-        const std::optional<long> tick = tickOf(e.beat, tpqn);
-        if (!tick || e.pitch < 0 || e.pitch > 127 || e.velocity < 0 || e.velocity > 127) {
-            return {};
-        }
-        events.push_back(TickEvent{*tick, e.on, e.pitch, e.velocity});
+    const std::optional<std::vector<TickEvent>> events = quantise(compiled.events, tpqn);
+    if (!events) {
+        return {};
     }
-    std::stable_sort(events.begin(), events.end(), keyLess);
 
     Bytes track;
-    // Tempo: FF 51 03 tt tt tt, microseconds per quarter note, big-endian.
-    append(track, {0x00, 0xFF, 0x51, 0x03});
-    track.push_back(static_cast<std::uint8_t>((*tempo >> 16) & 0xFF));
-    track.push_back(static_cast<std::uint8_t>((*tempo >> 8) & 0xFF));
-    track.push_back(static_cast<std::uint8_t>(*tempo & 0xFF));
-    // Time signature: FF 58 04 nn dd cc bb, with 24 MIDI clocks per metronome click and eight
-    // thirty-second notes per quarter, the conventional values.
-    append(track, {0x00, 0xFF, 0x58, 0x04, static_cast<std::uint8_t>(num), static_cast<std::uint8_t>(*denPower),
-                   0x18, 0x08});
-    // Track name: FF 03 len bytes, the bytes as given. Live names a clip dropped from the file after it.
-    if (!trackName.empty()) {
-        append(track, {0x00, 0xFF, 0x03});
-        append(track, vlq(static_cast<std::uint32_t>(trackName.size())));
-        track.insert(track.end(), trackName.begin(), trackName.end());
-    }
-
-    long previous = 0;
-    for (const TickEvent& e : events) {
-        append(track, vlq(static_cast<std::uint32_t>(e.tick - previous)));
-        previous = e.tick;
-        track.push_back(static_cast<std::uint8_t>((e.on ? kNoteOn : kNoteOff) | channel));
-        track.push_back(static_cast<std::uint8_t>(e.pitch));
-        track.push_back(static_cast<std::uint8_t>(e.velocity));
-    }
-
+    appendTempoAndMeter(track, *tempo, num, *denPower);
     // End of track at endBeat so trailing silence survives, never before the last event.
-    const long eotTick = std::max(*endTick, previous);
-    append(track, vlq(static_cast<std::uint32_t>(eotTick - previous)));
-    append(track, {0xFF, 0x2F, 0x00});
-
-    // The MTrk length is four bytes. Reaching this needs some 600 million events (each at most seven
-    // bytes), which no document produces in practice; it is a guard, not a path the tests exercise.
-    if (track.size() > std::numeric_limits<std::uint32_t>::max()) {
+    appendNameEventsAndEnd(track, trackName, *events, channel, std::max(*endTick, lastTick(*events)));
+    if (!fitsChunk(track)) {
         return {};
     }
 
@@ -178,9 +216,58 @@ Bytes writeSmf0(const Compiled& compiled, double bpm, int num, int den, int tpqn
     appendBe16(file, 0);  // format 0
     appendBe16(file, 1);  // one track
     appendBe16(file, static_cast<std::uint16_t>(tpqn));
-    append(file, {'M', 'T', 'r', 'k'});
-    appendBe32(file, static_cast<std::uint32_t>(track.size()));
-    append(file, track);
+    appendTrackChunk(file, track);
+    return file;
+}
+
+Bytes writeSmf1(const std::vector<SmfLane>& lanes, double bpm, int num, int den, int ppq, double endBeat) {
+    const std::optional<long> tempo = tempoOf(bpm);
+    const std::optional<int> denPower = denominatorPower(den);
+    // The track count (lanes + the conductor) is two bytes.
+    if (lanes.empty() || lanes.size() > 0xFFFE || !tempo || !denPower || num < 1 || num > 255 || ppq < 1 ||
+        ppq > 32767) {
+        return {};
+    }
+    const std::optional<long> endTick = tickOf(endBeat, ppq);
+    if (!endTick) {
+        return {};
+    }
+    // Quantise every lane first: the one end tick every MTrk shares is known only after the last lane's last event.
+    std::vector<std::vector<TickEvent>> quantised;
+    quantised.reserve(lanes.size());
+    long sharedEnd = *endTick;
+    for (const SmfLane& lane : lanes) {
+        std::optional<std::vector<TickEvent>> events = quantise(lane.events, ppq);
+        if (!events || lane.name.size() > kMaxMetaLength) {
+            return {};
+        }
+        sharedEnd = std::max(sharedEnd, lastTick(*events));
+        quantised.push_back(std::move(*events));
+    }
+
+    // The conductor: tempo, meter and the end-of-track, at the shared end tick like every lane.
+    Bytes conductor;
+    appendTempoAndMeter(conductor, *tempo, num, *denPower);
+    appendNameEventsAndEnd(conductor, {}, {}, 0, sharedEnd);
+    if (!fitsChunk(conductor)) {
+        return {};
+    }
+
+    Bytes file;
+    append(file, {'M', 'T', 'h', 'd'});
+    appendBe32(file, 6);
+    appendBe16(file, 1);  // format 1
+    appendBe16(file, static_cast<std::uint16_t>(lanes.size() + 1));
+    appendBe16(file, static_cast<std::uint16_t>(ppq));
+    appendTrackChunk(file, conductor);
+    for (std::size_t i = 0; i < lanes.size(); ++i) {
+        Bytes body;
+        appendNameEventsAndEnd(body, lanes[i].name, quantised[i], 0, sharedEnd);
+        if (!fitsChunk(body)) {
+            return {};
+        }
+        appendTrackChunk(file, body);
+    }
     return file;
 }
 

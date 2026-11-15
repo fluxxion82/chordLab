@@ -3,6 +3,7 @@
 #include "chordlab/feel.h"
 #include "chordlab/tracks.h"
 #include "chordlab/voicing.h"
+#include "note_merge.h"
 
 #include <algorithm>
 #include <array>
@@ -153,18 +154,6 @@ Compiled compile(const Document& doc) {
 
 namespace {
 
-/// One note of one lane on its way through `compilePlayback`'s merge.
-struct LaneNote {
-    double start;
-    double end;
-    int pitch;
-    int velocity;
-    int lane;  // 0 the chords, 1 + i track i
-    int id;    // a track note's id; a chord note's index in pairing order
-    bool shortened = false;
-    std::int64_t tick = 0;  // llround(start * 960): equal starts are equal rounded ticks
-};
-
 /// `compiled`'s events paired back into notes per pitch, appended to `notes` in the order of their ons.
 void pairChordNotes(const std::vector<NoteEvent>& events, std::vector<LaneNote>& notes) {
     constexpr std::size_t kClosed = static_cast<std::size_t>(-1);
@@ -223,34 +212,8 @@ Compiled compilePlayback(const Document& doc) {
         }
     }
 
-    // The merge, per pitch in (rounded start tick, lane, id) order; the exact start only breaks what cannot tie.
-    for (LaneNote& note : notes) note.tick = std::llround(note.start * kFeelTicksPerBeat);
-    std::sort(notes.begin(), notes.end(), [](const LaneNote& a, const LaneNote& b) {
-        return std::tie(a.pitch, a.tick, a.lane, a.id, a.start) < std::tie(b.pitch, b.tick, b.lane, b.id, b.start);
-    });
-    std::vector<LaneNote> merged;
-    merged.reserve(notes.size());
-    for (std::size_t i = 0; i < notes.size();) {
-        LaneNote note = notes[i];
-        std::size_t j = i + 1;
-        // Equal starts of one pitch (one rounded tick): one note at the first member's start (a chord note's beat
-        // when there is one), the latest end, the highest velocity; the first's lane and id.
-        for (; j < notes.size() && notes[j].pitch == note.pitch && notes[j].tick == note.tick; ++j) {
-            note.end = std::max(note.end, notes[j].end);
-            note.velocity = std::max(note.velocity, notes[j].velocity);
-        }
-        i = j;
-        assert(note.start < note.end);  // the latest end is at least the first member's, which ends after its start
-        // The previous note of this pitch, still sounding, ends where this one starts (a retrigger). Its rounded
-        // tick is lower, so its start is strictly earlier.
-        if (!merged.empty() && merged.back().pitch == note.pitch && merged.back().end > note.start) {
-            assert(merged.back().start < note.start);
-            merged.back().end = note.start;
-            merged.back().shortened = true;
-        }
-        merged.push_back(note);
-    }
-
+    // The merge (note_merge.h): per pitch in (rounded start tick, lane, id) order, equal starts one note, the rest retriggered.
+    const std::vector<LaneNote> merged = mergeLaneNotes(std::move(notes));
     playback.events.reserve(2 * merged.size());
     for (const LaneNote& note : merged) {
         // Only a note the merge shortened may be dropped, judged in rounded ticks (never on the raw beats).
