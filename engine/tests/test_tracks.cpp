@@ -102,6 +102,7 @@ void checkRefused(const DocumentStore& store, const DocumentStore& reference) {
     CHECK(store.nextTrackId() == reference.nextTrackId());
     CHECK(store.nextNoteId() == reference.nextNoteId());
     CHECK(store.revision() == reference.revision());
+    CHECK(store.noteSelection() == reference.noteSelection());
 }
 
 NoteSpec ns(int pitch, std::int64_t start, std::int64_t length, int velocity = 100) {
@@ -1266,6 +1267,7 @@ TEST_CASE("every track edit validates its candidate: on a document past a cap, o
         early.push_back(ns(40 + i, 2000, 3000));
         late.push_back(ns(60 + i, 2000, 480));
     }
+    REQUIRE(store.addTrack(TrackRole::Lead) == 2);  // empty, so removing it leaves the document past the cap
     const std::vector<int> earlyIds = store.insertNotes(1, early);
     REQUIRE(earlyIds.size() == static_cast<std::size_t>(cap));
     store.setLength(1, 2.0);  // the early notes go inactive
@@ -1280,12 +1282,42 @@ TEST_CASE("every track edit validates its candidate: on a document past a cap, o
     CHECK_FALSE(store.patchTrack(1, std::string{"Low"}, std::nullopt, &refusal));
     CHECK(refusal == kPolyphonyMessage);
     checkRefused(store, reference);
+    CHECK_FALSE(store.moveTrack(2, 0, &refusal));
+    CHECK(refusal == kPolyphonyMessage);
+    checkRefused(store, reference);
+    CHECK_FALSE(store.removeTrack(2, &refusal));
+    CHECK(refusal == kPolyphonyMessage);
+    checkRefused(store, reference);
     CHECK_FALSE(store.removeNotes(1, {earlyIds.front()}, &refusal));  // still past the cap
     CHECK(refusal == kPolyphonyMessage);
     checkRefused(store, reference);
     CHECK(store.removeNotes(1, earlyIds, &refusal));
     CHECK(refusal.empty());
     CHECK(trackPolyphony(store.doc()) == cap);
+}
+
+TEST_CASE("insertNotes / updateNotes: a note anchored to a removed chord refuses the edit, deriving no start") {
+    // Chord removal keeps the notes it owned for now (a later task removes them); the edits must not derive a
+    // start from the dangling anchor, and refuse with the validator's message.
+    DocumentStore store;
+    store.appendChord(kC, 4.0, 100);
+    store.appendChord(kF, 4.0, 100);
+    REQUIRE(store.addTrack(TrackRole::Bass) == 1);
+    REQUIRE(store.insertNotes(1, {ns(36, 0, 480), ns(38, kBar, 480)}) == std::vector<int>{1, 2});
+    store.removeChord(1);  // note 1 now anchors no chord
+    const DocumentStore reference = store;
+    std::string refusal;
+    CHECK(store.insertNotes(1, {ns(40, 0, 480)}, &refusal).empty());
+    CHECK(refusal == "Note 1 belongs to no chord");
+    checkRefused(store, reference);
+    NoteEdit pitchOnly = edit(2);
+    pitchOnly.pitch = 50;
+    CHECK_FALSE(store.updateNotes(1, {pitchOnly}, &refusal));
+    CHECK(refusal == "Note 1 belongs to no chord");
+    checkRefused(store, reference);
+    CHECK_FALSE(store.updateNotes(1, {}, &refusal));  // nothing to do stays a no-op
+    CHECK(refusal.empty());
+    checkRefused(store, reference);
 }
 
 // --- lane mute and solo (D8, live state) ----------------------------------------------------
@@ -1392,8 +1424,10 @@ TEST_CASE("setChordsMute / setChordsSolo: live, kept by undo and redo, no histor
     DocumentStore store = threeChordsAndBass();
     const std::uint64_t r = store.revision();
     const Document before = store.doc();
-    store.setChordsMute(true);
-    store.setChordsSolo(true);
+    CHECK(store.setChordsMute(true));
+    CHECK(store.setChordsSolo(true));
+    CHECK_FALSE(store.setChordsMute(true));  // no change
+    CHECK_FALSE(store.setChordsSolo(true));
     CHECK(store.doc().chordsMuted);
     CHECK(store.doc().chordsSolo);
     CHECK(store.doc() != before);

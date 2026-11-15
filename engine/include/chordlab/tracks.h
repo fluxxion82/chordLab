@@ -176,10 +176,11 @@ std::string defaultTrackName(const Document& doc, TrackRole role);
 /// - both counters >= 1; at most `kMaxTracks` tracks; track ids >= 1, unique and below `nextTrackId`; roles
 ///   declared `TrackRole`s; names of at most `kMaxTrackNameBytes` bytes; at most `kMaxNotesPerTrack` notes per
 ///   track, inactive ones included;
-/// - note ids >= 1, unique across all tracks and below `nextNoteId`; every anchor an existing chord (checked
-///   before any start is derived); every note in D1's domain: pitch 0..127, velocity 1..127, offset >= 0,
-///   derived start in [0, kMaxNoteTick - kMinTrackNoteTicks], length in [kMinTrackNoteTicks, kMaxNoteTick -
-///   start]; each track's notes sorted by (derived start, pitch, id);
+/// - note by note, track by track: the id >= 1 and below `nextNoteId`; the anchor an existing chord (checked
+///   before any start is derived); D1's domain: pitch 0..127, velocity 1..127, offset >= 0, derived start in
+///   [0, kMaxNoteTick - kMinTrackNoteTicks], length in [kMinTrackNoteTicks, kMaxNoteTick - start]; each track's
+///   notes sorted by (derived start, pitch, id);
+/// - note ids unique across all tracks (the smallest repeated id is reported);
 /// - D10's limits over the active notes of all tracks, muted ones included: `trackPolyphony` at most
 ///   `kMaxTrackPolyphony` ("At most 8 track notes can sound at once") and `densestOnsetWindow` at most
 ///   `kMaxTrackOnsetsPerBeat` ("At most 24 notes can start within one beat across all tracks"), the numbers

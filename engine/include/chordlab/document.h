@@ -138,11 +138,11 @@ inline bool operator!=(const Section& a, const Section& b) noexcept {
 /// Undo scope: `events`, `sections`, `tracks`, `projectKey`, `autoVoiceLead`, `feel` and `meter` are undoable (they are what the user
 /// composes: the flag changes which notes `compile` produces, so toggling it is an edit of the progression,
 /// not a view of it). `browsedKey`, `progressionLoop`, `followHost`, `relationMode`, `transposeWithKey`,
-/// `keyHintSeen`, `midiThru`, `newChordBeats`, `chordsMuted` and `chordsSolo` are live session state (each
-/// track's own `mute` and `solo` are meant to be too; their setters and undo handling come with them): changing them never creates history, and undo/redo leave their
-/// current values alone while restoring the rest, with one exception: a `browsedKey` equal to `projectKey`
-/// (home) follows the project key wherever it changes, through `setProjectKey`, `undo` and `redo`, so the
-/// palette never stays on a key the project just left.
+/// `keyHintSeen`, `midiThru`, `newChordBeats`, `chordsMuted` and `chordsSolo` are live session state, and so are
+/// each track's own `mute` and `solo` (kept by track id): changing them never creates history, and undo/redo
+/// leave their current values alone while restoring the rest, with one exception: a `browsedKey` equal to
+/// `projectKey` (home) follows the project key wherever it changes, through `setProjectKey`, `undo` and `redo`,
+/// so the palette never stays on a key the project just left.
 struct Document {
     Key projectKey{{'C', 0}, Mode::Ionian};
     Key browsedKey{{'C', 0}, Mode::Ionian};
@@ -559,7 +559,8 @@ public:
     /// afterwards, a note id counter that cannot hand out `specs.size()` ids below INT_MAX, an empty
     /// progression ("Add chords first"), or any start no chord owns (at or after the end: "A note must start
     /// before the end of the progression"), and when the result fails `validateTracks` (the playback limits, D10).
-    /// Every note already in the track must anchor an existing chord (the sort reads every note's derived start).
+    /// Refused too, before anything is derived, when a note already in the track anchors no chord (the sort reads
+    /// every note's derived start), with `validateTracks`' message ("Note 3 belongs to no chord").
     /// The inserted notes become the note selection, exactly them, in the track's note order (live state, set
     /// after the commit).
     std::vector<int> insertNotes(int trackId, const std::vector<NoteSpec>& specs, std::string* refusal = nullptr);
@@ -583,8 +584,9 @@ public:
     /// result depend on their order, so the call is ambiguous), or a moved start no chord owns ("A note must
     /// start before the end of the progression", "Add chords first" when the progression is empty). A no-op
     /// (false, no reason) when nothing changes, an empty `edits` included (unlike `insertNotes`, which refuses an
-    /// empty list). Every note of the track, not only the edited ones, must anchor an existing chord (the sort
-    /// reads every note's derived start).
+    /// empty list). Refused, before anything is derived, when any note of the track, not only an edited one,
+    /// anchors no chord (the sort reads every note's derived start), with `validateTracks`' message ("Note 3
+    /// belongs to no chord"); an empty `edits` stays a no-op even then.
     bool updateNotes(int trackId, const std::vector<NoteEdit>& edits, std::string* refusal = nullptr);
 
     /// Live state (tracks design D4, D8): mutes or soloes track `id`. Never recorded in the history and leaves the
@@ -596,8 +598,9 @@ public:
     bool setTrackSolo(int id, bool on);
 
     /// Live state, as `setTrackMute`: mutes or soloes the chords lane (`Document::chordsMuted` / `chordsSolo`).
-    void setChordsMute(bool on);
-    void setChordsSolo(bool on);
+    /// Returns false, changing nothing, for a value the lane already has.
+    bool setChordsMute(bool on);
+    bool setChordsSolo(bool on);
 
     /// The note selection (D5): live state, one track at a time, its ids in the track's note order. Kept across
     /// edits, undo and redo for as long as each note exists: after every commit, undo and redo, ids no longer in

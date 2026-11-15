@@ -216,19 +216,19 @@ bool validateTracks(const Document& doc, int nextTrackId, int nextNoteId, std::s
     std::vector<int> trackIds;
     std::size_t noteCount = 0;
     for (const Track& t : doc.tracks) {
-        const std::string which = "Track " + std::to_string(t.id);
+        const auto which = [&t] { return "Track " + std::to_string(t.id); };  // built only for a failure
         if (t.id < 1 || t.id >= nextTrackId) {
-            return fail(error, which + " has an id outside 1.." + std::to_string(nextTrackId - 1));
+            return fail(error, which() + " has an id outside 1.." + std::to_string(nextTrackId - 1));
         }
         if (std::find(trackIds.begin(), trackIds.end(), t.id) != trackIds.end()) {
-            return fail(error, which + " appears twice");
+            return fail(error, which() + " appears twice");
         }
         trackIds.push_back(t.id);
         if (t.role != TrackRole::Bass && t.role != TrackRole::Lead && t.role != TrackRole::Other) {
-            return fail(error, which + " has an unknown role");
+            return fail(error, which() + " has an unknown role");
         }
         if (t.name.size() > static_cast<std::size_t>(kMaxTrackNameBytes)) {
-            return fail(error, which + " has a name longer than " + std::to_string(kMaxTrackNameBytes) + " bytes");
+            return fail(error, which() + " has a name longer than " + std::to_string(kMaxTrackNameBytes) + " bytes");
         }
         if (t.notes.size() > static_cast<std::size_t>(kMaxNotesPerTrack)) {
             return fail(error, "At most " + std::to_string(kMaxNotesPerTrack) + " notes per track");
@@ -243,29 +243,29 @@ bool validateTracks(const Document& doc, int nextTrackId, int nextNoteId, std::s
         std::int64_t previousStart = 0;
         const TrackNote* previous = nullptr;
         for (const TrackNote& n : t.notes) {
-            const std::string which = "Note " + std::to_string(n.id);
+            const auto which = [&n] { return "Note " + std::to_string(n.id); };  // built only for a failure
             if (n.id < 1 || n.id >= nextNoteId) {
-                return fail(error, which + " has an id outside 1.." + std::to_string(nextNoteId - 1));
+                return fail(error, which() + " has an id outside 1.." + std::to_string(nextNoteId - 1));
             }
             noteIds.push_back(n.id);
             if (timeline.indexOf(n.anchorEventId) < 0) {  // before any start is derived from it
-                return fail(error, which + " belongs to no chord");
+                return fail(error, which() + " belongs to no chord");
             }
             if (n.pitch < 0 || n.pitch > 127) {
-                return fail(error, which + " has a pitch outside 0..127");
+                return fail(error, which() + " has a pitch outside 0..127");
             }
             if (n.velocity < 1 || n.velocity > 127) {
-                return fail(error, which + " has a velocity outside 1..127");
+                return fail(error, which() + " has a velocity outside 1..127");
             }
             if (n.offsetTick < 0) {
-                return fail(error, which + " starts before its chord");
+                return fail(error, which() + " starts before its chord");
             }
             const std::int64_t start = noteStart(timeline, n);  // 64-bit: no offset can overflow it
             if (start > kMaxNoteTick - kMinTrackNoteTicks) {
-                return fail(error, which + " starts past the end of the note range");
+                return fail(error, which() + " starts past the end of the note range");
             }
             if (n.lengthTicks < kMinTrackNoteTicks || n.lengthTicks > kMaxNoteTick - start) {
-                return fail(error, which + " has a length outside " + std::to_string(kMinTrackNoteTicks) + ".." +
+                return fail(error, which() + " has a length outside " + std::to_string(kMinTrackNoteTicks) + ".." +
                                        std::to_string(kMaxNoteTick - start) + " ticks");
             }
             if (previous != nullptr && std::tie(start, n.pitch, n.id) <=

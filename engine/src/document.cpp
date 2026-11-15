@@ -320,6 +320,20 @@ std::string noOwnerReason(const Document& doc) {
     return doc.events.empty() ? "Add chords first" : "A note must start before the end of the progression";
 }
 
+/// Refuses, with `validateTracks`' message, when a note of `notes` anchors no chord of `timeline` (true then):
+/// a note edit derives starts from the anchors before the validator runs, and must not derive one from a
+/// dangling anchor. Defence: chord removal is meant to take the notes it owned along.
+bool refuseDanglingAnchor(const std::vector<TrackNote>& notes, const ChordTimeline& timeline,
+                          std::string* refusal) {
+    for (const TrackNote& n : notes) {
+        if (timeline.indexOf(n.anchorEventId) < 0) {
+            refuse(refusal, "Note " + std::to_string(n.id) + " belongs to no chord");
+            return true;
+        }
+    }
+    return false;
+}
+
 }  // namespace
 
 DocumentStore::DocumentStore(int firstId) : nextId_(firstId) {
@@ -1078,6 +1092,9 @@ std::vector<int> DocumentStore::insertNotes(int trackId, const std::vector<NoteS
         return {};
     }
     const ChordTimeline timeline = chordTimeline(doc_);
+    if (refuseDanglingAnchor(doc_.tracks[static_cast<std::size_t>(index)].notes, timeline, refusal)) {
+        return {};
+    }
     Document next = doc_;
     std::vector<TrackNote>& notes = next.tracks[static_cast<std::size_t>(index)].notes;
     notes.reserve(held + specs.size());
@@ -1157,7 +1174,13 @@ bool DocumentStore::updateNotes(int trackId, const std::vector<NoteEdit>& edits,
             return false;
         }
     }
+    if (edits.empty()) {
+        return false;  // nothing to do, whatever state the track is in
+    }
     const ChordTimeline timeline = chordTimeline(doc_);
+    if (refuseDanglingAnchor(current, timeline, refusal)) {
+        return false;
+    }
     Document next = doc_;
     std::vector<TrackNote>& notes = next.tracks[static_cast<std::size_t>(index)].notes;
     for (const NoteEdit& e : edits) {
@@ -1246,12 +1269,20 @@ bool DocumentStore::setTrackSolo(int id, bool on) {
     return true;
 }
 
-void DocumentStore::setChordsMute(bool on) {
+bool DocumentStore::setChordsMute(bool on) {
+    if (doc_.chordsMuted == on) {
+        return false;
+    }
     doc_.chordsMuted = on;
+    return true;
 }
 
-void DocumentStore::setChordsSolo(bool on) {
+bool DocumentStore::setChordsSolo(bool on) {
+    if (doc_.chordsSolo == on) {
+        return false;
+    }
     doc_.chordsSolo = on;
+    return true;
 }
 
 const NoteSelection& DocumentStore::noteSelection() const {
