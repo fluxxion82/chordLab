@@ -93,15 +93,19 @@ void checkOneStep(DocumentStore& store, Mutate mutate) {
     CHECK(store.doc() == after);
 }
 
-/// Checks that `store` refused an edit: unchanged, with the same history (undo and redo) and counters as
-/// `reference`.
+/// Checks that `store` refused an edit: unchanged, with the same history (undo and redo), counters and selections
+/// (chords with their anchor, notes) as `reference`.
 void checkRefused(const DocumentStore& store, const DocumentStore& reference) {
     CHECK(store.doc() == reference.doc());
     CHECK(sameHistoryTop(store, reference));
     CHECK(sameRedoTop(store, reference));
+    CHECK(store.nextId() == reference.nextId());
+    CHECK(store.nextSectionId() == reference.nextSectionId());
     CHECK(store.nextTrackId() == reference.nextTrackId());
     CHECK(store.nextNoteId() == reference.nextNoteId());
     CHECK(store.revision() == reference.revision());
+    CHECK(store.selectedEventIds() == reference.selectedEventIds());
+    CHECK(store.selectedEventId() == reference.selectedEventId());
     CHECK(store.noteSelection() == reference.noteSelection());
 }
 
@@ -1732,6 +1736,41 @@ TEST_CASE("a lengthen that would reactivate a note past the onset cap is refused
     CHECK_FALSE(store.setLength(1, 4.0, &refusal));  // note 1 at kBar - 10 and the run from kBar share a beat
     CHECK(refusal == kOnsetMessage);
     checkRefused(store, reference);
+}
+
+TEST_CASE("removeChord / moveChord: refused when the later chord's notes move up into the beat of an earlier chord's tail") {
+    // Half the cap of short notes ending where chord 1 ends, one more than half from chord 3's start: removing chord
+    // 2, or moving chord 3 into its place, packs them into one beat. Polyphony stays 1 (back to back).
+    constexpr int cap = kMaxTrackOnsetsPerBeat;
+    constexpr std::int32_t step = kMinTrackNoteTicks;
+    static_assert((cap + 1) * step < kFeelTicksPerBeat, "the packed run must fit in one beat");
+    DocumentStore store = threeChordsAndBass();
+    std::vector<NoteSpec> notes;
+    for (int j = 0; j < cap / 2; ++j) {
+        notes.push_back(ns(60, kBar - (cap / 2 - j) * step, step));  // chord 1's tail
+    }
+    for (int j = 0; j < cap / 2 + 1; ++j) {
+        notes.push_back(ns(62, 2 * kBar + j * step, step));  // chord 3's head
+    }
+    REQUIRE(store.insertNotes(1, notes).size() == notes.size());
+    REQUIRE(densestOnsetWindow(store.doc()) == cap / 2 + 1);
+    store.setSelectedEvents({2, 3}, 2);
+    const DocumentStore reference = store;
+    std::string refusal;
+    CHECK_FALSE(store.removeChord(2, &refusal));
+    CHECK(refusal == kOnsetMessage);
+    checkRefused(store, reference);
+    CHECK_FALSE(store.removeChords({2}, &refusal));
+    CHECK(refusal == kOnsetMessage);
+    checkRefused(store, reference);
+    CHECK_FALSE(store.moveChord(3, 1, &refusal));
+    CHECK(refusal == kOnsetMessage);
+    checkRefused(store, reference);
+    // One head note fewer fits exactly at the cap.
+    REQUIRE(store.removeNotes(1, {cap + 1}));
+    CHECK(store.removeChord(2, &refusal));
+    CHECK(refusal.empty());
+    CHECK(densestOnsetWindow(store.doc()) == cap);
 }
 
 TEST_CASE("removeChord / removeChords: the removed chord's notes go, inactive ones included; an earlier long note stays") {

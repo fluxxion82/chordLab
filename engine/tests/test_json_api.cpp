@@ -2775,10 +2775,24 @@ TEST_CASE("boundary: an append refused by an exhausted id counter is reported, a
     const Document before = store.doc();
     std::string error;
     CHECK_FALSE(applyCommandJson(store, kAppendC, error));
-    CHECK_FALSE(error.empty());
+    CHECK(error == "\"appendChord\" refused: no event ids left");  // its own message, not the store's reason
     CHECK(store.doc() == before);
     CHECK(store.nextId() == INT_MAX);
     CHECK_FALSE(store.undo());
+}
+
+TEST_CASE("boundary: an insert the id counter cannot serve is reported with its own message, and changes nothing") {
+    DocumentStore store(INT_MAX - 1);  // one id left
+    const Document before = store.doc();
+    std::string error;
+    const json c = {{"root", 0}, {"type", "maj"}};
+    CHECK_FALSE(apply(store, {{"cmd", "insertChords"}, {"index", 0}, {"chords", json::array({c, c})}}, error));
+    CHECK(error == "\"insertChords\" refused: not enough event ids left");
+    CHECK(store.doc() == before);
+    CHECK(store.nextId() == INT_MAX - 1);
+    CHECK_FALSE(store.undo());
+    applyOk(store, {{"cmd", "insertChords"}, {"index", 0}, {"chords", json::array({c})}});  // one id: enough
+    CHECK(store.nextId() == INT_MAX);
 }
 
 // --- Capacity --------------------------------------------------------------------------
@@ -2814,9 +2828,7 @@ TEST_CASE("capacity: appendChord on a full document is refused with a clear erro
 
     std::string error;
     CHECK_FALSE(apply(store, {{"cmd", "appendChord"}, {"root", 5}, {"type", "maj"}}, error));
-    CAPTURE(error);
-    CHECK(error.find(std::to_string(kMaxChords)) != std::string::npos);
-    CHECK(error.find("appendChord") != std::string::npos);
+    CHECK(error == "\"appendChord\" refused: the document already holds " + std::to_string(kMaxChords) + " chords");
     CHECK(store.doc() == before);
     CHECK(store.nextId() == kMaxChords + 1);
 
@@ -2994,8 +3006,8 @@ TEST_CASE("loadPreset: refusals by the store are reported with its reason and ch
         const int nextId = store.nextId();
         std::string error;
         CHECK_FALSE(apply(store, {{"cmd", "loadPreset"}, {"id", "axis"}, {"mode", "append"}}, error));
-        CHECK_MESSAGE(error.find("\"loadPreset\" refused") != std::string::npos, error);
-        CHECK_MESSAGE(error.find(std::to_string(kMaxChords)) != std::string::npos, error);
+        CHECK(error ==
+              "\"loadPreset\" refused: the document would hold more than " + std::to_string(kMaxChords) + " chords");
         CHECK(store.doc() == before);
         CHECK(store.nextId() == nextId);
         applyOk(store, {{"cmd", "loadPreset"}, {"id", "axis"}, {"mode", "replace"}});  // 4 alone fit
@@ -3005,8 +3017,7 @@ TEST_CASE("loadPreset: refusals by the store are reported with its reason and ch
         DocumentStore store(INT_MAX - 3);
         std::string error;
         CHECK_FALSE(apply(store, {{"cmd", "loadPreset"}, {"id", "axis"}, {"mode", "replace"}}, error));
-        CHECK_MESSAGE(error.find("\"loadPreset\" refused") != std::string::npos, error);
-        CHECK_MESSAGE(error.find("event ids") != std::string::npos, error);
+        CHECK(error == "\"loadPreset\" refused: not enough event ids left");
         CHECK(store.doc().events.empty());
         CHECK_FALSE(store.undo());
     }
@@ -3015,8 +3026,7 @@ TEST_CASE("loadPreset: refusals by the store are reported with its reason and ch
         store.replace(Document{}, 1, INT_MAX);
         std::string error;
         CHECK_FALSE(apply(store, {{"cmd", "loadPreset"}, {"id", "axis"}, {"mode", "append"}}, error));
-        CHECK_MESSAGE(error.find("\"loadPreset\" refused") != std::string::npos, error);
-        CHECK_MESSAGE(error.find("section ids") != std::string::npos, error);
+        CHECK(error == "\"loadPreset\" refused: not enough section ids left");
         CHECK(store.doc().events.empty());
         CHECK(store.nextId() == 1);
         CHECK_FALSE(store.undo());
@@ -3965,9 +3975,8 @@ TEST_CASE("insertChords: refused whole past kMaxChords, with the reason; exactly
     REQUIRE_MESSAGE(loadStateJson(store, stateWithChords(kMaxChords - 2), error), error);
     const json three = json::array({entry(0, "maj"), entry(5, "maj"), entry(7, "7")});
     CHECK_FALSE(apply(store, insertCmd(0, three), error));
-    CAPTURE(error);
-    CHECK(error.find("insertChords") != std::string::npos);
-    CHECK(error.find(std::to_string(kMaxChords)) != std::string::npos);
+    CHECK(error == "\"insertChords\" refused: the document would hold more than " + std::to_string(kMaxChords) +
+                       " chords");
     CHECK(store.doc().events.size() == static_cast<std::size_t>(kMaxChords) - 2);
     CHECK(store.nextId() == kMaxChords - 1);
     applyOk(store, insertCmd(0, json::array({entry(0, "maj"), entry(5, "maj")})));
@@ -4220,6 +4229,9 @@ constexpr std::int32_t kBarTicks = 4 * kFeelTicksPerBeat;
 const std::string kPolyphonyLimit =
     "At most " + std::to_string(kMaxTrackPolyphony) + " track notes can sound at once";
 
+const std::string kOnsetLimit =
+    "At most " + std::to_string(kMaxTrackOnsetsPerBeat) + " notes can start within one beat across all tracks";
+
 /// `threeChords` with a Bass track (id 1): kMaxTrackPolyphony notes held from tick 0 into the second chord (to
 /// kBar + 3000) and one note at the start of the third chord, after they end. Moving the third chord earlier, or
 /// shortening or removing the second, would put that note under the held ones.
@@ -4235,9 +4247,11 @@ DocumentStore heldNotes() {
     return store;
 }
 
-/// Sends `cmd` and checks the track-limit refusal: false, the error `"<wire>" refused: <the polyphony message>`,
-/// `documentChanged` false, and the store as it was (document, revision, history, counters, selection).
-void checkTrackRefusal(DocumentStore& store, json cmd, const std::string& wire) {
+/// Sends `cmd` and checks the store's refusal: false, the error `"<wire>" refused: <reason>` (the polyphony message
+/// unless another is given), `documentChanged` false, and the store as it was (document, revision, history,
+/// counters, selection and anchor).
+void checkTrackRefusal(DocumentStore& store, json cmd, const std::string& wire,
+                       const std::string& reason = kPolyphonyLimit) {
     CAPTURE(cmd.dump());
     cmd["schema"] = kJsonSchema;
     const DocumentStore reference = store;
@@ -4245,11 +4259,15 @@ void checkTrackRefusal(DocumentStore& store, json cmd, const std::string& wire) 
     bool changed = true;
     CHECK_FALSE(applyCommandJson(store, cmd.dump(), error, &changed));
     CHECK_FALSE(changed);
-    CHECK(error == "\"" + wire + "\" refused: " + kPolyphonyLimit);
+    CHECK(error == "\"" + wire + "\" refused: " + reason);
     CHECK(store.doc() == reference.doc());
     CHECK(store.revision() == reference.revision());
     CHECK(store.nextId() == reference.nextId());
+    CHECK(store.nextSectionId() == reference.nextSectionId());
+    CHECK(store.nextTrackId() == reference.nextTrackId());
+    CHECK(store.nextNoteId() == reference.nextNoteId());
     CHECK(store.selectedEventIds() == reference.selectedEventIds());
+    CHECK(store.selectedEventId() == reference.selectedEventId());
     CHECK(store.noteSelection() == reference.noteSelection());
     DocumentStore a = store;
     DocumentStore b = reference;
@@ -4293,6 +4311,43 @@ TEST_CASE("insertChords: a refusal by the track limits names the command and the
                       {{"cmd", "insertChords"}, {"index", 0}, {"chords", {{{"root", 0}, {"type", "maj"}, {"lengthBeats", 0.2506}}}}},
                       "insertChords");
     CHECK(changes(store, {{"cmd", "insertChords"}, {"index", 0}, {"chords", {{{"root", 0}, {"type", "maj"}, {"lengthBeats", 0.25}}}}}));
+}
+
+TEST_CASE("chord timing commands: a refusal by the onset cap names the command and the cap and changes nothing") {
+    // Half the cap of short notes ending where the first chord ends, and one more than half at the start of the
+    // third: removing the second chord, or moving the third into its place, packs them all into one beat.
+    constexpr int cap = kMaxTrackOnsetsPerBeat;
+    constexpr std::int32_t step = kMinTrackNoteTicks;  // back to back: polyphony 1
+    static_assert((cap + 1) * step < kFeelTicksPerBeat, "the packed run must fit in one beat");
+    DocumentStore store = threeChords();
+    REQUIRE(store.addTrack(TrackRole::Bass) == 1);
+    std::vector<NoteSpec> notes;
+    for (int j = 0; j < cap / 2; ++j) {
+        notes.push_back(NoteSpec{60, kBarTicks - (cap / 2 - j) * step, step});
+    }
+    for (int j = 0; j < cap / 2 + 1; ++j) {
+        notes.push_back(NoteSpec{62, 2 * kBarTicks + j * step, step});
+    }
+    REQUIRE(store.insertNotes(1, notes).size() == notes.size());
+    checkTrackRefusal(store, {{"cmd", "removeChord"}, {"id", 2}}, "removeChord", kOnsetLimit);
+    checkTrackRefusal(store, {{"cmd", "moveChord"}, {"id", 3}, {"index", 1}}, "moveChord", kOnsetLimit);
+}
+
+TEST_CASE("insertChords: refused when it pushes a note past the end of the note range; the store's reason") {
+    // kMaxChords - 1 chords of kMaxLengthBeats and a note in the last running to kMaxNoteTick: a one-beat chord
+    // inserted at 0 would start it a beat later, its length past the range.
+    DocumentStore store;
+    for (int i = 0; i < kMaxChords - 1; ++i) {
+        REQUIRE(store.appendChord(kC, kMaxLengthBeats) == i + 1);
+    }
+    REQUIRE(store.addTrack(TrackRole::Lead) == 1);
+    const auto lastStart = static_cast<std::int64_t>((kMaxChords - 2) * kMaxLengthBeats * kFeelTicksPerBeat);
+    REQUIRE(store.insertNotes(1, {NoteSpec{60, lastStart, kMaxNoteTick - lastStart}}) == std::vector<int>{1});
+    const json oneBeat = json::array({{{"root", 0}, {"type", "maj"}, {"lengthBeats", 1.0}}});
+    checkTrackRefusal(store, {{"cmd", "insertChords"}, {"index", 0}, {"chords", oneBeat}}, "insertChords",
+                      "Note 1 has a length outside " + std::to_string(kMinTrackNoteTicks) + ".." +
+                          std::to_string(kMaxNoteTick - (lastStart + kFeelTicksPerBeat)) + " ticks");
+    applyOk(store, {{"cmd", "insertChords"}, {"index", kMaxChords - 1}, {"chords", oneBeat}});  // at the end: nothing moves
 }
 
 TEST_CASE("chord timing commands carry the notes: later chords' notes move, removed chords' notes go") {

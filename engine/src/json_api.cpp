@@ -1329,11 +1329,11 @@ enum class Refusal {
     PresetIdsExhausted,
     PresetSectionIdsExhausted,
     PresetInvalid,
-    Tracks  ///< a chord timing edit the track invariant refused (tracks design D4, D10); the store gave the reason
+    Store  ///< the store refused and gave its reason (today the track invariant on a chord timing edit, tracks D4, D10)
 };
 
-/// The wire name of a command that `Refusal::Tracks` can refuse, for its error message.
-const char* timingCommandName(Command::Kind kind) {
+/// The wire name of a command that `Refusal::Store` can refuse, for its error message.
+const char* commandWireName(Command::Kind kind) {
     switch (kind) {
         case Command::Kind::AppendChord:
             return "appendChord";
@@ -1354,18 +1354,20 @@ const char* timingCommandName(Command::Kind kind) {
         default:
             break;
     }
-    return "command";  // no other command reaches Refusal::Tracks
+    return "command";  // no other command reaches Refusal::Store
 }
 
-/// `Refusal::Tracks` when the store refused (a non-empty `reason`), else `None` (changed, or a valid no-op).
-Refusal timingRefusal(const std::string& reason) {
-    return reason.empty() ? Refusal::None : Refusal::Tracks;
+/// Classifies a store call that reports through the `std::string* refusal` convention (document.h): `ok` its
+/// result, `reason` the string it filled. `Refusal::Store` when it failed with a reason (refused), else `None`
+/// (changed, or failed without one: a valid no-op).
+Refusal storeRefusal(bool ok, const std::string& reason) {
+    return !ok && !reason.empty() ? Refusal::Store : Refusal::None;
 }
 
 /// `loadPreset`: resolves the preset in the project key and hands it to the store, which builds the
 /// whole next document and commits it once; a refusal is the store's own reason
 /// (`progressionRefusal`), asked before the call so that nothing has changed, or else the track invariant's
-/// (`Refusal::Tracks`, the store's message in `reason`).
+/// (`Refusal::Store`, the store's message in `reason`).
 Refusal applyLoadPreset(DocumentStore& store, const Preset& preset, ProgressionLoad load, std::string& reason) {
     const std::vector<std::pair<Chord, double>> steps = resolvePreset(preset, store.doc().projectKey, store.doc().meter);
     switch (store.progressionRefusal(steps, load)) {
@@ -1388,7 +1390,7 @@ Refusal applyLoadPreset(DocumentStore& store, const Preset& preset, ProgressionL
     }
     // The pre-checks passed, so only the track invariant can have refused (the notes of an append stay put and a
     // replace removes them all, so it never does); kept total.
-    return reason.empty() ? Refusal::PresetInvalid : Refusal::Tracks;
+    return reason.empty() ? Refusal::PresetInvalid : Refusal::Store;
 }
 
 /// True when `index` is a chord position of `doc` at which no section starts: the one case in which the
@@ -1411,7 +1413,7 @@ bool canStartSection(const Document& doc, int index) {
 /// chords or the store's id counter is exhausted, and a section add when the section id counter is (each
 /// classified by a pre-check that mirrors the store's); a preset load for the store's `progressionRefusal`; and
 /// any chord timing edit (append, insert, preset load, move, resize, removal) that the track invariant refuses
-/// (`Refusal::Tracks`, with the store's message in `reason`). Either way nothing changes.
+/// (`Refusal::Store`, with the store's message in `reason`). Either way nothing changes.
 Refusal applyCommand(DocumentStore& store, const Command& command, std::string& name, const CommandLists& lists,
                      std::string& reason) {
     const Document& doc = store.doc();
@@ -1443,19 +1445,17 @@ Refusal applyCommand(DocumentStore& store, const Command& command, std::string& 
                                      command.hasInversion ? std::optional<int>(command.inversion) : std::nullopt,
                                      &reason) != kNoEventId
                        ? Refusal::None
-                       : Refusal::Tracks;
+                       : Refusal::Store;
         case Command::Kind::MoveChord:
-            store.moveChord(command.id, command.index, &reason);
-            return timingRefusal(reason);
+            return storeRefusal(store.moveChord(command.id, command.index, &reason), reason);
         case Command::Kind::SetLength:
-            store.setLength(command.id, command.lengthBeats, &reason);
-            return timingRefusal(reason);
+            return storeRefusal(store.setLength(command.id, command.lengthBeats, &reason), reason);
         case Command::Kind::SetVelocity:
             store.setVelocity(command.id, command.velocity);
             return Refusal::None;
         case Command::Kind::RemoveChord:
-            store.removeChord(command.id, &reason);  // an unknown id is a valid no-op
-            return timingRefusal(reason);
+            // An unknown id is a valid no-op.
+            return storeRefusal(store.removeChord(command.id, &reason), reason);
         case Command::Kind::SetProgressionLoop:
             store.setProgressionLoop(command.on);
             return Refusal::None;
@@ -1527,14 +1527,14 @@ Refusal applyCommand(DocumentStore& store, const Command& command, std::string& 
                 return Refusal::InsertIdsExhausted;  // the store's own id check, asked first
             }
             // Lengths are finite (validated), the batch fits and the ids suffice: only the track invariant can still
-            // refuse.
-            return store.insertChords(command.index, lists.chords, &reason).empty() ? Refusal::Tracks : Refusal::None;
+            // refuse, when a note pushed along leaves the note range (D1) or a pushed fractional chord gains a rounded
+            // tick and reactivates a note over a cap.
+            return store.insertChords(command.index, lists.chords, &reason).empty() ? Refusal::Store : Refusal::None;
         case Command::Kind::RemoveChords:
-            store.removeChords(lists.ids, &reason);  // no id that exists is a valid no-op
-            return timingRefusal(reason);
+            // No id that exists is a valid no-op.
+            return storeRefusal(store.removeChords(lists.ids, &reason), reason);
         case Command::Kind::SetLengths:
-            store.setLengths(lists.ids, command.lengthBeats, &reason);
-            return timingRefusal(reason);
+            return storeRefusal(store.setLengths(lists.ids, command.lengthBeats, &reason), reason);
         case Command::Kind::SetNewChordLength:
             store.setNewChordLength(command.hasLength ? std::optional<double>(command.lengthBeats) : std::nullopt);
             return Refusal::None;
@@ -2037,8 +2037,8 @@ bool applyCommandJson(DocumentStore& store, std::string_view text, std::string& 
             case Refusal::PresetInvalid:
                 error = "\"loadPreset\" refused: the preset has no loadable steps";
                 return false;
-            case Refusal::Tracks:
-                error = std::string("\"") + timingCommandName(command.kind) + "\" refused: " + reason;
+            case Refusal::Store:
+                error = std::string("\"") + commandWireName(command.kind) + "\" refused: " + reason;
                 return false;
         }
         return true;

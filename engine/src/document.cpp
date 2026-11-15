@@ -322,8 +322,8 @@ std::string noOwnerReason(const Document& doc) {
 
 /// Refuses, with `validateTracks`' message, when a note of `notes` anchors no chord of `timeline` (true then):
 /// a note edit derives starts from the anchors before the validator runs, and must not derive one from a
-/// dangling anchor. A defence only: chord removal takes the notes it owned along (D3), so no store document
-/// holds a dangling anchor.
+/// dangling anchor. Store documents never reach it: chord removals drop the notes they owned (D3) and `replace`
+/// requires `validateTracks`. Kept as defence in depth for release builds, where the asserts are off.
 bool refuseDanglingAnchor(const std::vector<TrackNote>& notes, const ChordTimeline& timeline,
                           std::string* refusal) {
     for (const TrackNote& n : notes) {
