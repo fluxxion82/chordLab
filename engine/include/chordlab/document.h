@@ -314,7 +314,11 @@ enum class ProgressionRefusal { None, Empty, NonFiniteLength, DocumentFull, Even
 /// them re-sorts every track's notes by (derived start, pitch, id) against the new boundaries, runs
 /// `validateTracks` on its candidate and, when that fails (moved or reactivated notes past
 /// `kMaxTrackPolyphony` or `kMaxTrackOnsetsPerBeat`, or past the note range, D10), refuses whole: no history, no
-/// counter consumed, no revision, the selections unchanged, the validator's message in `refusal`. They report
+/// counter consumed, no revision, the selections unchanged, and a refusal in chord terms (D17a): "That change
+/// would leave more than N track notes sounding at once" (N = `kMaxTrackPolyphony`), "That change would leave
+/// more than M track notes starting within one beat" (M = `kMaxTrackOnsetsPerBeat`) or "That change would move a
+/// track note past the end of what ChordLab can hold" (the note range); any other validator failure keeps the
+/// validator's text. The track edits and state loads keep the validator's per-note messages. They report
 /// through the same trailing `std::string* refusal` channel as the track edits: a refusal returns the failure value
 /// with a non-empty reason, a no-op the failure value with an empty one. Notes are never shortened or moved to make
 /// an edit fit.
@@ -774,7 +778,9 @@ private:
     /// reason); otherwise it must pass `validateTracks` with the counters the edit will publish (`nextTrackId`,
     /// `nextNoteId`), else nothing changes and the validator's message goes to `refusal`. The caller publishes
     /// those counters right after a true return, with no throwing step in between.
-    bool commitTracks(Document next, int nextTrackId, int nextNoteId, std::string* refusal);
+    /// `inChordTerms` (the chord timing edits only, via `commitTimingWithIds`) words a track-limit refusal in chord
+    /// terms (D17a) instead of with the validator's per-note text.
+    bool commitTracks(Document next, int nextTrackId, int nextNoteId, std::string* refusal, bool inChordTerms = false);
 
     /// `commitTracks` for the chord timing edits (D3): first re-sorts every track's notes by (derived start, pitch,
     /// id) against `next`'s boundaries (a move or a resize reorders derived starts), then validates with the current

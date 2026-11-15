@@ -4386,10 +4386,12 @@ namespace {
 constexpr std::int32_t kBarTicks = 4 * kFeelTicksPerBeat;
 
 const std::string kPolyphonyLimit =
-    "At most " + std::to_string(kMaxTrackPolyphony) + " track notes can sound at once";
+    "That change would leave more than " + std::to_string(kMaxTrackPolyphony) + " track notes sounding at once";
 
 const std::string kOnsetLimit =
-    "At most " + std::to_string(kMaxTrackOnsetsPerBeat) + " notes can start within one beat across all tracks";
+    "That change would leave more than " + std::to_string(kMaxTrackOnsetsPerBeat) + " track notes starting within one beat";
+
+const std::string kDomainLimit = "That change would move a track note past the end of what ChordLab can hold";
 
 /// `threeChords` with a Bass track (id 1): kMaxTrackPolyphony notes held from tick 0 into the second chord (to
 /// kBar + 3000) and one note at the start of the third chord, after they end. Moving the third chord earlier, or
@@ -4503,10 +4505,25 @@ TEST_CASE("insertChords: refused when it pushes a note past the end of the note 
     const auto lastStart = static_cast<std::int64_t>((kMaxChords - 2) * kMaxLengthBeats * kFeelTicksPerBeat);
     REQUIRE(store.insertNotes(1, {NoteSpec{60, lastStart, kMaxNoteTick - lastStart}}) == std::vector<int>{1});
     const json oneBeat = json::array({{{"root", 0}, {"type", "maj"}, {"lengthBeats", 1.0}}});
-    checkTrackRefusal(store, {{"cmd", "insertChords"}, {"index", 0}, {"chords", oneBeat}}, "insertChords",
-                      "Note 1 has a length outside " + std::to_string(kMinTrackNoteTicks) + ".." +
-                          std::to_string(kMaxNoteTick - (lastStart + kFeelTicksPerBeat)) + " ticks");
+    checkTrackRefusal(store, {{"cmd", "insertChords"}, {"index", 0}, {"chords", oneBeat}}, "insertChords", kDomainLimit);
     applyOk(store, {{"cmd", "insertChords"}, {"index", kMaxChords - 1}, {"chords", oneBeat}});  // at the end: nothing moves
+}
+
+TEST_CASE("chord timing commands: a refusal by the note range reads in chord terms (D17a)") {
+    // A first chord one beat short of kMaxLengthBeats, the rest full, and a note in the last running to kMaxNoteTick:
+    // lengthening the first by that beat starts the note a beat later, its length past the range.
+    DocumentStore store;
+    REQUIRE(store.appendChord(kC, kMaxLengthBeats - 1.0) == 1);
+    for (int i = 1; i < kMaxChords; ++i) {
+        REQUIRE(store.appendChord(kC, kMaxLengthBeats) == i + 1);
+    }
+    REQUIRE(store.addTrack(TrackRole::Lead) == 1);
+    const auto lastStart = static_cast<std::int64_t>(kMaxNoteTick) - kFeelTicksPerBeat * static_cast<std::int64_t>(kMaxLengthBeats);
+    REQUIRE(store.insertNotes(1, {NoteSpec{60, lastStart - kFeelTicksPerBeat, kMaxNoteTick - lastStart + kFeelTicksPerBeat}}) ==
+            std::vector<int>{1});
+    checkTrackRefusal(store, {{"cmd", "setLength"}, {"id", 1}, {"lengthBeats", kMaxLengthBeats}}, "setLength", kDomainLimit);
+    checkTrackRefusal(store, {{"cmd", "setLengths"}, {"ids", {1}}, {"lengthBeats", kMaxLengthBeats}}, "setLengths",
+                      kDomainLimit);
 }
 
 TEST_CASE("chord timing commands carry the notes: later chords' notes move, removed chords' notes go") {
@@ -5232,7 +5249,7 @@ TEST_CASE("insertChords: a refusal by the track limits keeps the new track and i
         stack.push_back(chordNoteJson(laneJson("Stack", "lead"), 0, 480, 40 + i));
     }
     checkRefusedWith(store, insertWith(0, stack), "insertChords",
-                     "At most " + std::to_string(kMaxTrackPolyphony) + " track notes can sound at once");
+                     kPolyphonyLimit);
     CHECK(trackIds(store) == std::vector<int>{1});
 }
 

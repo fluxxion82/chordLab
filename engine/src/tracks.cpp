@@ -231,8 +231,21 @@ bool fail(std::string& error, std::string reason) {
 
 }  // namespace
 
-bool validateTracks(const Document& doc, int nextTrackId, int nextNoteId, std::string& error) {
+bool validateTracks(const Document& doc, int nextTrackId, int nextNoteId, std::string& error, TrackFault* fault) {
     error.clear();
+    if (fault != nullptr) {
+        *fault = TrackFault::None;
+    }
+    // Every failure below is a Structure fault unless the domain and the playback limits say otherwise.
+    const auto failAs = [&](TrackFault kind, std::string reason) {
+        if (fault != nullptr) {
+            *fault = kind;
+        }
+        return fail(error, std::move(reason));
+    };
+    if (fault != nullptr) {
+        *fault = TrackFault::Structure;  // replaced by None on success, narrowed on the three classified failures
+    }
     if (nextTrackId < 1 || nextNoteId < 1) {
         return fail(error, "The track and note id counters must be at least 1");
     }
@@ -288,11 +301,11 @@ bool validateTracks(const Document& doc, int nextTrackId, int nextNoteId, std::s
             }
             const std::int64_t start = noteStart(timeline, n);  // 64-bit: no offset can overflow it
             if (start > kMaxNoteTick - kMinTrackNoteTicks) {
-                return fail(error, which() + " starts past the end of the note range");
+                return failAs(TrackFault::Domain, which() + " starts past the end of the note range");
             }
             if (n.lengthTicks < kMinTrackNoteTicks || n.lengthTicks > kMaxNoteTick - start) {
-                return fail(error, which() + " has a length outside " + std::to_string(kMinTrackNoteTicks) + ".." +
-                                       std::to_string(kMaxNoteTick - start) + " ticks");
+                return failAs(TrackFault::Domain, which() + " has a length outside " + std::to_string(kMinTrackNoteTicks) +
+                                                      ".." + std::to_string(kMaxNoteTick - start) + " ticks");
             }
             if (previous != nullptr && std::tie(start, n.pitch, n.id) <=
                                            std::tie(previousStart, previous->pitch, previous->id)) {
@@ -310,11 +323,15 @@ bool validateTracks(const Document& doc, int nextTrackId, int nextNoteId, std::s
 
     const std::vector<Span> spans = activeSpans(doc, timeline);
     if (maxOverlap(spans) > kMaxTrackPolyphony) {
-        return fail(error, "At most " + std::to_string(kMaxTrackPolyphony) + " track notes can sound at once");
+        return failAs(TrackFault::Polyphony,
+                      "At most " + std::to_string(kMaxTrackPolyphony) + " track notes can sound at once");
     }
     if (maxStartsPerBeat(spans) > kMaxTrackOnsetsPerBeat) {
-        return fail(error, "At most " + std::to_string(kMaxTrackOnsetsPerBeat) +
-                               " notes can start within one beat across all tracks");
+        return failAs(TrackFault::Onsets, "At most " + std::to_string(kMaxTrackOnsetsPerBeat) +
+                                              " notes can start within one beat across all tracks");
+    }
+    if (fault != nullptr) {
+        *fault = TrackFault::None;
     }
     return true;
 }

@@ -487,12 +487,32 @@ bool hasTrackNotes(const Document& doc) {
 
 }  // namespace
 
-bool DocumentStore::commitTracks(Document next, int nextTrackId, int nextNoteId, std::string* refusal) {
+bool DocumentStore::commitTracks(Document next, int nextTrackId, int nextNoteId, std::string* refusal,
+                                 bool inChordTerms) {
     if (next == doc_) {
         return false;  // a no-op stays one
     }
     std::string error;
-    if (!validateTracks(next, nextTrackId, nextNoteId, error)) {
+    TrackFault fault = TrackFault::None;
+    if (!validateTracks(next, nextTrackId, nextNoteId, error, &fault)) {
+        if (inChordTerms) {  // D17a: a chord timing edit explains itself in chord terms
+            switch (fault) {
+                case TrackFault::Domain:
+                    error = "That change would move a track note past the end of what ChordLab can hold";
+                    break;
+                case TrackFault::Polyphony:
+                    error = "That change would leave more than " + std::to_string(kMaxTrackPolyphony) +
+                            " track notes sounding at once";
+                    break;
+                case TrackFault::Onsets:
+                    error = "That change would leave more than " + std::to_string(kMaxTrackOnsetsPerBeat) +
+                            " track notes starting within one beat";
+                    break;
+                case TrackFault::None:
+                case TrackFault::Structure:
+                    break;  // the validator's text
+            }
+        }
         refuse(refusal, std::move(error));
         return false;
     }
@@ -511,7 +531,7 @@ bool DocumentStore::commitTimingWithIds(Document next, int nextTrackId, int next
             sortTrackNotes(t.notes, timeline);
         }
     }
-    return commitTracks(std::move(next), nextTrackId, nextNoteId, refusal);
+    return commitTracks(std::move(next), nextTrackId, nextNoteId, refusal, true);
 }
 
 void DocumentStore::dropStaleSelection() noexcept {

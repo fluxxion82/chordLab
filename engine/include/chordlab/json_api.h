@@ -361,8 +361,11 @@ std::string heardJson(const Listener& listener, const Key& projectKey);
 ///   shorter chord leaves the notes past its end inactive, a longer one reactivates them), a removed chord takes
 ///   its notes along and a "replace" preset removes every note, keeping the tracks (document.h). Each is refused
 ///   (false, no change, no history, `documentChanged` false) when the result would break the track invariant,
-///   with the store's reason in the error: `"<command>" refused: <reason>`, for example `"setLength" refused: At
-///   most 8 track notes can sound at once` (`validateTracks`, tracks.h, with the constants' numbers).
+///   with the store's reason in the error: `"<command>" refused: <reason>`, in chord terms (D17a), for example
+///   `"setLength" refused: That change would leave more than 8 track notes sounding at once`, `... would leave
+///   more than 24 track notes starting within one beat` or `... would move a track note past the end of what
+///   ChordLab can hold` (the numbers are `kMaxTrackPolyphony` and `kMaxTrackOnsetsPerBeat`; any other
+///   `validateTracks` failure keeps its text). The note commands keep the validator's per-note messages.
 /// - `setProgressionLoop {on}`, `setFollowHost {on}`: the matching live-state setter.
 /// - `setInversion {id,inversion}`, `setOctave {id,octave}`, `resetVoicing {id}`: the matching store
 ///   call (the values are clamped by the store and the event is marked manual; see document.h).

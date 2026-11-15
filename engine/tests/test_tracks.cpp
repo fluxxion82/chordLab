@@ -22,6 +22,13 @@ using namespace chordlab;
 
 namespace {
 
+// The chord timing edits' refusals in chord terms (D17a).
+const std::string kTimingPolyphony =
+    "That change would leave more than " + std::to_string(kMaxTrackPolyphony) + " track notes sounding at once";
+const std::string kTimingOnsets =
+    "That change would leave more than " + std::to_string(kMaxTrackOnsetsPerBeat) + " track notes starting within one beat";
+const std::string kTimingDomain = "That change would move a track note past the end of what ChordLab can hold";
+
 Chord chord(PitchClass root, std::string_view typeId) {
     return Chord{root, &chordType(typeId)};
 }
@@ -807,10 +814,10 @@ TEST_CASE("a chord edit that would push a note past the note range is refused; t
     const DocumentStore reference = store;
     std::string refusal;
     CHECK_FALSE(store.setLength(first, kMaxLengthBeats, &refusal));
-    CHECK(refusal == "Note 1 starts past the end of the note range");
+    CHECK(refusal == kTimingDomain);
     checkRefused(store, reference);
     CHECK_FALSE(store.setLengths({first}, kMaxLengthBeats, &refusal));
-    CHECK(refusal == "Note 1 starts past the end of the note range");
+    CHECK(refusal == kTimingDomain);
     checkRefused(store, reference);
     // A note sounding to the very end of the range, 960 ticks earlier: the same growth would push its end past it.
     NoteEdit earlier = edit(1);
@@ -819,8 +826,7 @@ TEST_CASE("a chord edit that would push a note past the note range is refused; t
     REQUIRE(store.updateNotes(1, {earlier}));
     const DocumentStore toTheEnd = store;
     CHECK_FALSE(store.setLength(first, kMaxLengthBeats, &refusal));
-    CHECK(refusal == "Note 1 has a length outside " + std::to_string(kMinTrackNoteTicks) + ".." +
-                     std::to_string(kFeelTicksPerBeat) + " ticks");
+    CHECK(refusal == kTimingDomain);
     checkRefused(store, toTheEnd);
 }
 
@@ -1284,7 +1290,7 @@ TEST_CASE("a lengthen that would reactivate notes past the cap is refused; at th
     REQUIRE(trackPolyphony(store.doc()) == cap);
     const DocumentStore reference = store;
     CHECK_FALSE(store.setLength(1, 4.0, &refusal));  // the early ones would sound again, 2000..5000, over 3920
-    CHECK(refusal == kPolyphonyMessage);
+    CHECK(refusal == kTimingPolyphony);
     checkRefused(store, reference);
     CHECK(store.addTrack(TrackRole::Lead, std::nullopt, &refusal) == 3);
     CHECK(refusal.empty());
@@ -1295,7 +1301,7 @@ TEST_CASE("a lengthen that would reactivate notes past the cap is refused; at th
     CHECK(refusal.empty());
     CHECK(trackPolyphony(store.doc()) == cap);
     CHECK_FALSE(store.setLength(1, 4.0, &refusal));  // seven of them would still sound over the late ones
-    CHECK(refusal == kPolyphonyMessage);
+    CHECK(refusal == kTimingPolyphony);
     CHECK(store.removeNotes(1, earlyIds, &refusal));
     CHECK(store.setLength(1, 4.0, &refusal));
     CHECK(refusal.empty());
@@ -1709,10 +1715,10 @@ TEST_CASE("shortening a chord makes its notes past the new end inactive, kept an
     // 3120 ticks would bring them back over the second chord's notes (now at 4320): refused whole.
     const DocumentStore reference = store;
     CHECK_FALSE(store.setLength(1, 3.25, &refusal));
-    CHECK(refusal == kPolyphonyMessage);
+    CHECK(refusal == kTimingPolyphony);
     checkRefused(store, reference);
     CHECK_FALSE(store.setLengths({1, 2}, 3.25, &refusal));
-    CHECK(refusal == kPolyphonyMessage);
+    CHECK(refusal == kTimingPolyphony);
     checkRefused(store, reference);
     // Four beats: they sound again, clear of the second chord's notes.
     CHECK(store.setLength(1, 4.0, &refusal));
@@ -1737,7 +1743,7 @@ TEST_CASE("a lengthen that would reactivate a note past the onset cap is refused
     REQUIRE(densestOnsetWindow(store.doc()) == cap);
     const DocumentStore reference = store;
     CHECK_FALSE(store.setLength(1, 4.0, &refusal));  // note 1 at kBar - 10 and the run from kBar share a beat
-    CHECK(refusal == kOnsetMessage);
+    CHECK(refusal == kTimingOnsets);
     checkRefused(store, reference);
 }
 
@@ -1761,13 +1767,13 @@ TEST_CASE("removeChord / moveChord: refused when the later chord's notes move up
     const DocumentStore reference = store;
     std::string refusal;
     CHECK_FALSE(store.removeChord(2, &refusal));
-    CHECK(refusal == kOnsetMessage);
+    CHECK(refusal == kTimingOnsets);
     checkRefused(store, reference);
     CHECK_FALSE(store.removeChords({2}, &refusal));
-    CHECK(refusal == kOnsetMessage);
+    CHECK(refusal == kTimingOnsets);
     checkRefused(store, reference);
     CHECK_FALSE(store.moveChord(3, 1, &refusal));
-    CHECK(refusal == kOnsetMessage);
+    CHECK(refusal == kTimingOnsets);
     checkRefused(store, reference);
     // One head note fewer fits exactly at the cap.
     REQUIRE(store.removeNotes(1, {cap + 1}));
@@ -1821,16 +1827,16 @@ TEST_CASE("removeChord / removeChords / moveChord / setLength: refused when note
     const DocumentStore reference = store;
     std::string refusal;
     CHECK_FALSE(store.removeChord(2, &refusal));  // chord 3's note would start at kBar, under the held ones
-    CHECK(refusal == kPolyphonyMessage);
+    CHECK(refusal == kTimingPolyphony);
     checkRefused(store, reference);
     CHECK_FALSE(store.removeChords({2}, &refusal));
-    CHECK(refusal == kPolyphonyMessage);
+    CHECK(refusal == kTimingPolyphony);
     checkRefused(store, reference);
     CHECK_FALSE(store.moveChord(3, 1, &refusal));  // the same, by a move
-    CHECK(refusal == kPolyphonyMessage);
+    CHECK(refusal == kTimingPolyphony);
     checkRefused(store, reference);
     CHECK_FALSE(store.setLength(2, 1.0, &refusal));  // a shorten that moves chord 3's note to 4800
-    CHECK(refusal == kPolyphonyMessage);
+    CHECK(refusal == kTimingPolyphony);
     checkRefused(store, reference);
     CHECK(store.setLength(2, 3000.0 / kFeelTicksPerBeat + 0.25, &refusal));  // chord 3 at 7080, after 6840
     CHECK(refusal.empty());
@@ -1883,7 +1889,7 @@ TEST_CASE("insertChords: refused when a chord pushed along gains a rounded tick 
     const DocumentStore reference = store;
     const int nextId = store.nextId();
     CHECK(store.insertChords(0, {ChordSpec{kC, 0.2506}}, &refusal).empty());
-    CHECK(refusal == kPolyphonyMessage);
+    CHECK(refusal == kTimingPolyphony);
     checkRefused(store, reference);
     CHECK(store.nextId() == nextId);  // no event id consumed
     CHECK(store.selectedEventIds() == reference.selectedEventIds());
@@ -2179,7 +2185,7 @@ TEST_CASE("insertChords with notes: a refusal by the track limits leaves no new 
     }
     std::string refusal = "stale";
     CHECK(store.insertChords(0, {chordWith(kC, 4.0, nine)}, &refusal).empty());
-    CHECK(refusal == kPolyphonyMessage);
+    CHECK(refusal == kTimingPolyphony);
     checkRefused(store, reference);
     CHECK(trackIdsOf(store) == std::vector<int>{1});
     CHECK(store.nextId() == reference.nextId());

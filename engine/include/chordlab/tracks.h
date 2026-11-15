@@ -177,6 +177,9 @@ std::int32_t clampNoteLength(std::int64_t length, std::int32_t start);
 /// `defaultSectionName` steps over taken names). Only names count, not roles.
 std::string defaultTrackName(const Document& doc, TrackRole role);
 
+/// What `validateTracks` found wrong (D17a); see its `fault` parameter.
+enum class TrackFault { None, Structure, Domain, Polyphony, Onsets };
+
 /// The track invariant (D7), checked on a whole document with the id counters that go with it (`nextTrackId`,
 /// `nextNoteId`: the candidate counters an edit will publish, or a loaded state's). True when all of these hold,
 /// else false with a short reason in `error` (cleared on entry, so empty exactly when true), the first failure
@@ -199,7 +202,13 @@ std::string defaultTrackName(const Document& doc, TrackRole role);
 /// every chord timing edit of `DocumentStore` runs it on its candidate, and a state loader runs it before
 /// `DocumentStore::replace`.
 /// O(n log n) in the number of notes.
-bool validateTracks(const Document& doc, int nextTrackId, int nextNoteId, std::string& error);
+///
+/// `fault`, when given, classifies the failure so a caller can word it for its own edit (D17a): `None` on success;
+/// `Domain` for a derived start past `kMaxNoteTick - kMinTrackNoteTicks` or a length past `kMaxNoteTick - start`;
+/// `Polyphony` and `Onsets` for the two D10 limits; `Structure` for everything else. `error` is the validator's
+/// precise text whatever the class.
+bool validateTracks(const Document& doc, int nextTrackId, int nextNoteId, std::string& error,
+                    TrackFault* fault = nullptr);
 
 /// The most active track notes of all tracks (muted ones included) sounding at one tick: authored intervals
 /// [start, start + length), so touching notes (one ends where the next starts) do not overlap. Notes whose anchor
