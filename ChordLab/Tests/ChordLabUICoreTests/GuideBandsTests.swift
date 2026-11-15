@@ -161,4 +161,25 @@ final class GuideBandsTests: XCTestCase {
     XCTAssertEqual(cache.builds, 4)
     XCTAssertNotEqual(lead.bands[0].opacities, first.bands[0].opacities)
   }
+
+  func testWithoutARevisionTheCacheAlwaysRebuilds() throws {
+    var snapshot = try fixture()
+    snapshot.revision = nil
+    let cache = GuideBandsCache()
+    let before = cache.bands(snapshot: snapshot, geometry: RollGeometry(), trackRole: .bass)
+    _ = cache.bands(snapshot: snapshot, geometry: RollGeometry(), trackRole: .bass)
+    XCTAssertEqual(cache.builds, 2, "an older build's chord edit keeps the count and the end: never trust the key")
+    // A changed guide under the same (revision-less) key is laid out anew.
+    var edited = try JSONSerialization.jsonObject(with: JSONEncoder().encode(snapshot)) as! [String: Any]
+    var events = edited["events"] as! [[String: Any]]
+    events[0]["guide"] = events[1]["guide"]
+    edited["events"] = events
+    let changed = try JSONDecoder().decode(Snapshot.self, from: JSONSerialization.data(withJSONObject: edited))
+    XCTAssertEqual(GuideBands.key(snapshot: changed, geometry: RollGeometry(), trackRole: .bass),
+                   GuideBands.key(snapshot: snapshot, geometry: RollGeometry(), trackRole: .bass))
+    let layout = cache.bands(snapshot: changed, geometry: RollGeometry(), trackRole: .bass)
+    XCTAssertEqual(layout, GuideBands(snapshot: changed, geometry: RollGeometry(), trackRole: .bass))
+    XCTAssertNotEqual(layout.bands[0].roles, before.bands[0].roles, "the first chord's new guide is drawn")
+    XCTAssertEqual(cache.builds, 3)
+  }
 }

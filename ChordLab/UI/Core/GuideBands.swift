@@ -12,7 +12,8 @@ import Foundation
 ///
 /// The key (`Key`) is what the layout depends on: the snapshot's content revision (every chord timing, quality,
 /// feel or key change commits a new one), with the event count and `endBeat` as a guard, the zoom, the tick grid
-/// and the track role. `GuideBandsCache` holds the last layout and rebuilds it only when the key changes.
+/// and the track role. `GuideBandsCache` holds the last layout and rebuilds it only when the key changes (always
+/// when the snapshot has no revision).
 ///
 /// Depends on nothing but CoreGraphics and Foundation; unit-tested by the `ChordLabUICore` package
 /// (Tests/ChordLabUICoreTests/GuideBandsTests.swift).
@@ -137,8 +138,9 @@ struct GuideBands: Equatable {
 }
 
 /// The last guide band layout (tracks design D14: "cached per snapshot revision and zoom"): `bands` returns it while
-/// the key is unchanged and builds a new one otherwise. A reference type so the roll view can keep it across body
-/// evaluations without publishing anything; main-thread use only.
+/// the key is unchanged and builds a new one otherwise; a snapshot without a revision (an older plug-in build)
+/// always builds, since its key cannot tell a chord edit from no change. A reference type so the roll view can keep
+/// it across body evaluations without publishing anything; main-thread use only.
 final class GuideBandsCache {
   private(set) var current: GuideBands?
   /// How many layouts were built (tests and the harness read it).
@@ -148,7 +150,9 @@ final class GuideBandsCache {
 
   func bands(snapshot: Snapshot, geometry: RollGeometry, trackRole: TrackRole) -> GuideBands {
     let key = GuideBands.key(snapshot: snapshot, geometry: geometry, trackRole: trackRole)
-    if let current, current.key == key { return current }
+    // Without a revision (an older plug-in build) a chord edit that keeps the count and the end would look like
+    // the same key: never reuse such a layout.
+    if key.revision != nil, let current, current.key == key { return current }
     let layout = GuideBands(snapshot: snapshot, geometry: geometry, trackRole: trackRole)
     current = layout
     builds += 1

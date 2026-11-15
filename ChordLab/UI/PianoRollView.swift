@@ -15,13 +15,19 @@ import SwiftUI
 /// - **Keyboard column** (`PianoKeyboardView`, `keyboardWidth`) left of the grid, and the **grid**
 ///   (`PianoRollCanvas`).
 ///
+/// The playhead (and over the grid the insert marker) is a light overlay (`RollMarkersOverlay`) above the ribbon's
+/// and the grid's canvases, never an input of them: a transport push (display rate while playing) moves two thin
+/// rectangles and redraws neither canvas, which only take the snapshot, the track, the view state and the timing
+/// (`PianoRollCanvas` is `Equatable` and compared with `.equatable()`). The toolbar likewise takes plain values and
+/// an actions struct, so it re-renders only when one of its values changes.
+///
 /// Scrolling has no `ScrollView`: the grid is a viewport that draws its content at the track's `scroll`, the ribbon
 /// follows it horizontally and the keyboard vertically, all from the same value. The grid region is one view (a
-/// `ZStack` holding the canvas, where plan Task 18's `RollInputView` goes over the canvas only); its measured size
-/// is the viewport (`onGeometryChange` → `ChordLabState.setRollViewport`), which also performs the track's first
-/// open (bar 1, the role's register). Scroll and zoom are set from outside through `ChordLabState`
-/// (`setRollScroll`, `scrollRoll`, `zoomRoll`, `zoomRollIn/Out`). Each track gets a fresh view (`.id(track.id)` in
-/// `ContentView`), so its grid measures itself when it opens.
+/// `ZStack` holding the canvas and the markers overlay, where plan Task 18's `RollInputView` goes over them, covering
+/// the grid only); its measured size is the viewport (`onGeometryChange` → `ChordLabState.setRollViewport`), which
+/// also performs the track's first open (bar 1, the role's register). Scroll and zoom are set from outside through
+/// `ChordLabState` (`setRollScroll`, `scrollRoll`, `zoomRoll`, `zoomRollIn/Out`). Each track gets a fresh view
+/// (`.id(track.id)` in `ContentView`), so its grid measures itself when it opens.
 struct PianoRollView: View {
   @EnvironmentObject var state: ChordLabState
   @ObservedObject var rolls: RollViewStore
@@ -39,23 +45,28 @@ struct PianoRollView: View {
     VStack(spacing: Self.spacing) {
       if let snapshot = state.snapshot {
         let view = rolls.states[track.id]
-        let geometry = view.geometry(ticksPerBeat: snapshot.ticksPerBeatOrDefault)
+        let timing = state.rollTiming ?? RollTiming(snapshot: snapshot)
+        let geometry = view.geometry(ticksPerBeat: timing.ticksPerBeat)
         let playhead = Playhead.beat(transport: state.transport, endBeat: snapshot.endBeat,
                                      loop: snapshot.progressionLoop)
         RollToolbar(trackId: track.id, grid: view.grid, snap: view.snap, mode: view.mode,
                     showsOtherTracks: view.showsOtherTracks, canZoomIn: geometry.canZoomIn,
-                    canZoomOut: geometry.canZoomOut)
+                    canZoomOut: geometry.canZoomOut, actions: .roll(of: state, trackId: track.id))
+          .equatable()
         VStack(spacing: 0) {
           HStack(spacing: 0) {
             Color.clear.frame(width: Self.keyboardWidth)
-            RollRibbonView(snapshot: snapshot, geometry: geometry, scrollX: view.scroll.x, playheadBeat: playhead)
+            RollRibbonView(snapshot: snapshot, timing: timing, geometry: geometry, scrollX: view.scroll.x)
+              .equatable()
+              .overlay(RollMarkersOverlay(geometry: geometry, scrollX: view.scroll.x,
+                                          ticksPerBeat: timing.ticksPerBeat, playheadBeat: playhead))
           }
           .frame(height: Self.ribbonHeight)
           .background(RollColors.ribbonGround)
           HStack(spacing: 0) {
             PianoKeyboardView(geometry: geometry, scrollY: view.scroll.y)
               .frame(width: Self.keyboardWidth)
-            grid(snapshot: snapshot, view: view, geometry: geometry, playhead: playhead, name: name)
+            grid(snapshot: snapshot, view: view, timing: timing, geometry: geometry, playhead: playhead, name: name)
           }
         }
         .clipShape(RoundedRectangle(cornerRadius: Self.cornerRadius))
@@ -70,14 +81,20 @@ struct PianoRollView: View {
 
   // MARK: - Grid
 
-  /// The grid region: the canvas, and (plan Task 18) the input view over it, in one frame that is the viewport.
-  private func grid(snapshot: Snapshot, view: RollViewState, geometry: RollGeometry, playhead: Double?,
-                    name: String) -> some View {
-    ZStack(alignment: .topLeading) {
-      PianoRollCanvas(snapshot: snapshot, track: track, view: view,
-                      bands: rolls.bands.bands(snapshot: snapshot, geometry: geometry, trackRole: track.role),
-                      playheadBeat: playhead)
-      // Plan Task 18: RollInputView here, covering the canvas only.
+  /// The grid region: the canvas, the markers overlay (playhead, insert marker; never hit-tested) and (plan Task 18)
+  /// the input view over them, in one frame that is the viewport. The canvas gets the view state without the
+  /// insert marker, so a hover that only moves the marker redraws the overlay alone.
+  private func grid(snapshot: Snapshot, view: RollViewState, timing: RollTiming, geometry: RollGeometry,
+                    playhead: Double?, name: String) -> some View {
+    var drawn = view
+    drawn.editState.insertMarker = nil
+    return ZStack(alignment: .topLeading) {
+      PianoRollCanvas(snapshot: snapshot, track: track, view: drawn, timing: timing,
+                      bands: rolls.bands.bands(snapshot: snapshot, geometry: geometry, trackRole: track.role))
+        .equatable()
+      RollMarkersOverlay(geometry: geometry, scrollX: view.scroll.x, ticksPerBeat: timing.ticksPerBeat,
+                         playheadBeat: playhead, insertMarker: view.editState.insertMarker)
+      // Plan Task 18: RollInputView here, covering the grid region (the overlay above takes no events).
     }
     .clipped()
     .contentShape(Rectangle())
@@ -90,10 +107,30 @@ struct PianoRollView: View {
   }
 }
 
-/// The roll's toolbar (tracks design D14; see `PianoRollView`): its own view with plain value inputs, so a scroll,
-/// which changes none of them, does not rebuild its menus.
-struct RollToolbar: View {
-  @EnvironmentObject var state: ChordLabState
+/// What the roll's toolbar does (`RollToolbar`): the `ChordLabState` roll setters of one track.
+struct RollToolbarActions {
+  let setGrid: @MainActor (RollGrid) -> Void
+  let setSnap: @MainActor (PitchSnap) -> Void
+  let setMode: @MainActor (RollMode) -> Void
+  let setShowsOtherTracks: @MainActor (Bool) -> Void
+  let zoomIn: @MainActor () -> Void
+  let zoomOut: @MainActor () -> Void
+
+  /// Track `trackId`'s setters on `state`.
+  static func roll(of state: ChordLabState, trackId: Int) -> RollToolbarActions {
+    RollToolbarActions(setGrid: { state.setRollGrid(trackId: trackId, $0) },
+                       setSnap: { state.setRollSnap(trackId: trackId, $0) },
+                       setMode: { state.setRollMode(trackId: trackId, $0) },
+                       setShowsOtherTracks: { state.setRollShowsOtherTracks(trackId: trackId, $0) },
+                       zoomIn: { state.zoomRollIn(trackId: trackId) },
+                       zoomOut: { state.zoomRollOut(trackId: trackId) })
+  }
+}
+
+/// The roll's toolbar (tracks design D14; see `PianoRollView`): plain values and an actions struct, no observed
+/// object, and `Equatable` over the values (the actions are the same setters of the same track, `trackId`), so
+/// with `.equatable()` it re-renders only when a value changes: never on a scroll or a transport push.
+struct RollToolbar: View, Equatable {
   let trackId: Int
   let grid: RollGrid
   let snap: PitchSnap
@@ -101,6 +138,12 @@ struct RollToolbar: View {
   let showsOtherTracks: Bool
   let canZoomIn: Bool
   let canZoomOut: Bool
+  let actions: RollToolbarActions
+
+  static func == (a: RollToolbar, b: RollToolbar) -> Bool {
+    a.trackId == b.trackId && a.grid == b.grid && a.snap == b.snap && a.mode == b.mode
+      && a.showsOtherTracks == b.showsOtherTracks && a.canZoomIn == b.canZoomIn && a.canZoomOut == b.canZoomOut
+  }
 
   /// An icon button's square (zoom, nudges): borderless, like the lane tab row's +, so the widest toolbar (Grid
   /// 1/16T, Snap Chord + tensions) still fits the 700-pt minimum width.
@@ -110,7 +153,7 @@ struct RollToolbar: View {
     HStack(spacing: 8) {
       Menu {
         ForEach(RollGrid.allCases, id: \.self) { option in
-          Button(option.title + (option == grid ? "  ✓" : "")) { state.setRollGrid(trackId: trackId, option) }
+          Button(option.title + (option == grid ? "  ✓" : "")) { actions.setGrid(option) }
         }
       } label: {
         Text("Grid \(grid.title)")
@@ -122,7 +165,7 @@ struct RollToolbar: View {
 
       Menu {
         ForEach(PitchSnap.allCases, id: \.self) { option in
-          Button(option.title + (option == snap ? "  ✓" : "")) { state.setRollSnap(trackId: trackId, option) }
+          Button(option.title + (option == snap ? "  ✓" : "")) { actions.setSnap(option) }
         }
       } label: {
         Text("Snap \(snap.title)")
@@ -132,7 +175,7 @@ struct RollToolbar: View {
       .accessibilityLabel("Snap pitch")
       .accessibilityValue(snap.title)
 
-      Picker("Mode", selection: Binding(get: { mode }, set: { state.setRollMode(trackId: trackId, $0) })) {
+      Picker("Mode", selection: Binding(get: { mode }, set: { actions.setMode($0) })) {
         Text("Notes").tag(RollMode.notes)
         Text("Velocity").tag(RollMode.velocity)
       }
@@ -143,15 +186,15 @@ struct RollToolbar: View {
 
       HStack(spacing: 0) {
         iconButton("minus.magnifyingglass", label: "Zoom out", help: "Zoom out in time",
-                   enabled: canZoomOut) { state.zoomRollOut(trackId: trackId) }
+                   enabled: canZoomOut) { actions.zoomOut() }
         iconButton("plus.magnifyingglass", label: "Zoom in", help: "Zoom in in time",
-                   enabled: canZoomIn) { state.zoomRollIn(trackId: trackId) }
+                   enabled: canZoomIn) { actions.zoomIn() }
       }
 
       Spacer(minLength: 0)
 
       Toggle(isOn: Binding(get: { showsOtherTracks },
-                           set: { state.setRollShowsOtherTracks(trackId: trackId, $0) })) {
+                           set: { actions.setShowsOtherTracks($0) })) {
         Text("Other tracks").foregroundStyle(.white)
       }
       .toggleStyle(.accentSwitch)
@@ -195,20 +238,20 @@ struct RollToolbar: View {
 /// `PianoRollView.ribbonBarStripHeight` strip of bar numbers and pulse ticks (the sequence ruler's look: bar ticks
 /// 9 pt at 60 %, pulses 4 pt at 30 %, 9-pt numbers), then the chord strip: section tints (`SectionStyle` at
 /// `RollColors.sectionTint`) behind each chord's symbol over its playback span, boundary lines at the span starts,
-/// the area after the end dimmed with the ruler's dashed end line, and the 2-pt playhead. A symbol stays at the
-/// left edge while its span runs on past it, clipped to its span.
-struct RollRibbonView: View {
+/// the area after the end dimmed with the ruler's dashed end line. A symbol stays at the left edge while its span
+/// runs on past it, clipped to its span. The playhead is `RollMarkersOverlay` over it (not an input, so a transport
+/// push does not redraw it).
+struct RollRibbonView: View, Equatable {
   let snapshot: Snapshot
+  let timing: RollTiming
   let geometry: RollGeometry
   let scrollX: CGFloat
-  let playheadBeat: Double?
 
   var body: some View {
     Canvas { context, size in
       let strip = PianoRollView.ribbonBarStripHeight
       let scroll = CGPoint(x: scrollX, y: 0)
       let ticks = geometry.visibleTicks(viewport: size, scroll: scroll)
-      let timing = RollTiming(snapshot: snapshot)
       let events = snapshot.events
       let rate = timing.ticksPerBeat
       func x(_ tick: Int) -> CGFloat { geometry.x(tick: tick) - scrollX }
@@ -279,11 +322,38 @@ struct RollRibbonView: View {
       }
       // The line between the ribbon and the grid.
       context.fill(Path(CGRect(x: 0, y: size.height - 1, width: size.width, height: 1)), with: .color(RollColors.frame))
+    }
+    .accessibilityHidden(true)
+  }
+}
+
+/// The playhead (2 pt white, the sequence bar's) and, over the grid, the insert marker (1 pt in the accent colour)
+/// at the roll's horizontal scroll: two positioned rectangles over the ribbon's or the grid's canvas, so that a
+/// transport push or a hover moves them without redrawing a canvas. Never hit-tested (plan Task 18's input view
+/// owns the grid's events) and hidden from accessibility; the canvas beneath clips them to its frame.
+struct RollMarkersOverlay: View {
+  let geometry: RollGeometry
+  let scrollX: CGFloat
+  let ticksPerBeat: Int
+  /// The playhead's beat (`Playhead.beat`), nil when hidden.
+  let playheadBeat: Double?
+  /// The insert marker's tick (`RollEditState.insertMarker`), nil for none.
+  var insertMarker: Int? = nil
+
+  var body: some View {
+    ZStack(alignment: .topLeading) {
+      Color.clear
+      if let marker = insertMarker {
+        let x = (geometry.x(tick: marker) - scrollX).rounded(.down) + 0.5
+        Rectangle().fill(Color.accentColor.opacity(0.9)).frame(width: 1).offset(x: x - 0.5)
+      }
       if let beat = playheadBeat {
-        let px = x(Int((beat * Double(rate)).rounded()))
-        context.fill(Path(CGRect(x: px - 1, y: 0, width: 2, height: size.height)), with: .color(.white))
+        let x = geometry.x(tick: Int((beat * Double(ticksPerBeat)).rounded())) - scrollX
+        Rectangle().fill(Color.white).frame(width: 2).offset(x: x - 1)
       }
     }
+    .clipped()
+    .allowsHitTesting(false)
     .accessibilityHidden(true)
   }
 }

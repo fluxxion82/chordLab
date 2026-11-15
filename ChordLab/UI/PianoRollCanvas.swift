@@ -21,19 +21,26 @@ import SwiftUI
 ///    (design D3) as dashed outlines at their derived position; notes in the gesture state's `hiddenIds` left out
 ///    and its `previewNotes` drawn opaque with a light ring; in Velocity mode a light bar along each note's top
 ///    whose length is its velocity; selected notes (the snapshot's `noteSelection`) wear a white ring;
-/// 8. the rubber band, the insert marker (the accent colour) and the playhead (2 pt white, the sequence bar's).
+/// 8. the rubber band.
 ///
-/// Fills of one kind are batched into one path (one per guide role, the other tracks' outlines one per track, the
-/// open track's notes one per run of consecutive notes of one velocity, so they still stack in note order); the
-/// selection rings, inactive outlines and velocity bars are drawn over all of them. The UI computes no theory: roles, degrees, spans and note
+/// The playhead and the insert marker are not drawn here: `RollMarkersOverlay` sits over the canvas, so a transport
+/// push or a hover redraws neither this canvas nor its inputs (the caller passes the view state without the insert
+/// marker and compares the canvas with `.equatable()`).
+///
+/// **Stacking is note order**, the gesture machine's hit rule (the topmost hit is the last note in note order): each
+/// note's fill (or inactive outline), velocity bar and ring are drawn before the next note's. Notes are batched
+/// into runs drawn as one path per layer (fill, edge, bars, rings) while that cannot change the stacking: a run
+/// holds consecutive notes of one kind (active of one velocity, or inactive) none of which overlaps an earlier
+/// note of the run (only notes on one row can overlap, so a per-row right edge decides). Guide fills are one path
+/// per role and the other tracks' outlines one per track. The UI computes no theory: roles, degrees, spans and note
 /// positions all come from the snapshot.
-struct PianoRollCanvas: View {
+struct PianoRollCanvas: View, Equatable {
   let snapshot: Snapshot
   let track: TrackJSON
   let view: RollViewState
+  /// The snapshot's timing (`ChordLabState.rollTiming`, computed once per snapshot).
+  let timing: RollTiming
   let bands: GuideBands
-  /// The playhead's beat (`Playhead.beat`), nil when hidden.
-  let playheadBeat: Double?
 
   var body: some View {
     Canvas { context, size in
@@ -46,7 +53,6 @@ struct PianoRollCanvas: View {
   private func draw(_ context: inout GraphicsContext, size: CGSize) {
     let geometry = view.geometry(ticksPerBeat: snapshot.ticksPerBeatOrDefault)
     let scroll = view.scroll
-    let timing = RollTiming(snapshot: snapshot)
     let ticks = geometry.visibleTicks(viewport: size, scroll: scroll)
     let pitches = geometry.visiblePitches(viewport: size, scroll: scroll)
     let bounds = CGRect(origin: .zero, size: size)
@@ -64,11 +70,7 @@ struct PianoRollCanvas: View {
       drawOtherTracks(&context, geometry: geometry, scroll: scroll, ticks: ticks, pitches: pitches)
     }
     drawNotes(&context, geometry: geometry, scroll: scroll, ticks: ticks, pitches: pitches)
-    drawEditOverlays(&context, size: size, geometry: geometry, scroll: scroll)
-    if let beat = playheadBeat {
-      let x = geometry.x(tick: Int((beat * Double(timing.ticksPerBeat)).rounded())) - scroll.x
-      context.fill(Path(CGRect(x: x - 1, y: 0, width: 2, height: size.height)), with: .color(.white))
-    }
+    drawRubberBand(&context, scroll: scroll)
   }
 
   /// A crisp 1-pt vertical or horizontal line position: the pixel centre at or before `value`.
@@ -252,55 +254,69 @@ struct PianoRollCanvas: View {
     let colour = TrackStyle.color(role: track.role)
     let selected = track.selectedIds(in: snapshot.noteSelection)
     let hidden = view.editState.hiddenIds
-    // Notes are filled in note order (the gesture machine's topmost hit is the last in note order), a run of
-    // consecutive notes of one velocity as one path.
-    var run = Path()
-    var runVelocity: Int?
-    func flush() {
-      guard let velocity = runVelocity else { return }
-      context.fill(run, with: .color(colour.opacity(RollNoteStyle.opacity(velocity: velocity))))
-      context.stroke(run, with: .color(RollColors.noteEdge), lineWidth: 0.75)
-      run = Path()
-      runVelocity = nil
-    }
-    var inactive = Path()
+    let velocityMode = view.mode == .velocity
+    // The current run (see the type comment): its kind (nil: empty; an active note's velocity, or `inactiveKind`,
+    // one style whatever the velocity), its layers, and per row the right edge of its notes so far (rows not in the
+    // run are -infinity; `rows` lists the ones to reset).
+    let inactiveKind = -1
+    var runKind: Int?
+    var fills = Path()
+    var bars = Path()
     var rings = Path()
-    var velocityBars = Path()
+    var rightEdge = [CGFloat](repeating: -.infinity, count: RollGeometry.pitchCount)
+    var rows: [Int] = []
+    func flush() {
+      guard let kind = runKind else { return }
+      if kind != inactiveKind {
+        context.fill(fills, with: .color(colour.opacity(RollNoteStyle.opacity(velocity: kind))))
+        context.stroke(fills, with: .color(RollColors.noteEdge), lineWidth: 0.75)
+      } else {
+        context.fill(fills, with: .color(colour.opacity(RollColors.inactiveFill)))
+        context.stroke(fills, with: .color(colour.opacity(0.9)), style: StrokeStyle(lineWidth: 1, dash: [3, 2]))
+      }
+      if !bars.isEmpty { context.fill(bars, with: .color(RollColors.velocityBar)) }
+      if !rings.isEmpty { context.stroke(rings, with: .color(.white), lineWidth: 1.5) }
+      fills = Path()
+      bars = Path()
+      rings = Path()
+      for row in rows { rightEdge[row] = -.infinity }
+      rows.removeAll(keepingCapacity: true)
+      runKind = nil
+    }
     for i in RollVisibleNotes.indices(notes, ticks: ticks, pitches: pitches) where !hidden.contains(notes.id[i]) {
       let rect = noteRect(start: notes.start[i], length: notes.length[i], pitch: notes.pitch[i], geometry: geometry,
                           scroll: scroll)
-      let shape = roundedNote(rect)
-      if notes.active[i] {
-        if runVelocity != notes.velocity[i] { flush() }
-        runVelocity = notes.velocity[i]
-        run.addPath(shape)
-      } else {
-        inactive.addPath(roundedNote(rect.insetBy(dx: 0.5, dy: 0.5)))
-      }
-      if view.mode == .velocity {
-        velocityBars.addRect(velocityBar(rect, velocity: notes.velocity[i]))
+      let active = notes.active[i]
+      let kind = active ? max(notes.velocity[i], 0) : inactiveKind
+      let row = min(max(notes.pitch[i], 0), RollGeometry.pitchCount - 1)
+      // A different kind, or an overlap with an earlier note of the run on this row (within a point: the edge and
+      // the ring reach that far), starts a new run, so this note draws over that one.
+      if let current = runKind, current != kind || rect.minX < rightEdge[row] + 1 { flush() }
+      runKind = kind
+      if rightEdge[row] == -.infinity { rows.append(row) }
+      rightEdge[row] = max(rightEdge[row], rect.maxX)
+      fills.addPath(active ? roundedNote(rect) : roundedNote(rect.insetBy(dx: 0.5, dy: 0.5)))
+      if velocityMode {
+        bars.addRect(velocityBar(rect, velocity: notes.velocity[i]))
       }
       if selected.contains(notes.id[i]) {
         rings.addPath(roundedNote(rect.insetBy(dx: 0.75, dy: 0.75)))
       }
     }
     flush()
-    context.fill(inactive, with: .color(colour.opacity(RollColors.inactiveFill)))
-    context.stroke(inactive, with: .color(colour.opacity(0.9)), style: StrokeStyle(lineWidth: 1, dash: [3, 2]))
-    context.fill(velocityBars, with: .color(RollColors.velocityBar))
-    context.stroke(rings, with: .color(.white), lineWidth: 1.5)
 
-    // The drag preview: the edited notes (or the duplicates) drawn opaque with a light ring.
+    // The drag preview: the edited notes (or the duplicates) drawn opaque with a light ring, over every note, their
+    // velocity bars on top.
     var preview = Path()
+    var previewBars = Path()
     for note in view.editState.previewNotes {
       let rect = noteRect(start: note.start, length: note.length, pitch: note.pitch, geometry: geometry, scroll: scroll)
       preview.addPath(roundedNote(rect))
-      if view.mode == .velocity {
-        context.fill(Path(velocityBar(rect, velocity: note.velocity)), with: .color(RollColors.velocityBar))
-      }
+      if velocityMode { previewBars.addRect(velocityBar(rect, velocity: note.velocity)) }
     }
     context.fill(preview, with: .color(colour))
     context.stroke(preview, with: .color(.white.opacity(0.85)), lineWidth: 1)
+    context.fill(previewBars, with: .color(RollColors.velocityBar))
   }
 
   /// Velocity mode's bar: 2 pt along the note's top, as long as the velocity is of 127.
@@ -309,19 +325,10 @@ struct PianoRollCanvas: View {
     return CGRect(x: rect.minX + 1, y: rect.minY + 1, width: max(1, (rect.width - 2) * fraction), height: 2)
   }
 
-  private func drawEditOverlays(_ context: inout GraphicsContext, size: CGSize, geometry: RollGeometry,
-                                scroll: CGPoint) {
-    if let band = view.editState.rubberBand {
-      let rect = band.offsetBy(dx: -scroll.x, dy: -scroll.y)
-      context.fill(Path(rect), with: .color(.white.opacity(0.06)))
-      context.stroke(Path(rect), with: .color(.white.opacity(0.8)), lineWidth: 1)
-    }
-    if let marker = view.editState.insertMarker {
-      let x = crisp(geometry.x(tick: marker) - scroll.x)
-      if x >= 0, x <= size.width {
-        context.fill(Path(CGRect(x: x - 0.5, y: 0, width: 1, height: size.height)),
-                     with: .color(Color.accentColor.opacity(0.9)))
-      }
-    }
+  private func drawRubberBand(_ context: inout GraphicsContext, scroll: CGPoint) {
+    guard let band = view.editState.rubberBand else { return }
+    let rect = band.offsetBy(dx: -scroll.x, dy: -scroll.y)
+    context.fill(Path(rect), with: .color(.white.opacity(0.06)))
+    context.stroke(Path(rect), with: .color(.white.opacity(0.8)), lineWidth: 1)
   }
 }

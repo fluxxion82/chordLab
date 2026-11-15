@@ -37,12 +37,41 @@ final class RollViewStateTests: XCTestCase {
     XCTAssertEqual(content(state, timing, CGSize(width: 1000, height: 300)).width, 1000, "never narrower than the viewport")
   }
 
+  func testTheContentReachesANotePastTheEnd() {
+    // An inactive note left two bars past the end (14400 + 2 × 3840 = 22080): the content runs to its end plus one
+    // bar, (22080 + 3840) ticks at 48 pt per beat = 1296 pt, while the progression's end (the hatch) stays put.
+    let past = RollTiming(ticksPerBeat: 960, barTicks: 3840, endTick: 14400, minNoteTicks: 30, contentEndTick: 22080)
+    XCTAssertEqual(past.endTick, 14400, "the hatch and the insert rule keep the progression's end")
+    XCTAssertEqual(content(RollViewState(), past, viewport), CGSize(width: 1296, height: 1792))
+    var state = RollViewState()
+    state.fit(viewport: viewport, timing: past, role: .bass)
+    state.setScroll(CGPoint(x: 1e6, y: 0), viewport: viewport, timing: past)
+    XCTAssertEqual(state.scroll.x, 696, "1296 − 600")
+    let noteEnd = state.geometry(ticksPerBeat: 960).x(tick: 22080)
+    XCTAssertLessThanOrEqual(noteEnd, state.scroll.x + viewport.width, "the note's end (its resize edge) is on screen")
+    XCTAssertGreaterThan(noteEnd, state.geometry(ticksPerBeat: 960).x(tick: 14400 + 3840),
+                         "beyond the end plus one bar, where the old content stopped")
+    // Without such a note the content stops one bar after the end, as before; a smaller content end is the end.
+    XCTAssertEqual(timing.contentEndTick, 14400)
+    XCTAssertEqual(RollTiming(ticksPerBeat: 960, barTicks: 3840, endTick: 14400, minNoteTicks: 30,
+                              contentEndTick: 100).contentEndTick, 14400)
+  }
+
+  func testASnapshotWhoseLastNoteMovesInClampsBackToTheEnd() {
+    let past = RollTiming(ticksPerBeat: 960, barTicks: 3840, endTick: 14400, minNoteTicks: 30, contentEndTick: 22080)
+    var state = RollViewState()
+    state.setScroll(CGPoint(x: 1e6, y: 0), viewport: viewport, timing: past)
+    XCTAssertEqual(state.scroll.x, 696)
+    // The note is deleted: the content shrinks back to the end plus one bar.
+    state.fit(viewport: viewport, timing: timing, role: .bass)
+    XCTAssertEqual(state.scroll.x, 312, "912 − 600")
+  }
+
   // MARK: - First open
 
   func testFirstOpenScrollsToTheRolesRegisterAtBarOne() {
     for role in TrackRole.allCases {
       var state = RollViewState()
-      state.scroll = CGPoint(x: 123, y: 45)
       state.fit(viewport: viewport, timing: timing, role: role)
       let expected = RollGeometry().initialScroll(register: role.register, viewport: viewport)
       XCTAssertEqual(state.scroll, expected, "\(role)")

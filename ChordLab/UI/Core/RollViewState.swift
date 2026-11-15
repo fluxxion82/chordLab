@@ -7,10 +7,11 @@ import Foundation
 /// Other tracks, the gesture machine's state (`editState`, `RollEditLogic`; plan Task 18 feeds it), and whether
 /// the first open has scrolled to the role's register yet. Never saved and never sent to the engine.
 ///
-/// Every scroll it stores is clamped to the content (`RollGeometry.clampedScroll`): the progression plus one bar of
-/// the meter (`RollTiming.barTicks`, like the strip's trailing slack) wide, the 128 rows tall. The callers pass the
-/// viewport and the snapshot's timing in, so a resize, a zoom or a shorter progression (`fit`) always lands the
-/// scroll inside the content.
+/// Every scroll it stores is clamped to the content (`RollGeometry.clampedScroll`): the progression, or the latest
+/// note end past it (`RollTiming.contentEndTick`), plus one bar of the meter (`RollTiming.barTicks`, like the
+/// strip's trailing slack) wide, the 128 rows tall. `scroll` is read-only outside: every write goes through
+/// `fit`, `setScroll`, `scroll(by:)` or a zoom, which clamp. The callers pass the viewport and the snapshot's timing
+/// in, so a resize, a zoom or a shorter progression (`fit`) always lands the scroll inside the content.
 ///
 /// **First open** (design D2, D14): the first `fit` with a real viewport (both sides positive) scrolls to bar 1 and
 /// centres the role's register (`RollGeometry.initialScroll(register:viewport:)`), once; a later role change
@@ -19,7 +20,8 @@ import Foundation
 /// Depends on nothing but CoreGraphics and Foundation; unit-tested by the `ChordLabUICore` package
 /// (Tests/ChordLabUICoreTests/RollViewStateTests.swift).
 struct RollViewState: Equatable {
-  var scroll: CGPoint = .zero
+  /// Content coordinates of the viewport's top-left; always clamped (see the type comment).
+  private(set) var scroll: CGPoint = .zero
   /// Horizontal zoom, `RollGeometry.pxPerBeatRange` (clamped through `RollGeometry`).
   private(set) var pxPerBeat: CGFloat = RollGeometry.defaultPxPerBeat
   /// Vertical zoom, `RollGeometry.rowHeightRange`.
@@ -42,10 +44,11 @@ struct RollViewState: Equatable {
     RollGeometry(pxPerBeat: pxPerBeat, rowHeight: rowHeight, ticksPerBeat: ticksPerBeat)
   }
 
-  /// The roll's content: the progression's end plus one bar of slack, never narrower than the viewport, 128 rows
+  /// The roll's content: the content end (`RollTiming.contentEndTick`: the progression's end, or the latest note
+  /// end of any track when a note runs past it) plus one bar of slack, never narrower than the viewport, 128 rows
   /// tall (`RollGeometry.contentSize`).
   static func contentSize(geometry: RollGeometry, timing: RollTiming, viewport: CGSize) -> CGSize {
-    geometry.contentSize(endTick: timing.endTick, slackTicks: timing.barTicks, viewport: viewport)
+    geometry.contentSize(endTick: timing.contentEndTick, slackTicks: timing.barTicks, viewport: viewport)
   }
 
   /// After a measurement or a snapshot: the first open's scroll when it is due (see the type comment), then the

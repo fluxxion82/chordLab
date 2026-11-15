@@ -7,7 +7,12 @@ class ChordLabState: NSObject, ObservableObject {
   var params: [Param] = []
   @Published var bundleID = String("")
   /// The last snapshot the plugin pushed; nil until the first one arrives.
-  @Published var snapshot: Snapshot?
+  @Published var snapshot: Snapshot? {
+    didSet { rollTiming = snapshot.map(RollTiming.init(snapshot:)) }
+  }
+  /// The roll's timing of `snapshot` (`RollTiming`), computed once per snapshot: its `contentEndTick` walks every
+  /// track's notes, and the roll's setters and canvases read it at display rate.
+  private(set) var rollTiming: RollTiming?
   /// The last command the plugin rejected, or a decode failure; cleared by the next good snapshot.
   @Published var lastError: String?
   /// Counts every error reported into `lastError`, so a watcher can tell a repeated identical error
@@ -409,18 +414,19 @@ class ChordLabState: NSObject, ObservableObject {
   /// fits the track's scroll to it; the first measurement with a real size is the track's first open, which
   /// scrolls to its role's register at bar 1 (`RollViewState.fit`). Nothing for a track the snapshot lacks.
   @MainActor func setRollViewport(trackId: Int, _ size: CGSize) {
-    guard let snapshot, let track = snapshot.track(id: trackId) else { return }
+    guard let snapshot, let timing = rollTiming, let track = snapshot.track(id: trackId) else { return }
     var states = rolls.states
-    states.setViewport(size, trackId: trackId, role: track.role, timing: RollTiming(snapshot: snapshot))
+    states.setViewport(size, trackId: trackId, role: track.role, timing: timing)
     publishRolls(states)
   }
 
   /// Changes track `trackId`'s roll view state with the current viewport and the snapshot's timing; the one path
-  /// every roll setter takes (and the input view's, plan Task 18). Nothing before the first snapshot.
+  /// every roll setter takes (and the input view's, plan Task 18). Nothing before the first snapshot, and nothing
+  /// for a track the snapshot lacks (no entry is made for it).
   @MainActor func editRoll(trackId: Int, _ change: (inout RollViewState, CGSize, RollTiming) -> Void) {
-    guard let snapshot else { return }
+    guard let snapshot, let timing = rollTiming, snapshot.track(id: trackId) != nil else { return }
     var states = rolls.states
-    states.edit(trackId: trackId, timing: RollTiming(snapshot: snapshot), change)
+    states.edit(trackId: trackId, timing: timing, change)
     publishRolls(states)
   }
 
@@ -486,7 +492,8 @@ class ChordLabState: NSObject, ObservableObject {
     var openTrackId: Int?
     if case .track(let id) = openLane { openTrackId = id }
     var states = rolls.states
-    states.snapshotApplied(tracks: snapshot.tracks ?? [], timing: RollTiming(snapshot: snapshot), openTrackId: openTrackId)
+    states.snapshotApplied(tracks: snapshot.tracks ?? [], timing: rollTiming ?? RollTiming(snapshot: snapshot),
+                           openTrackId: openTrackId)
     publishRolls(states)
   }
 
