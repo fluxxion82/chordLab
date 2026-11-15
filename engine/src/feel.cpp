@@ -439,7 +439,7 @@ Performance performDocument(const Document& doc) {
            }) == events.end());
 
     // D11: decided once, for the whole document.
-    if (events.size() > kMaxSnapshotEvents ||
+    if (events.size() > kMaxChordEvents ||
         densestBeat(events, performance.endTick()) > kMaxFeelEventsPerBeat) {
         events.clear();
         performance.feelLimited = true;

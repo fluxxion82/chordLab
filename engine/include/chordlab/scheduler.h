@@ -34,10 +34,10 @@ struct MidiOut {
 
 /// The compiled progression as the scheduler plays it. `events` must be sorted by
 /// `(beat, off before on, pitch)` with every beat in `[0, endBeat]` and at most
-/// `Scheduler::kMaxSnapshotEvents` of them, as `compile` produces. Lifetime: the array must stay valid
-/// and unchanged from its `adopt` through every `process` call until the next `adopt`. That next `adopt`
-/// never reads the previous array (everything it needs from the old timeline is kept in scheduler state
-/// that `process` maintains), so the memory may be reused as soon as the next `adopt` is entered: the
+/// `Scheduler::kMaxSnapshotEvents` of them, as `compile` and `compilePlayback` produce. Lifetime: the array
+/// must stay valid and unchanged from its `adopt` through every `process` call until the next `adopt`. That
+/// next `adopt` never reads the previous array (everything it needs from the old timeline is kept in scheduler
+/// state that `process` maintains), so the memory may be reused as soon as the next `adopt` is entered: the
 /// plug-in's triple buffer relies on this, since `acquire` hands the old slot back to the producer before
 /// `adopt` runs. `generation` changes whenever the content changes.
 struct Snapshot {
@@ -146,7 +146,8 @@ public:
     /// progression, far beyond any real block); beyond it the block only releases.
     static constexpr std::size_t kMaxWrapsPerBlock = 64;
     /// The most events a snapshot may hold; a larger one is adopted as empty. The value is
-    /// `chordlab::kMaxSnapshotEvents` of limits.h, which document.h sizes `kMaxChords` against.
+    /// `chordlab::kMaxSnapshotEvents` of limits.h: the chord budget (`kMaxChordEvents`, which document.h sizes
+    /// `kMaxChords` against) plus every track note's on and off.
     static constexpr std::size_t kMaxSnapshotEvents = ::chordlab::kMaxSnapshotEvents;
     /// An output capacity that always pays every owed release in one block.
     static constexpr std::size_t kCapacityForImmediateRelease = 128;

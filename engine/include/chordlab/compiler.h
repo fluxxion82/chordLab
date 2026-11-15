@@ -49,6 +49,44 @@ std::vector<std::vector<int>> voicings(const Document& doc);
 /// checked): a document that came from outside the process is validated by the store before it gets here.
 Compiled compile(const Document& doc);
 
+/// Compiles what the plug-in plays (tracks design D8): the audible lanes of `doc`, the chords and every track,
+/// merged into one event list. `fillSlot` is its only caller; `compile` keeps meaning the chords alone (snapshot,
+/// export, sections). Main thread: allocates.
+///
+/// - **Audible lanes** (`laneAudible`, tracks.h): with no solo anywhere (chords or tracks), every unmuted lane; with
+///   any solo, only the soloed lanes, mute ignored on a soloed lane. The chords lane is `chordsAudible(doc)`, track i
+///   `trackAudible(doc, i)`.
+/// - **Chord notes** are `compile(doc)`'s, in its beats exactly (authored doubles on the block path and in the
+///   over-budget fallback, `tick / 960.0` when a feel performs), paired back into notes per pitch in event order:
+///   per pitch `compile` alternates on, off, on, off (block chords do not overlap themselves, a retrigger's off
+///   sorts before the on at its beat, and the feel's safety leaves the notes of one pitch disjoint), so the n-th
+///   off of a pitch closes its n-th on.
+/// - **Track notes**: the active notes (`noteActive`) of the audible tracks, inactive ones skipped. A note of
+///   derived start `s` (`noteStart`, D3) and length `l` ticks becomes `[s / 960.0, min((s + l) / 960.0, endBeat))`
+///   with `endBeat` = `compile(doc).endBeat`; one starting at or after `endBeat` is skipped (in a store's document
+///   an active note always starts before it, so this is a guard). Nothing is re-rounded.
+/// - **Paired merge** (the feel's D10 safety over lanes, on notes before any event exists): per pitch the notes
+///   are ordered by start, then lane (the chords first, then the tracks in document order), then id (a track
+///   note's id; a chord note's index in that order of pairing, which never decides anything, since chord notes of
+///   one pitch never share a start). Notes of one pitch with equal starts become one note with the latest end and
+///   the highest velocity; that note counts as untouched (no member is cut short: the merged end is the longest
+///   member's). Otherwise a note still sounding when the next note of its pitch starts ends at that start (the
+///   later note retriggers), and is then "shortened". A shortened note whose length in rounded ticks,
+///   `llround((end - start) * 960)`, is under `kMinNoteTicks` (feel.h) is dropped; a note the merge did not
+///   shorten is never dropped, so a track can never remove an exact five-tick feel note (`96005 / 960.0 - 96000 /
+///   960.0` is a hair under `5 / 960.0`). Clipping a track note at `endBeat` is not a merge either: a note
+///   clipped to under five ticks is kept.
+/// - **Events**: an on at each note's start (its velocity) and an off at its end (velocity 0), sorted by `(beat,
+///   off before on, pitch)` as `compile` sorts them; per pitch the merged notes are disjoint with positive length,
+///   so the order is total. Every beat lies in [0, endBeat].
+///
+/// `endBeat` and `feelLimited` are `compile(doc)`'s: tracks never lengthen the loop. When the chords lane is
+/// audible and no track contributes a note, `events` equals `compile(doc).events` exactly (nothing is merged,
+/// shortened or dropped, and the events are re-emitted bit for bit in the same order). At most
+/// `kMaxSnapshotEvents` events: `kMaxChordEvents` for the chords, two per track note, and the merge only removes.
+/// Same preconditions as `compile`; the tracks must satisfy `validateTracks` (every anchor a chord of `doc`).
+Compiled compilePlayback(const Document& doc);
+
 /// Compiles the `count` chords from `firstEvent` on, as they sound in the whole document, re-based to 0:
 /// each chord takes the voicing `voicings(doc)` gives it in the whole progression (the context of auto
 /// voice-leading is the whole progression, so a chord at the start of a range still follows the chord

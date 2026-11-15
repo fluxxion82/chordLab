@@ -185,8 +185,9 @@ struct Performance {
     /// beats, so adjacent chords share their boundary tick exactly. Size `doc.events.size() + 1`
     /// (just {0} for an empty one); the last entry is the end tick.
     std::vector<int> chordTicks;
-    /// The feel would exceed a budget (D11): more than `kMaxSnapshotEvents` events, or more than
-    /// `kMaxFeelEventsPerBeat` in some beat. The whole document then plays and exports as block chords.
+    /// The feel would exceed a budget (D11): more than `kMaxChordEvents` events (the chord budget, limits.h),
+    /// or more than `kMaxFeelEventsPerBeat` in some beat. The whole document then plays and exports as block
+    /// chords.
     bool feelLimited = false;
 
     int endTick() const { return chordTicks.back(); }
@@ -222,8 +223,8 @@ bool feelPerforms(const Feel& feel);
 ///   note left shorter than `kMinNoteTicks` is dropped. Clamping is monotone, so a strum's order survives
 ///   (notes may only come to share a tick);
 /// - budgets (D11), decided once for the whole document: when the result has more than
-///   `kMaxSnapshotEvents` events or `densestBeat` above `kMaxFeelEventsPerBeat`, `events` is cleared and
-///   `feelLimited` set.
+///   `kMaxChordEvents` events (the chord budget; a snapshot slot holds the tracks' notes on top, tracks design
+///   D8) or `densestBeat` above `kMaxFeelEventsPerBeat`, `events` is cleared and `feelLimited` set.
 /// Same preconditions as `compile`; `doc.meter` must satisfy `validMeter`.
 Performance performDocument(const Document& doc);
 

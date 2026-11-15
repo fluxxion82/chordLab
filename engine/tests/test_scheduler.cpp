@@ -1418,21 +1418,23 @@ TEST_CASE("regression: a stop in the same batch frees its preview slot for a sta
 }
 
 TEST_CASE("regression: the snapshot size bound") {
+    // kMaxSnapshotEvents / 2 notes a thousandth of a beat apart: the last ends before beat 6.2 (with 12288 events).
     std::vector<NoteEvent> big;
-    for (int i = 0; i < 2048; ++i) {
-        big.push_back({i * 0.001, true, 60, 100});
-        big.push_back({i * 0.001 + 0.0005, false, 60, 0});
+    for (std::size_t i = 0; i < Scheduler::kMaxSnapshotEvents / 2; ++i) {
+        big.push_back({static_cast<double>(i) * 0.001, true, 60, 100});
+        big.push_back({static_cast<double>(i) * 0.001 + 0.0005, false, 60, 0});
     }
     REQUIRE(big.size() == Scheduler::kMaxSnapshotEvents);
+    REQUIRE(big.back().beat < 8.0);
     Host host;
-    host.adopt(snapshotOf(big, 4.0));
+    host.adopt(snapshotOf(big, 8.0));
     const std::vector<Ev> played = host.run(0.0, 512, true);  // 512 samples = 0.0213 beats: 22 notes
     CHECK(played.size() == 43);
     CHECK(host.lastOk);
 #ifdef NDEBUG
     // One more event than the bound: adopted as an empty snapshot (a debug build asserts instead).
-    big.push_back({4.0, false, 60, 0});
-    host.adopt(snapshotOf(big, 4.0, true, 2));
+    big.push_back({8.0, false, 60, 0});
+    host.adopt(snapshotOf(big, 8.0, true, 2));
     const std::vector<Ev> flushed = host.run(512.0 / kSamplesPerBeat, 512, true);
     CAPTURE(describe(flushed));
     CHECK(flushed == std::vector<Ev>{off(0, 60)});

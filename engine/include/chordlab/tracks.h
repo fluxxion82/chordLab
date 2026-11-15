@@ -1,5 +1,6 @@
 #pragma once
 
+#include "chordlab/limits.h"
 #include "chordlab/meter.h"
 
 #include <cstddef>
@@ -77,6 +78,11 @@ constexpr int kMaxTracks = 4;
 
 /// The most notes one track holds, inactive ones included: `DocumentStore::insertNotes` refuses past it.
 constexpr int kMaxNotesPerTrack = 1024;
+
+// A snapshot slot holds the chord budget plus an on and an off for every note of every track (limits.h).
+static_assert(kMaxSnapshotEvents == kMaxChordEvents + static_cast<std::size_t>(kMaxTracks) *
+                                                          static_cast<std::size_t>(kMaxNotesPerTrack) * 2,
+              "kMaxSnapshotEvents is the chord budget plus every track note's on and off");
 
 /// The shortest track note, in ticks: a 1/32 beat. Unrelated to the feel's `kMinNoteTicks` (5).
 constexpr std::int32_t kMinTrackNoteTicks = 30;

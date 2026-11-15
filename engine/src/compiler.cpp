@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <tuple>
+#include <unordered_map>
 #include <utility>
 
 namespace chordlab {
@@ -148,6 +149,114 @@ Compiled compile(const Document& doc) {
     // additions; a performance ends on the last chord's end tick instead.
     assert(compiled.endBeat == doc.endBeat() || (feelPerforms(doc.feel) && !compiled.feelLimited));
     return compiled;
+}
+
+namespace {
+
+/// One note of one lane on its way through `compilePlayback`'s merge.
+struct LaneNote {
+    double start;
+    double end;
+    int pitch;
+    int velocity;
+    int lane;  // 0 the chords, 1 + i track i
+    int id;    // a track note's id; a chord note's index in pairing order
+    bool shortened = false;
+};
+
+/// `compiled`'s events paired back into notes per pitch, appended to `notes` in the order of their ons.
+void pairChordNotes(const std::vector<NoteEvent>& events, std::vector<LaneNote>& notes) {
+    std::unordered_map<int, std::size_t> open;  // pitch -> index into `notes` of its sounding note
+    for (const NoteEvent& e : events) {
+        if (e.on) {
+            [[maybe_unused]] const bool fresh =
+                open.emplace(e.pitch, notes.size()).second;  // compile never overlaps a pitch with itself
+            assert(fresh);
+            notes.push_back(LaneNote{e.beat, e.beat, e.pitch, e.velocity, 0, static_cast<int>(notes.size())});
+        } else {
+            const auto it = open.find(e.pitch);
+            assert(it != open.end());  // every off closes an on of its pitch
+            if (it == open.end()) continue;
+            notes[it->second].end = e.beat;
+            open.erase(it);
+        }
+    }
+    assert(open.empty());
+}
+
+}  // namespace
+
+Compiled compilePlayback(const Document& doc) {
+    const Compiled chords = compile(doc);
+    Compiled playback;
+    playback.endBeat = chords.endBeat;
+    playback.feelLimited = chords.feelLimited;
+
+    std::vector<LaneNote> notes;
+    if (chordsAudible(doc)) {
+        notes.reserve(chords.events.size() / 2);
+        pairChordNotes(chords.events, notes);
+    }
+    bool anyTrack = false;
+    for (std::size_t i = 0; i < doc.tracks.size(); ++i) {
+        anyTrack = anyTrack || (trackAudible(doc, i) && !doc.tracks[i].notes.empty());
+    }
+    if (anyTrack) {
+        const ChordTimeline timeline = chordTimeline(doc);
+        for (std::size_t i = 0; i < doc.tracks.size(); ++i) {
+            if (!trackAudible(doc, i)) continue;
+            for (const TrackNote& note : doc.tracks[i].notes) {
+                if (!noteActive(timeline, note)) continue;
+                const std::int64_t start = noteStart(timeline, note);
+                const double startBeat = static_cast<double>(start) / kFeelTicksPerBeat;
+                if (startBeat >= playback.endBeat) continue;
+                const double endBeat =
+                    std::min(static_cast<double>(start + note.lengthTicks) / kFeelTicksPerBeat, playback.endBeat);
+                notes.push_back(
+                    LaneNote{startBeat, endBeat, note.pitch, note.velocity, 1 + static_cast<int>(i), note.id});
+            }
+        }
+    }
+
+    // The merge, per pitch in (start, lane, id) order.
+    std::sort(notes.begin(), notes.end(), [](const LaneNote& a, const LaneNote& b) {
+        return std::tie(a.pitch, a.start, a.lane, a.id) < std::tie(b.pitch, b.start, b.lane, b.id);
+    });
+    std::vector<LaneNote> merged;
+    merged.reserve(notes.size());
+    for (std::size_t i = 0; i < notes.size();) {
+        LaneNote note = notes[i];
+        std::size_t j = i + 1;
+        // Equal starts of one pitch: one note, the latest end, the highest velocity; the first's lane and id.
+        for (; j < notes.size() && notes[j].pitch == note.pitch && notes[j].start == note.start; ++j) {
+            note.end = std::max(note.end, notes[j].end);
+            note.velocity = std::max(note.velocity, notes[j].velocity);
+        }
+        i = j;
+        // The previous note of this pitch, still sounding, ends where this one starts (a retrigger).
+        if (!merged.empty() && merged.back().pitch == note.pitch && merged.back().end > note.start) {
+            merged.back().end = note.start;
+            merged.back().shortened = true;
+        }
+        merged.push_back(note);
+    }
+
+    playback.events.reserve(2 * merged.size());
+    for (const LaneNote& note : merged) {
+        // Only a note the merge shortened may be dropped, judged in rounded ticks (never on the raw beats).
+        if (note.shortened && std::llround((note.end - note.start) * kFeelTicksPerBeat) < kMinNoteTicks) continue;
+        assert(note.start < note.end);
+        assert(note.start >= 0.0 && note.end <= playback.endBeat);
+        playback.events.push_back(NoteEvent{note.start, true, note.pitch, note.velocity});
+        playback.events.push_back(NoteEvent{note.end, false, note.pitch, 0});
+    }
+    std::sort(playback.events.begin(), playback.events.end(), keyLess);
+    // Per pitch the kept notes are disjoint with positive length, so no two events share the key.
+    assert(std::adjacent_find(playback.events.begin(), playback.events.end(),
+                              [](const NoteEvent& a, const NoteEvent& b) { return !keyLess(a, b); }) ==
+           playback.events.end());
+    assert(playback.events.size() <= kMaxSnapshotEvents);
+    return playback;
 }
 
 Compiled compileSection(const Document& doc, int sectionIndex) {

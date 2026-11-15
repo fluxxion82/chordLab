@@ -46,13 +46,14 @@ constexpr int kMaxSectionNameBytes = 64;
 
 /// The most chords a document may hold: `appendChord` refuses the next one (`kNoEventId`), `loadStateJson`
 /// rejects a state with more, and `replace` asserts. The bound exists so that a compiled document always
-/// fits one scheduler snapshot: kMaxChords chords x at most 8 voices (headroom; `voicing` has one note per
-/// chord tone, at most 5 today, the ninths) x 2 events (on and off) = 4096 = `kMaxSnapshotEvents`. With
-/// today's voicings a full document compiles to 2560 events. A feel (feel.h) that would perform more than
-/// `kMaxSnapshotEvents` falls back to these block chords, so the bound holds for every feel.
+/// fits the chord budget of one scheduler snapshot: kMaxChords chords x at most 8 voices (headroom; `voicing`
+/// has one note per chord tone, at most 5 today, the ninths) x 2 events (on and off) = 4096 = `kMaxChordEvents`
+/// (limits.h; the slot holds the tracks' notes on top, `kMaxSnapshotEvents`). With today's voicings a full
+/// document compiles to 2560 events. A feel (feel.h) that would perform more than `kMaxChordEvents` falls back to
+/// these block chords, so the bound holds for every feel.
 constexpr int kMaxChords = 256;
-static_assert(static_cast<std::size_t>(kMaxChords) * 8 * 2 <= kMaxSnapshotEvents,
-              "a full document of eight-note chords must fit one scheduler snapshot");
+static_assert(static_cast<std::size_t>(kMaxChords) * 8 * 2 <= kMaxChordEvents,
+              "a full document of eight-note chords must fit the chord budget of one scheduler snapshot");
 
 /// One chord of the progression. There is no start field: the progression is a contiguous sequence (D9),
 /// so an event starts where the previous one ends (see `Document::startBeatOf`).

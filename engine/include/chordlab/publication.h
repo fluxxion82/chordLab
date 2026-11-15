@@ -23,6 +23,10 @@ namespace chordlab {
 /// it. A flag-only change publishes a fresh slot with identical content under the same generation, which the
 /// scheduler adopts as unchanged (no flush, playback goes on) while the plug-in reads the new flags from
 /// the slot. That keeps the scheduler's rule "same generation, same content" exact.
+///
+/// Size: `kMaxSnapshotEvents` (12288) events of 24 bytes, about 288 KB a slot and 864 KB for the three of a
+/// `TripleBuffer<SnapshotSlot>`, so a slot or a buffer belongs on the heap (or in static storage), never on a
+/// stack (a secondary thread on macOS gets 512 KB).
 struct SnapshotSlot {
     std::array<NoteEvent, kMaxSnapshotEvents> events;
     std::size_t count = 0;
@@ -33,7 +37,7 @@ struct SnapshotSlot {
 };
 
 /// The producer's memory of its last publication, for change detection: the compiled content as
-/// published, the three flags, and the generation it went out with (0 before the first).
+/// published (`compilePlayback`'s), the three flags, and the generation it went out with (0 before the first).
 struct Publication {
     Compiled compiled;
     bool loop = true;
@@ -42,14 +46,17 @@ struct Publication {
     std::uint32_t generation = 0;
 };
 
-/// Compiles `doc` and, when anything a slot carries differs from `last` (or nothing was published yet),
+/// Compiles what `doc` plays (`compilePlayback`: the audible lanes, chords and tracks, merged; tracks design D8)
+/// and, when anything a slot carries differs from `last` (or nothing was published yet),
 /// fills `slot` with it, records it in `last` and returns true: the caller then publishes `slot` under
 /// `last.generation`. The generation is bumped when the content (events, endBeat, loop) changed and kept
 /// when only `followHost` or `midiThru` did. Returns false, touching neither `slot` nor `last`, when the document
-/// compiles to exactly what was last published (a browsed-key change, a no-op undo, a rejected command).
-/// `kMaxChords` bounds a compiled document to the slot (document.h); a document that did not fit would be
-/// adopted as empty by the scheduler anyway, so it is published as empty, not truncated (and asserts).
-/// Allocates (compile): main thread only.
+/// compiles to exactly what was last published (a browsed-key change, a no-op undo, a rejected command, a note
+/// selection, an edit of a muted track's notes). The chord budget and the track caps bound the result to the
+/// slot: at most `kMaxChordEvents` chord events (`kMaxChords`, document.h, and the feel's budget) plus an on and
+/// an off per track note (`kMaxTracks` x `kMaxNotesPerTrack`), which is `kMaxSnapshotEvents`, the merge only
+/// removing events. A document that did not fit would be adopted as empty by the scheduler anyway, so it is
+/// published as empty, not truncated (and asserts). Allocates (compilePlayback): main thread only.
 bool fillSlot(const Document& doc, SnapshotSlot& slot, Publication& last);
 
 }  // namespace chordlab
