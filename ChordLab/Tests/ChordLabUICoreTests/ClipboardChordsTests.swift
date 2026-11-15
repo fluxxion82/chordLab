@@ -83,6 +83,7 @@ final class ClipboardChordsTests: XCTestCase {
     XCTAssertEqual(board.cleared, 1)
     XCTAssertEqual(board.items.count, 1, "both forms on one item: published together or not at all")
     XCTAssertEqual(board.items.first?.text, "C – Am")
+    XCTAssertEqual(board.items.first?.type, ClipboardChords.pasteboardType)
     XCTAssertEqual(ClipboardChords.paste(from: board), ClipboardChords.chords(of: events, ids: [1, 2]))
   }
 
@@ -136,6 +137,6 @@ private final class FakePasteboard: ChordPasteboard {
 
   func data(forType type: String) -> Data? {
     guard type == ClipboardChords.pasteboardType else { return nil }
-    return raw ?? items.last?.chords
+    return raw ?? items.last { $0.type == type }?.data
   }
 }
