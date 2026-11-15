@@ -324,31 +324,50 @@ json sectionsJson(const Document& doc) {
     return sections;
 }
 
-/// The snapshot's `tracks` (tracks design D6): each track with its audibility, each note with its derived start, its
-/// anchor and offset and whether it is active. The chord timeline is built once for all notes.
+/// A track's notes as the snapshot publishes them: one array per field, all of the track's note count, in its note
+/// order (tracks design D6). Built column by column in one pass over the notes, with no object per note.
+json snapshotNoteColumnsJson(const ChordTimeline& timeline, const Track& track) {
+    const std::size_t count = track.notes.size();
+    json::array_t id, pitch, start, length, velocity, anchor, offset, active;
+    for (json::array_t* column : {&id, &pitch, &start, &length, &velocity, &anchor, &offset, &active}) {
+        column->reserve(count);
+    }
+    for (const TrackNote& n : track.notes) {
+        id.emplace_back(n.id);
+        pitch.emplace_back(n.pitch);
+        start.emplace_back(noteStart(timeline, n));
+        length.emplace_back(n.lengthTicks);
+        velocity.emplace_back(n.velocity);
+        anchor.emplace_back(n.anchorEventId);
+        offset.emplace_back(n.offsetTick);
+        active.emplace_back(noteActive(timeline, n));
+    }
+    json columns = json::object();
+    columns["id"] = json(std::move(id));
+    columns["pitch"] = json(std::move(pitch));
+    columns["start"] = json(std::move(start));
+    columns["length"] = json(std::move(length));
+    columns["velocity"] = json(std::move(velocity));
+    columns["anchor"] = json(std::move(anchor));
+    columns["offset"] = json(std::move(offset));
+    columns["active"] = json(std::move(active));
+    return columns;
+}
+
+/// The snapshot's `tracks` (tracks design D6): each track with its audibility and its notes column-wise
+/// (`snapshotNoteColumnsJson`: derived start, anchor, offset, active). The chord timeline is built once for all notes.
 json snapshotTracksJson(const Document& doc) {
     const ChordTimeline timeline = chordTimeline(doc);
     json tracks = json::array();
     for (std::size_t i = 0; i < doc.tracks.size(); ++i) {
         const Track& t = doc.tracks[i];
-        json notes = json::array();
-        for (const TrackNote& n : t.notes) {
-            notes.push_back({{"id", n.id},
-                             {"pitch", n.pitch},
-                             {"start", noteStart(timeline, n)},
-                             {"length", n.lengthTicks},
-                             {"velocity", n.velocity},
-                             {"anchor", n.anchorEventId},
-                             {"offset", n.offsetTick},
-                             {"active", noteActive(timeline, n)}});
-        }
         tracks.push_back({{"id", t.id},
                           {"name", t.name},
                           {"role", trackRoleName(t.role)},
                           {"mute", t.mute},
                           {"solo", t.solo},
                           {"audible", trackAudible(doc, i)},
-                          {"notes", std::move(notes)}});
+                          {"notes", snapshotNoteColumnsJson(timeline, t)}});
     }
     return tracks;
 }

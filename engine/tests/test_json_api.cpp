@@ -5422,16 +5422,24 @@ const json kTrackedStateTracks = json::parse(R"([
     {"id":4,"pitch":72,"anchor":1,"offset":960,"length":480,"velocity":110},
     {"id":5,"pitch":76,"anchor":3,"offset":500,"length":600,"velocity":127}]}])");
 
-/// `trackedStore`'s tracks as the snapshot publishes them: F is two beats, so G7 starts at 5760 and note 3 (offset
+/// `trackedStore`'s tracks as the snapshot publishes them (notes column-wise, one array per field): F is two beats, so G7 starts at 5760 and note 3 (offset
 /// 2880 in a 1920-tick chord) is inactive; only the soloed lead is audible.
 const json kTrackedSnapshotTracks = json::parse(R"([
-  {"id":1,"name":"Bass","role":"bass","mute":true,"solo":false,"audible":false,"notes":[
-    {"id":1,"pitch":36,"start":0,"length":960,"velocity":100,"anchor":1,"offset":0,"active":true},
-    {"id":2,"pitch":43,"start":1920,"length":960,"velocity":90,"anchor":1,"offset":1920,"active":true},
-    {"id":3,"pitch":41,"start":6720,"length":480,"velocity":80,"anchor":2,"offset":2880,"active":false}]},
-  {"id":2,"name":"Melody","role":"lead","mute":false,"solo":true,"audible":true,"notes":[
-    {"id":4,"pitch":72,"start":960,"length":480,"velocity":110,"anchor":1,"offset":960,"active":true},
-    {"id":5,"pitch":76,"start":6260,"length":600,"velocity":127,"anchor":3,"offset":500,"active":true}]}])");
+  {"id":1,"name":"Bass","role":"bass","mute":true,"solo":false,"audible":false,"notes":{
+    "id":[1,2,3],"pitch":[36,43,41],"start":[0,1920,6720],"length":[960,960,480],"velocity":[100,90,80],
+    "anchor":[1,1,2],"offset":[0,1920,2880],"active":[true,true,false]}},
+  {"id":2,"name":"Melody","role":"lead","mute":false,"solo":true,"audible":true,"notes":{
+    "id":[4,5],"pitch":[72,76],"start":[960,6260],"length":[480,600],"velocity":[110,127],
+    "anchor":[1,3],"offset":[960,500],"active":[true,true]}}])");
+
+/// A track's `notes` in the snapshot when it holds none: every column present and empty.
+json emptyNoteColumns() {
+    json columns = json::object();
+    for (const char* key : {"id", "pitch", "start", "length", "velocity", "anchor", "offset", "active"}) {
+        columns[key] = json::array();
+    }
+    return columns;
+}
 
 const std::string kStateTracksRejected = "\"tracks\" rejected: ";
 
@@ -5635,11 +5643,11 @@ TEST_CASE("snapshot: the revision through the shell's snapshotJson across edits,
     applyOk(store, {{"cmd", "undo"}});
     snap = shellSnapshot(store);
     CHECK(snap.at("revision") == r0 + 2);
-    CHECK(snap.at("tracks").at(0).at("notes") == json::array());
+    CHECK(snap.at("tracks").at(0).at("notes") == emptyNoteColumns());
     applyOk(store, {{"cmd", "redo"}});
     snap = shellSnapshot(store);
     CHECK(snap.at("revision") == r0 + 3);
-    CHECK(snap.at("tracks").at(0).at("notes").size() == 2);
+    CHECK(snap.at("tracks").at(0).at("notes").at("id").size() == 2);
 
     applyOk(store, {{"cmd", "selectNotes"}, {"trackId", 1}, {"ids", {1}}});
     REQUIRE_MESSAGE(loadStateJson(store, stateJson(store), error), error);
@@ -5855,9 +5863,10 @@ TEST_CASE("state: tracks are validated against the clamped chord lengths, not th
     CHECK(trackPolyphony(probe.doc()) == 0);
     CHECK(densestOnsetWindow(probe.doc()) == 0);
     const json snapNotes = shellSnapshot(probe).at("tracks").at(0).at("notes");
-    REQUIRE(snapNotes.size() == notes.size());
-    for (const json& n : snapNotes) {
-        CHECK(n.at("active") == false);
+    REQUIRE(snapNotes.at("id").size() == notes.size());
+    REQUIRE(snapNotes.at("active").size() == notes.size());
+    for (const json& active : snapNotes.at("active")) {
+        CHECK(active == false);
     }
 
     // The same notes under a chord saved at 64 beats: identical document, so identical verdict.

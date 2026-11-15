@@ -323,9 +323,15 @@ TEST_CASE("golden fixtures: the tracks fixtures carry mixed mute and solo, an in
     CHECK(tracks[1].at("solo") == true);
     CHECK(tracks[1].at("audible") == true);
     CHECK(snap.at("chordsAudible") == false);  // a track is soloed and the chords are not
-    CHECK(tracks[0].at("notes").at(2) == json({{"id", 3}, {"pitch", 41}, {"start", 7680 + 1440}, {"length", 480},
-                                               {"velocity", 80}, {"anchor", 3}, {"offset", 1440}, {"active", false}}));
-    CHECK(tracks[1].at("notes").at(1).at("start") == 8640 + 480);  // G7 moved a beat earlier with its note
+    CHECK(tracks[0].at("notes").at("id").at(2) == 3);  // notes are columns: one array per field, in note order
+    CHECK(tracks[0].at("notes").at("pitch").at(2) == 41);
+    CHECK(tracks[0].at("notes").at("start").at(2) == 7680 + 1440);
+    CHECK(tracks[0].at("notes").at("length").at(2) == 480);
+    CHECK(tracks[0].at("notes").at("velocity").at(2) == 80);
+    CHECK(tracks[0].at("notes").at("anchor").at(2) == 3);
+    CHECK(tracks[0].at("notes").at("offset").at(2) == 1440);
+    CHECK(tracks[0].at("notes").at("active").at(2) == false);
+    CHECK(tracks[1].at("notes").at("start").at(1) == 8640 + 480);  // G7 moved a beat earlier with its note
     CHECK(snap.at("events").at(3).at("playStart") == 9.0);
     for (const json& e : snap.at("events")) {  // every event carries its harmonic guide, twelve entries per view
         const json& guide = e.at("guide");

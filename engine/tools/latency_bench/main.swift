@@ -5,19 +5,21 @@
 // - `Snapshot` (today's decoder, ChordLab/UI/Core/Snapshot.swift), which skips the tracks keys (M2 adds them);
 // - `JSONSerialization.jsonObject`, the parse alone: the lower bound of any decoder of these bytes;
 // - an M2 estimate: today's `Snapshot` plus mirrors of the tracks keys the design's D6 publishes (tracks with their
-//   notes, the per-event guide and play span, the note selection and limits), decoded from the same decoder.
+//   notes column-wise, the per-event guide and play span, the note selection and limits), decoded from the same
+//   decoder. (The keyed-object notes shape the engine published first is gone: the bytes no longer carry it.)
 
 import Foundation
 
-struct BenchNoteJSON: Decodable {
-  let id: Int
-  let pitch: Int
-  let start: Int
-  let length: Int
-  let velocity: Int
-  let anchor: Int
-  let offset: Int
-  let active: Bool
+/// A track's notes as the snapshot publishes them: one array per field, all the same length, in note order.
+struct BenchNoteColumnsJSON: Decodable {
+  let id: [Int]
+  let pitch: [Int]
+  let start: [Int]
+  let length: [Int]
+  let velocity: [Int]
+  let anchor: [Int]
+  let offset: [Int]
+  let active: [Bool]
 }
 
 struct BenchTrackJSON: Decodable {
@@ -27,7 +29,7 @@ struct BenchTrackJSON: Decodable {
   let mute: Bool
   let solo: Bool
   let audible: Bool
-  let notes: [BenchNoteJSON]
+  let notes: BenchNoteColumnsJSON
 }
 
 struct BenchGuideJSON: Decodable {
@@ -126,7 +128,7 @@ try time("JSONSerialization.jsonObject (parse only)", runs: runs) {
 }
 try time("M2 estimate: Snapshot + tracks keys", runs: runs) {
   let s = try JSONDecoder().decode(M2Snapshot.self, from: data)
-  return s.tracks.reduce(0) { $0 + $1.notes.count } + s.eventExtras.count
+  return s.tracks.reduce(0) { $0 + $1.notes.id.count } + s.eventExtras.count
 }
 
 /// The M2 estimate's parts, each with its own parse of the whole bytes.

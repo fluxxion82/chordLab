@@ -111,8 +111,8 @@ struct SnapshotExtras {
 ///              "fits":true}, ...],
 ///  "ticksPerBeat":960, "revision":7,
 ///  "tracks":[{"id":1,"name":"Bass","role":"bass","mute":false,"solo":false,"audible":true,
-///             "notes":[{"id":1,"pitch":36,"start":0,"length":960,"velocity":100,"anchor":1,"offset":0,
-///                       "active":true}, ...]}, ...],
+///             "notes":{"id":[1,...],"pitch":[36,...],"start":[0,...],"length":[960,...],"velocity":[100,...],
+///                      "anchor":[1,...],"offset":[0,...],"active":[true,...]}}, ...],
 ///  "chordsMuted":false, "chordsSolo":false, "chordsAudible":true,
 ///  "noteSelection":{"trackId":1,"ids":[1]}|null,
 ///  "trackLimits":{"maxTracks":4,"maxNotesPerTrack":1024,"minNoteTicks":30,"maxPolyphony":8,"maxOnsetsPerBeat":15},
@@ -304,10 +304,13 @@ struct SnapshotExtras {
 ///   gives none. A note command's `baseRevision` names it.
 /// - `tracks`: `Document::tracks` in order, each `{id, name, role, mute, solo, audible, notes}`: `role`
 ///   `trackRoleName` ("bass", "lead", "other"), `audible` `trackAudible` (tracks.h: the mute/solo outcome, so the UI
-///   never derives it), `notes` in the track's note order, each `{id, pitch, start, length, velocity, anchor,
-///   offset, active}`: `start` the derived absolute tick, `noteStart` (the anchor's boundary plus the offset, so the UI
+///   never derives it), `notes` the track's notes column-wise (no object per note, a cheap decode): `{id, pitch,
+///   start, length, velocity, anchor, offset, active}`, each an array of the same length (the track's note count) in
+///   the track's note order, so note `i` is the `i`th entry of every array; an empty track keeps every key with an
+///   empty array. `start` is the derived absolute tick, `noteStart` (the anchor's boundary plus the offset, so the UI
 ///   never resolves anchors), `anchor` the id of the chord it belongs to, `offset` the ticks into it, `active`
-///   `noteActive` (false once its chord is shorter than its offset: kept and drawn, not played). Empty without tracks.
+///   `noteActive` (false once its chord is shorter than its offset: kept and drawn, not played). `tracks` is empty
+///   without tracks. (The state JSON keeps one object per note.)
 /// - `chordsMuted`, `chordsSolo`: `Document::chordsMuted` / `chordsSolo`; `chordsAudible`: `chordsAudible(doc)`.
 /// - `noteSelection`: `extras.noteSelection` as `{"trackId":n,"ids":[...]}`, normalised against `doc` as
 ///   `selectedEventIds` is: the ids the track holds, in its note order, once each; null when the selection is empty,
