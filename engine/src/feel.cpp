@@ -3,12 +3,14 @@
 #include "chordlab/compiler.h"
 #include "chordlab/document.h"
 #include "chordlab/limits.h"
+#include "chordlab/tracks.h"
 
 #include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstddef>
 #include <tuple>
+#include <type_traits>
 
 namespace chordlab {
 
@@ -391,14 +393,9 @@ Performance performDocument(const Document& doc) {
     assert(validMeter(doc.meter));
     Performance performance;
     const std::size_t count = doc.events.size();
-    performance.chordTicks.reserve(count + 1);
-    // Chord boundaries: the cumulative beats, accumulated as `Document::startBeatOf` does, rounded once.
-    double beat = 0.0;
-    performance.chordTicks.push_back(0);
-    for (const ChordEvent& event : doc.events) {
-        beat += event.lengthBeats;
-        performance.chordTicks.push_back(static_cast<int>(std::lround(beat * kFeelTicksPerBeat)));
-    }
+    // Chord boundaries: the canonical ones (tracks.h), so the feel and the track notes share one rounding.
+    static_assert(std::is_same_v<std::int32_t, int>, "chordTicks holds the canonical boundaries as they are");
+    performance.chordTicks = chordBoundaryTicks(doc);
     if (count == 0) return performance;
 
     const std::vector<std::vector<int>> chosen = voicings(doc);

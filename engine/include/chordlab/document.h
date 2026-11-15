@@ -7,9 +7,11 @@
 #include "chordlab/pitch.h"
 #include "chordlab/relatedness.h"
 #include "chordlab/scale.h"
+#include "chordlab/tracks.h"
 #include "chordlab/voicing.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <deque>
 #include <optional>
 #include <string>
@@ -128,15 +130,16 @@ inline bool operator!=(const Section& a, const Section& b) noexcept {
     return !(a == b);
 }
 
-/// The whole editable state of a project: the two keys, the progression, its sections, the voicing flag,
-/// the transport toggles, the palette's relation mode, the key-transpose switch and hint flag, the MIDI
-/// Thru switch and the new-chord length. Plain data
+/// The whole editable state of a project: the two keys, the progression, its sections, the tracks of notes over
+/// it (tracks.h), the voicing flag, the transport toggles, the palette's relation mode, the key-transpose switch
+/// and hint flag, the MIDI Thru switch, the new-chord length and the chords lane's mute and solo. Plain data
 /// so that `DocumentStore` can snapshot it for undo; mutate it through the store, not directly.
 ///
-/// Undo scope: `events`, `sections`, `projectKey`, `autoVoiceLead`, `feel` and `meter` are undoable (they are what the user
+/// Undo scope: `events`, `sections`, `tracks`, `projectKey`, `autoVoiceLead`, `feel` and `meter` are undoable (they are what the user
 /// composes: the flag changes which notes `compile` produces, so toggling it is an edit of the progression,
 /// not a view of it). `browsedKey`, `progressionLoop`, `followHost`, `relationMode`, `transposeWithKey`,
-/// `keyHintSeen`, `midiThru` and `newChordBeats` are live session state: changing them never creates history, and undo/redo leave their
+/// `keyHintSeen`, `midiThru`, `newChordBeats`, `chordsMuted` and `chordsSolo` are live session state (each
+/// track's own `mute` and `solo` are meant to be too; their setters and undo handling come with them): changing them never creates history, and undo/redo leave their
 /// current values alone while restoring the rest, with one exception: a `browsedKey` equal to `projectKey`
 /// (home) follows the project key wherever it changes, through `setProjectKey`, `undo` and `redo`, so the
 /// palette never stays on a key the project just left.
@@ -157,6 +160,10 @@ struct Document {
     /// live, persisted: how long a chord added without a length lasts, in beats, on the quarter-beat grid
     /// inside [kMinLengthBeats, kMaxLengthBeats] (`snapNewChordBeats`); nullopt: one bar of the meter (D3)
     std::optional<double> newChordBeats;
+    /// tracks of notes anchored to the chords (tracks design D1, D3); undoable; at most `kMaxTracks`
+    std::vector<Track> tracks;
+    bool chordsMuted = false;  // live, persisted: the chords lane is muted (D8)
+    bool chordsSolo = false;   // live, persisted: the chords lane is soloed (D8)
 
     /// Beat at which the event at `index` starts: the sum of the lengths before it. `index` must be in
     /// 0..events.size(); `startBeatOf(events.size())` is `endBeat()`.
@@ -183,7 +190,8 @@ inline bool operator==(const Document& a, const Document& b) noexcept {
            a.feel == b.feel && a.meter == b.meter &&
            a.progressionLoop == b.progressionLoop && a.followHost == b.followHost &&
            a.relationMode == b.relationMode && a.transposeWithKey == b.transposeWithKey &&
-           a.keyHintSeen == b.keyHintSeen && a.midiThru == b.midiThru && a.newChordBeats == b.newChordBeats;
+           a.keyHintSeen == b.keyHintSeen && a.midiThru == b.midiThru && a.newChordBeats == b.newChordBeats &&
+           a.tracks == b.tracks && a.chordsMuted == b.chordsMuted && a.chordsSolo == b.chordsSolo;
 }
 
 inline bool operator!=(const Document& a, const Document& b) noexcept {
@@ -202,6 +210,26 @@ bool sectionsWellFormed(const Document& doc);
 /// `beats` must be finite. What `DocumentStore::setNewChordLength` and `loadStateJson` store.
 double snapNewChordBeats(double beats);
 
+/// One note for `DocumentStore::insertNotes` (tracks design D4): an absolute start, which the store clamps and
+/// then resolves to its owning chord and offset, and a length, pitch and velocity it clamps (D1). 64-bit ticks,
+/// so every value clamps in the store without a narrowing step anywhere.
+struct NoteSpec {
+    int pitch;
+    std::int64_t startTick;
+    std::int64_t lengthTicks;
+    int velocity = 100;
+};
+
+/// One note's change for `DocumentStore::updateNotes`: the note `id` and the fields to set, absolute values
+/// clamped as `NoteSpec`'s; an absent field keeps the note's value.
+struct NoteEdit {
+    int id;
+    std::optional<int> pitch;
+    std::optional<std::int64_t> startTick;
+    std::optional<std::int64_t> lengthTicks;
+    std::optional<int> velocity;
+};
+
 /// How `DocumentStore::appendProgression` / `replaceProgression` would place a batch of chords: after the
 /// last chord, or instead of every chord and section.
 enum class ProgressionLoad { Append, Replace };
@@ -214,8 +242,8 @@ enum class ProgressionRefusal { None, Empty, NonFiniteLength, DocumentFull, Even
 
 /// Owns a `Document` and its undo/redo history.
 ///
-/// Undoable state is `Document::events`, `Document::sections`, `Document::projectKey` and
-/// `Document::autoVoiceLead`. Every mutation that changes any of them pushes the previous document onto the
+/// Undoable state is `Document::events`, `Document::sections`, `Document::tracks`, `Document::projectKey`,
+/// `Document::autoVoiceLead`, `Document::feel` and `Document::meter`. Every mutation that changes any of them pushes the previous document onto the
 /// undo stack and clears the redo stack. A call that changes nothing (an unknown id, a value equal to the
 /// current one after clamping, a move to the chord's current position, a rejected argument) pushes nothing
 /// and leaves the redo stack intact.
@@ -231,8 +259,21 @@ enum class ProgressionRefusal { None, Empty, NonFiniteLength, DocumentFull, Even
 /// leaves it out).
 /// The history holds at most `kMaxUndoDepth` snapshots; beyond that the oldest is dropped.
 /// Event ids are handed out from a counter that starts at `firstId` (1 by default), only ever increases
-/// and is not part of the undoable state, so an id is never reused even after undo or redo. Section ids
-/// come from a second counter of their own (starting at 1) with the same rules.
+/// and is not part of the undoable state, so an id is never reused even after undo or redo. Section ids,
+/// track ids and note ids (unique across all tracks) come from counters of their own (each starting at 1) with
+/// the same rules.
+///
+/// The content revision (`revision`, tracks design D4) counts changes of the undoable state: it starts at 1 and
+/// moves by one after every commit that changed the document (chord, section, key, feel and track edits alike),
+/// after every successful `undo` and `redo` and after every `replace`; a refused or no-op call, an undo or redo
+/// with nothing to do, a live-state setter and a selection change leave it as it is. It is never reused within
+/// a store, so a revision names one document state.
+///
+/// Track and note edits report a refusal through a trailing `std::string* refusal` (may be null). The string is
+/// cleared on entry; on a refusal (invalid arguments, a limit, exhausted ids) the edit returns its failure value
+/// (false, an empty vector or `kNoTrackId`), changes nothing (no history, no counter, no revision) and writes a
+/// short human-readable reason; on a mere no-op (valid, but nothing would change) it returns false (or the empty
+/// vector) and leaves the string empty. So a caller tells "refused" (non-empty reason) from "nothing to do".
 ///
 /// Sections follow the chords they start on, except that the first section is pinned to the start of the
 /// sequence: `moveChord` keeps every section on its start chord and re-sorts the list by the new indices,
@@ -482,6 +523,52 @@ public:
     /// section already starts there, or when `id` is the first section, which is pinned to index 0.
     void moveSectionStart(int id, int newFirstEventIndex);
 
+    /// Adds an empty track with `role` at the end of the list and returns its new id, as one undoable step (tracks
+    /// design D4). An absent or empty `name` takes `defaultTrackName(doc, role)`; a longer name than
+    /// `kMaxTrackNameBytes` is cut at a UTF-8 character boundary as `addSection` cuts one. A track needs no chords.
+    /// Refused (`kNoTrackId`, see the class comment) when the document already holds `kMaxTracks` tracks or the
+    /// track id counter has reached INT_MAX. `role` must be a declared `TrackRole`.
+    int addTrack(TrackRole role, std::optional<std::string> name = std::nullopt, std::string* refusal = nullptr);
+
+    /// Removes track `id` with its notes, as one undoable step. Refused (false) for an unknown id.
+    bool removeTrack(int id, std::string* refusal = nullptr);
+
+    /// Sets the name and/or the role of track `id` in ONE candidate document and one undoable step. The name is
+    /// cut as `addTrack` cuts it; an empty name is stored empty, exactly as `renameSection` stores one (no
+    /// default is substituted: that happens only when a track is added). Refused (false) for an unknown id or
+    /// when neither field is given; a no-op (false, no reason) when the result equals the current track.
+    bool patchTrack(int id, std::optional<std::string> name, std::optional<TrackRole> role,
+                    std::string* refusal = nullptr);
+
+    /// Moves track `id` to `newIndex`, clamped to 0..size-1 (as `moveChord`), as one undoable step. Refused
+    /// (false) for an unknown id; a no-op (false, no reason) when it is already there.
+    bool moveTrack(int id, int newIndex, std::string* refusal = nullptr);
+
+    /// Inserts `specs` into track `trackId` as ONE undoable step and returns their new ids in spec order (fresh
+    /// and increasing). Each spec is clamped in D1's order (pitch and velocity; the start into [0, kMaxNoteTick -
+    /// kMinTrackNoteTicks] first; then the length against the space the start leaves) and its clamped start is
+    /// resolved to the owning chord and offset (`resolveStart`: half-open, a boundary tick belongs to the next
+    /// chord); the track's notes are then re-sorted by (derived start, pitch, id). Refused whole (empty vector, no
+    /// id consumed) for an unknown track, empty `specs`, more than `kMaxNotesPerTrack` notes in the track
+    /// afterwards, a note id counter that cannot hand out `specs.size()` ids below INT_MAX, an empty
+    /// progression ("Add chords first"), or any start no chord owns (at or after the end).
+    std::vector<int> insertNotes(int trackId, const std::vector<NoteSpec>& specs, std::string* refusal = nullptr);
+
+    /// Removes the notes of `ids` that track `trackId` holds, as ONE undoable step; ids it does not hold are
+    /// skipped and a repeat counts once. Refused (false) for an unknown track; a no-op (false, no reason) when
+    /// none of `ids` is in the track.
+    bool removeNotes(int trackId, const std::vector<int>& ids, std::string* refusal = nullptr);
+
+    /// Applies `edits` to track `trackId`'s notes as ONE undoable step: each given field is an absolute value,
+    /// clamped as `insertNotes` clamps it. A new start is clamped and resolved again, so moving a note (or its left
+    /// edge) across a chord boundary changes its anchor; the length, given or kept, is then clamped against the
+    /// note's start (the new one, else its current derived start). The notes are re-sorted afterwards. Refused
+    /// whole (false) for an unknown track, an id the track does not hold, an id listed twice (two edits of one
+    /// note would make the result depend on their order, so the call is ambiguous), or a new start no chord owns
+    /// ("Add chords first" when the progression is empty). A no-op (false, no reason) when nothing changes,
+    /// `edits` empty included. Every note edited must anchor an existing chord.
+    bool updateNotes(int trackId, const std::vector<NoteEdit>& edits, std::string* refusal = nullptr);
+
     /// Restores the undoable state from before the most recent change, keeping the live state (a browsed
     /// key that is the project key stays so: it follows the restored key). Returns false, changing nothing,
     /// when there is nothing to undo.
@@ -504,7 +591,11 @@ public:
     /// default): one past the largest section id in `doc` (which the id bound keeps from overflowing), 1
     /// when it has none; a derived INT_MAX means the next `addSection` is refused. Callers that take
     /// documents from outside the process (`loadStateJson`) validate before calling.
-    void replace(Document doc, int nextId, int nextSectionId = 0);
+    /// `nextTrackId` and `nextNoteId` follow `nextSectionId`'s rule: >= 1 and greater than every track id
+    /// (respectively every note id of every track), or 0 to derive one past the largest (1 when there is none).
+    /// Track and note ids must be in 1..INT_MAX-1 and unique (note ids across all tracks), and every note must
+    /// anchor an existing chord. Moves the revision.
+    void replace(Document doc, int nextId, int nextSectionId = 0, int nextTrackId = 0, int nextNoteId = 0);
 
     /// The id the next successful append will get. Persisted by `stateJson` so that a reloaded document
     /// keeps handing out fresh ids.
@@ -514,16 +605,28 @@ public:
     /// derives it when the state carries none.
     int nextSectionId() const;
 
+    /// The id the next successful `addTrack` will get; `replace` derives it when the state carries none.
+    int nextTrackId() const;
+
+    /// The id the next note `insertNotes` hands out; `replace` derives it when the state carries none.
+    int nextNoteId() const;
+
+    /// The content revision (see the class comment): 1 for a new store.
+    std::uint64_t revision() const;
+
     /// Position of event `id` in playback order, or -1 if no event has that id.
     int findIndex(int id) const;
 
     /// Position of section `id` in `doc().sections`, or -1 if no section has that id.
     int findSectionIndex(int id) const;
 
+    /// Position of track `id` in `doc().tracks`, or -1 if no track has that id.
+    int findTrackIndex(int id) const;
+
 private:
     /// Makes `next` the current document if it differs from the current one, recording the current one
-    /// for undo (dropping the oldest snapshot past `kMaxUndoDepth`) and clearing the redo stack. Returns
-    /// whether anything changed.
+    /// for undo (dropping the oldest snapshot past `kMaxUndoDepth`), clearing the redo stack and moving the
+    /// revision. Returns whether anything changed.
     bool commit(Document next);
 
     /// The one body of `appendProgression` and `replaceProgression`: checks `progressionRefusal`, builds
@@ -541,6 +644,9 @@ private:
     std::deque<Document> redoStack_;
     int nextId_;
     int nextSectionId_ = 1;
+    int nextTrackId_ = 1;
+    int nextNoteId_ = 1;
+    std::uint64_t revision_ = 1;
     std::vector<int> selectedEventIds_;  // strip order; empty: nothing selected
     int anchorEventId_ = kNoEventId;     // one of selectedEventIds_, or kNoEventId when it is empty
 };

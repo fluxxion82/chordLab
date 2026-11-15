@@ -8,10 +8,12 @@
 #include "chordlab/pitch.h"
 #include "chordlab/relatedness.h"
 #include "chordlab/scale.h"
+#include "chordlab/tracks.h"
 #include "chordlab/voicing.h"
 
 #include <climits>
 #include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <optional>
 #include <random>
@@ -140,6 +142,9 @@ TEST_CASE("Document: defaults to C Ionian, empty, looping and following the host
     CHECK(doc.keyHintSeen == false);
     CHECK(doc.midiThru == true);
     CHECK_FALSE(doc.newChordBeats.has_value());
+    CHECK(doc.tracks.empty());
+    CHECK(doc.chordsMuted == false);
+    CHECK(doc.chordsSolo == false);
 }
 
 TEST_CASE("Document: empty document has endBeat 0 and startBeatOf(0) 0") {
@@ -220,6 +225,22 @@ TEST_CASE("ChordEvent / Document: equality compares every field") {
     CHECK(x != y);
     y = x;
     y.keyHintSeen = true;
+    CHECK(x != y);
+    y = x;
+    y.tracks.push_back(Track{1, "Bass", TrackRole::Bass});
+    CHECK(x != y);
+    Document z = y;
+    CHECK(z == y);
+    z.tracks.front().notes.push_back(TrackNote{1, 36, 1, 0, 480, 100});
+    CHECK(z != y);
+    z = y;
+    z.tracks.front().mute = true;  // live flags inside a track count too
+    CHECK(z != y);
+    y = x;
+    y.chordsMuted = true;
+    CHECK(x != y);
+    y = x;
+    y.chordsSolo = true;
     CHECK(x != y);
 }
 
@@ -2818,4 +2839,79 @@ TEST_CASE("DocumentStore: 200 random chord and section operations keep the secti
     for (const Section& s : final.sections) {
         CHECK(store.nextSectionId() > s.id);
     }
+}
+
+// --- revision ----------------------------------------------------------------------------
+
+TEST_CASE("revision: starts at 1; every content commit moves it by one, chord edits included") {
+    DocumentStore store;
+    CHECK(store.revision() == 1);
+    REQUIRE(store.appendChord(kC, 4.0) == 1);
+    CHECK(store.revision() == 2);
+    store.setLength(1, 2.0);
+    CHECK(store.revision() == 3);
+    store.setProjectKey(key('D', 0, Mode::Dorian));
+    CHECK(store.revision() == 4);
+    store.setFeel(Feel{Rhythm::Pulse});
+    CHECK(store.revision() == 5);
+    REQUIRE(store.addSection(0, "A") == 1);
+    CHECK(store.revision() == 6);
+    REQUIRE(store.addTrack(TrackRole::Bass) == 1);
+    CHECK(store.revision() == 7);
+}
+
+TEST_CASE("revision: refusals and no-ops leave it, chord and track edits alike") {
+    DocumentStore store = threeChords();
+    const std::uint64_t r = store.revision();
+    CHECK(store.appendChord(kC, kNaN) == kNoEventId);
+    store.setLength(1, 4.0);   // the current length
+    store.setLength(99, 1.0);  // unknown id
+    store.moveChord(2, 1);     // where it is
+    CHECK_FALSE(store.removeChords({98}));
+    CHECK(store.addSection(7, "X") == kNoSectionId);
+    CHECK_FALSE(store.removeTrack(1));
+    CHECK(store.insertNotes(1, {NoteSpec{36, 0, 480}}).empty());
+    CHECK(store.revision() == r);
+}
+
+TEST_CASE("revision: live state and the selection never move it") {
+    DocumentStore store = threeChords();
+    const std::uint64_t r = store.revision();
+    store.setBrowsedKey(key('E', -1, Mode::Lydian));
+    store.setProgressionLoop(false);
+    store.setFollowHost(false);
+    store.setRelationMode(RelationMode::Off);
+    store.setTransposeWithKey(true);
+    store.setKeyHintSeen(true);
+    store.setMidiThru(false);
+    store.setNewChordLength(2.0);
+    store.setSelectedEvent(2);
+    store.setSelectedEvents({1, 3});
+    CHECK(store.revision() == r);
+}
+
+TEST_CASE("revision: a successful undo and redo each move it; with nothing to undo or redo it stays") {
+    DocumentStore store;
+    CHECK_FALSE(store.undo());
+    CHECK_FALSE(store.redo());
+    CHECK(store.revision() == 1);
+    REQUIRE(store.appendChord(kC) == 1);
+    CHECK(store.revision() == 2);
+    REQUIRE(store.undo());
+    CHECK(store.revision() == 3);  // back to the empty document, but a newer revision: never reused
+    CHECK_FALSE(store.undo());
+    CHECK(store.revision() == 3);
+    REQUIRE(store.redo());
+    CHECK(store.revision() == 4);
+    CHECK_FALSE(store.redo());
+    CHECK(store.revision() == 4);
+}
+
+TEST_CASE("revision: replace moves it, even to an equal document") {
+    DocumentStore store = threeChords();
+    const std::uint64_t r = store.revision();
+    store.replace(store.doc(), store.nextId());
+    CHECK(store.revision() == r + 1);
+    store.replace(Document{}, 1);
+    CHECK(store.revision() == r + 2);
 }
