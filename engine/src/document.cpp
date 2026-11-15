@@ -1109,11 +1109,16 @@ bool DocumentStore::updateNotes(int trackId, const std::vector<NoteEdit>& edits,
         if (e.velocity.has_value()) {
             note.velocity = clampNoteVelocity(*e.velocity);
         }
-        if (!e.startTick.has_value() && !e.lengthTicks.has_value()) {
+        // A start equal to the current derived one (as given or once clamped) counts as absent: a drag re-sends
+        // the snapshot's start (D15), and resolving it again would move an inactive note to another chord.
+        const std::int64_t derived = noteStart(timeline, note);
+        const bool moved =
+            e.startTick.has_value() && *e.startTick != derived && clampNoteStart(*e.startTick) != derived;
+        if (!moved && !e.lengthTicks.has_value()) {
             continue;
         }
         std::int32_t start = 0;
-        if (e.startTick.has_value()) {
+        if (moved) {
             start = clampNoteStart(*e.startTick);
             const std::optional<NoteAnchor> anchor = resolveStart(timeline, start);
             if (!anchor.has_value()) {
@@ -1123,7 +1128,9 @@ bool DocumentStore::updateNotes(int trackId, const std::vector<NoteEdit>& edits,
             note.anchorEventId = anchor->eventId;  // across a boundary: the note changes its chord
             note.offsetTick = anchor->offsetTick;
         } else {
-            start = clampNoteStart(noteStart(timeline, note));  // the current derived start (already in the domain)
+            // The derived start, clamped into the start domain: a chord edit can have pushed it past
+            // kMaxNoteTick - kMinTrackNoteTicks (the offset stays), and then the length clamps to its minimum.
+            start = clampNoteStart(derived);
         }
         // A kept length is clamped again too: a later start leaves less room.
         note.lengthTicks = clampNoteLength(e.lengthTicks.value_or(note.lengthTicks), start);

@@ -67,6 +67,16 @@ bool sameHistoryTop(const DocumentStore& store, const DocumentStore& reference) 
     return undoneA == undoneB && a.doc() == b.doc();
 }
 
+/// Whether `store`'s redo stack has `reference`'s top: each redoes once (on copies) to the same document. A
+/// refused call that wrongly cleared the redo stack would no longer redo.
+bool sameRedoTop(const DocumentStore& store, const DocumentStore& reference) {
+    DocumentStore a = store;
+    DocumentStore b = reference;
+    const bool redoneA = a.redo();
+    const bool redoneB = b.redo();
+    return redoneA == redoneB && a.doc() == b.doc();
+}
+
 /// Runs `mutate`, checks it changed the document as exactly one undo step: undo restores the document from
 /// before and redo the document from after. Leaves the store in the "after" state.
 template <typename Mutate>
@@ -83,10 +93,12 @@ void checkOneStep(DocumentStore& store, Mutate mutate) {
     CHECK(store.doc() == after);
 }
 
-/// Checks that `store` refused an edit: unchanged, with the same history and counters as `reference`.
+/// Checks that `store` refused an edit: unchanged, with the same history (undo and redo) and counters as
+/// `reference`.
 void checkRefused(const DocumentStore& store, const DocumentStore& reference) {
     CHECK(store.doc() == reference.doc());
     CHECK(sameHistoryTop(store, reference));
+    CHECK(sameRedoTop(store, reference));
     CHECK(store.nextTrackId() == reference.nextTrackId());
     CHECK(store.nextNoteId() == reference.nextNoteId());
     CHECK(store.revision() == reference.revision());
@@ -506,11 +518,30 @@ TEST_CASE("insertNotes: a start at or after the end, or any refused spec, refuse
     const DocumentStore reference = store;
     std::string refusal;
     CHECK(store.insertNotes(1, {ns(36, 3 * kBar, 480)}, &refusal).empty());
-    CHECK_FALSE(refusal.empty());
+    CHECK(refusal == "A note must start before the end of the progression");
     refusal.clear();
     CHECK(store.insertNotes(1, {ns(36, 480, 480), ns(38, 3 * kBar + 5, 480)}, &refusal).empty());  // no partial insert
-    CHECK_FALSE(refusal.empty());
+    CHECK(refusal == "A note must start before the end of the progression");
     checkRefused(store, reference);
+}
+
+TEST_CASE("insertNotes / updateNotes: a refusal leaves the redo stack intact") {
+    DocumentStore store = threeChordsAndBass();
+    REQUIRE(store.insertNotes(1, {ns(36, 0, 480)}) == std::vector<int>{1});
+    REQUIRE(store.insertNotes(1, {ns(38, 480, 480)}) == std::vector<int>{2});
+    const Document redone = store.doc();
+    REQUIRE(store.undo());  // the redo stack now holds the second insert
+    const DocumentStore reference = store;
+    std::string refusal;
+    CHECK(store.insertNotes(1, {ns(40, 3 * kBar, 480)}, &refusal).empty());
+    CHECK(refusal == "A note must start before the end of the progression");
+    NoteEdit pastEnd = edit(1);
+    pastEnd.startTick = 3 * kBar;
+    CHECK_FALSE(store.updateNotes(1, {pastEnd}, &refusal));
+    CHECK(refusal == "A note must start before the end of the progression");
+    checkRefused(store, reference);
+    REQUIRE(store.redo());
+    CHECK(store.doc() == redone);
 }
 
 TEST_CASE("insertNotes: an empty progression refuses with \"Add chords first\"") {
@@ -678,6 +709,98 @@ TEST_CASE("updateNotes: a start moved across a boundary re-anchors; onto a bound
     CHECK(notesOf(store).at(0) == TrackNote{2, 38, 1, 0, 480, 100});
 }
 
+TEST_CASE("updateNotes: a start moved across a boundary re-anchors as one undo step that undo and redo round-trip") {
+    DocumentStore store = threeChordsAndBass();
+    REQUIRE(store.insertNotes(1, {ns(36, kBar - 200, 480)}) == std::vector<int>{1});
+    NoteEdit across = edit(1);
+    across.pitch = 38;
+    across.startTick = kBar + 300;
+    checkOneStep(store, [&](DocumentStore& s) { CHECK(s.updateNotes(1, {across})); });
+    CHECK(notesOf(store) == std::vector<TrackNote>{TrackNote{1, 38, 2, 300, 480, 100}});
+    REQUIRE(store.undo());
+    CHECK(notesOf(store) == std::vector<TrackNote>{TrackNote{1, 36, 1, kBar - 200, 480, 100}});
+    REQUIRE(store.redo());
+    CHECK(notesOf(store) == std::vector<TrackNote>{TrackNote{1, 38, 2, 300, 480, 100}});
+}
+
+TEST_CASE("updateNotes: an unchanged start keeps an inactive note's anchor and offset (D15)") {
+    DocumentStore store;
+    const int first = store.appendChord(kC, 4.0, 100);
+    const int second = store.appendChord(kF, 4.0, 100);
+    REQUIRE(store.addTrack(TrackRole::Bass) == 1);
+    REQUIRE(store.insertNotes(1, {ns(36, 3000, 480)}) == std::vector<int>{1});
+    store.setLength(first, 2.0);  // boundaries 0, 1920, 5760: tick 3000 now lies in the second chord
+    REQUIRE(notesOf(store) == std::vector<TrackNote>{TrackNote{1, 36, first, 3000, 480, 100}});
+    REQUIRE_FALSE(noteActive(store.doc(), notesOf(store).at(0)));
+    NoteEdit pitch = edit(1);
+    pitch.pitch = 40;
+    pitch.startTick = 3000;  // the snapshot's start, re-sent unchanged
+    checkOneStep(store, [&](DocumentStore& s) { CHECK(s.updateNotes(1, {pitch})); });
+    CHECK(notesOf(store) == std::vector<TrackNote>{TrackNote{1, 40, first, 3000, 480, 100}});
+    CHECK_FALSE(noteActive(store.doc(), notesOf(store).at(0)));
+    NoteEdit length = edit(1);
+    length.startTick = 3000;
+    length.lengthTicks = 960;
+    CHECK(store.updateNotes(1, {length}));
+    CHECK(notesOf(store) == std::vector<TrackNote>{TrackNote{1, 40, first, 3000, 960, 100}});
+    NoteEdit moved = edit(1);
+    moved.startTick = 3001;  // a real move re-anchors (and so reactivates)
+    CHECK(store.updateNotes(1, {moved}));
+    CHECK(notesOf(store) == std::vector<TrackNote>{TrackNote{1, 40, second, 3001 - 1920, 960, 100}});
+    CHECK(noteActive(store.doc(), notesOf(store).at(0)));
+}
+
+TEST_CASE("updateNotes: an unchanged start at or after the end is accepted; only a moved start must have an owner") {
+    DocumentStore store;
+    const int only = store.appendChord(kC, 4.0, 100);
+    REQUIRE(store.addTrack(TrackRole::Bass) == 1);
+    REQUIRE(store.insertNotes(1, {ns(36, 3000, 480)}) == std::vector<int>{1});
+    store.setLength(only, 2.0);  // the progression ends at 1920, before the note's derived start
+    REQUIRE(noteStart(store.doc(), notesOf(store).at(0)) == 3000);
+    NoteEdit pitch = edit(1);
+    pitch.pitch = 41;
+    pitch.startTick = 3000;
+    checkOneStep(store, [&](DocumentStore& s) { CHECK(s.updateNotes(1, {pitch})); });
+    CHECK(notesOf(store) == std::vector<TrackNote>{TrackNote{1, 41, only, 3000, 480, 100}});
+    NoteEdit length = edit(1);
+    length.lengthTicks = 1000;
+    checkOneStep(store, [&](DocumentStore& s) { CHECK(s.updateNotes(1, {length})); });
+    CHECK(notesOf(store) == std::vector<TrackNote>{TrackNote{1, 41, only, 3000, 1000, 100}});
+    const DocumentStore reference = store;
+    NoteEdit moved = edit(1);
+    moved.startTick = 2999;
+    std::string refusal;
+    CHECK_FALSE(store.updateNotes(1, {moved}, &refusal));
+    CHECK(refusal == "A note must start before the end of the progression");
+    checkRefused(store, reference);
+}
+
+TEST_CASE("updateNotes: a derived start pushed past the start domain keeps its anchor; a length clamps to the minimum") {
+    // 256 chords, the first one beat short: the last starts 960 ticks early, so a note 5 ticks before the end
+    // of its 64 beats fits the start domain; growing the first chord then moves it to kMaxNoteTick - 5.
+    DocumentStore store;
+    const int first = store.appendChord(kC, kMaxLengthBeats - 1.0);
+    int last = first;
+    for (int i = 1; i < kMaxChords; ++i) {
+        last = store.appendChord(kC, kMaxLengthBeats);
+    }
+    REQUIRE(store.addTrack(TrackRole::Lead) == 1);
+    constexpr std::int32_t offset = 64 * kFeelTicksPerBeat - 5;
+    REQUIRE(store.insertNotes(1, {ns(60, kMaxNoteTick - kFeelTicksPerBeat - 5, 480)}) == std::vector<int>{1});
+    REQUIRE(notesOf(store) == std::vector<TrackNote>{TrackNote{1, 60, last, offset, 480, 100}});
+    store.setLength(first, kMaxLengthBeats);
+    REQUIRE(noteStart(store.doc(), notesOf(store).at(0)) == kMaxNoteTick - 5);
+    NoteEdit pitch = edit(1);
+    pitch.pitch = 62;
+    pitch.startTick = kMaxNoteTick - 5;  // unchanged, though outside the start domain
+    CHECK(store.updateNotes(1, {pitch}));
+    CHECK(notesOf(store) == std::vector<TrackNote>{TrackNote{1, 62, last, offset, 480, 100}});
+    NoteEdit length = edit(1);
+    length.lengthTicks = 5000;
+    CHECK(store.updateNotes(1, {length}));
+    CHECK(notesOf(store) == std::vector<TrackNote>{TrackNote{1, 62, last, offset, kMinTrackNoteTicks, 100}});
+}
+
 TEST_CASE("updateNotes: a start at or after the end, an unknown id or a repeated id refuses the whole edit") {
     DocumentStore store = threeChordsAndBass();
     REQUIRE(store.insertNotes(1, {ns(36, 0, 480), ns(38, 480, 480)}).size() == 2);
@@ -692,7 +815,7 @@ TEST_CASE("updateNotes: a start at or after the end, an unknown id or a repeated
     again.pitch = 51;
     std::string refusal;
     CHECK_FALSE(store.updateNotes(1, {pitchOnly, pastEnd}, &refusal));
-    CHECK_FALSE(refusal.empty());
+    CHECK(refusal == "A note must start before the end of the progression");
     refusal.clear();
     CHECK_FALSE(store.updateNotes(1, {pitchOnly, unknown}, &refusal));
     CHECK(refusal == "No note with id 99 in track 1");

@@ -549,24 +549,35 @@ public:
     /// kMinTrackNoteTicks] first; then the length against the space the start leaves) and its clamped start is
     /// resolved to the owning chord and offset (`resolveStart`: half-open, a boundary tick belongs to the next
     /// chord); the track's notes are then re-sorted by (derived start, pitch, id). Refused whole (empty vector, no
-    /// id consumed) for an unknown track, empty `specs`, more than `kMaxNotesPerTrack` notes in the track
+    /// id consumed) for an unknown track, empty `specs` ("No notes to insert": unlike `removeNotes` and
+    /// `updateNotes`, for which an empty list is a silent no-op), more than `kMaxNotesPerTrack` notes in the track
     /// afterwards, a note id counter that cannot hand out `specs.size()` ids below INT_MAX, an empty
-    /// progression ("Add chords first"), or any start no chord owns (at or after the end).
+    /// progression ("Add chords first"), or any start no chord owns (at or after the end: "A note must start
+    /// before the end of the progression"). Every note already in the track must anchor an existing chord (the
+    /// sort reads every note's derived start).
     std::vector<int> insertNotes(int trackId, const std::vector<NoteSpec>& specs, std::string* refusal = nullptr);
 
     /// Removes the notes of `ids` that track `trackId` holds, as ONE undoable step; ids it does not hold are
     /// skipped and a repeat counts once. Refused (false) for an unknown track; a no-op (false, no reason) when
-    /// none of `ids` is in the track.
+    /// none of `ids` is in the track, an empty `ids` included (unlike `insertNotes`, which refuses an empty list).
     bool removeNotes(int trackId, const std::vector<int>& ids, std::string* refusal = nullptr);
 
     /// Applies `edits` to track `trackId`'s notes as ONE undoable step: each given field is an absolute value,
-    /// clamped as `insertNotes` clamps it. A new start is clamped and resolved again, so moving a note (or its left
-    /// edge) across a chord boundary changes its anchor; the length, given or kept, is then clamped against the
-    /// note's start (the new one, else its current derived start). The notes are re-sorted afterwards. Refused
-    /// whole (false) for an unknown track, an id the track does not hold, an id listed twice (two edits of one
-    /// note would make the result depend on their order, so the call is ambiguous), or a new start no chord owns
-    /// ("Add chords first" when the progression is empty). A no-op (false, no reason) when nothing changes,
-    /// `edits` empty included. Every note edited must anchor an existing chord.
+    /// clamped as `insertNotes` clamps it. A start equal to the note's current derived start, as given or once
+    /// clamped, counts as absent (D15: a drag re-sends the snapshot's start): the note keeps its anchor and offset,
+    /// so a pitch-only drag never moves an inactive note to another chord or reactivates it, and is accepted even
+    /// when that derived start lies at or after the end of the progression. A different start is clamped and
+    /// resolved again, so moving a note (or its left edge) across a chord boundary changes its anchor (an inactive
+    /// note moved is re-anchored). When the start moved or a length is given, the length (given or kept) is then
+    /// clamped against the note's start: the new one, else its current derived start clamped into [0,
+    /// kMaxNoteTick - kMinTrackNoteTicks] (a chord edit can push a derived start past that bound, and then the
+    /// length clamps to `kMinTrackNoteTicks`). The notes are re-sorted afterwards. Refused whole (false) for an
+    /// unknown track, an id the track does not hold, an id listed twice (two edits of one note would make the
+    /// result depend on their order, so the call is ambiguous), or a moved start no chord owns ("A note must
+    /// start before the end of the progression", "Add chords first" when the progression is empty). A no-op
+    /// (false, no reason) when nothing changes, an empty `edits` included (unlike `insertNotes`, which refuses an
+    /// empty list). Every note of the track, not only the edited ones, must anchor an existing chord (the sort
+    /// reads every note's derived start).
     bool updateNotes(int trackId, const std::vector<NoteEdit>& edits, std::string* refusal = nullptr);
 
     /// Restores the undoable state from before the most recent change, keeping the live state (a browsed
