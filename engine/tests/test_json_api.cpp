@@ -1598,7 +1598,7 @@ TEST_CASE("setMeter: rejected messages leave the document and the undo history u
 }
 
 TEST_CASE("snapshot: feelLimited is true only when the feel performs and is over budget") {
-    // 64 one-bar ninths come to 5120 events under Subdivided: more than kMaxSnapshotEvents (test_feel.cpp).
+    // 64 one-bar ninths come to 5120 events under Subdivided: more than kMaxChordEvents (test_feel.cpp).
     DocumentStore store;
     for (int i = 0; i < 64; ++i) {
         applyOk(store, {{"cmd", "appendChord"}, {"root", 0}, {"type", "9"}, {"lengthBeats", 4.0}});

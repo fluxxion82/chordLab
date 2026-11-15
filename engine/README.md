@@ -103,10 +103,12 @@ the triple buffer, and the raw MIDI ring through pushes, refused pushes, `takeOv
 direct `malloc` or a path the random walk never reaches, so it is evidence, not a proof.
 
 Everything else (`DocumentStore`, `compile`, the palette and symbols, `json_api`, `smf`) is ordinary
-allocating code for the UI/message thread. The hand-over is a `Snapshot`: `compile` produces the
-`NoteEvent` array off the audio thread, and the caller keeps it alive and unchanged from `adopt` until
-the next `adopt`, which never reads it (see `Snapshot` in `scheduler.h`). `kMaxChords` (`document.h`) bounds the document so
-that a compiled snapshot always fits `kMaxSnapshotEvents` (`limits.h`). `TripleBuffer<T>`
+allocating code for the UI/message thread. The hand-over is a `Snapshot`: `compilePlayback`, called by
+`fillSlot`, produces the `NoteEvent` array off the audio thread, and the caller keeps it alive and
+unchanged from `adopt` until the next `adopt`, which never reads it (see `Snapshot` in `scheduler.h`).
+`kMaxChords` (`document.h`) bounds the chords to the chord budget `kMaxChordEvents` (4096), and the track
+caps add at most `kMaxTracks` × `kMaxNotesPerTrack` × 2 = 4 × 1024 × 2 events, so a snapshot always fits
+`kMaxSnapshotEvents` (12288, `limits.h`). `TripleBuffer<T>`
 (`triple_buffer.h`) is the handoff that satisfies that lifetime rule without a lock: the producer fills
 and publishes preallocated slots, the consumer acquires the latest one per block, and the slot it holds
 is never written until its next acquire. `publication.h` is the producer's half as the plug-in uses it:

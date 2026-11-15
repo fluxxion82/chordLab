@@ -5,6 +5,7 @@
 #include "chordlab/voicing.h"
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <climits>
 #include <cmath>
@@ -12,7 +13,6 @@
 #include <cstdint>
 #include <cstdlib>
 #include <tuple>
-#include <unordered_map>
 #include <utility>
 
 namespace chordlab {
@@ -162,26 +162,31 @@ struct LaneNote {
     int lane;  // 0 the chords, 1 + i track i
     int id;    // a track note's id; a chord note's index in pairing order
     bool shortened = false;
+    std::int64_t tick = 0;  // llround(start * 960): equal starts are equal rounded ticks
 };
 
 /// `compiled`'s events paired back into notes per pitch, appended to `notes` in the order of their ons.
 void pairChordNotes(const std::vector<NoteEvent>& events, std::vector<LaneNote>& notes) {
-    std::unordered_map<int, std::size_t> open;  // pitch -> index into `notes` of its sounding note
+    constexpr std::size_t kClosed = static_cast<std::size_t>(-1);
+    std::array<std::size_t, 128> open;  // pitch -> index into `notes` of its sounding note, or kClosed
+    open.fill(kClosed);
     for (const NoteEvent& e : events) {
+        assert(e.pitch >= 0 && e.pitch < 128);
+        if (e.pitch < 0 || e.pitch >= 128) continue;
+        std::size_t& sounding = open[static_cast<std::size_t>(e.pitch)];
         if (e.on) {
-            [[maybe_unused]] const bool fresh =
-                open.emplace(e.pitch, notes.size()).second;  // compile never overlaps a pitch with itself
-            assert(fresh);
+            assert(sounding == kClosed);  // compile never overlaps a pitch with itself
+            if (sounding != kClosed) continue;
+            sounding = notes.size();
             notes.push_back(LaneNote{e.beat, e.beat, e.pitch, e.velocity, 0, static_cast<int>(notes.size())});
         } else {
-            const auto it = open.find(e.pitch);
-            assert(it != open.end());  // every off closes an on of its pitch
-            if (it == open.end()) continue;
-            notes[it->second].end = e.beat;
-            open.erase(it);
+            assert(sounding != kClosed);  // every off closes an on of its pitch
+            if (sounding == kClosed) continue;
+            notes[sounding].end = e.beat;
+            sounding = kClosed;
         }
     }
-    assert(open.empty());
+    assert(std::all_of(open.begin(), open.end(), [](std::size_t i) { return i == kClosed; }));
 }
 
 }  // namespace
@@ -218,23 +223,28 @@ Compiled compilePlayback(const Document& doc) {
         }
     }
 
-    // The merge, per pitch in (start, lane, id) order.
+    // The merge, per pitch in (rounded start tick, lane, id) order; the exact start only breaks what cannot tie.
+    for (LaneNote& note : notes) note.tick = std::llround(note.start * kFeelTicksPerBeat);
     std::sort(notes.begin(), notes.end(), [](const LaneNote& a, const LaneNote& b) {
-        return std::tie(a.pitch, a.start, a.lane, a.id) < std::tie(b.pitch, b.start, b.lane, b.id);
+        return std::tie(a.pitch, a.tick, a.lane, a.id, a.start) < std::tie(b.pitch, b.tick, b.lane, b.id, b.start);
     });
     std::vector<LaneNote> merged;
     merged.reserve(notes.size());
     for (std::size_t i = 0; i < notes.size();) {
         LaneNote note = notes[i];
         std::size_t j = i + 1;
-        // Equal starts of one pitch: one note, the latest end, the highest velocity; the first's lane and id.
-        for (; j < notes.size() && notes[j].pitch == note.pitch && notes[j].start == note.start; ++j) {
+        // Equal starts of one pitch (one rounded tick): one note at the first member's start (a chord note's beat
+        // when there is one), the latest end, the highest velocity; the first's lane and id.
+        for (; j < notes.size() && notes[j].pitch == note.pitch && notes[j].tick == note.tick; ++j) {
             note.end = std::max(note.end, notes[j].end);
             note.velocity = std::max(note.velocity, notes[j].velocity);
         }
         i = j;
-        // The previous note of this pitch, still sounding, ends where this one starts (a retrigger).
+        assert(note.start < note.end);  // the latest end is at least the first member's, which ends after its start
+        // The previous note of this pitch, still sounding, ends where this one starts (a retrigger). Its rounded
+        // tick is lower, so its start is strictly earlier.
         if (!merged.empty() && merged.back().pitch == note.pitch && merged.back().end > note.start) {
+            assert(merged.back().start < note.start);
             merged.back().end = note.start;
             merged.back().shortened = true;
         }
@@ -246,6 +256,7 @@ Compiled compilePlayback(const Document& doc) {
         // Only a note the merge shortened may be dropped, judged in rounded ticks (never on the raw beats).
         if (note.shortened && std::llround((note.end - note.start) * kFeelTicksPerBeat) < kMinNoteTicks) continue;
         assert(note.start < note.end);
+        if (!(note.start < note.end)) continue;  // impossible for valid input; never emit an off before its on
         assert(note.start >= 0.0 && note.end <= playback.endBeat);
         playback.events.push_back(NoteEvent{note.start, true, note.pitch, note.velocity});
         playback.events.push_back(NoteEvent{note.end, false, note.pitch, 0});

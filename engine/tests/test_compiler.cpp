@@ -326,7 +326,7 @@ TEST_CASE("compile: random documents of up to 20 chords keep the event invariant
 
 // --- Capacity --------------------------------------------------------------------------
 
-TEST_CASE("compile: kMaxChords chords of the widest dictionary type fit a scheduler snapshot") {
+TEST_CASE("compile: kMaxChords chords of the widest dictionary type fit the chord budget") {
     const ChordType* widest = nullptr;
     for (const ChordType& t : allChordTypes()) {
         if (widest == nullptr || t.intervals.size() > widest->intervals.size()) {
@@ -342,7 +342,7 @@ TEST_CASE("compile: kMaxChords chords of the widest dictionary type fit a schedu
     }
     const Compiled compiled = compile(store.doc());
     CHECK(compiled.events.size() == static_cast<std::size_t>(kMaxChords) * widest->intervals.size() * 2);
-    CHECK(compiled.events.size() <= kMaxSnapshotEvents);
+    CHECK(compiled.events.size() <= kMaxChordEvents);
 }
 
 // --- Inversions, octaves and auto voice-leading ----------------------------------------
@@ -1418,7 +1418,7 @@ TEST_CASE("compilePlayback: the audible lanes follow mute and solo, one rule for
     // Distinct pitches per lane, so nothing merges and each lane's notes are recognisable: the chords C, Am, F, G7
     // sit above 38, track A plays 36 and track B 38.
     DocumentStore store = fourBars();
-    const int a = addTrackWith(store, {ns(36, 0, 960), ns(36, 3840, 960)});
+    const int a = addTrackWith(store, {ns(36, 0, kFeelTicksPerBeat), ns(36, 3840, kFeelTicksPerBeat)});
     const int b = addTrackWith(store, {ns(38, 1920, 480)});
     const Events chordEvents = compile(store.doc()).events;
     REQUIRE(std::all_of(chordEvents.begin(), chordEvents.end(), [](const NoteEvent& e) { return e.pitch > 38; }));
@@ -1474,7 +1474,7 @@ TEST_CASE("compilePlayback: notes of one pitch starting together become one, wit
     REQUIRE(soundingIn(compile(store.doc()), 60, 0.0, 4.0) == Soundings{{0.0, 4.0, 60, 100}});
     REQUIRE(soundingIn(compile(store.doc()), 67, 0.0, 12.0) == Soundings{{0.0, 4.0, 67, 100}});
     SUBCASE("two tracks") {
-        addTrackWith(store, {ns(40, 0, 960, 80)});
+        addTrackWith(store, {ns(40, 0, kFeelTicksPerBeat, 80)});
         addTrackWith(store, {ns(40, 0, 1920, 70)});
         CHECK(soundingIn(compilePlayback(store.doc()), 40) == Soundings{{0.0, 2.0, 40, 80}});
     }
@@ -1487,16 +1487,62 @@ TEST_CASE("compilePlayback: notes of one pitch starting together become one, wit
         CHECK(soundingIn(compilePlayback(store.doc()), 67, 0.0, 12.0) == Soundings{{0.0, 6.0, 67, 100}});
     }
     SUBCASE("three notes in one track") {
-        addTrackWith(store, {ns(40, 0, 960, 30), ns(40, 0, 3000, 20), ns(40, 0, 100, 90)});
+        addTrackWith(store, {ns(40, 0, kFeelTicksPerBeat, 30), ns(40, 0, 3000, 20), ns(40, 0, 100, 90)});
         CHECK(soundingIn(compilePlayback(store.doc()), 40) == Soundings{{0.0, 3000 / kTicksPerBeat, 40, 90}});
     }
     checkPlayable(compilePlayback(store.doc()));
 }
 
+TEST_CASE("compilePlayback: equal starts are equal rounded ticks, so an off-grid chord note merges at its boundary") {
+    // Block chords C, C, G whose first length is off the tick grid: the second C's notes sit at the authored double,
+    // a track note at that chord's boundary tick at tick / 960; both round to tick 481, so they start together.
+    const auto playing = [](double firstLength, int trackVelocity) {
+        DocumentStore store;
+        store.appendChord(kC, firstLength, 100);
+        store.appendChord(kC, 1.0, 100);
+        store.appendChord(chord(7, "maj"), 4.0, 100);
+        REQUIRE(chordBoundaryTicks(store.doc()).at(1) == 481);
+        addTrackWith(store, {ns(60, 481, 3 * kFeelTicksPerBeat, trackVelocity)});
+        const Compiled playback = compilePlayback(store.doc());
+        checkPlayable(playback);
+        return soundingIn(playback, 60);
+    };
+    const double trackEnd = (481 + 3 * kFeelTicksPerBeat) / kTicksPerBeat;
+    SUBCASE("the track note's double is earlier than the chord's (0.5012 rounds up to tick 481)") {
+        REQUIRE(481 / kTicksPerBeat < 0.5012);
+        CHECK(playing(0.5012, 90) == Soundings{{0.0, 0.5012, 60, 100}, {0.5012, trackEnd, 60, 100}});
+    }
+    SUBCASE("the track note's double is later than the chord's (0.5008 rounds down to tick 481)") {
+        REQUIRE(481 / kTicksPerBeat > 0.5008);
+        CHECK(playing(0.5008, 120) == Soundings{{0.0, 0.5008, 60, 100}, {0.5008, trackEnd, 60, 120}});
+    }
+    SUBCASE("on the grid the same document gives the same one note") {
+        DocumentStore store;
+        store.appendChord(kC, 0.5, 100);
+        store.appendChord(kC, 1.0, 100);
+        store.appendChord(chord(7, "maj"), 4.0, 100);
+        addTrackWith(store, {ns(60, 480, 3 * kFeelTicksPerBeat, 90)});
+        CHECK(soundingIn(compilePlayback(store.doc()), 60) == Soundings{{0.0, 0.5, 60, 100}, {0.5, 3.5, 60, 100}});
+    }
+}
+
+TEST_CASE("compilePlayback: notes one rounded tick apart do not merge; the later retriggers the earlier") {
+    DocumentStore store;
+    store.appendChord(kC, 0.5012, 100);  // the second C's notes at 0.5012 beat, tick 481
+    store.appendChord(kC, 1.0, 100);
+    store.appendChord(chord(7, "maj"), 4.0, 100);
+    addTrackWith(store, {ns(60, 482, 3 * kFeelTicksPerBeat, 90)});
+    const Compiled playback = compilePlayback(store.doc());
+    // The second C's 60 is cut to under a tick at 482 and dropped; the track note plays from its own start.
+    const double at = 482 / kTicksPerBeat;
+    CHECK(soundingIn(playback, 60) == Soundings{{0.0, 0.5012, 60, 100}, {at, at + 3.0, 60, 90}});
+    checkPlayable(playback);
+}
+
 TEST_CASE("compilePlayback: a nested note of the same pitch cuts the outer one, whose tail is not resumed") {
     DocumentStore store = fourBars();
-    addTrackWith(store, {ns(40, 0, 8 * 960)});
-    addTrackWith(store, {ns(40, 3 * 960, 2 * 960, 90)});
+    addTrackWith(store, {ns(40, 0, 8 * kFeelTicksPerBeat)});
+    addTrackWith(store, {ns(40, 3 * kFeelTicksPerBeat, 2 * kFeelTicksPerBeat, 90)});
     const Compiled playback = compilePlayback(store.doc());
     CHECK(soundingIn(playback, 40) == Soundings{{0.0, 3.0, 40, 100}, {3.0, 5.0, 40, 90}});
     checkPlayable(playback);
@@ -1512,7 +1558,8 @@ TEST_CASE("compilePlayback: a chord note and a track note of one pitch retrigger
     }
     REQUIRE(fPitch != -1);
     REQUIRE(soundingIn(chords, fPitch, 0.0, 12.0) == Soundings{{8.0, 12.0, fPitch, 100}});
-    addTrackWith(store, {ns(60, 960, 960, 90), ns(fPitch, 7 * 960, 2 * 960, 80)});
+    addTrackWith(store, {ns(60, kFeelTicksPerBeat, kFeelTicksPerBeat, 90),
+                         ns(fPitch, 7 * kFeelTicksPerBeat, 2 * kFeelTicksPerBeat, 80)});
     const Compiled playback = compilePlayback(store.doc());
     // The chord's 60 over [0, 4) ends where the track's starts; the track's fPitch over [7, 9) ends where F's starts.
     CHECK(soundingIn(playback, 60, 0.0, 4.0) == Soundings{{0.0, 1.0, 60, 100}, {1.0, 2.0, 60, 90}});
@@ -1525,19 +1572,20 @@ TEST_CASE("compilePlayback: a chord note and a track note of one pitch retrigger
 TEST_CASE("compilePlayback: only a note the merge shortened below kMinNoteTicks rounded ticks is dropped") {
     DocumentStore store = fourBars();
     SUBCASE("a chord note cut to 4 ticks is dropped; the track note that cut it plays") {
-        addTrackWith(store, {ns(60, kMinNoteTicks - 1, 960, 90)});
+        addTrackWith(store, {ns(60, kMinNoteTicks - 1, kFeelTicksPerBeat, 90)});
         const double at = (kMinNoteTicks - 1) / kTicksPerBeat;
         CHECK(soundingIn(compilePlayback(store.doc()), 60, 0.0, 4.0) == Soundings{{at, at + 1.0, 60, 90}});
     }
     SUBCASE("a chord note cut to exactly kMinNoteTicks is kept") {
-        addTrackWith(store, {ns(60, kMinNoteTicks, 960, 90)});
+        addTrackWith(store, {ns(60, kMinNoteTicks, kFeelTicksPerBeat, 90)});
         const double at = kMinNoteTicks / kTicksPerBeat;
         CHECK(soundingIn(compilePlayback(store.doc()), 60, 0.0, 4.0) == Soundings{{0.0, at, 60, 100}, {at, at + 1.0, 60, 90}});
     }
     SUBCASE("a track note cut by another track's note: 3 ticks dropped, kMinNoteTicks kept") {
-        addTrackWith(store, {ns(40, 0, 960, 70), ns(41, 960, 960, 70)});
-        addTrackWith(store, {ns(40, 3, 960, 90), ns(41, 960 + kMinNoteTicks, 960, 90)});
-        const double cut = (960 + kMinNoteTicks) / kTicksPerBeat;
+        addTrackWith(store, {ns(40, 0, kFeelTicksPerBeat, 70), ns(41, kFeelTicksPerBeat, kFeelTicksPerBeat, 70)});
+        addTrackWith(store, {ns(40, 3, kFeelTicksPerBeat, 90),
+                             ns(41, kFeelTicksPerBeat + kMinNoteTicks, kFeelTicksPerBeat, 90)});
+        const double cut = (kFeelTicksPerBeat + kMinNoteTicks) / kTicksPerBeat;
         CHECK(soundingIn(compilePlayback(store.doc()), 40) == Soundings{{3 / kTicksPerBeat, 963 / kTicksPerBeat, 40, 90}});
         CHECK(soundingIn(compilePlayback(store.doc()), 41) ==
               Soundings{{1.0, cut, 41, 70}, {cut, (1920 + kMinNoteTicks) / kTicksPerBeat, 41, 90}});
@@ -1551,7 +1599,7 @@ TEST_CASE("compilePlayback: an untouched exact five-tick feel note at tick 96000
     // comparison would call it short; but no merge shortens it, so it is never a candidate for dropping.
     DocumentStore store;
     store.appendChord(kC, 64.0, 100);
-    store.appendChord(kC, 96005.0 / 960.0 - 64.0, 100);
+    store.appendChord(kC, 96005.0 / kTicksPerBeat - 64.0, 100);
     store.appendChord(kAm, 4.0, 100);
     store.setFeel(Feel{Rhythm::Pulse});
     REQUIRE(chordBoundaryTicks(store.doc()) == std::vector<std::int32_t>{0, 61440, 96005, 99845});
@@ -1563,7 +1611,8 @@ TEST_CASE("compilePlayback: an untouched exact five-tick feel note at tick 96000
     REQUIRE(contains(soundingIn(chords, 60), Sounding{on, off, 60, 100}));
     // The track plays 60 right up to the note's start and again from its end, touching it on both sides, and the
     // chord's previous 60 ([95040, 95904)) is cut by the first track note.
-    addTrackWith(store, {ns(60, 95500, 500, 80), ns(60, 96005, 960, 80), ns(48, 95000, 960, 80)});
+    addTrackWith(store,
+                 {ns(60, 95500, 500, 80), ns(60, 96005, kFeelTicksPerBeat, 80), ns(48, 95000, kFeelTicksPerBeat, 80)});
     const Compiled playback = compilePlayback(store.doc());
     const Soundings p60 = soundingIn(playback, 60);
     CHECK(contains(p60, Sounding{on, off, 60, 100}));
@@ -1576,7 +1625,8 @@ TEST_CASE("compilePlayback: an untouched exact five-tick feel note at tick 96000
 TEST_CASE("compilePlayback: track notes end at compile's endBeat; inactive notes, and so any at or past it, are skipped") {
     SUBCASE("block chords") {
         DocumentStore store = fourBars();  // ends at beat 16
-        const int id = addTrackWith(store, {ns(40, 15 * 960, 2 * 960), ns(41, 0, 960)});
+        const int id =
+            addTrackWith(store, {ns(40, 15 * kFeelTicksPerBeat, 2 * kFeelTicksPerBeat), ns(41, 0, kFeelTicksPerBeat)});
         addInactiveNote(store, id, 3, 42);  // anchored to G7 at its length: it would start exactly at endBeat
         const Compiled playback = compilePlayback(store.doc());
         CHECK(bitsOf(playback.endBeat) == bitsOf(16.0));

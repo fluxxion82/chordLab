@@ -65,13 +65,17 @@ Compiled compile(const Document& doc);
 ///   derived start `s` (`noteStart`, D3) and length `l` ticks becomes `[s / 960.0, min((s + l) / 960.0, endBeat))`
 ///   with `endBeat` = `compile(doc).endBeat`; one starting at or after `endBeat` is skipped (in a store's document
 ///   an active note always starts before it, so this is a guard). Nothing is re-rounded.
-/// - **Paired merge** (the feel's D10 safety over lanes, on notes before any event exists): per pitch the notes
-///   are ordered by start, then lane (the chords first, then the tracks in document order), then id (a track
-///   note's id; a chord note's index in that order of pairing, which never decides anything, since chord notes of
-///   one pitch never share a start). Notes of one pitch with equal starts become one note with the latest end and
-///   the highest velocity; that note counts as untouched (no member is cut short: the merged end is the longest
-///   member's). Otherwise a note still sounding when the next note of its pitch starts ends at that start (the
-///   later note retriggers), and is then "shortened". A shortened note whose length in rounded ticks,
+/// - **Paired merge** (the feel's D10 safety over lanes, on notes before any event exists): two notes of one pitch
+///   start together when their starts round to the same tick, `llround(start * 960)` (an off-grid block chord's
+///   notes sit at the authored beat, a track note on that chord's boundary at the rounded tick / 960: they start
+///   together). Per pitch the notes are ordered by that rounded start, then lane (the chords first, then the tracks
+///   in document order), then id (a track note's id; a chord note's index in that order of pairing, which never
+///   decides anything, since chord notes of one pitch are at least five ticks apart), then the exact start. Notes
+///   of one pitch starting together become one note at the start of the first in that order (a chord note's beat
+///   when one is among them, so the chords keep `compile`'s beats), with the latest end and the highest velocity;
+///   that note counts as untouched (no member is cut short: the merged end is the longest member's). Otherwise a
+///   note still sounding when the next note of its pitch starts ends at that start (the later note retriggers),
+///   and is then "shortened". A shortened note whose length in rounded ticks,
 ///   `llround((end - start) * 960)`, is under `kMinNoteTicks` (feel.h) is dropped; a note the merge did not
 ///   shorten is never dropped, so a track can never remove an exact five-tick feel note (`96005 / 960.0 - 96000 /
 ///   960.0` is a hair under `5 / 960.0`). Clipping a track note at `endBeat` is not a merge either: a note

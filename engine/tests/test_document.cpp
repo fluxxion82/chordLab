@@ -409,9 +409,9 @@ TEST_CASE("appendChord: returns -1 and changes nothing once the id counter reach
     CHECK_FALSE(exhausted.undo());
 }
 
-TEST_CASE("kMaxChords: plan value, and a full document of eight-note chords still fits a snapshot") {
+TEST_CASE("kMaxChords: plan value, and a full document of eight-note chords still fits the chord budget") {
     CHECK(kMaxChords == 256);
-    CHECK(static_cast<std::size_t>(kMaxChords) * 8 * 2 <= kMaxSnapshotEvents);
+    CHECK(static_cast<std::size_t>(kMaxChords) * 8 * 2 <= kMaxChordEvents);
 }
 
 TEST_CASE("appendChord: the chord past kMaxChords is refused, changing nothing and keeping the history") {
