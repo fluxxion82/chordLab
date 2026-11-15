@@ -28,6 +28,12 @@ class ChordLabState: NSObject, ObservableObject {
   /// Whether a text field (a section rename) is being edited: the key routes (`EditorKeyRouter`) stand
   /// down meanwhile, so typing a name never appends or removes chords.
   @Published var editingText = false
+  /// What the keyboard edits (tracks design D15 "Keyboard", `KeyTarget`): the chords, or one track's notes; the key
+  /// routes ask the map with it (`EditorKeyRouter`). Every applied snapshot resolves it (`KeyTarget.resolved`: a
+  /// removed track's notes fall back to the chords). The roll's mouse-down sets `.notes` and an open-lane change
+  /// resets it (`KeyTarget.afterOpenLaneChange`), both wired in M3 with `openLane` (plan Tasks 16, 18); until then
+  /// it stays `.chords`.
+  @Published var keyTarget: KeyTarget = .chords
   /// The row under the key bar (`KeyTransposeRow`): the one-time "chords kept their notes" hint after a tonic
   /// change with Transpose with key off, or the four-second "moved" note after one with it on (D8, D9).
   /// Either closes as soon as a snapshot browses a key other than the project key.
@@ -226,10 +232,16 @@ class ChordLabState: NSObject, ObservableObject {
   /// Runs a keyboard command. Digits append the suggestion chip of that number (nothing when there is no such
   /// chip); Delete removes every selected chord in one step; ⌘C copies the selection, ⌘X cuts it, ⌘V pastes
   /// after the anchor (else at the end), ⌘D duplicates the selection after its last block, ⌘A selects every
-  /// block (strip editing design D5, D6); undo and redo are the key bar's commands. Each does nothing when it
-  /// has nothing to act on, and the router consumes every mapped key whether or not it did anything, so the
-  /// host never acts on it (see `KeyCommandMap`, `EditorKeyRouter`).
+  /// block (strip editing design D5, D6); undo and redo are the key bar's commands; an arrow nudge (mapped only
+  /// with a track's notes targeted, tracks design D15) does nothing yet (plan Task 20); with notes targeted only
+  /// undo and redo run (`KeyCommand.runsBeforeNoteDispatch`). Each does nothing when it has nothing to act on,
+  /// and the router consumes every mapped key whether or not it did anything, so the host never acts on it (see
+  /// `KeyCommandMap`, `EditorKeyRouter`).
   @MainActor func perform(_ command: KeyCommand) {
+    // Everything below acts on the chords. With a track's notes targeted only the shared undo history runs, so
+    // a key meant for the notes never edits the chords the open track hides; plan Task 20 replaces this guard
+    // with the dispatch by target.
+    guard command.runsBeforeNoteDispatch(target: keyTarget) else { return }
     let selection = snapshot?.selection ?? []
     switch command {
     case .appendSuggestion(let n):
@@ -253,6 +265,8 @@ class ChordLabState: NSObject, ObservableObject {
       duplicateChords(selection)
     case .selectAll:
       select(SelectionLogic.all(eventIds))
+    case .nudge:
+      break   // mapped only with notes targeted, which needs the roll (M3); plan Task 20 sends the nudge
     }
   }
 
@@ -469,6 +483,8 @@ class ChordLabState: NSObject, ObservableObject {
       let decoded = try JSONDecoder().decode(Snapshot.self, from: json)
       snapshot = decoded
       lastError = nil
+      let target = keyTarget.resolved(in: decoded.tracks)
+      if target != keyTarget { keyTarget = target }
       updateKeyRow(for: decoded)
     } catch {
       reportError("snapshot decode failed: \(error)")

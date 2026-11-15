@@ -80,7 +80,7 @@ enum ClipboardChords {
   static func copy(_ ids: [Int], from events: [EventJSON], to pasteboard: ChordPasteboard) -> Bool {
     guard let data = encode(chords(of: events, ids: ids)) else { return false }
     pasteboard.clear()
-    return pasteboard.write(ClipboardItem(chords: data, text: symbolLine(of: events, ids: ids)))
+    return pasteboard.write(ClipboardItem(type: pasteboardType, data: data, text: symbolLine(of: events, ids: ids)))
   }
 
   /// ⌘X: the copy, then the `removeChords` to send, only when the copy was published; nil (nothing is removed)
@@ -95,16 +95,20 @@ enum ClipboardChords {
   }
 }
 
-/// The two forms of one copy (D5): ChordLab's chords (`ClipboardChords.encode`) and the plain-text symbol line.
-/// A pasteboard writes them as one item, so both are published or neither is.
+/// The two forms of one copy (strip editing D5, tracks design D15): ChordLab's payload under its custom `type`
+/// (`ClipboardChords.pasteboardType` with `ClipboardChords.encode`'s bytes, or `NoteClipboard.pasteboardType` with
+/// `NoteClipboard.encode`'s) and the plain-text line (the chord symbols, or the note names). A pasteboard writes
+/// them as one item, so both are published or neither is.
 struct ClipboardItem: Equatable {
-  let chords: Data
+  let type: String
+  let data: Data
   let text: String
 }
 
 /// Where the clipboard lives: the general `NSPasteboard` in the plug-in (UI/SystemPasteboard.swift), a fake in
-/// the tests. `clear` empties it; `write` publishes one item in both forms and says whether it did (every
-/// representation set and the item accepted); `data(forType:)` reads the bytes under a type, ChordLab's or another.
+/// the tests; one protocol for both ChordLab types (chords and notes). `clear` empties it; `write` publishes one
+/// item in both forms, the payload under the item's `type`, and says whether it did (every representation set and
+/// the item accepted); `data(forType:)` reads the bytes under a type, ChordLab's or another.
 protocol ChordPasteboard {
   func clear()
   func write(_ item: ClipboardItem) -> Bool

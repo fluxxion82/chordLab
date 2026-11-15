@@ -527,6 +527,7 @@ final class SnapshotTests: XCTestCase {
     "snapshot-browsing-progression.json",
     "snapshot-legacy-phase1.json",
     "snapshot-feel.json",
+    "snapshot-tracks.json",
     "state-progression.json",
   ]
 
@@ -836,6 +837,118 @@ final class SnapshotTests: XCTestCase {
       XCTAssertNil(cell.function, "cell \(cell.id)")
       XCTAssertNil(cell.tension, "cell \(cell.id)")
       XCTAssertNil(cell.engineId, "cell \(cell.id)")
+    }
+  }
+
+  // MARK: - Tracks (tracks design D6)
+
+  func testTracksFixtureCarriesTheTopLevelKeys() throws {
+    let snapshot = try snapshotFixture("snapshot-tracks.json")
+    XCTAssertEqual(snapshot.ticksPerBeat, 960)
+    XCTAssertEqual(snapshot.revision, 15)
+    XCTAssertEqual(snapshot.chordsMuted, false)
+    XCTAssertEqual(snapshot.chordsSolo, false)
+    XCTAssertEqual(snapshot.chordsAudible, false)
+    XCTAssertEqual(snapshot.noteSelection, NoteSelectionJSON(trackId: 2, ids: [4, 5]))
+    XCTAssertEqual(snapshot.trackLimits, TrackLimitsJSON(maxTracks: 4, maxNotesPerTrack: 1024, minNoteTicks: 30, maxPolyphony: 8,
+                                                         maxOnsetsPerBeat: 15))
+  }
+
+  func testTracksFixtureDecodesBothTracks() throws {
+    let snapshot = try snapshotFixture("snapshot-tracks.json")
+    let tracks = try XCTUnwrap(snapshot.tracks)
+    XCTAssertEqual(tracks.map(\.id), [1, 2])
+    XCTAssertEqual(tracks.map(\.name), ["Bass", "Lead"])
+    XCTAssertEqual(tracks.map(\.role), [.bass, .lead])
+    XCTAssertEqual(tracks.map(\.mute), [true, false])
+    XCTAssertEqual(tracks.map(\.solo), [false, true])
+    XCTAssertEqual(tracks.map(\.audible), [false, true])
+
+    let bass = tracks[0].notes
+    XCTAssertEqual(bass.count, 3)
+    XCTAssertEqual(bass.id, [1, 2, 3])
+    XCTAssertEqual(bass.pitch, [36, 45, 41])
+    XCTAssertEqual(bass.start, [0, 3840, 9120])
+    XCTAssertEqual(bass.length, [960, 1920, 480])
+    XCTAssertEqual(bass.velocity, [100, 90, 80])
+    XCTAssertEqual(bass.anchor, [1, 2, 3])
+    XCTAssertEqual(bass.offset, [0, 0, 1440])
+    XCTAssertEqual(bass.active, [true, true, false])
+    let inactive = bass[2]
+    XCTAssertFalse(inactive.active)
+    XCTAssertEqual(inactive.start, 9120, "the derived absolute tick: chord 3 starts at beat 8 (7680) plus the 1440 offset")
+    XCTAssertEqual(inactive.end, 9600)
+    XCTAssertEqual(bass.index(ofId: 2), 1)
+    XCTAssertNil(bass.index(ofId: 4))
+
+    let lead = tracks[1].notes
+    XCTAssertEqual(lead.count, 2)
+    XCTAssertEqual(lead[0], RollNote(id: 4, pitch: 72, start: 960, length: 480, velocity: 110, anchor: 1, offset: 960, active: true))
+    XCTAssertEqual(lead.index(ofId: 5), 1)
+    XCTAssertEqual(tracks[1].selectedIds(in: snapshot.noteSelection), [4, 5])
+    XCTAssertEqual(tracks[0].selectedIds(in: snapshot.noteSelection), [])
+    XCTAssertEqual(snapshot.track(id: 2)?.name, "Lead")
+  }
+
+  func testTracksFixtureEventsCarryPlaySpansAndGuides() throws {
+    let snapshot = try snapshotFixture("snapshot-tracks.json")
+    XCTAssertEqual(snapshot.events.map(\.playStart), [0, 4, 8, 9])
+    XCTAssertEqual(snapshot.events.map(\.playEnd), [4, 8, 9, 15])
+    let guide = try XCTUnwrap(snapshot.events[0].guide)
+    XCTAssertEqual(guide.roles, [.root, .outside, .tension, .outside, .chord, .avoid, .outside, .chord, .outside, .tension, .outside,
+                                 .tension])
+    XCTAssertEqual(guide.scale, 2741)
+    XCTAssertEqual(guide.degrees, ["R", "b2", "2", "b3", "3", "4", "#4", "5", "b6", "6", "b7", "7"])
+    XCTAssertEqual(guide.names, ["C", "Db", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"])
+    XCTAssertEqual(guide.role(pc: 0), .root)
+    XCTAssertEqual(guide.role(pc: 4), .chord)
+    XCTAssertEqual(guide.role(pc: 5), .avoid)
+    XCTAssertTrue(guide.inScale(pc: 5))
+    XCTAssertFalse(guide.inScale(pc: 6))
+    // Event 2 is Am over C major: A is the root, F is an avoid note.
+    let am = try XCTUnwrap(snapshot.events[1].guide)
+    XCTAssertEqual(am.role(pc: 9), .root)
+    XCTAssertEqual(am.role(pc: 0), .chord)
+    XCTAssertEqual(am.names[1], "C#")
+    XCTAssertEqual(am.displayName(pc: 10), "B♭")
+    XCTAssertEqual(am.role(pc: 5), .avoid)
+    XCTAssertEqual(am.displayDegree(pc: 10), "♭2")
+    XCTAssertEqual(am.displayDegree(pc: 22), "♭2")
+    XCTAssertEqual(am.displayDegree(pc: 9), "R")
+    XCTAssertEqual(GuideJSON(roles: [], scale: 0, degrees: ["R"], names: ["C"]).displayDegree(pc: 5), "")
+  }
+
+  /// Every fixture that predates the tracks (the legacy Phase 1 file, the inline Phase 2 string) decodes with
+  /// every tracks field nil, and the fixtures written after them carry them all.
+  func testSnapshotsWithoutTheTracksKeysDecodeThemAsNil() throws {
+    let legacy = try snapshotFixture("snapshot-legacy-phase1.json")
+    let phase2 = try Self.decode(Snapshot.self, Self.phase2)
+    for snapshot in [legacy, phase2, try Self.decode(Snapshot.self, Self.phase1)] {
+      XCTAssertNil(snapshot.ticksPerBeat)
+      XCTAssertNil(snapshot.revision)
+      XCTAssertNil(snapshot.tracks)
+      XCTAssertNil(snapshot.chordsMuted)
+      XCTAssertNil(snapshot.chordsSolo)
+      XCTAssertNil(snapshot.chordsAudible)
+      XCTAssertNil(snapshot.noteSelection)
+      XCTAssertNil(snapshot.trackLimits)
+      XCTAssertEqual(snapshot.ticksPerBeatOrDefault, 960)
+      for event in snapshot.events {
+        XCTAssertNil(event.playStart, "event \(event.id)")
+        XCTAssertNil(event.playEnd, "event \(event.id)")
+        XCTAssertNil(event.guide, "event \(event.id)")
+      }
+    }
+  }
+
+  func testNewerFixturesCarryTheTracksKeys() throws {
+    for name in ["snapshot-home-progression.json", "snapshot-feel.json", "snapshot-home-empty.json"] {
+      let snapshot = try snapshotFixture(name)
+      XCTAssertEqual(snapshot.ticksPerBeat, 960, name)
+      XCTAssertNotNil(snapshot.revision, name)
+      XCTAssertEqual(snapshot.tracks?.count, 0, "\(name): no tracks")
+      XCTAssertNil(snapshot.noteSelection, name)
+      XCTAssertEqual(snapshot.trackLimits?.maxTracks, 4, name)
     }
   }
 }

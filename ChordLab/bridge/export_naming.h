@@ -4,8 +4,10 @@
 // naming can be unit-tested outside Xcode (ChordLab/bridge/tests).
 
 #include <cctype>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace chordlab::bridge {
 
@@ -20,6 +22,40 @@ inline std::string safeExportLabel(std::string_view label)
     for (const char c : label)
         safe += std::isalnum(static_cast<unsigned char>(c)) ? c : (c == '#' ? 's' : '-');
     return safe;
+}
+
+/// The label (before safeExportLabel) of a clip export, D12: `<key>-<lane label>`, then `-<section label>` for a
+/// section. The lane label is the lane's name for one lane ("Chords" for the chords lane, the track's name for a
+/// track: the caller passes the names in request order), "All" when `allLanes` (whatever `laneNames` holds), and
+/// "Lanes" for several explicit lanes: a joined list of at most kMaxTracks (4) 64-byte track names plus "Chords"
+/// could pass the file system's 255-byte name limit, so the label does not grow with the lanes. `sectionName`
+/// nullopt means the whole progression (no section segment); a present name is the section's, and a present but
+/// empty one (an unnamed section) is the segment "Section", so a section's file never has the whole
+/// progression's name. An empty lane name, or no lanes at all without `allLanes`, leaves its segment out rather
+/// than a dangling '-'. "C Ionian" + {"Bass"} -> "C Ionian-Bass", + {"Chords"} and "Verse" ->
+/// "C Ionian-Chords-Verse", + {"Chords"} and "" -> "C Ionian-Chords-Section", all lanes -> "C Ionian-All".
+inline std::string clipExportLabel(std::string_view keyName, const std::vector<std::string>& laneNames, bool allLanes,
+                                   const std::optional<std::string>& sectionName)
+{
+    std::string label(keyName);
+    std::string_view lane;
+    if (allLanes)
+        lane = "All";
+    else if (laneNames.size() == 1)
+        lane = laneNames[0];
+    else if (laneNames.size() > 1)
+        lane = "Lanes";
+    if (!lane.empty())
+    {
+        label += '-';
+        label += lane;
+    }
+    if (sectionName)
+    {
+        label += '-';
+        label += sectionName->empty() ? std::string_view("Section") : std::string_view(*sectionName);
+    }
+    return label;
 }
 
 /// The file name (no directory) of one export:

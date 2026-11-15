@@ -2,8 +2,10 @@
 
 #include "bridge/export_naming.h"
 
+#include <optional>
 #include <string>
 
+using chordlab::bridge::clipExportLabel;
 using chordlab::bridge::exportFileName;
 using chordlab::bridge::isChordLabExportName;
 using chordlab::bridge::safeExportLabel;
@@ -59,4 +61,56 @@ TEST_CASE("isChordLabExportName: directories are judged by name only") {
     // ...but the predicate sees names, not file types: a directory named like an export matches, exactly as
     // PurgeStaleExports's hasPrefix/hasSuffix test always has.
     CHECK(isChordLabExportName("ChordLab-folder.mid"));
+}
+
+TEST_CASE("clipExportLabel: one lane is <key>-<lane name>") {
+    CHECK(clipExportLabel("C Ionian", {"Chords"}, false, std::nullopt) == "C Ionian-Chords");
+    CHECK(clipExportLabel("C Ionian", {"Bass"}, false, std::nullopt) == "C Ionian-Bass");
+    CHECK(safeExportLabel(clipExportLabel("F# Dorian", {"Lead 2"}, false, std::nullopt)) == "Fs-Dorian-Lead-2");
+}
+
+TEST_CASE("clipExportLabel: all lanes is <key>-All, several explicit lanes <key>-Lanes") {
+    CHECK(clipExportLabel("C Ionian", {}, true, std::nullopt) == "C Ionian-All");
+    // allLanes wins over whatever names are passed.
+    CHECK(clipExportLabel("C Ionian", {"Chords", "Bass"}, true, std::nullopt) == "C Ionian-All");
+    CHECK(clipExportLabel("C Ionian", {"Chords", "Bass"}, false, std::nullopt) == "C Ionian-Lanes");
+    CHECK(clipExportLabel("C Ionian", {"Bass", "Lead", "Other", "Extra", "Chords"}, false, std::nullopt) == "C Ionian-Lanes");
+}
+
+TEST_CASE("clipExportLabel: a section name is appended, as the section export's label") {
+    CHECK(clipExportLabel("C Ionian", {"Chords"}, false, "Verse") == "C Ionian-Chords-Verse");
+    CHECK(clipExportLabel("C Ionian", {"Bass"}, false, "Chorus 2") == "C Ionian-Bass-Chorus 2");
+    CHECK(clipExportLabel("C Ionian", {}, true, "Verse") == "C Ionian-All-Verse");
+    CHECK(clipExportLabel("C Ionian", {"Chords", "Lead"}, false, "Verse") == "C Ionian-Lanes-Verse");
+    CHECK(safeExportLabel(clipExportLabel("C Ionian", {"Bass"}, false, "Chorus 2")) == "C-Ionian-Bass-Chorus-2");
+}
+
+TEST_CASE("clipExportLabel: an empty lane name leaves no dangling dash; no lanes is just the key") {
+    CHECK(clipExportLabel("C Ionian", {""}, false, std::nullopt) == "C Ionian");
+    CHECK(clipExportLabel("C Ionian", {""}, false, "Verse") == "C Ionian-Verse");
+    CHECK(clipExportLabel("C Ionian", {}, false, std::nullopt) == "C Ionian");
+}
+
+TEST_CASE("clipExportLabel: a non-ASCII track name becomes one '-' per byte in the safe label") {
+    // U+00E9 is two UTF-8 bytes (C3 A9), U+266B three (E2 99 AB).
+    CHECK(safeExportLabel(clipExportLabel("C Ionian", {"Caf\xC3\xA9 \xE2\x99\xAB"}, false, std::nullopt)) == "C-Ionian-Caf------");
+    CHECK(safeExportLabel(clipExportLabel("C Ionian", {"Caf\xC3\xA9"}, false, "Verse")) == "C-Ionian-Caf---Verse");
+}
+
+TEST_CASE("clipExportLabel: an unnamed section is the segment \"Section\", not the whole progression's label") {
+    CHECK(clipExportLabel("C Ionian", {"Chords"}, false, std::string()) == "C Ionian-Chords-Section");
+    CHECK(clipExportLabel("C Ionian", {}, true, std::string()) == "C Ionian-All-Section");
+    CHECK(clipExportLabel("C Ionian", {"Chords", "Lead"}, false, std::string()) == "C Ionian-Lanes-Section");
+    CHECK(clipExportLabel("C Ionian", {""}, false, std::string()) == "C Ionian-Section");
+    // ...which differs from the whole progression's label.
+    CHECK(clipExportLabel("C Ionian", {"Bass"}, false, std::string()) != clipExportLabel("C Ionian", {"Bass"}, false, std::nullopt));
+    CHECK(clipExportLabel("C Ionian", {"Bass"}, false, std::nullopt) == "C Ionian-Bass");
+}
+
+TEST_CASE("clipExportLabel: the label never grows with the number of lanes") {
+    // Four 64-byte track names plus "Chords" joined would be over the file system's 255-byte name limit
+    // (4 * 64 + 6 + separators); "Lanes" cannot be.
+    const std::string longName(64, 'x');
+    const std::string label = clipExportLabel("C# HarmonicMinor", {"Chords", longName, longName, longName, longName}, false, std::nullopt);
+    CHECK(label == "C# HarmonicMinor-Lanes");
 }

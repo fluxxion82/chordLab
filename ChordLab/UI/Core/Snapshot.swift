@@ -7,8 +7,10 @@ import Foundation
 /// `selectedEventId`, P2-M3's `homeTriads`, and the chord relations' `relationMode`, `relationReference`
 /// and per-cell `relation` / `relationText`, the progression presets' `presets`, and the applied chords'
 /// `applied` with its cells' `label` / `target`, and the spelled note names `voicingNames` /
-/// `outOfKeyNames`, and the strip editing's `selectedEventIds` and `newChordBeats`) are optional so that a UI built against this file still decodes a snapshot from an
-/// older plug-in build.
+/// `outOfKeyNames`, and the strip editing's `selectedEventIds` and `newChordBeats`, and the tracks' `ticksPerBeat`,
+/// `revision`, `tracks`, `chordsMuted`, `chordsSolo`, `chordsAudible`, `noteSelection` and `trackLimits` with the
+/// events' `playStart`, `playEnd` and `guide`) are optional so that a UI built against this file still decodes a
+/// snapshot from an older plug-in build.
 
 /// `{"letter":"C","alter":0}`: a spelled tonic, `alter` -1 flat, 0 natural, 1 sharp.
 struct TonicJSON: Codable, Equatable {
@@ -55,6 +57,10 @@ struct WhyJSON: Codable, Equatable {
 /// `voicing` / `outOfKey`. `function` is "T", "PD", "D" or "O", `tension` 0..100; `inversion`, `octave`
 /// and `manualVoicing` the stored voicing fields; `why` the relation to the previous event, nil on the
 /// first. Everything after `voicing` is absent from older plug-in builds.
+/// `playStart` / `playEnd` (tracks design D6) are the chord's playback span in beats: the authored
+/// `startBeat` and `startBeat + lengthBeats` unless a feel performs, when they are the tick-rounded boundaries
+/// the scheduler plays. The strip draws the authored positions; the roll's guide bands and chord lookups use
+/// the span. `guide` is the chord's harmonic guide against the project key (tracks design D9).
 struct EventJSON: Codable, Equatable, Identifiable {
   let id: Int
   let root: Int
@@ -75,6 +81,9 @@ struct EventJSON: Codable, Equatable, Identifiable {
   let octave: Int?
   let manualVoicing: Bool?
   let why: WhyJSON?
+  var playStart: Double? = nil
+  var playEnd: Double? = nil
+  var guide: GuideJSON? = nil
 }
 
 /// One palette cell: the chord on scale degree `degree` (0..6) of the browsed key in row `tier`.
@@ -210,6 +219,149 @@ struct MeterJSON: Codable, Equatable {
   let den: Int
 }
 
+/// A guide role: how a pitch class sounds over a chord (tracks design D9), decoded from the engine's
+/// `guideRoleName` strings "root", "chord", "tension", "avoid" and "outside". An unknown string is `.outside`,
+/// so a role a newer plug-in adds never loses the snapshot.
+enum GuideRole: String, Codable {
+  case root, chord, tension, avoid, outside
+
+  init(from decoder: Decoder) throws {
+    let text = try decoder.singleValueContainer().decode(String.self)
+    self = GuideRole(rawValue: text) ?? .outside
+  }
+
+  func encode(to encoder: Encoder) throws {
+    var container = encoder.singleValueContainer()
+    try container.encode(rawValue)
+  }
+}
+
+/// An event's `guide` (tracks design D9): four views of the chord's harmonic guide indexed by absolute pitch
+/// class (C = 0, not relative to the root), against the project key. `scale` is the chord scale as a 12-bit
+/// mask (bit `pc` set when `pc` is in it; C major's 2741). `degrees` ("R", "b9", "#11", "bb7") and `names`
+/// ("E#", "G#", "Bb") stay ASCII like every engine string; `displayDegrees` / `displayNames` convert with
+/// `ChordSymbol.glyphs` for drawing. The lookups take any integer as a pitch class (taken mod 12, so a MIDI note
+/// number works), and a short `roles` array reads as `.outside` rather than trapping.
+struct GuideJSON: Codable, Equatable {
+  let roles: [GuideRole]
+  let scale: Int
+  let degrees: [String]
+  let names: [String]
+
+  private static func pitchClass(_ value: Int) -> Int { ((value % 12) + 12) % 12 }
+
+  /// The role of `pc` (mod 12); `.outside` when `roles` has no entry for it.
+  func role(pc: Int) -> GuideRole {
+    let index = Self.pitchClass(pc)
+    return index < roles.count ? roles[index] : .outside
+  }
+
+  /// Whether `pc` (mod 12) is in the chord scale: its bit of `scale` is set.
+  func inScale(pc: Int) -> Bool { (scale >> Self.pitchClass(pc)) & 1 == 1 }
+
+  /// `names` with the accidentals as glyphs ("Db" reads "D♭", "F#" "F♯").
+  var displayNames: [String] { names.map(ChordSymbol.glyphs) }
+
+  /// `degrees` with the accidentals as glyphs ("b9" reads "♭9", "#11" "♯11").
+  var displayDegrees: [String] { degrees.map(ChordSymbol.glyphs) }
+
+  /// The glyph name of `pc` (mod 12); empty when `names` has no entry for it.
+  func displayName(pc: Int) -> String {
+    let index = Self.pitchClass(pc)
+    return index < names.count ? ChordSymbol.glyphs(names[index]) : ""
+  }
+
+  /// The glyph degree of `pc` (mod 12) ("b2" reads "♭2", "R" stays "R"); empty when `degrees` has no entry for it.
+  /// Converts the one string, as `displayName(pc:)` does, never the whole array as `displayDegrees` does.
+  func displayDegree(pc: Int) -> String {
+    let index = Self.pitchClass(pc)
+    return index < degrees.count ? ChordSymbol.glyphs(degrees[index]) : ""
+  }
+}
+
+/// One track's notes, column-wise (tracks design D6): eight parallel arrays, entry `i` of each being note `i` in
+/// the track's note order (derived start, pitch, id), so decoding builds no object per note. `start` is the derived
+/// absolute tick, `anchor` the id of the note's chord, `offset` the ticks into it, `active` false once the chord
+/// is shorter than the offset. A well-formed snapshot has equal lengths; `count` is the shortest column's, so a
+/// ragged one never traps `subscript`, `indices` or `index(ofId:)`.
+///
+/// A `RandomAccessCollection` of `RollNote` (indices `0..<count`, each element built on demand), so views can
+/// iterate, `reversed()`, `first(where:)` and slice it. The engine keeps every track's notes sorted by (derived
+/// start, pitch, id) after each store edit (`Track::notes`, engine/include/chordlab/tracks.h; `sortTrackNotes`), so
+/// `start` is non-decreasing in note order and a view may binary-search the notes that overlap a visible tick window.
+struct TrackNotesJSON: Codable, Equatable, RandomAccessCollection {
+  let id: [Int]
+  let pitch: [Int]
+  let start: [Int]
+  let length: [Int]
+  let velocity: [Int]
+  let anchor: [Int]
+  let offset: [Int]
+  let active: [Bool]
+
+  /// The number of notes: the minimum of the column counts.
+  var count: Int {
+    Swift.min(id.count, pitch.count, start.count, length.count, velocity.count, anchor.count, offset.count, active.count)
+  }
+
+  var startIndex: Int { 0 }
+  var endIndex: Int { count }
+
+  /// `0..<count`.
+  var indices: Range<Int> { 0..<count }
+
+  /// Note `i` built from the columns; `i` must be in `indices` (as an `Array`'s subscript).
+  subscript(i: Int) -> RollNote {
+    RollNote(id: id[i], pitch: pitch[i], start: start[i], length: length[i], velocity: velocity[i], anchor: anchor[i],
+             offset: offset[i], active: active[i])
+  }
+
+  /// The position of the note with this id in the columns, nil for none. O(n): for a single lookup; use
+  /// `indices(ofIds:)` for many.
+  func index(ofId noteId: Int) -> Int? {
+    id.prefix(count).firstIndex(of: noteId)
+  }
+
+  /// The positions of the notes whose ids are in `ids`, ascending (note order), in one pass over the columns; ids
+  /// that name no note are skipped.
+  func indices(ofIds ids: Set<Int>) -> [Int] {
+    guard !ids.isEmpty else { return [] }
+    return (0..<count).filter { ids.contains(id[$0]) }
+  }
+}
+
+/// One track of the snapshot (tracks design D1, D6). `audible` is the mute/solo outcome as the engine
+/// computes it, so the UI never derives it; `notes` are column-wise.
+struct TrackJSON: Codable, Equatable, Identifiable {
+  let id: Int
+  let name: String
+  let role: TrackRole
+  let mute: Bool
+  let solo: Bool
+  let audible: Bool
+  let notes: TrackNotesJSON
+}
+
+/// The snapshot's `noteSelection` (tracks design D5): the selected notes of one track, in the track's note order.
+struct NoteSelectionJSON: Codable, Equatable {
+  let trackId: Int
+  let ids: [Int]
+}
+
+/// The snapshot's `trackLimits` (tracks design D1, D10): the caps the engine enforces, so the UI never repeats a
+/// number: at most `maxTracks` tracks of `maxNotesPerTrack` notes, each at least `minNoteTicks` long, no more
+/// than `maxPolyphony` sounding at once and `maxOnsetsPerBeat` onsets in a beat.
+struct TrackLimitsJSON: Codable, Equatable {
+  let maxTracks: Int
+  let maxNotesPerTrack: Int
+  let minNoteTicks: Int
+  let maxPolyphony: Int
+  let maxOnsetsPerBeat: Int
+
+  /// The shortest track note when the snapshot carries no `trackLimits` (`kMinTrackNoteTicks`, a 1/32 beat).
+  static let defaultMinNoteTicks = 30
+}
+
 /// The whole document as the UI shows it, plus the palette of the browsed key.
 struct Snapshot: Codable, Equatable {
   let schema: Int
@@ -275,6 +427,22 @@ struct Snapshot: Codable, Equatable {
   /// Whether incoming MIDI notes are passed on to the plug-in's output (the transport row's Thru switch);
   /// absent from older plug-in builds, whose UI then hides the switch.
   let midiThru: Bool?
+  /// The tick grid of every tick field (960); absent from builds before tracks (read it through
+  /// `ticksPerBeatOrDefault`). The tracks fields below are all absent from such builds.
+  var ticksPerBeat: Int? = nil
+  /// The store's content revision: moves with every content commit, undo, redo and state load, never with a
+  /// selection or a live flag. A note command's `baseRevision` names it.
+  var revision: UInt64? = nil
+  /// The tracks in order, empty without tracks; each track's notes are column-wise.
+  var tracks: [TrackJSON]? = nil
+  /// The chords lane's mute and solo flags and their outcome (`chordsAudible`, as a track's `audible`).
+  var chordsMuted: Bool? = nil
+  var chordsSolo: Bool? = nil
+  var chordsAudible: Bool? = nil
+  /// The selected notes of one track (live engine state); nil (JSON null, or absent) for none.
+  var noteSelection: NoteSelectionJSON? = nil
+  /// The engine's track and note caps.
+  var trackLimits: TrackLimitsJSON? = nil
 
   /// `relationMode` as a case; nil when absent or unknown.
   var relationModeValue: RelationMode? { relationMode.flatMap(RelationMode.init(rawValue:)) }

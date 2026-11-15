@@ -358,8 +358,14 @@ bool ChordLab::OnKeyDown(const IKeyPress& key)
 {
   // Main thread: the host calls IPlugView::onKeyDown on the UI thread, between OpenWindow and
   // CloseWindow, so mViewController is valid or null. iPlug2's IKeyPress: utf8 text, a Windows virtual
-  // key (kVK_BACK 0x08, kVK_DELETE 0x2E, digits 0x30..0x39), S = shift, C = command on macOS
-  // (IPlugVST3_View.h TranslateKeyMessage reads kCommandKey into C), A = alt; Control is not carried.
+  // key (kVK_BACK 0x08, kVK_DELETE 0x2E, digits 0x30..0x39, arrows kVK_LEFT 0x25 / kVK_UP 0x26 /
+  // kVK_RIGHT 0x27 / kVK_DOWN 0x28, normally with empty text; the VK decides), S = shift, C = command
+  // on macOS (IPlugVST3_View.h TranslateKeyMessage reads kCommandKey into C), A = alt; Control is not
+  // carried.
+  // Every key goes to the router unfiltered; it reads arrows from the VK and consumes a key only when
+  // the map has a command for it with the current key target (arrows: only with notes targeted).
+  // Live 12 never calls this route (it delivers keys to the plug-in window, route A; tracks design S0);
+  // other hosts may.
   auto* vc = (ChordLabViewController*) mViewController;
   if (!vc)
     return false;
@@ -768,6 +774,12 @@ bool ChordLab::OnMessage(int msgTag, int ctrlTag, int dataSize, const void* pDat
     return true;
   }
 
+  if (msgTag == kMsgTagExportClip)
+  {
+    HandleExportClip((pData && dataSize > 0) ? std::string_view((const char*) pData, (size_t) dataSize) : std::string_view());
+    return true;
+  }
+
   return CocoaEditorDelegate::OnMessage(msgTag, ctrlTag, dataSize, pData);
 }
 
@@ -874,22 +886,62 @@ void ChordLab::HandleExportSection(std::string_view text)
   }
 }
 
+void ChordLab::HandleExportClip(std::string_view text)
+{
+  // Main thread. {"schema":1,"lanes":...,"sectionId":...}: lanes are independent clips of their own notes
+  // (tracks design D12). exportClip answers an unknown track or section with empty bytes ("nothing to
+  // export"), so resolveClipExport (bridge/export_request.h, unit-tested) resolves the ids under the same lock
+  // as the export, for an error that says which is wrong (the section first, then the first unknown track).
+  @autoreleasepool
+  {
+  const std::optional<chordlab::bridge::ClipExportRequest> request = chordlab::bridge::parseClipExportRequest(text);
+  if (!request)
+  {
+    PushError("clip export message needs schema 1, lanes and a section id or null");
+    return;
+  }
+  const double bpm = HostBpm();
+  chordlab::bridge::ResolvedClipExport resolved;
+  std::vector<uint8_t> bytes;
+  std::string label;
+  {
+    std::lock_guard<std::mutex> lock(mModelMutex);
+    const chordlab::Document& doc = mStore.doc();
+    resolved = chordlab::bridge::resolveClipExport(doc, *request);
+    if (!resolved.problem)
+    {
+      bytes = chordlab::exportClip(doc, resolved.spec, bpm);
+      label = chordlab::bridge::clipExportLabel(chordlab::keyName(doc.projectKey), resolved.laneNames, request->allLanes,
+                                                resolved.sectionName);
+    }
+  }
+  if (resolved.problem)
+  {
+    PushError(resolved.problem);                                 // outside the lock, like every call into the UI
+    return;
+  }
+  WriteExport(bytes, label);
+  }
+}
+
 void ChordLab::WriteExport(const std::vector<uint8_t>& bytes, const std::string& label)
 {
-  // Main thread, never real-time. `bytes` come from chordlab::exportMidi (empty when there is nothing to write).
+  // Main thread, never real-time. `bytes` come from chordlab::exportMidi or chordlab::exportClip (empty when there is
+  // nothing to write: no events, or the writer refused).
   @autoreleasepool
   {
   if (bytes.empty())
   {
-    PushError("nothing to export");                              // no chords, or the writer refused (a tempo it cannot encode)
+    PushError("nothing to export");                              // no events, or the writer refused (a tempo it cannot encode)
     return;
   }
 
   // NSTemporaryDirectory()/ChordLab/ChordLab-<label>-<yyyyMMdd-HHmmss>-<pid>-<counter>-<uuid8>.mid, the
-  // label (the key, plus the section name for a section) spelled with 's' for a sharp and '-' for
-  // anything but an ASCII letter or digit so the name is safe anywhere ("C-Ionian", "Fs-Dorian",
-  // "C-Ionian-Verse"); pid, counter and uuid make it unique across instances and processes, and the name
-  // is checked to be unused before anything is written (see the cleanup note above).
+  // label (the key; plus the section name for a section; for a clip, the lane and then the section) spelled
+  // with 's' for a sharp and '-' for anything but an ASCII letter or digit so the name is safe anywhere
+  // ("C-Ionian", "Fs-Dorian", "C-Ionian-Verse", "C-Ionian-Bass-Verse"); pid, counter and uuid make it unique
+  // across instances and processes, and the name is checked to be unused before anything is written (see the
+  // cleanup note above).
   const std::string safeLabel = chordlab::bridge::safeExportLabel(label);
   char stamp[32] = {0};
   const std::time_t now = std::time(nullptr);

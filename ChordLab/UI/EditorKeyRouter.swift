@@ -4,16 +4,22 @@ import AppKit
 ///
 /// Route A (`install`): a local key-down monitor sees every key the application dispatches, before any
 /// window does. It acts only when the event is for the editor's own window, the editor owns the keyboard
-/// in that window, no text is being edited, and the key maps. Ownership: true when the editor appears,
-/// then follows the last mouse-down in that window's content view — inside the editor's view it is ours,
-/// elsewhere in the content view it is the host's (a host that puts its own controls, or a second editor,
-/// in the same window keeps its keys); a mouse-down outside the content view (a title-bar drag, a
-/// traffic-light click, a resize-edge grab) chooses neither and changes nothing. Route B (`handle(characters:…)`): the host delivered the key through the plug-in API
+/// in that window, no text is being edited, and the key maps for the current target. Ownership: true when
+/// the editor appears, then follows the last mouse-down in that window's content view — inside the
+/// editor's view it is ours, elsewhere in the content view it is the host's (a host that puts its own
+/// controls, or a second editor, in the same window keeps its keys); a mouse-down outside the content view
+/// (a title-bar drag, a traffic-light click, a resize-edge grab) chooses neither and changes nothing.
+/// Route B (`handle(characters:…)`): the host delivered the key through the plug-in API
 /// (VST3 `onKeyDown` → `ChordLab::OnKeyDown`); the host already chose the plug-in, so only the text gate
 /// applies; its key-ups (`keyUp(characters:…)`, VST3 `onKeyUp` → `ChordLab::OnKeyUp`) end a held key,
-/// since that route has no repeat flag. `KeyRepeatFilter` makes one physical press one command on either
-/// route, or on both when a host uses both, and keeps a held key from repeating. A mapped key is consumed
-/// either way; everything else goes on to the host.
+/// since that route has no repeat flag. Live 12 delivers every key, arrows included, through route A only
+/// (tracks design S0); route B serves hosts that use the plug-in API. Both routes read arrows from the key
+/// (route A's key codes 123–126, route B's virtual keys `kVK_LEFT`…`kVK_DOWN`), never from the text.
+/// `KeyCommandMap.command(for:target:)` is asked with `ChordLabState.keyTarget` before a key is consumed, so
+/// an arrow with the chords targeted is not ours on either route and goes back to the host; with a track's
+/// notes targeted it nudges them. `KeyRepeatFilter` makes one physical press one command on either route, or
+/// on both when a host uses both, and keeps a held key from repeating (arrows too: one step per press). A key
+/// mapped for the current target is consumed either way; everything else goes on to the host.
 final class EditorKeyRouter {
   private unowned let view: NSView
   private unowned let state: ChordLabState
@@ -138,7 +144,7 @@ final class EditorKeyRouter {
 
   @MainActor private func deliver(_ input: KeyInput, source: KeySource) -> Bool {
     guard !editingText else { return false }
-    guard let command = KeyCommandMap.command(for: input) else { return false }
+    guard let command = KeyCommandMap.command(for: input, target: state.keyTarget) else { return false }
     if filter.shouldAct(input, at: ProcessInfo.processInfo.systemUptime, source: source) {
       state.perform(command)
     }
@@ -147,18 +153,13 @@ final class EditorKeyRouter {
 }
 
 extension KeyInput {
-  /// Route A: macOS hardware key codes for the delete keys (51 = delete, 117 = forward delete), the
-  /// unmodified character for the rest; modifiers masked to the device-independent flags.
+  /// Route A: the key from the event's key code and unmodified text
+  /// (`Key(macKeyCode:charactersIgnoringModifiers:)`, in Core and unit-tested). Only ⌘ ⇧ ⌥ ⌃ are read from
+  /// the flags: the function-key and numeric-pad bits AppKit sets on arrows (S0: 0xA00100) are not
+  /// modifiers here.
   init(event: NSEvent) {
     let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-    let key: Key
-    switch event.keyCode {
-    case 51: key = .delete
-    case 117: key = .forwardDelete
-    default:
-      let text = event.charactersIgnoringModifiers ?? ""
-      key = text.count == 1 ? .character(text.first!) : .other
-    }
+    let key = Key(macKeyCode: event.keyCode, charactersIgnoringModifiers: event.charactersIgnoringModifiers)
     self.init(key: key, command: flags.contains(.command), shift: flags.contains(.shift),
               option: flags.contains(.option), control: flags.contains(.control))
   }
