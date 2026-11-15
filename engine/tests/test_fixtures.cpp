@@ -22,6 +22,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <cstddef>
 #include <cstdlib>
 #include <fstream>
 #include <iterator>
@@ -326,6 +327,13 @@ TEST_CASE("golden fixtures: the tracks fixtures carry mixed mute and solo, an in
                                                {"velocity", 80}, {"anchor", 3}, {"offset", 1440}, {"active", false}}));
     CHECK(tracks[1].at("notes").at(1).at("start") == 8640 + 480);  // G7 moved a beat earlier with its note
     CHECK(snap.at("events").at(3).at("playStart") == 9.0);
+    for (const json& e : snap.at("events")) {  // every event carries its harmonic guide, twelve entries per view
+        const json& guide = e.at("guide");
+        CHECK(guide.at("roles").size() == 12);
+        CHECK(guide.at("degrees").size() == 12);
+        CHECK(guide.at("names").size() == 12);
+        CHECK(guide.at("roles").at(e.at("root").get<std::size_t>()) == "root");
+    }
 
     DocumentStore loaded;
     std::string error;

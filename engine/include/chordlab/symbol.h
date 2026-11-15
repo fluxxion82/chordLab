@@ -18,6 +18,15 @@ enum class SymbolStyle { Standard, Klimper };
 /// by the type's suffix in the given style, e.g. `Bm7b5` / `Bø7`, `Eb`, `CmΔ7`.
 std::string chordSymbol(const Chord& chord, const Key& spellingKey, SymbolStyle style = SymbolStyle::Klimper);
 
+/// Letter steps (0..6) above the root of the tone `semitones` above it in a chord of `type`: the interval's
+/// major degree (`majorDegreeOfInterval`, pitch.h), except where the chord's structure writes it otherwise, by
+/// the rule `chordToneSpelling` spells with: a tritone is a diminished fifth (4), not a sharp fourth, when the
+/// type has no perfect fifth (`dim`, `dim7`, `m7b5`); eight semitones an augmented fifth (4), not a flat sixth,
+/// when it has none (`aug`, `augMaj7`); and nine semitones a diminished seventh (6), not a sixth, when it has that
+/// diminished fifth (`dim7`). `semitones` is reduced modulo 12 (a ninth, 14, is 1); any value is accepted, in
+/// or out of the type. The harmonic guides (guide.h) letter a chord's tones with it.
+int chordToneDegree(const ChordType& type, int semitones);
+
 /// The spelling of pitch class `pc` as a tone of `chord`, whose root is spelled in `spellingKey` as
 /// `chordSymbol` spells it: the letter the tone's interval above the root lands on (a third on the third
 /// letter from the root, a seventh on the seventh, a ninth on the second), with the accidental that

@@ -93,7 +93,9 @@ struct SnapshotExtras {
 ///             "tension":3,"startBeat":0.0,"lengthBeats":4.0,"velocity":100,
 ///             "inversion":0,"octave":0,"manualVoicing":false,"voicing":[60,64,67],
 ///             "voicingNames":["C4","E4","G4"],"outOfKey":[],"outOfKeyNames":[],"why":null,
-///             "playStart":0.0,"playEnd":4.0}, ...],
+///             "playStart":0.0,"playEnd":4.0,
+///             "guide":{"roles":["root","outside","tension", ...],"scale":2741,
+///                      "degrees":["R","b2","2", ...],"names":["C","Db","D", ...]}}, ...],
 ///  "sections":[{"id":1,"name":"Verse","colourIndex":0,"firstEventIndex":0}, ...],
 ///  "suggestions":[{"root":5,"type":"maj","symbol":"F","roman":"IV","function":"PD","score":2.35,
 ///                  "reasons":["commonTones","smooth","diatonic","predominant"],
@@ -289,6 +291,13 @@ struct SnapshotExtras {
 ///   the second chord's start), the authored doubles otherwise, so on the block path and in the over-budget fallback
 ///   they equal `startBeat` and `startBeat + lengthBeats` as accumulated. `startBeat` and `lengthBeats` stay authored
 ///   (the strip draws them); what is shaded by playback (the roll's guide bands, chord lookups) uses these.
+/// - per event, `guide`: the chord's harmonic guide, `harmonicGuide(chord, doc.projectKey)` (guide.h, tracks design
+///   D9: the rules for roles, the chord scale, degrees and names live there), read against the PROJECT key like
+///   `roman`, never the browsed one. Four views indexed by absolute pitch class 0..11 (C = 0, not relative to the
+///   root): `roles` twelve `guideRoleName` strings ("root", "chord", "tension", "avoid", "outside"), `scale` the
+///   chord scale as a 12-bit integer (bit `pc` set when `pc` is in it; C major's 2741), `degrees` twelve ASCII
+///   degree labels above the root ("R", "b9", "#11", "bb7"), `names` twelve ASCII note names on the guide's
+///   letters ("E#", "G#", "Bb").
 /// - `ticksPerBeat`: 960 (`kFeelTicksPerBeat`), the grid of every tick field.
 /// - `revision`: `extras.revision`, the store's content revision (`DocumentStore::revision`, document.h: it moves
 ///   with every content commit, undo, redo and state load, never with a selection or a live flag); 0 when the caller

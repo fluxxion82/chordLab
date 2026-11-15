@@ -6,6 +6,7 @@
 #include "chordlab/document.h"
 #include "chordlab/feel.h"
 #include "chordlab/function.h"
+#include "chordlab/guide.h"
 #include "chordlab/harmony.h"
 #include "chordlab/identify.h"
 #include "chordlab/listener.h"
@@ -166,6 +167,22 @@ json voicingNamesJson(const Chord& chord, const std::vector<int>& voicing, const
         out.push_back(spelling.text() + std::to_string(octave));
     }
     return out;
+}
+
+/// An event's `guide`: `harmonicGuide(chord, projectKey)` (guide.h) as four parallel views indexed by pitch
+/// class, `{"roles":[12 guideRoleName], "scale":scaleMask, "degrees":[12], "names":[12]}`.
+json guideJson(const Chord& chord, const Key& projectKey) {
+    const Guide guide = harmonicGuide(chord, projectKey);
+    json roles = json::array();
+    json degrees = json::array();
+    json names = json::array();
+    for (std::size_t pc = 0; pc < 12; ++pc) {
+        roles.push_back(guideRoleName(guide.role[pc]));
+        degrees.push_back(guide.degree[pc]);
+        names.push_back(guide.name[pc]);
+    }
+    return json{{"roles", std::move(roles)}, {"scale", guide.scaleMask}, {"degrees", std::move(degrees)},
+                {"names", std::move(names)}};
 }
 
 /// One palette cell as the snapshot writes it (`palette.cells` and `homeTriads` alike): the cell's own
@@ -2473,7 +2490,8 @@ std::string snapshotJson(const Document& doc, const Palette& palette, int select
                       {"outOfKeyNames", outOfKeyNamesJson(e.chord, doc.projectKey, doc.projectKey)},
                       {"why", i == 0 ? json() : whyJson(doc.events[i - 1].chord, e.chord, doc.projectKey)},
                       {"playStart", spans[i].start},
-                      {"playEnd", spans[i].end}};
+                      {"playEnd", spans[i].end},
+                      {"guide", guideJson(e.chord, doc.projectKey)}};
         events.push_back(std::move(event));
         beat += e.lengthBeats;
     }
