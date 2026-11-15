@@ -521,6 +521,90 @@ final class RollEditLogicTests: XCTestCase {
                    "once it actually moves, a horizontal move snaps it too")
   }
 
+  // MARK: - Return to the origin, off the grid (D15)
+
+  private let offGridNotes: [NoteRow] = [(10, 60, 100, 500, 100, true), (11, 64, 960, 480, 90, true),
+                                         (12, 67, 2010, 470, 80, true)]
+
+  func testAnOffGridNoteDraggedBackToItsOriginSendsNothing() {
+    // The review's reproducer: eighth grid, content coordinates, down/drag/drag/up.
+    XCTAssertEqual(geometry.pitch(atY: 945), 60)
+    let roll = context(offGridNotes, selected: [10])
+    let events = [down(CGPoint(x: 17.5, y: 945)), drag(CGPoint(x: 65.5, y: 875)), drag(CGPoint(x: 17.5, y: 945)),
+                  up(CGPoint(x: 17.5, y: 945))]
+    let (state, effects) = run(events, roll)
+    XCTAssertEqual(sends(effects), [])
+    assertPaired(effects)
+    XCTAssertEqual(state.previewNotes, [])
+    // The preview drawn at the origin agrees with the (empty) commit: the note stays where it is.
+    let (dragging, _) = run(Array(events.prefix(3)), roll)
+    XCTAssertEqual(dragging.previewNotes.map(\.start), [100])
+    XCTAssertEqual(dragging.previewNotes.map(\.pitch), [60])
+  }
+
+  func testAnOffGridDuplicateDroppedOnItsOriginInsertsNothing() {
+    let p = CGPoint(x: 17.5, y: 945)
+    let roll = context(offGridNotes, selected: [10])
+    let (dragging, moving) = run([down(p, option: true), drag(CGPoint(x: 65.5, y: 875)), drag(p)], roll)
+    XCTAssertEqual(dragging.previewNotes.map(\.start), [100], "the preview is the origin, not a grid point")
+    let (_, effects) = run([up(p)], roll, from: dragging)
+    XCTAssertEqual(sends(effects), [])
+    assertPaired(moving + effects)
+  }
+
+  func testAnOffGridStartEdgeResizeBackToItsOriginSendsNothing() {
+    let p = CGPoint(x: 6, y: point(0, 60).y)   // note 10 starts at x 5
+    XCTAssertEqual(RollHit.hit(at: p, context: context(offGridNotes))?.zone, .startEdge)
+    let roll = context(offGridNotes, selected: [10])
+    let (dragging, _) = run([down(p), drag(offset(p, x: 20)), drag(p)], roll)
+    XCTAssertEqual(dragging.previewNotes.map(\.start), [100])
+    XCTAssertEqual(dragging.previewNotes.map(\.length), [500])
+    let (state, effects) = run([up(p)], roll, from: dragging)
+    XCTAssertEqual(sends(effects), [])
+    XCTAssertNil(state.lastLength, "nothing was resized")
+  }
+
+  func testAnOffGridEndEdgeResizeBackToItsOriginSendsNothing() {
+    let p = CGPoint(x: 29, y: point(0, 60).y)   // note 10 ends at x 30
+    XCTAssertEqual(RollHit.hit(at: p, context: context(offGridNotes))?.zone, .endEdge)
+    let roll = context(offGridNotes, selected: [10])
+    let (dragging, _) = run([down(p), drag(offset(p, x: -12)), drag(p)], roll)
+    XCTAssertEqual(dragging.previewNotes.map(\.length), [500])
+    let (state, effects) = run([up(p)], roll, from: dragging)
+    XCTAssertEqual(sends(effects), [])
+    XCTAssertNil(state.lastLength)
+  }
+
+  func testAMixedGroupDraggedBackToItsOriginSendsNothing() {
+    let roll = context(offGridNotes, selected: [10, 11, 12])
+    for pressed in [10, 11, 12] {
+      let note = offGridNotes.first { $0.id == pressed }!
+      let p = CGPoint(x: geometry.x(tick: note.start) + 8, y: geometry.y(pitch: note.pitch) + 7)
+      let (dragging, moving) = run([down(p), drag(offset(p, x: 37, y: -28)), drag(p)], roll)
+      XCTAssertEqual(dragging.previewNotes.map(\.start), [100, 960, 2010], "pressing note \(pressed)")
+      let (_, effects) = run([up(p)], roll, from: dragging)
+      XCTAssertEqual(sends(effects), [], "pressing note \(pressed)")
+      assertPaired(moving + effects)
+    }
+    // A group resize back to the origin too (note 10's end edge, the others follow).
+    let p = CGPoint(x: 29, y: point(0, 60).y)
+    let (_, resize) = run([down(p), drag(offset(p, x: 11)), drag(p), up(p)], roll)
+    XCTAssertEqual(sends(resize), [])
+  }
+
+  func testAnOffGridNoteBackAtItsXOnAnotherRowChangesOnlyItsPitch() {
+    let p = CGPoint(x: 17.5, y: 945)
+    let back = CGPoint(x: 17.5, y: 945 - 28)   // two rows up
+    let roll = context(offGridNotes, selected: [10])
+    let (_, effects) = run([down(p), drag(CGPoint(x: 65.5, y: 875)), drag(back), up(back)], roll)
+    XCTAssertEqual(sends(effects), [.updateNotes(trackId: 7, edits: [RollNoteEdit(id: 10, pitch: 62)], baseRevision: 5)],
+                   "a pitch-only edit: no start")
+    let (_, copy) = run([down(p, option: true), drag(back), up(back)], roll)
+    XCTAssertEqual(sends(copy), [.insertNotes(trackId: 7, notes: [
+      RollNoteSpec(pitch: 62, start: 100, length: 500, velocity: 100),
+    ], baseRevision: 5)], "the copy keeps the origin's start")
+  }
+
   func testAnUpPastTheThresholdWithNoDragEventCommitsTheMove() {
     let p = point(1200, 64)
     XCTAssertEqual(run([down(p), up(offset(p, x: 24))], context()).effects, [

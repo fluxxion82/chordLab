@@ -276,7 +276,8 @@ struct RollEditState: Equatable {
 ///   makes the delta jump nor starts a drag by itself.
 /// - **Move / duplicate:** pitch delta = the row under the pointer minus the row under the down; time delta from the
 ///   anchor (the pressed note): its new start = `grid.snapNearest(start + Δx in ticks)` (bar-relative), the delta
-///   the difference, through the group clamp (`RollGroupMath.move`). When the clamp's upper bound bites (a start
+///   the difference (none at all while the pointer is at the down's x: a zero raw displacement never snaps, so an
+///   off-grid note dragged back to its origin stays put), through the group clamp (`RollGroupMath.move`). When the clamp's upper bound bites (a start
 ///   would reach the progression's end, or an end `kMaxNoteTick`) and the grid is not Off, the anchor goes to the
 ///   last grid point the clamp allows (`grid.snapDown(anchor.start + clamped)`), unless that point is behind the
 ///   anchor (an off-grid anchor in its last cell): then the raw clamp (the last tick before the end), so a drag
@@ -284,7 +285,7 @@ struct RollEditState: Equatable {
 ///   the chord at its new start (`PlaySpans`) once it actually moves (the row or the clamped tick delta is not 0;
 ///   decision: a purely horizontal move of an out-of-set note snaps it too, a drag back to its origin does not);
 ///   a group moves by exact rows; then the clamp again for the pitch.
-/// - **Resize:** the anchor's dragged edge snaps to the nearest grid point; the shared delta through
+/// - **Resize:** the anchor's dragged edge snaps to the nearest grid point (not at a zero raw displacement); the shared delta through
 ///   `RollGroupMath.resize` (shortest ≥ `minNoteTicks`, start ≥ 0, starts before the end, end ≤ `kMaxNoteTick`).
 /// - **Velocity:** 1 pt up = one step louder; the shared delta through `RollGroupMath.velocity` (1...127).
 /// - **Up after a drag** commits: the preview is dropped and EXACTLY ONE command is sent, carrying `baseRevision` =
@@ -483,8 +484,11 @@ enum RollEditLogic {
     let limits = context.limits
     let origin = press.origin(in: context.geometry)
     let dxTicks = ticks(point.x - origin.x, geometry: context.geometry)
-    func snapNearest(_ tick: Int) -> Int {
-      context.grid.snapNearest(tick, barTicks: timing.barTicks, ticksPerBeat: timing.ticksPerBeat)
+    /// The delta that puts the anchor edge at `tick` on the grid after the pointer travelled `dxTicks`; a zero
+    /// travel is no time change at all, so a drag back to where it began leaves an off-grid note where it is (D15).
+    func snappedDelta(from tick: Int) -> Int {
+      guard dxTicks != 0 else { return 0 }
+      return context.grid.snapNearest(tick + dxTicks, barTicks: timing.barTicks, ticksPerBeat: timing.ticksPerBeat) - tick
     }
     switch kind {
     case .rubberBand:
@@ -497,7 +501,7 @@ enum RollEditLogic {
     case .move, .duplicate:
       guard let anchor = press.anchor else { break }
       var dPitch = context.geometry.pitch(atY: point.y) - context.geometry.pitch(atY: origin.y)
-      let dTick = moveTicks(press.group, anchor: anchor, wanted: snapNearest(anchor.start + dxTicks) - anchor.start,
+      let dTick = moveTicks(press.group, anchor: anchor, wanted: snappedDelta(from: anchor.start),
                             context: context)
       if press.group.count == 1, context.snap != .off, dPitch != 0 || dTick != 0 {
         let guide = PlaySpans.event(atTick: anchor.start + dTick, in: context.events, ticksPerBeat: timing.ticksPerBeat)?.guide
@@ -514,12 +518,12 @@ enum RollEditLogic {
       }
     case .resizeStart:
       guard let anchor = press.anchor else { break }
-      drag.dTick = RollGroupMath.resize(press.group, edge: .start, dTick: snapNearest(anchor.start + dxTicks) - anchor.start,
+      drag.dTick = RollGroupMath.resize(press.group, edge: .start, dTick: snappedDelta(from: anchor.start),
                                         limits: limits)
       drag.preview = RollGroupMath.applying(press.group, dStart: drag.dTick, dLength: -drag.dTick)
     case .resizeEnd:
       guard let anchor = press.anchor else { break }
-      drag.dTick = RollGroupMath.resize(press.group, edge: .end, dTick: snapNearest(anchor.end + dxTicks) - anchor.end,
+      drag.dTick = RollGroupMath.resize(press.group, edge: .end, dTick: snappedDelta(from: anchor.end),
                                         limits: limits)
       drag.preview = RollGroupMath.applying(press.group, dLength: drag.dTick)
     }
