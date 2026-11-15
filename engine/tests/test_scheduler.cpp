@@ -3,7 +3,9 @@
 #include "chordlab/chord.h"
 #include "chordlab/compiler.h"
 #include "chordlab/document.h"
+#include "chordlab/publication.h"
 #include "chordlab/scheduler.h"
+#include "chordlab/tracks.h"
 #include "chordlab/triple_buffer.h"
 
 #include <algorithm>
@@ -12,6 +14,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <memory>
+#include <optional>
 #include <ostream>
 #include <random>
 #include <sstream>
@@ -2713,17 +2717,606 @@ TEST_CASE("scheduler thru: dropThru leaves previews and the progression alone") 
     CHECK(host.scheduler.sounding(67));
 }
 
+// --- Capacity at the track caps: adversarial blocks (tracks design D10, Task 8) ----------------------------
+
+namespace {
+
+/// The plug-in's output capacity (ChordLab.h: kMidiOutCapacity), which must not rise (the VST3 output queue would
+/// reallocate on the audio thread), and the supported envelope's worst block.
+constexpr std::size_t kOutCapacity = 512;
+constexpr double kEnvRate = 44100.0;
+constexpr double kEnvTempo = 300.0;
+constexpr int kEnvFrames = 4096;
+constexpr double kEnvSamplesPerBeat = kEnvRate * 60.0 / kEnvTempo;  // 8820
+static_assert(kEnvFrames / kEnvSamplesPerBeat <= 0.47, "the envelope's block spans at most 0.47 beat");
+
+/// The derivation's terms (the capacity test's comment), from the constants they rest on.
+constexpr int kBoundSounding = 128;                                    // S0: one physical note per pitch
+constexpr int kBoundPreviewOns = static_cast<int>(Scheduler::kMaxPreviews) * 8;  // eight previews of eight
+constexpr int kBoundThruOns = static_cast<int>(Scheduler::kMaxThruPerBlock);
+constexpr int kBoundChordVoices = 5;                                   // the dictionary's largest type
+constexpr int kBoundChordPitches = 2 * kBoundChordVoices;              // Cs: an arpeggio over two octaves
+constexpr int kBoundChordOns = kMaxFeelEventsPerBeat / 2 + kBoundChordPitches;  // chase + timeline, chord lane
+constexpr int kBoundTrackOns = kMaxTrackPolyphony + 2 * kMaxTrackOnsetsPerBeat;  // chase + timeline, tracks
+constexpr int kPhysicalBound = kBoundSounding + kBoundPreviewOns + 2 * kBoundThruOns + 2 * kBoundChordOns +
+                               2 * kBoundTrackOns;
+static_assert(kPhysicalBound <= static_cast<int>(kOutCapacity),
+              "the track caps must keep the derived worst block inside the plug-in's output capacity");
+constexpr int kScratchBound = (kBoundChordPitches + kMaxTrackPolyphony) + kBoundThruOns +
+                              2 * (kMaxFeelEventsPerBeat + 2 * kMaxTrackOnsetsPerBeat) + kBoundChordPitches +
+                              kMaxTrackPolyphony;
+static_assert(kScratchBound <=
+                  static_cast<int>(Scheduler::kMaxEventsPerBlock - Scheduler::kReservedReleaseEvents),
+              "a block inside the envelope must never carry timeline events over");
+
+std::int64_t envSample(double beat, double anchor) {
+    return static_cast<std::int64_t>(std::floor((beat - anchor) * kEnvSamplesPerBeat + 0.5));
+}
+
+/// The expected output of one block, written from scheduler.h's contract rather than from scheduler.cpp: one
+/// physical note per pitch shared by three owners; the first owner's attack sounds, the progression or a thru note
+/// attacking a sounding pitch retriggers (off, on), a preview joining one is silent; the last owner's release
+/// sounds the off; owed offs are paid first. Order: owed offs, preview commands in arrival order, then by sample:
+/// the discontinuity's releases (progression, then thru), the chase by pitch, the thru notes in arrival order, the
+/// timeline in playback order.
+struct Oracle {
+    std::array<std::uint8_t, 128> owners{};
+    std::array<bool, 128> owed{};
+    std::vector<std::pair<int, std::vector<int>>> previews;  // active previews: id, held pitches
+    std::vector<Ev> out;
+
+    void attack(std::uint8_t owner, int offset, int pitch, int velocity) {
+        std::uint8_t& o = owners[static_cast<std::size_t>(pitch)];
+        if (o == 0) {
+            if (owed[static_cast<std::size_t>(pitch)]) {
+                out.push_back(off(offset, pitch));
+                owed[static_cast<std::size_t>(pitch)] = false;
+            }
+            out.push_back(on(offset, pitch, velocity));
+        } else if (owner != kOwnerPreview) {
+            out.push_back(off(offset, pitch));
+            out.push_back(on(offset, pitch, velocity));
+        }
+        o = static_cast<std::uint8_t>(o | owner);
+    }
+
+    void release(std::uint8_t owner, int offset, int pitch) {
+        std::uint8_t& o = owners[static_cast<std::size_t>(pitch)];
+        if ((o & owner) == 0) return;
+        o = static_cast<std::uint8_t>(o & ~owner);
+        if (o == 0) out.push_back(off(offset, pitch));
+    }
+
+    bool previewHolds(int pitch) const {
+        for (const auto& p : previews) {
+            if (std::find(p.second.begin(), p.second.end(), pitch) != p.second.end()) return true;
+        }
+        return false;
+    }
+
+    void stopPreview(int id) {
+        for (auto it = previews.begin(); it != previews.end();) {
+            if (it->first != id) {
+                ++it;
+                continue;
+            }
+            const std::vector<int> held = it->second;
+            it = previews.erase(it);
+            for (int pitch : held) {
+                if (!previewHolds(pitch)) release(kOwnerPreview, 0, pitch);
+            }
+        }
+    }
+
+    void command(const PreviewCmd& cmd) {
+        if (cmd.kind == PreviewCmd::Extend) return;
+        stopPreview(cmd.id);
+        if (cmd.kind != PreviewCmd::Start) return;
+        std::vector<int> held;
+        for (int i = 0; i < cmd.count; ++i) {
+            const int pitch = cmd.pitches[i];
+            if (pitch >= 128 || std::find(held.begin(), held.end(), pitch) != held.end()) continue;
+            attack(kOwnerPreview, 0, pitch, std::clamp(cmd.velocity, 1, 127));
+            held.push_back(pitch);
+        }
+        if (!held.empty()) previews.emplace_back(cmd.id, held);
+    }
+};
+
+/// What one block does, as the oracle needs it.
+struct BlockPlan {
+    Snapshot snapshot;
+    double anchor;
+    std::int64_t blockSample;
+    bool playing;
+    bool flush;
+    bool thruReleaseAll;
+    std::vector<PreviewCmd> batch;
+    std::vector<ThruEvent> thru;
+};
+
+std::size_t endIndexOf(const Snapshot& s) {
+    for (std::size_t i = 0; i < s.count; ++i) {
+        if (s.events[i].beat >= s.endBeat) return i;
+    }
+    return s.count;
+}
+
+/// Occurrence (k, i) of the looped timeline: wrap k's start plus the event's beat, the final offs on the next
+/// wrap's start (scheduler.h: the final offs of one wrap precede the first attacks of the next).
+double occurrenceBeat(const Snapshot& s, std::size_t endIndex, std::int64_t k, std::size_t i) {
+    if (i >= endIndex) return static_cast<double>(k + 1) * s.endBeat;
+    return static_cast<double>(k) * s.endBeat + s.events[i].beat;
+}
+
+std::vector<Ev> expectedBlock(Oracle oracle, const BlockPlan& plan) {
+    enum Op { ReleaseAll, ThruReleaseAll, Attack, ThruOn, ThruOff, Release };
+    struct Item {
+        std::int64_t sample;
+        int phase;
+        Op op;
+        int pitch;
+        int velocity;
+    };
+    oracle.out.clear();
+    for (int pitch = 0; pitch < 128; ++pitch) {
+        if (oracle.owed[static_cast<std::size_t>(pitch)]) {
+            oracle.out.push_back(off(0, pitch));
+            oracle.owed[static_cast<std::size_t>(pitch)] = false;
+        }
+    }
+    for (const PreviewCmd& cmd : plan.batch) oracle.command(cmd);
+
+    std::vector<Item> items;
+    const std::int64_t lo = plan.blockSample;
+    const std::int64_t hi = plan.blockSample + kEnvFrames;
+    if (plan.flush) items.push_back(Item{lo, 0, ReleaseAll, 0, 0});
+    if (plan.thruReleaseAll) items.push_back(Item{lo, 0, ThruReleaseAll, 0, 0});
+    const Snapshot& s = plan.snapshot;
+    const std::size_t endIndex = endIndexOf(s);
+    const double position = plan.anchor + static_cast<double>(lo) / kEnvSamplesPerBeat;
+    if (plan.playing && plan.flush && s.count > 0 && position >= 0.0 && (s.loop || position < s.endBeat)) {
+        // The chase: every note, paired per pitch in the wrap holding the position, whose on lies before the
+        // block's first sample and whose off lies after it.
+        const std::int64_t k = s.loop ? static_cast<std::int64_t>(std::floor(position / s.endBeat)) : 0;
+        std::array<int, 128> open;
+        open.fill(-1);
+        std::array<int, 128> chased{};
+        for (std::size_t i = 0; i < s.count; ++i) {
+            const NoteEvent& e = s.events[i];
+            if (e.on) {
+                open[static_cast<std::size_t>(e.pitch)] = static_cast<int>(i);
+                continue;
+            }
+            const int o = open[static_cast<std::size_t>(e.pitch)];
+            REQUIRE(o >= 0);
+            open[static_cast<std::size_t>(e.pitch)] = -1;
+            if (envSample(occurrenceBeat(s, endIndex, k, static_cast<std::size_t>(o)), plan.anchor) < lo &&
+                envSample(occurrenceBeat(s, endIndex, k, i), plan.anchor) > lo) {
+                chased[static_cast<std::size_t>(e.pitch)] = s.events[static_cast<std::size_t>(o)].velocity;
+            }
+        }
+        for (int pitch = 0; pitch < 128; ++pitch) {
+            if (chased[static_cast<std::size_t>(pitch)] != 0) {
+                items.push_back(Item{lo, 1, Attack, pitch, chased[static_cast<std::size_t>(pitch)]});
+            }
+        }
+    }
+    for (const ThruEvent& t : plan.thru) {
+        const std::int64_t offset = std::clamp<std::int64_t>(t.sampleOffset, 0, kEnvFrames - 1);
+        items.push_back(Item{lo + offset, 2, t.on ? ThruOn : ThruOff, t.pitch, t.velocity});
+    }
+    if (plan.playing && s.count > 0) {
+        const double first = plan.anchor + static_cast<double>(lo) / kEnvSamplesPerBeat;
+        const double last = plan.anchor + static_cast<double>(hi) / kEnvSamplesPerBeat;
+        const std::int64_t wrapOfFirst = static_cast<std::int64_t>(std::floor(first / s.endBeat));
+        const std::int64_t k0 = s.loop ? std::max<std::int64_t>(0, wrapOfFirst - 1) : 0;
+        const std::int64_t k1 = s.loop ? static_cast<std::int64_t>(std::floor(last / s.endBeat)) + 1 : 0;
+        for (std::int64_t k = k0; k <= k1; ++k) {
+            for (std::size_t i = 0; i < s.count; ++i) {
+                const std::int64_t sample = envSample(occurrenceBeat(s, endIndex, k, i), plan.anchor);
+                const NoteEvent& e = s.events[i];
+                if (sample < lo || sample >= hi || (!s.loop && e.on && i >= endIndex)) continue;
+                items.push_back(Item{sample, 3, e.on ? Attack : Release, e.pitch, e.velocity});
+            }
+        }
+    }
+    std::stable_sort(items.begin(), items.end(), [](const Item& a, const Item& b) {
+        return a.sample != b.sample ? a.sample < b.sample : a.phase < b.phase;
+    });
+    for (const Item& item : items) {
+        const int offset = static_cast<int>(std::clamp<std::int64_t>(item.sample - lo, 0, kEnvFrames - 1));
+        switch (item.op) {
+            case ReleaseAll:
+                for (int p = 0; p < 128; ++p) oracle.release(kOwnerProgression, offset, p);
+                break;
+            case ThruReleaseAll:
+                for (int p = 0; p < 128; ++p) oracle.release(kOwnerThru, offset, p);
+                break;
+            case Attack:
+                oracle.attack(kOwnerProgression, offset, item.pitch, item.velocity);
+                break;
+            case Release:
+                oracle.release(kOwnerProgression, offset, item.pitch);
+                break;
+            case ThruOn:
+                oracle.attack(kOwnerThru, offset, item.pitch, item.velocity);
+                break;
+            case ThruOff:
+                oracle.release(kOwnerThru, offset, item.pitch);
+                break;
+        }
+    }
+    return oracle.out;
+}
+
+/// A document published the plug-in's way (`fillSlot` into a heap `SnapshotSlot`, adopted under the publication's
+/// generation; two slots, so the array an `adopt` replaces stays untouched until then) and played in the envelope's
+/// worst blocks (300 bpm, 44.1 kHz, 4096 frames) into the plug-in's output capacity. Every block must be complete,
+/// and the physical stream must stay consistent per pitch (no double on, no orphan off) and agree with
+/// `Scheduler::sounding`.
+struct Rig {
+    Host host{kEnvRate};
+    std::array<std::unique_ptr<SnapshotSlot>, 2> slots{std::make_unique<SnapshotSlot>(),
+                                                       std::make_unique<SnapshotSlot>()};
+    int front = 1;
+    Publication last;
+    Snapshot snapshot{nullptr, 0, 0.0, true, 0};
+    bool playing = false;
+    double anchor = 0.0;
+    std::int64_t blockSample = 0;
+    bool flushPending = false;
+    bool thruReleasePending = false;
+    std::vector<PreviewCmd> batch;
+    std::vector<ThruEvent> thru;
+    std::vector<std::pair<int, std::vector<int>>> previews;  // as the oracle models them
+    std::array<bool, 128> sounding{};                        // what the output so far implies
+    std::size_t worst = 0;
+
+    void publish(const Document& doc) {
+        const int back = 1 - front;
+        REQUIRE(fillSlot(doc, *slots[static_cast<std::size_t>(back)], last));
+        const SnapshotSlot& slot = *slots[static_cast<std::size_t>(back)];
+        snapshot = Snapshot{slot.events.data(), slot.count, slot.endBeat, slot.loop, last.generation};
+        REQUIRE(slot.count > 0);
+        host.adopt(snapshot);
+        front = back;
+        flushPending = true;
+    }
+
+    void startPreview(int id, const std::vector<int>& pitches) {
+        const PreviewCmd cmd = previewStart(id, pitches);
+        REQUIRE(host.scheduler.pushPreview(cmd));
+        batch.push_back(cmd);
+    }
+
+    void stopPreview(int id) {
+        const PreviewCmd cmd = previewStop(id);
+        REQUIRE(host.scheduler.pushPreview(cmd));
+        batch.push_back(cmd);
+    }
+
+    void thruNote(bool isOn, int pitch, int offset, int velocity = 90) {
+        REQUIRE(host.pushThru(isOn, pitch, velocity, offset));
+        thru.push_back(ThruEvent{isOn, static_cast<std::uint8_t>(pitch), static_cast<std::uint8_t>(velocity), offset});
+    }
+
+    void releaseThru() {
+        host.scheduler.releaseThru();
+        thruReleasePending = true;
+    }
+
+    void panic() {
+        host.scheduler.panic();
+        previews.clear();
+        thru.clear();
+    }
+
+    double clockPpq() const {
+        return anchor + static_cast<double>(blockSample) / kEnvSamplesPerBeat;
+    }
+
+    int soundingCount() const {
+        return static_cast<int>(std::count(sounding.begin(), sounding.end(), true));
+    }
+
+    /// One block: at `ppq` while playing (a seek when it differs from the clock, a start after a stop), or a
+    /// stopped block. With `oracle`, the output must equal `expectedBlock`'s exactly, every event of it written,
+    /// and satisfy the derivation's identity, written = 2 x ons + S0 - E.
+    std::vector<Ev> block(std::optional<double> ppq, bool oracle, std::size_t capacity = kOutCapacity) {
+        const bool play = ppq.has_value();
+        const double at = play ? *ppq : clockPpq();
+        const bool discontinuous = play && (!playing || std::fabs(at - clockPpq()) > Scheduler::kSeekThresholdBeats);
+        BlockPlan plan{snapshot, discontinuous ? at : anchor, discontinuous ? 0 : blockSample, play,
+                       discontinuous || flushPending || (playing && !play), thruReleasePending, batch, thru};
+        std::vector<Ev> expected;
+        if (oracle) {
+            Oracle model;
+            for (int p = 0; p < 128; ++p) {
+                model.owners[static_cast<std::size_t>(p)] = host.owners(p);
+                model.owed[static_cast<std::size_t>(p)] = host.scheduler.sounding(p) && host.owners(p) == 0;
+            }
+            model.previews = previews;
+            expected = expectedBlock(model, plan);
+        }
+        const int before = soundingCount();
+        const std::vector<Ev> events = host.run(at, kEnvFrames, play, kEnvTempo, capacity);
+        if (capacity == kOutCapacity) {
+            CAPTURE(describe(events));
+            REQUIRE(host.lastOk);
+        }
+        int ons = 0;
+        for (std::size_t i = 0; i < events.size(); ++i) {
+            const Ev& e = events[i];
+            ons += e.on ? 1 : 0;
+            const bool retrigger = !e.on && i + 1 < events.size() && events[i + 1].on &&
+                                   events[i + 1].pitch == e.pitch && events[i + 1].offset == e.offset;
+            if (retrigger) {
+                REQUIRE(sounding[static_cast<std::size_t>(e.pitch)]);
+                ++i;
+                ++ons;
+                continue;
+            }
+            REQUIRE(sounding[static_cast<std::size_t>(e.pitch)] != e.on);  // no double on, no orphan off
+            sounding[static_cast<std::size_t>(e.pitch)] = e.on;
+        }
+        for (int p = 0; p < 128; ++p) {
+            REQUIRE(sounding[static_cast<std::size_t>(p)] == host.scheduler.sounding(p));
+        }
+        // The identity the derivation rests on, on every block.
+        CHECK(static_cast<int>(events.size()) == 2 * ons + before - soundingCount());
+        if (oracle) {
+            CAPTURE(describe(events));
+            CAPTURE(describe(expected));
+            CHECK(events == expected);
+            CHECK(host.lastWritten == expected.size());
+            CHECK(host.lastOk);
+        }
+        worst = std::max(worst, host.lastWritten);
+
+        // The preview model follows the commands (an oracle block's model is exact; otherwise replay them).
+        Oracle replay;
+        replay.previews = previews;
+        for (int p = 0; p < 128; ++p) replay.owners[static_cast<std::size_t>(p)] = host.owners(p);
+        for (const PreviewCmd& cmd : batch) replay.command(cmd);
+        previews = replay.previews;
+        batch.clear();
+        thru.clear();
+        flushPending = false;
+        thruReleasePending = false;
+        if (play) {
+            if (discontinuous) {
+                anchor = at;
+                blockSample = 0;
+            }
+            blockSample += kEnvFrames;
+        } else {
+            blockSample = 0;
+        }
+        playing = play;
+        return events;
+    }
+
+    /// Ends everything and checks that no note hangs: every preview stopped, every thru note released, the
+    /// transport stopped.
+    void silence() {
+        for (const auto& p : std::vector<std::pair<int, std::vector<int>>>(previews)) stopPreview(p.first);
+        std::size_t queued = 0;
+        for (int pitch = 0; pitch < 128; ++pitch) {
+            if ((host.owners(pitch) & kOwnerThru) == 0) continue;
+            if (queued == Scheduler::kMaxThruPerBlock) {
+                block(std::nullopt, false);
+                queued = 0;
+            }
+            thruNote(false, pitch, 0);
+            ++queued;
+        }
+        block(std::nullopt, false);
+        block(std::nullopt, false);
+        for (int p = 0; p < 128; ++p) {
+            CHECK_FALSE(host.scheduler.sounding(p));
+            CHECK_FALSE(sounding[static_cast<std::size_t>(p)]);
+        }
+    }
+};
+
+/// The pitches of `doc`'s chord lane sounding anywhere in it (compile, the chords alone).
+std::vector<int> chordPitches(const Document& doc) {
+    std::vector<int> pitches;
+    for (const NoteEvent& e : compile(doc).events) {
+        if (std::find(pitches.begin(), pitches.end(), e.pitch) == pitches.end()) pitches.push_back(e.pitch);
+    }
+    std::sort(pitches.begin(), pitches.end());
+    return pitches;
+}
+
+/// Pitches handed out in ascending order, each at most once, skipping the ones excluded.
+struct PitchPool {
+    std::array<bool, 128> used{};
+    explicit PitchPool(const std::vector<int>& excluded = {}) {
+        for (int p : excluded) used[static_cast<std::size_t>(p)] = true;
+    }
+    std::vector<int> take(int n) {
+        std::vector<int> pitches;
+        for (int p = 0; p < 128 && static_cast<int>(pitches.size()) < n; ++p) {
+            if (used[static_cast<std::size_t>(p)]) continue;
+            used[static_cast<std::size_t>(p)] = true;
+            pitches.push_back(p);
+        }
+        REQUIRE(static_cast<int>(pitches.size()) == n);
+        return pitches;
+    }
+    std::vector<int> takeAll() {
+        return take(static_cast<int>(std::count(used.begin(), used.end(), false)));
+    }
+};
+
+/// The densest chord lane (the throughput test's fixture): eight-note chords in 7/8 played `Subdivided`, 96 events
+/// in some beat (the feel's cap), endBeat 16.125.
+DocumentStore denseChords() {
+    DocumentStore store;
+    store.appendChord(Chord{0, &kCluster8}, 0.625, 100);
+    for (int i = 0; i < 31; ++i) store.appendChord(Chord{0, &kCluster8}, 0.5, 100);
+    store.setMeter(Meter{7, 8});
+    store.setFeel(Feel{Rhythm::Subdivided});
+    const Performance performance = performDocument(store.doc());
+    REQUIRE_FALSE(performance.feelLimited);
+    REQUIRE(densestBeat(performance.events, performance.endTick()) == kMaxFeelEventsPerBeat);
+    return store;
+}
+
+/// Inserts `specs` into a new track of `store`, all of them (the playback limits included).
+void addNotes(DocumentStore& store, const std::vector<NoteSpec>& specs) {
+    const int track = store.addTrack(TrackRole::Other);
+    REQUIRE(track != kNoTrackId);
+    std::string refusal;
+    REQUIRE_MESSAGE(store.insertNotes(track, specs, &refusal).size() == specs.size(), refusal);
+}
+
+/// Eight groups of eight pitches for the previews.
+std::vector<std::vector<int>> previewGroups(const std::vector<int>& pitches) {
+    REQUIRE(pitches.size() == 64);
+    std::vector<std::vector<int>> groups(8);
+    for (std::size_t i = 0; i < 64; ++i) groups[i / 8].push_back(pitches[i]);
+    return groups;
+}
+
+/// The assumed workload in one block: the eight sounding previews (ids 1..8) replaced by eight new ones (9..16) on
+/// the same pitches, and kMaxThruPerBlock incoming notes on `thruPitches` (cycled), spread over the block.
+void workload(Rig& rig, const std::vector<std::vector<int>>& groups, const std::vector<int>& thruPitches) {
+    for (int id = 1; id <= 8; ++id) rig.stopPreview(id);
+    for (int id = 9; id <= 16; ++id) rig.startPreview(id, groups[static_cast<std::size_t>(id - 9)]);
+    for (std::size_t i = 0; i < Scheduler::kMaxThruPerBlock; ++i) {
+        rig.thruNote(true, thruPitches[i % thruPitches.size()], static_cast<int>(i) * 61);
+    }
+}
+
+std::vector<int> joined(const std::vector<std::vector<int>>& parts) {
+    std::vector<int> all;
+    for (const auto& part : parts) all.insert(all.end(), part.begin(), part.end());
+    return all;
+}
+
+/// The written counts of the adversarial blocks, for the summary.
+std::vector<std::pair<std::string, std::size_t>>& capacityLog() {
+    static std::vector<std::pair<std::string, std::size_t>> log;
+    return log;
+}
+
+void logBlock(const std::string& name, std::size_t written) {
+    capacityLog().emplace_back(name, written);
+    MESSAGE("capacity block " << name << ": " << written << " events written (capacity " << kOutCapacity
+                              << ", derived bound " << kPhysicalBound << ", caps " << kMaxTrackPolyphony << "/"
+                              << kMaxTrackOnsetsPerBeat << ")");
+    CHECK(written <= static_cast<std::size_t>(kPhysicalBound));
+}
+
+/// Rows of track notes 30 ticks (kMinTrackNoteTicks) apart over `slots` voices: note j in row j / slots.
+std::vector<NoteSpec> rows(const std::vector<int>& pitches, int slots, std::int64_t start, std::int64_t length,
+                           std::int64_t lastRowLength = 0) {
+    std::vector<NoteSpec> specs;
+    const int count = static_cast<int>(pitches.size());
+    const int lastRow = (count - 1) / slots;
+    for (int j = 0; j < count; ++j) {
+        const int row = j / slots;
+        specs.push_back(NoteSpec{pitches[static_cast<std::size_t>(j)], start + kMinTrackNoteTicks * row,
+                                 row == lastRow && lastRowLength > 0 ? lastRowLength : length, 100});
+    }
+    return specs;
+}
+
+}  // namespace
+
+/// The joint physical-message bound of one `process` block (tracks design D10, Task 8): what the plug-in's output
+/// capacity (ChordLab.h kMidiOutCapacity, 512, which must not rise: the VST3 output queue would reallocate on the
+/// audio thread) must hold so that every block inside the envelope is complete. The constants above recompute it
+/// from the caps (`kPhysicalBound`, a static_assert against 512), and the adversarial blocks (a) to (f) below build
+/// the cases from real `compilePlayback` output and check every event against an independent model.
+///
+/// Envelope. At most 300 bpm, at least 44.1 kHz, at most 4096 frames: at least 8820 samples a beat, so a block spans
+/// at most 0.4644 beat, under one. What the block plays is `compilePlayback`'s snapshot:
+/// - Chord lane (`compile`): at most kMaxFeelEventsPerBeat (96) events in any 960-tick window of the looped timeline
+///   (feel D11; `densestBeat` counts across the wrap; the block path, the over-budget fallback included, holds at
+///   most four boundaries of 5 offs and 5 ons a beat), so at most 96 in one block however many wraps it crosses.
+///   At most Cs = 10 chord-lane pitches sound at once: every performed note lies inside its own chord, a chord
+///   plays its arpeggio note list, at most 5 voices (the dictionary's largest type, pinned below) over two octaves,
+///   and the notes of one pitch are disjoint. (The tests' eight-voice cluster, played in one octave, stays inside.)
+/// - Tracks: `validateTracks` holds the active notes of all tracks, muted ones included, to N = kMaxTrackPolyphony
+///   sounding and M = kMaxTrackOnsetsPerBeat starting in any 960-tick window; clipping at endBeat and the merge only
+///   shorten, merge or drop notes, so the snapshot keeps both. The window does not wrap, so one block sees at most
+///   2M track starts: M before the loop end and M after its start, or, on a loop shorter than the block (0.25 beat
+///   at the least, which one window holds whole), the loop's M starts at most twice.
+/// - The merge never creates an attack (a merged on sits at a chord-lane on or a track start) and a pitch sounding
+///   after it sounds in the chord lane or in a track.
+/// - Workload, assumed: at most kMaxPreviews (8) previews of 8 pitches, none started and stopped in the same block
+///   (a preview acquired in a block holds its pitches to the block's end); at most kMaxThruPerBlock (64) incoming
+///   notes a block (enforced: the rest waits for the next block, which reports it).
+///
+/// The identity. Physical notes are per pitch: an on only from silence, an off only from sounding, a retrigger an
+/// off and an on of a sounding pitch (`Writer`, `attack`, `physicalOff`, `payOwed`; an owed pitch has no owner).
+/// So per pitch, offs minus ons is sounding-at-start minus sounding-at-end, and for the block
+///     written = 2 x ONS + S0 - E,
+/// ONS the physical note-ons, S0 and E the pitches sounding at the block's start and end, S0 <= 128. Releases are
+/// therefore bounded by sounding pitches, not owners: a pitch with three owners is released once, and every
+/// release beyond S0 - E pays for an on already counted twice. Every block below checks the identity.
+///
+/// ONS, phase by phase in the order `process` runs them:
+/// 1. Owed releases (`payOwed`, first): no ons; they are among S0.
+/// 2. Preview commands: at most 8 x 8 = 64 ons (a preview joining a sounding pitch is silent). Each pitch a preview
+///    acquires sounds at the block's end, so E >= those ons: previews add at most 2 x 64 - 64 = 64 beyond S0 (a stop
+///    and a start on the same 64 pitches: 64 offs inside S0 - E, 64 ons).
+/// 3. The discontinuity (a seek, a start, a stop, `reset`, an `adopt` of a new generation): the progression's
+///    release-all; the thru release-all after `reset`, `releaseThru`, `dropThru`, a thru on -> off edge or an
+///    overflow. No ons; their offs are among S0 - E.
+/// 4. The chase: one on per pitch the progression sounds at the block's first sample, c0 + t0, with c0 <= Cs
+///    chord-lane pitches and t0 <= N track notes.
+/// 5. Thru: at most 64 events, so at most 64 ons (each a retrigger at worst).
+/// 6. The timeline, chords and tracks after `compilePlayback`, across every wrap the block crosses (a wrap's final
+///    offs are releases before the next wrap's attacks): x chord-lane ons and y <= 2M track starts; a retrigger is
+///    one of these ons. Per pitch the chord lane alternates, so x minus its offs in the block is c_end - c0 (its
+///    pitches sounding at the end and at the start) while x plus those offs is at most 96: c0 + x <= 48 + (c0 +
+///    c_end) / 2 <= 48 + Cs = 58. With the chase, the tracks give t0 + y <= N + 2M.
+/// 7. Preview expiries (timeline phase): releases only.
+/// Hence
+///     written <= [S0 + 2 x previewOns - E] + 2 x thruOns + 2 x (c0 + x) + 2 x (t0 + y)
+///              <= (128 + 64) + 2 x 64 + 2 x 58 + 2 x (N + 2M) = 436 + 2N + 4M.
+/// The provisional caps, N = 8 and M = 24, give 548 > 512, so they could not stand. Polyphony first: N = 6 leaves
+/// M <= 16, and N = 6, M = 16 give exactly 128 + 64 + 128 + 116 + 76 = 512 (S0, previews beyond it, thru, chord
+/// lane, tracks). (N = 8 would need M <= 15; 8 and 16 give 516.)
+///
+/// Where the worst sits. It needs a flush (the chase) that also releases every thru note (a `reset`, a bypass end
+/// or a raw-input overflow at the same block as a seek or an adopt) with all 128 pitches sounding, the workload, and
+/// a chord lane and tracks at their per-block maxima, every on a retrigger. Without a thru release-all a
+/// start-sounding thru note ends only through a thru note-off (one of the 64 events), so S0 - E holds only the
+/// previews' pitches, thru note-offs and the progression's own start pitches (at most Cs + N): 128 (previews) +
+/// 128 (2 x thru ons + thru offs) + 2 x (58 + N + 2M) + (10 + N) = 382 + 3N + 4M (464). A continuous block has no
+/// chase: x minus the chord lane's offs is c_end - c_start, so x <= 48 + Cs / 2 = 53, and the block writes at most
+/// (128 + 64) + 128 + 2 x (53 + 2M) = 426 + 4M (490). An `adopt` is a flush in a continuous block, a seek's equal.
+/// Recovery: owed pitches are among S0 and paid first, so a block after a panic or after an overloaded block obeys
+/// the same bound; inside the envelope no block exceeds the capacity, so only a panic owes anything.
+///
+/// Scratch. The block's logical events fit `Scheduler::kMaxEventsPerBlock` without carrying any timeline over: the
+/// chase at most Cs + N, thru 64, the timeline at most 2 x (96 + 2M) + Cs + N (merged ons, and per pitch at most as
+/// many offs as ons plus the pitches sounding at the start): 16 + 64 + 272 = 352 <= 480 (kMaxEventsPerBlock -
+/// kReservedReleaseEvents, `kScratchBound`); the mandatory ones (two release-alls, two expiry candidates per
+/// preview) fit the reserved 32. So inside the envelope no release is owed, no attack dropped and nothing carried
+/// over: `process` returns true.
+///
+/// Measured at 6 / 16 (each block's MESSAGE; "the measured worst block" names the largest): (a) seek to 127.9 with
+/// all 128 pitches sounding 380, with a thru release-all 436 (the worst); (b) wrap block 374; (c) two wraps of a
+/// 0.25-beat loop 352; (d) seek onto a dense chord boundary 326; (e) adopt during sustained notes 332; (f) after
+/// owed releases 360, after a panic 368. (At 8 / 24 the same blocks wrote 412, 468, 408, 384, 344, 336, 360, 368:
+/// all complete, but the bound, not the blocks built, decides.) The chord lanes here reach about 16 ons a block;
+/// the bound allows 58, which is where the measured worst and the bound part.
+///
+/// The test below is the burst modelled before tracks (no track notes): the densest progression with eight previews
+/// already sounding, then a seek block that replaces them and retriggers 64 pitches by thru.
 TEST_CASE("scheduler: a worst-case block fits the plug-in's output capacity") {
-    // The modelled burst, not every possible block. The densest progression (the throughput test's fixture
-    // above: eight-note chords at 96 events per beat, 300 bpm, 44.1 kHz, 4096-frame blocks) with eight
-    // previews of eight pitches each already sounding (0..55 and 68..75, apart from the progression's
-    // 60..67). Then one block that is also a seek stops the eight previews, starts eight new ones on the same
-    // pitches (one preview replacement) and carries the full per-block thru allowance (kMaxThruPerBlock), 64 attacks on those pitches, each a
-    // retrigger (off and on): 64 + 64 + 128 events on top of the progression's release-all, chase and
-    // timeline. That burst peaks at 320, more than the old 256; ChordLab.h's kMidiOutCapacity (512) covers
-    // it and every block here is complete. A pathological run of queued preview commands (the queue holds
-    // 64, each able to replace sounding previews in the same block) is not modelled: it is bounded by the
-    // writer's incomplete-block path (attacks dropped, the block reported), not by this number.
+    // The burst modelled before tracks (no track notes), kept as a regression: the densest progression (the
+    // throughput test's fixture: eight-note chords at 96 events per beat) with eight previews of eight pitches
+    // already sounding (0..55 and 68..75, apart from the progression's 60..67); then one seek block stops them,
+    // starts eight new ones on the same pitches and carries kMaxThruPerBlock thru attacks on those pitches, each
+    // a retrigger. It peaks at 320, above the old capacity of 256.
     constexpr std::size_t kCapacity = 512;  // ChordLab.h: kMidiOutCapacity
     constexpr double kRate = 44100.0;
     constexpr double kTempo = 300.0;
@@ -2800,4 +3393,314 @@ TEST_CASE("scheduler: a worst-case block fits the plug-in's output capacity") {
         CHECK(maxWritten <= kCapacity);
         CHECK(maxWritten > 256);  // the old capacity could not carry it: why kMidiOutCapacity is 512
     }
+}
+TEST_CASE("scheduler capacity: the dictionary and the feel budget the derivation assumes") {
+    // Cs: at most kBoundChordVoices voices per chord (one note per chord tone), so an arpeggio over two octaves
+    // sounds at most kBoundChordPitches pitches at once.
+    for (const ChordType& type : allChordTypes()) {
+        CAPTURE(type.id);
+        CHECK(static_cast<int>(type.intervals.size()) <= kBoundChordVoices);
+    }
+    CHECK(kMaxFeelEventsPerBeat == 96);
+    CHECK(kPhysicalBound == 436 + 2 * kMaxTrackPolyphony + 4 * kMaxTrackOnsetsPerBeat);
+    MESSAGE("derived physical bound " << kPhysicalBound << " of " << kOutCapacity << " at caps "
+                                      << kMaxTrackPolyphony << "/" << kMaxTrackOnsetsPerBeat << "; scratch bound "
+                                      << kScratchBound);
+}
+
+TEST_CASE("scheduler capacity (a): a seek to 127.9 with 128 pitches sounding, the workload and tracks at the caps") {
+    // 128 beats: sixteen quarter-beat clusters at each end, thirty four-beat clusters (another root) between.
+    // Tracks at both caps around the wrap: s notes sustained through 127.9 into the end (chased, clipped: final
+    // offs), M starts in [127.9, 128) on the other N - s voices, M starts in [0, 0.125). The transport plays in the
+    // middle; eight previews (64 pitches, among them the end's chord and track pitches) and thru notes on every
+    // other pitch make all 128 sound. The seek block then replaces the previews, retriggers 64 pitches by thru,
+    // releases the old chord, chases at 127.9, crosses the wrap and plays the head.
+    constexpr int N = kMaxTrackPolyphony;
+    constexpr int M = kMaxTrackOnsetsPerBeat;
+    constexpr int tailVoices = (M + 3) / 4;  // four 30-tick starts fit the 96-tick tail per voice
+    constexpr int sustained = N - tailVoices;
+    static_assert(sustained >= 1, "a voice is left to sustain through the seek");
+    for (const bool releaseThru : {false, true}) {
+        CAPTURE(releaseThru);
+        DocumentStore store;
+        for (int i = 0; i < 16; ++i) store.appendChord(Chord{0, &kCluster8}, 0.25, 100);
+        for (int i = 0; i < 30; ++i) store.appendChord(Chord{8, &kCluster8}, 4.0, 100);
+        for (int i = 0; i < 16; ++i) store.appendChord(Chord{0, &kCluster8}, 0.25, 100);
+        DocumentStore endOnly;
+        endOnly.appendChord(Chord{0, &kCluster8}, 0.25, 100);
+        DocumentStore middleOnly;
+        middleOnly.appendChord(Chord{8, &kCluster8}, 4.0, 100);
+        const std::vector<int> end = chordPitches(endOnly.doc());
+        const std::vector<int> middle = chordPitches(middleOnly.doc());
+        const std::vector<int> excluded = joined({end, middle});
+        PitchPool pool(excluded);
+        const std::vector<int> sustainPitches = pool.take(sustained);
+        const std::vector<int> tailPitches = pool.take(M);
+        const std::vector<int> headPitches = pool.take(M);
+        const std::int64_t E = chordBoundaryTicks(store.doc()).back();
+        REQUIRE(E == 128 * 960);
+        std::vector<NoteSpec> specs;
+        for (int p : sustainPitches) specs.push_back(NoteSpec{p, E - 96 - 1920, 1920 + 96 + 200, 100});
+        for (const NoteSpec& n : rows(tailPitches, tailVoices, E - 96, kMinTrackNoteTicks)) specs.push_back(n);
+        for (const NoteSpec& n : rows(headPitches, N, 0, kMinTrackNoteTicks)) specs.push_back(n);
+        addNotes(store, specs);
+        REQUIRE(trackPolyphony(store.doc()) == N);
+        REQUIRE(densestOnsetWindow(store.doc()) == M);
+
+        std::vector<int> previewPitches = end;
+        previewPitches.insert(previewPitches.end(), sustainPitches.begin(), sustainPitches.end());
+        previewPitches.insert(previewPitches.end(), tailPitches.begin(), tailPitches.end());
+        previewPitches.insert(previewPitches.end(), headPitches.begin(), headPitches.end());
+        PitchPool rest(joined({previewPitches, middle}));
+        const std::vector<int> filler = rest.take(64 - static_cast<int>(previewPitches.size()));
+        previewPitches.insert(previewPitches.end(), filler.begin(), filler.end());
+        const std::vector<std::vector<int>> groups = previewGroups(previewPitches);
+        const std::vector<int> thruFill = rest.takeAll();
+
+        Rig rig;
+        rig.publish(store.doc());
+        rig.block(60.0, false);
+        rig.block(rig.clockPpq(), false);
+        for (int id = 1; id <= 8; ++id) rig.startPreview(id, groups[static_cast<std::size_t>(id - 1)]);
+        rig.block(rig.clockPpq(), false);
+        for (std::size_t i = 0; i < thruFill.size(); ++i) rig.thruNote(true, thruFill[i], static_cast<int>(i));
+        rig.block(rig.clockPpq(), false);
+        REQUIRE(rig.soundingCount() == 128);
+
+        workload(rig, groups, previewPitches);
+        if (releaseThru) rig.releaseThru();
+        rig.block(127.9, true);
+        logBlock(releaseThru ? "a: seek to 127.9 + releaseThru" : "a: seek to 127.9", rig.host.lastWritten);
+        for (int b = 0; b < 4; ++b) rig.block(rig.clockPpq(), false);
+        rig.silence();
+    }
+}
+
+TEST_CASE("scheduler capacity (b): a wrap block, the 64-on/80-off construction at the caps") {
+    // Codex's round-2 block (64 ons, 80 offs from 16/32) is 2M track starts and N + 2M track ends in one wrap
+    // block: N notes sounding into the block end 30 ticks in, M starts follow on those voices before the end (the
+    // last row long, clipped: final offs), M start right after the wrap and end inside the block. Over the densest
+    // chord lane, with the workload, in a continuous block 0.2 beat before the end.
+    constexpr int N = kMaxTrackPolyphony;
+    constexpr int M = kMaxTrackOnsetsPerBeat;
+    DocumentStore store = denseChords();
+    const std::vector<int> chords = chordPitches(store.doc());
+    const std::int64_t E = chordBoundaryTicks(store.doc()).back();
+    const std::int64_t blockStart = E - 192;  // 0.2 beat before the wrap
+    PitchPool pool(chords);
+    const std::vector<int> oldPitches = pool.take(N);
+    const std::vector<int> tailPitches = pool.take(M);
+    const std::vector<int> headPitches = pool.take(M);
+    std::vector<NoteSpec> specs;
+    for (int p : oldPitches) specs.push_back(NoteSpec{p, blockStart - 1440, 1440 + 30, 100});
+    for (const NoteSpec& n : rows(tailPitches, N, blockStart + 30, kMinTrackNoteTicks, 400)) specs.push_back(n);
+    for (const NoteSpec& n : rows(headPitches, N, 0, kMinTrackNoteTicks)) specs.push_back(n);
+    addNotes(store, specs);
+    REQUIRE(trackPolyphony(store.doc()) == N);
+    REQUIRE(densestOnsetWindow(store.doc()) == M);
+    // The previews take the free pitches (exactly 64 at 8/24), topped up from the chord's.
+    const int available = 128 - static_cast<int>(chords.size()) - N - 2 * M;
+    std::vector<int> groupPitches = pool.take(std::min(64, available));
+    for (std::size_t i = 0; groupPitches.size() < 64; ++i) {
+        REQUIRE(i < chords.size());
+        groupPitches.push_back(chords[i]);
+    }
+    const std::vector<std::vector<int>> groups = previewGroups(groupPitches);
+
+    Rig rig;
+    rig.publish(store.doc());
+    const double blockBeats = kEnvFrames / kEnvSamplesPerBeat;
+    const double startBeat = static_cast<double>(blockStart) / 960.0 - 2.0 * blockBeats;
+    for (int id = 1; id <= 8; ++id) rig.startPreview(id, groups[static_cast<std::size_t>(id - 1)]);
+    rig.block(startBeat, false);
+    rig.block(rig.clockPpq(), false);
+    REQUIRE(std::fabs(rig.clockPpq() - static_cast<double>(blockStart) / 960.0) < 1e-9);
+    workload(rig, groups, groupPitches);
+    rig.block(rig.clockPpq(), true);
+    logBlock("b: wrap block (2M on, N + 2M off)", rig.host.lastWritten);
+    for (int b = 0; b < 4; ++b) rig.block(rig.clockPpq(), false);
+    rig.silence();
+}
+
+TEST_CASE("scheduler capacity (c): a block across two wraps of a quarter-beat loop") {
+    // One quarter-beat cluster (the shortest loop) with M track starts on N voices inside it, the last row held
+    // past the loop end (clipped: final offs at every wrap). A 0.464-beat block from 10.24 crosses the wraps at
+    // 10.25 and 10.5, so it plays the loop's track starts twice (2M) and its chord twice, with the workload.
+    constexpr int N = kMaxTrackPolyphony;
+    constexpr int M = kMaxTrackOnsetsPerBeat;
+    DocumentStore store;
+    store.appendChord(Chord{0, &kCluster8}, 0.25, 100);
+    const std::vector<int> chords = chordPitches(store.doc());
+    REQUIRE(chordBoundaryTicks(store.doc()).back() == 240);
+    PitchPool pool(chords);
+    const std::vector<int> trackPitches = pool.take(M);
+    addNotes(store, rows(trackPitches, N, 0, kMinTrackNoteTicks, 300));
+    REQUIRE(trackPolyphony(store.doc()) == N);
+    REQUIRE(densestOnsetWindow(store.doc()) == M);
+    const std::vector<int> previewPitches = pool.take(64);
+    const std::vector<std::vector<int>> groups = previewGroups(previewPitches);
+
+    Rig rig;
+    rig.publish(store.doc());
+    for (int id = 1; id <= 8; ++id) rig.startPreview(id, groups[static_cast<std::size_t>(id - 1)]);
+    rig.block(10.24 - kEnvFrames / kEnvSamplesPerBeat, false);
+    REQUIRE(std::fabs(rig.clockPpq() - 10.24) < 1e-9);
+    workload(rig, groups, previewPitches);
+    const std::vector<Ev> events = rig.block(rig.clockPpq(), true);
+    int trackOns = 0;
+    for (const Ev& e : events) {
+        trackOns += e.on && std::find(trackPitches.begin(), trackPitches.end(), e.pitch) != trackPitches.end() ? 1 : 0;
+    }
+    CHECK(trackOns == 2 * M);  // both wraps' starts in one block
+    logBlock("c: two wraps of a 0.25-beat loop", rig.host.lastWritten);
+    for (int b = 0; b < 4; ++b) rig.block(rig.clockPpq(), false);
+    rig.silence();
+}
+
+TEST_CASE("scheduler capacity (d): a seek onto a dense chord boundary with eight 8-pitch previews") {
+    // The densest chord lane; a seek exactly onto chord 16's start (8.125), with N / 2 track notes sustained
+    // through it (chased) and M starts on the other voices right after it. Eight previews hold the chord's and the
+    // tracks' pitches (so the chase and the timeline retrigger them), thru notes every other pitch; the seek block
+    // replaces the previews and retriggers 64 of their pitches by thru.
+    constexpr int N = kMaxTrackPolyphony;
+    constexpr int M = kMaxTrackOnsetsPerBeat;
+    constexpr int sustained = N / 2;
+    DocumentStore store = denseChords();
+    const std::vector<int> chords = chordPitches(store.doc());
+    const std::int64_t boundary = 7800;  // 0.625 + 15 x 0.5 = 8.125 beats
+    REQUIRE(chordBoundaryTicks(store.doc())[16] == boundary);
+    PitchPool pool(chords);
+    const std::vector<int> sustainPitches = pool.take(sustained);
+    const std::vector<int> startPitches = pool.take(M);
+    std::vector<NoteSpec> specs;
+    for (int p : sustainPitches) specs.push_back(NoteSpec{p, boundary - 1440, 1440 + 600, 100});
+    for (const NoteSpec& n : rows(startPitches, N - sustained, boundary, kMinTrackNoteTicks)) specs.push_back(n);
+    addNotes(store, specs);
+    REQUIRE(trackPolyphony(store.doc()) == N);
+    REQUIRE(densestOnsetWindow(store.doc()) == M);
+    std::vector<int> previewPitches = joined({chords, sustainPitches, startPitches});
+    const std::vector<int> filler = pool.take(64 - static_cast<int>(previewPitches.size()));
+    previewPitches.insert(previewPitches.end(), filler.begin(), filler.end());
+    const std::vector<std::vector<int>> groups = previewGroups(previewPitches);
+    const std::vector<int> thruFill = pool.takeAll();
+
+    Rig rig;
+    rig.publish(store.doc());
+    rig.block(2.0, false);
+    for (int id = 1; id <= 8; ++id) rig.startPreview(id, groups[static_cast<std::size_t>(id - 1)]);
+    rig.block(rig.clockPpq(), false);
+    for (std::size_t i = 0; i < thruFill.size(); ++i) rig.thruNote(true, thruFill[i], static_cast<int>(i));
+    rig.block(rig.clockPpq(), false);
+    REQUIRE(rig.soundingCount() == 128);
+    workload(rig, groups, previewPitches);
+    rig.block(8.125, true);
+    logBlock("d: seek onto a dense chord boundary", rig.host.lastWritten);
+    for (int b = 0; b < 4; ++b) rig.block(rig.clockPpq(), false);
+    rig.silence();
+}
+
+TEST_CASE("scheduler capacity (e): an adopt during sustained track notes flushes and re-chases") {
+    // N track notes held over beats 4..8 under the densest chord lane; a new generation (one note's velocity
+    // changed) adopted mid-note: the block releases every progression pitch and chases the new snapshot at the
+    // same position, with the workload on top.
+    constexpr int N = kMaxTrackPolyphony;
+    DocumentStore store = denseChords();
+    const std::vector<int> chords = chordPitches(store.doc());
+    PitchPool pool(chords);
+    const std::vector<int> sustainPitches = pool.take(N);
+    std::vector<NoteSpec> specs;
+    for (int p : sustainPitches) specs.push_back(NoteSpec{p, 4 * 960, 4 * 960, 100});
+    const int track = store.addTrack(TrackRole::Other);
+    REQUIRE(store.insertNotes(track, specs).size() == specs.size());
+    REQUIRE(trackPolyphony(store.doc()) == N);
+    const std::vector<int> previewPitches = pool.take(64);
+    const std::vector<std::vector<int>> groups = previewGroups(previewPitches);
+    const std::vector<int> thruFill = pool.takeAll();
+
+    Rig rig;
+    rig.publish(store.doc());
+    rig.block(4.5, false);
+    for (int id = 1; id <= 8; ++id) rig.startPreview(id, groups[static_cast<std::size_t>(id - 1)]);
+    rig.block(rig.clockPpq(), false);
+    for (std::size_t i = 0; i < thruFill.size(); ++i) rig.thruNote(true, thruFill[i], static_cast<int>(i));
+    rig.block(rig.clockPpq(), false);
+    for (int p : sustainPitches) REQUIRE(rig.host.owners(p) == kOwnerProgression);
+    const int firstNote = store.doc().tracks.at(0).notes.at(0).id;
+    REQUIRE(store.updateNotes(track, {NoteEdit{firstNote, std::nullopt, std::nullopt, std::nullopt, 64}}));
+    workload(rig, groups, previewPitches);
+    rig.publish(store.doc());
+    const std::vector<Ev> events = rig.block(rig.clockPpq(), true);
+    for (int p : sustainPitches) {
+        CHECK(std::count(events.begin(), events.end(), off(0, p)) == 1);  // released by the flush ...
+        CHECK(rig.host.owners(p) == kOwnerProgression);                     // ... and chased again
+    }
+    logBlock("e: adopt during sustained track notes", rig.host.lastWritten);
+    for (int b = 0; b < 4; ++b) rig.block(rig.clockPpq(), false);
+    rig.silence();
+}
+
+TEST_CASE("scheduler capacity (f): a block after owed releases pays them first and completes") {
+    // As (d) up to the burst. Then a block the host gives too little output (8 events) owes most of its
+    // releases (a seek that also releases every thru note), or a panic owes every sounding pitch; either way the
+    // next envelope block pays them first, then carries the workload over the densest chord lane, complete.
+    constexpr int N = kMaxTrackPolyphony;
+    constexpr int M = kMaxTrackOnsetsPerBeat;
+    constexpr int sustained = N / 2;
+    for (const bool viaPanic : {false, true}) {
+        CAPTURE(viaPanic);
+        DocumentStore store = denseChords();
+        const std::vector<int> chords = chordPitches(store.doc());
+        const std::int64_t boundary = 7800;
+        PitchPool pool(chords);
+        const std::vector<int> sustainPitches = pool.take(sustained);
+        const std::vector<int> startPitches = pool.take(M);
+        std::vector<NoteSpec> specs;
+        for (int p : sustainPitches) specs.push_back(NoteSpec{p, boundary - 1440, 1440 + 600, 100});
+        for (const NoteSpec& n : rows(startPitches, N - sustained, boundary, kMinTrackNoteTicks)) specs.push_back(n);
+        addNotes(store, specs);
+        std::vector<int> previewPitches = joined({chords, sustainPitches, startPitches});
+        const std::vector<int> filler = pool.take(64 - static_cast<int>(previewPitches.size()));
+        previewPitches.insert(previewPitches.end(), filler.begin(), filler.end());
+        const std::vector<std::vector<int>> groups = previewGroups(previewPitches);
+        const std::vector<int> thruFill = pool.takeAll();
+
+        Rig rig;
+        rig.publish(store.doc());
+        rig.block(2.0, false);
+        for (int id = 1; id <= 8; ++id) rig.startPreview(id, groups[static_cast<std::size_t>(id - 1)]);
+        rig.block(rig.clockPpq(), false);
+        for (std::size_t i = 0; i < thruFill.size(); ++i) rig.thruNote(true, thruFill[i], static_cast<int>(i));
+        rig.block(rig.clockPpq(), false);
+        REQUIRE(rig.soundingCount() == 128);
+        if (viaPanic) {
+            rig.panic();
+            for (int id = 9; id <= 16; ++id) rig.startPreview(id, groups[static_cast<std::size_t>(id - 9)]);
+            for (std::size_t i = 0; i < Scheduler::kMaxThruPerBlock; ++i) {
+                rig.thruNote(true, previewPitches[i], static_cast<int>(i) * 61);
+            }
+        } else {
+            rig.releaseThru();
+            rig.block(8.0, false, 8);  // outside the envelope: too little output
+            CHECK_FALSE(rig.host.lastOk);
+            workload(rig, groups, previewPitches);
+        }
+        int owed = 0;
+        for (int p = 0; p < 128; ++p) owed += rig.host.scheduler.sounding(p) && rig.host.owners(p) == 0 ? 1 : 0;
+        CHECK(owed == (viaPanic ? 128 : static_cast<int>(thruFill.size()) - 8));  // the thru release-all past 8 slots
+        const std::vector<Ev> events = rig.block(rig.clockPpq(), true);
+        REQUIRE(events.size() >= static_cast<std::size_t>(owed));
+        for (int i = 0; i < owed; ++i) CHECK_FALSE(events[static_cast<std::size_t>(i)].on);  // the owed offs first
+        logBlock(viaPanic ? "f: after a panic" : "f: after a block that owed releases", rig.host.lastWritten);
+        for (int b = 0; b < 4; ++b) rig.block(rig.clockPpq(), false);
+        rig.silence();
+    }
+}
+
+TEST_CASE("scheduler capacity: the measured worst block") {
+    if (capacityLog().empty()) return;  // the adversarial blocks did not run (a filtered run)
+    const auto worst = std::max_element(capacityLog().begin(), capacityLog().end(),
+                                        [](const auto& a, const auto& b) { return a.second < b.second; });
+    MESSAGE("capacity: measured worst block " << worst->second << " (" << worst->first << ") of " << kOutCapacity
+                                              << ", derived bound " << kPhysicalBound);
+    CHECK(worst->second <= kOutCapacity);
 }

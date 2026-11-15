@@ -1233,13 +1233,17 @@ TEST_CASE("budgets: the chord budget is kMaxChordEvents, and tracks, four full o
           kMaxChordEvents + static_cast<std::size_t>(kMaxTracks) * static_cast<std::size_t>(kMaxNotesPerTrack) * 2);
     // The boundary of the test above, now as a store document holding kMaxTracks tracks of kMaxNotesPerTrack notes
     // each: notes kMaxTracks x 960 / kMaxTrackOnsetsPerBeat ticks apart in every track, so the onset limit is met
-    // exactly. The 32nd chord is lengthened while the notes go in and restored after, so the notes past its end are
-    // kept, inactive (they could not be inserted past the end of the progression).
+    // exactly. The last chords are lengthened while the notes go in (as many as the notes need) and restored after,
+    // so the notes past their ends are kept, inactive (they could not be inserted past the end of the progression).
     const Feel dense = arp(ArpPattern::Chord, ArpRate::Half, ArpRange::Two);
     DocumentStore store;
     for (int i = 0; i < 32; ++i) REQUIRE(store.appendChord(chordOf(i % 12, "maj7"), 4.0, 100) == i + 1);
-    REQUIRE(store.setLength(32, kMaxLengthBeats));
     const std::int64_t spacing = static_cast<std::int64_t>(kFeelTicksPerBeat) * kMaxTracks / kMaxTrackOnsetsPerBeat;
+    int lengthened = 0;
+    while (chordBoundaryTicks(store.doc()).back() <= (kMaxNotesPerTrack - 1) * spacing) {
+        REQUIRE(store.setLength(32 - lengthened, kMaxLengthBeats));
+        ++lengthened;
+    }
     for (int t = 0; t < kMaxTracks; ++t) {
         const int id = store.addTrack(TrackRole::Bass);
         REQUIRE(id != kNoTrackId);
@@ -1248,7 +1252,7 @@ TEST_CASE("budgets: the chord budget is kMaxChordEvents, and tracks, four full o
         std::string why;
         REQUIRE_MESSAGE(store.insertNotes(id, specs, &why).size() == specs.size(), why);
     }
-    REQUIRE(store.setLength(32, 4.0));
+    for (int i = 0; i < lengthened; ++i) REQUIRE(store.setLength(32 - i, 4.0));
     store.setFeel(dense);
     REQUIRE(store.doc().tracks.size() == static_cast<std::size_t>(kMaxTracks));
     std::size_t active = 0;

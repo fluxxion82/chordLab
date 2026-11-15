@@ -5878,9 +5878,13 @@ TEST_CASE("insertChords: a chord carrying a note into a full track is refused wi
     DocumentStore store;
     REQUIRE(store.appendChord(kC, kMaxLengthBeats) == 1);
     REQUIRE(store.addTrack(TrackRole::Bass) == 1);
+    // kMaxTrackOnsetsPerBeat onsets a beat, none overlapping: only the count is at its cap.
+    constexpr int spacing = kFeelTicksPerBeat / kMaxTrackOnsetsPerBeat;
+    static_assert(spacing >= kMinTrackNoteTicks && kMaxNotesPerTrack * spacing <= kMaxLengthBeats * kFeelTicksPerBeat,
+                  "the notes must fit the one chord without overlapping");
     std::vector<NoteSpec> notes;
     for (int i = 0; i < kMaxNotesPerTrack; ++i) {
-        notes.push_back(NoteSpec{40, i * 40, 30});  // 24 onsets a beat, none overlapping: only the count is at its cap
+        notes.push_back(NoteSpec{40, i * spacing, 30});
     }
     REQUIRE(store.insertNotes(1, notes).size() == static_cast<std::size_t>(kMaxNotesPerTrack));
     const json one = json::array({chordNoteJson(laneJson("Bass", "bass", 1), 0, 480, 40)});

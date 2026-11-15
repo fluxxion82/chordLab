@@ -115,7 +115,7 @@ struct SnapshotExtras {
 ///                       "active":true}, ...]}, ...],
 ///  "chordsMuted":false, "chordsSolo":false, "chordsAudible":true,
 ///  "noteSelection":{"trackId":1,"ids":[1]}|null,
-///  "trackLimits":{"maxTracks":4,"maxNotesPerTrack":1024,"minNoteTicks":30,"maxPolyphony":8,"maxOnsetsPerBeat":24},
+///  "trackLimits":{"maxTracks":4,"maxNotesPerTrack":1024,"minNoteTicks":30,"maxPolyphony":6,"maxOnsetsPerBeat":16},
 ///  "applied":[{"id":"applied-1-1","label":"V7/ii","target":"Dm","degree":1,"tier":1,"root":9,"type":"7",
 ///              "symbol":"A7","roman":"VI7","family":"Major","function":"D","tension":43,"filled":false,
 ///              "voicing":[69,73,76,79],"voicingNames":["A4","C#5","E5","G5"],"outOfKey":[1],"outOfKeyNames":["C#"],
@@ -362,8 +362,8 @@ std::string heardJson(const Listener& listener, const Key& projectKey);
 ///   its notes along and a "replace" preset removes every note, keeping the tracks (document.h). Each is refused
 ///   (false, no change, no history, `documentChanged` false) when the result would break the track invariant,
 ///   with the store's reason in the error: `"<command>" refused: <reason>`, in chord terms (D17a), for example
-///   `"setLength" refused: That change would leave more than 8 track notes sounding at once`, `... would leave
-///   more than 24 track notes starting within one beat` or `... would move a track note past the end of what
+///   `"setLength" refused: That change would leave more than 6 track notes sounding at once`, `... would leave
+///   more than 16 track notes starting within one beat` or `... would move a track note past the end of what
 ///   ChordLab can hold` (the numbers are `kMaxTrackPolyphony` and `kMaxTrackOnsetsPerBeat`; any other
 ///   `validateTracks` failure keeps its text). The note commands keep the validator's per-note messages.
 /// - `setProgressionLoop {on}`, `setFollowHost {on}`: the matching live-state setter.

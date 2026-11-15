@@ -2193,15 +2193,18 @@ TEST_CASE("insertChords with notes: a refusal by the track limits leaves no new 
 }
 
 TEST_CASE("insertChords with notes: refused when the new notes push a track past its note limit") {
-    // 14 chords of four beats (56 beats) hold 1024 notes at 20 starts per beat, under the onset cap.
+    // 16 chords of four beats (64 beats) hold 1024 notes at the onset cap's rate, kMaxTrackOnsetsPerBeat a beat.
+    constexpr int spacing = kFeelTicksPerBeat / kMaxTrackOnsetsPerBeat;
+    static_assert(spacing >= kMinTrackNoteTicks && (kMaxNotesPerTrack - 1) * spacing + 30 <= 16 * 4 * kFeelTicksPerBeat,
+                  "the notes must fit the 16 chords without overlapping");
     DocumentStore store;
-    for (int i = 0; i < 14; ++i) {
+    for (int i = 0; i < 16; ++i) {
         REQUIRE(store.appendChord(kC, 4.0) == i + 1);
     }
     REQUIRE(store.addTrack(TrackRole::Bass) == 1);
     std::vector<NoteSpec> many;
     for (int i = 0; i < kMaxNotesPerTrack; ++i) {
-        many.push_back(ns(60, i * 48, 30));
+        many.push_back(ns(60, i * spacing, 30));
     }
     REQUIRE(store.insertNotes(1, many).size() == static_cast<std::size_t>(kMaxNotesPerTrack));
     const DocumentStore reference = store;
