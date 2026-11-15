@@ -25,3 +25,7 @@ add_test(NAME engine_rt_alloc_test COMMAND engine_rt_alloc_test)
 add_executable(suggest_tune tools/suggest_tune.cpp)
 target_link_libraries(suggest_tune PRIVATE chordlab_engine)
 target_compile_options(suggest_tune PRIVATE -Wall -Wextra -Wpedantic)
+# Not a test: the tracks design's D6 latency gate, meant for a Release build of its own (see tools/latency_bench/).
+add_executable(latency_bench tools/latency_bench/latency_bench.cpp)
+target_link_libraries(latency_bench PRIVATE chordlab_engine)
+target_compile_options(latency_bench PRIVATE -Wall -Wextra -Wpedantic)
