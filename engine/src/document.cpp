@@ -478,6 +478,15 @@ bool DocumentStore::commit(Document next) {
     return true;
 }
 
+namespace {
+
+/// Whether any track of `doc` holds a note.
+bool hasTrackNotes(const Document& doc) {
+    return std::any_of(doc.tracks.begin(), doc.tracks.end(), [](const Track& t) { return !t.notes.empty(); });
+}
+
+}  // namespace
+
 bool DocumentStore::commitTracks(Document next, int nextTrackId, int nextNoteId, std::string* refusal) {
     if (next == doc_) {
         return false;  // a no-op stays one
@@ -496,7 +505,7 @@ bool DocumentStore::commitTiming(Document next, std::string* refusal) {
 
 bool DocumentStore::commitTimingWithIds(Document next, int nextTrackId, int nextNoteId, std::string* refusal) {
     // The notes keep their anchors and offsets (D3): only their derived starts moved, which may reorder a track.
-    if (std::any_of(next.tracks.begin(), next.tracks.end(), [](const Track& t) { return !t.notes.empty(); })) {
+    if (hasTrackNotes(next)) {
         const ChordTimeline timeline = chordTimeline(next);
         for (Track& t : next.tracks) {
             sortTrackNotes(t.notes, timeline);
@@ -991,9 +1000,14 @@ bool DocumentStore::setLengths(const std::vector<int>& ids, double lengthBeats, 
 
 namespace {
 
-/// Whether any track of `doc` holds a note.
-bool hasTrackNotes(const Document& doc) {
-    return std::any_of(doc.tracks.begin(), doc.tracks.end(), [](const Track& t) { return !t.notes.empty(); });
+/// Debug builds only: the candidate of a transpose still satisfies `validateTracks` (only pitches changed, so it
+/// must). Release builds compile it to nothing, the unused parameters included.
+void assertTracksValid([[maybe_unused]] const Document& doc, [[maybe_unused]] int nextTrackId,
+                       [[maybe_unused]] int nextNoteId) {
+#ifndef NDEBUG
+    std::string error;
+    assert(validateTracks(doc, nextTrackId, nextNoteId, error));
+#endif
 }
 
 /// Moves the notes of every track of `next` by `interval` (`transposeNotes`, D18) and re-sorts each track: a pitch
@@ -1018,7 +1032,8 @@ void DocumentStore::setProjectKey(Key key) {
     const int interval = wrapPitchClass(key.tonicPc() - doc_.projectKey.tonicPc());
     if (doc_.transposeWithKey && interval != 0) {
         // The chords and the tracks move in the same commit as the key: one undo step restores all three. The
-        // notes follow the chords' direction; with no chords there is none to weigh (D18: the smaller move).
+        // notes follow the chords' direction (D18). With no chords there is none to weigh and the smaller move is
+        // used, but that branch is unreachable today: notes need an anchor chord, so no chords means no notes.
         const int move = doc_.events.empty() ? trackOnlyInterval(interval) : chooseKeyTranspose(doc_.events, interval);
         if (!doc_.events.empty()) {
             transposeEvents(next.events, move);
@@ -1029,19 +1044,24 @@ void DocumentStore::setProjectKey(Key key) {
         next.browsedKey = key;  // a home browse follows the project key, as under undo and redo (keepLiveState)
     }
     next.projectKey = key;
+    assertTracksValid(next, nextTrackId_, nextNoteId_);
     commit(std::move(next));
 }
 
 bool DocumentStore::transposeFromKey(PitchClass fromTonic) {
     const int interval = wrapPitchClass(doc_.projectKey.tonicPc() - fromTonic);
-    // Notes only exist on chords, so "nothing to move" is no chords (and then no notes either).
+    // Notes need an anchor chord, so a document with notes always has chords and the `hasTrackNotes` half of this
+    // test never decides anything today; it is defensive, for the day a note can outlive its chords.
     if ((doc_.events.empty() && !hasTrackNotes(doc_)) || interval == 0) {
         return false;
     }
     Document next = doc_;
+    // The no-chord branch (`trackOnlyInterval`) is unreachable today for the same reason: the early return above
+    // already left when there were no chords. It keeps the notes' move defined if that stops being true.
     const int move = doc_.events.empty() ? trackOnlyInterval(interval) : chooseKeyTranspose(doc_.events, interval);
     transposeEvents(next.events, move);
     carryTracks(next, move);
+    assertTracksValid(next, nextTrackId_, nextNoteId_);
     return commit(std::move(next));
 }
 
@@ -1052,6 +1072,7 @@ bool DocumentStore::transposeProgression(int semitones) {
     Document next = doc_;
     transposeEvents(next.events, semitones);
     carryTracks(next, semitones);
+    assertTracksValid(next, nextTrackId_, nextNoteId_);
     return commit(std::move(next));
 }
 

@@ -508,8 +508,9 @@ public:
     /// direction is `chooseKeyTranspose`'s, the move `transposeEvents`' (transpose.h). The track notes move in
     /// that commit too (tracks design D18), by the same signed interval (`transposeNotes`: pitches only, a note
     /// that would leave 0..127 lands an octave off; the notes are re-sorted and the note selection follows their
-    /// new order); with no chords to weigh, by `trackOnlyInterval` (-5..+6), which can only matter for a
-    /// document whose tracks hold notes, and notes need a chord to anchor. With the switch off, or for a
+    /// new order). With no chords the move would be `trackOnlyInterval` (-5..+6), but that case is unreachable
+    /// today: notes need an anchor chord, so a document with no chords has no notes, and `hasTrackNotes` in the
+    /// transpose paths is defensive, not a path that runs. With the switch off, or for a
     /// mode-only change or an enharmonic respelling, no note moves. A browsed key equal
     /// to the current project key (home) becomes `key` too, so the palette follows the project; any other
     /// browsed key is left alone. Sections, ids, the selection and the id counters are untouched.

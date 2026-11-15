@@ -2514,3 +2514,76 @@ TEST_CASE("transpose: an inactive note (past its shortened chord) moves too, and
     REQUIRE(store.transposeProgression(3));
     checkNotesMoved(before, store.doc(), 3);
 }
+
+namespace {
+
+/// C, F, G7 (ids 1..3, four beats) all at octave -1, so `chooseKeyTranspose` takes the LARGER move (+7 for a
+/// fifth up, not -5, which would clamp the octaves), with a Bass track (id 1): 40 on C (id 1), 52 on F (id 2),
+/// 100 on G7 (id 3). `trackOnlyInterval(7)` is -5, so a note that took the smaller move would land elsewhere.
+DocumentStore lowChordsWithBass() {
+    DocumentStore store;
+    REQUIRE(store.insertChords(0, {ChordSpec{kC, 4.0, 100, std::nullopt, -1}, ChordSpec{kF, 4.0, 100, std::nullopt, -1},
+                                   ChordSpec{kG, 4.0, 100, std::nullopt, -1}}) == std::vector<int>{1, 2, 3});
+    REQUIRE(store.addTrack(TrackRole::Bass) == 1);
+    REQUIRE(store.insertNotes(1, {ns(40, 0, 480), ns(52, kBar, 480), ns(100, 2 * kBar, 480)}) ==
+            std::vector<int>{1, 2, 3});
+    return store;
+}
+
+}  // namespace
+
+TEST_CASE("setProjectKey with the switch on: the notes follow the chords' larger move (+7), not the smaller one (-5)") {
+    DocumentStore store = lowChordsWithBass();
+    store.setTransposeWithKey(true);
+    REQUIRE(chooseKeyTranspose(store.doc().events, 7) == 7);
+    REQUIRE(trackOnlyInterval(7) == -5);  // the two differ, so this case tells them apart
+    const Document before = store.doc();
+    const std::vector<ChordEvent> movedChords = movedBy(before.events, 7);
+
+    store.setProjectKey(keyOf('G', 0, Mode::Ionian));
+
+    CHECK(store.doc().events == movedChords);
+    CHECK(pitchById(store) == std::unordered_map<int, int>{{1, 47}, {2, 59}, {3, 107}});  // +7: 40 -> 47, not 35
+    checkNotesMoved(before, store.doc(), 7);
+    REQUIRE(store.undo());
+    CHECK(store.doc() == before);
+}
+
+TEST_CASE("transposeFromKey: the notes follow the chords' larger move (+7), not the smaller one (-5)") {
+    DocumentStore store = lowChordsWithBass();
+    store.setProjectKey(keyOf('G', 0, Mode::Ionian));  // switch off: nothing moves yet
+    REQUIRE(pitchById(store) == std::unordered_map<int, int>{{1, 40}, {2, 52}, {3, 100}});
+    REQUIRE(chooseKeyTranspose(store.doc().events, 7) == 7);
+    const Document before = store.doc();
+    const std::vector<ChordEvent> movedChords = movedBy(before.events, 7);
+
+    REQUIRE(store.transposeFromKey(0));
+
+    CHECK(store.doc().events == movedChords);
+    CHECK(pitchById(store) == std::unordered_map<int, int>{{1, 47}, {2, 59}, {3, 107}});
+    checkNotesMoved(before, store.doc(), 7);
+    REQUIRE(store.undo());
+    CHECK(store.doc() == before);
+}
+
+TEST_CASE("transposeProgression: two notes that fold onto the same pitch keep D4's order by id, and the document validates") {
+    DocumentStore store = threeChordsAndBass();
+    // Same start on C: 127 (id 1) then 115 (id 2). Moved +1 both land on 116 (127 + 1 folds down an octave).
+    REQUIRE(store.insertNotes(1, {ns(127, 0, 480), ns(115, 0, 480)}) == std::vector<int>{1, 2});
+    REQUIRE(store.doc().tracks[0].notes[0].id == 2);  // sorted by pitch first: 115 then 127
+    const Document before = store.doc();
+
+    REQUIRE(store.transposeProgression(1));
+
+    const std::vector<TrackNote>& notes = store.doc().tracks[0].notes;
+    REQUIRE(notes.size() == 2);
+    CHECK(notes[0].pitch == 116);
+    CHECK(notes[1].pitch == 116);
+    CHECK(notes[0].id == 1);  // equal start and pitch: the id breaks the tie, so the order changed
+    CHECK(notes[1].id == 2);
+    checkNotesMoved(before, store.doc(), 1);
+    std::string error;
+    CHECK(validateTracks(store.doc(), store.nextTrackId(), store.nextNoteId(), error));
+    REQUIRE(store.undo());
+    CHECK(store.doc() == before);
+}

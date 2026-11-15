@@ -18,6 +18,7 @@
 #include "chordlab/suggest.h"
 #include "chordlab/symbol.h"
 #include "chordlab/tension.h"
+#include "chordlab/transpose.h"
 #include "chordlab/voicing.h"
 
 #include <nlohmann/json.hpp>
@@ -1222,6 +1223,34 @@ TEST_CASE("transposeFromKey and transposeProgression carry the track notes, the 
     DocumentStore explicitDown = threeChordsWithBassNotes();
     applyOk(explicitDown, {{"cmd", "transposeProgression"}, {"semitones", -7}});
     CHECK(bassIdAndPitch(explicitDown) == IdPitches{{1, 7}, {2, 11}, {3, 33}, {4, 118}});
+}
+
+/// C, F, G7 all at octave -1 (the chords' direction is then +7 for a fifth up, not the smaller -5) with a Bass track
+/// (id 1): 40 on C (id 1), 52 on F (id 2), 100 on G7 (id 3).
+DocumentStore lowChordsWithBassNotes() {
+    DocumentStore store;
+    REQUIRE(store.insertChords(0, {ChordSpec{kC, 4.0, 100, std::nullopt, -1}, ChordSpec{kF, 4.0, 100, std::nullopt, -1},
+                                   ChordSpec{kG7, 4.0, 100, std::nullopt, -1}}) == std::vector<int>{1, 2, 3});
+    REQUIRE(store.addTrack(TrackRole::Bass) == 1);
+    REQUIRE(store.insertNotes(1, {NoteSpec{40, 0, 480}, NoteSpec{52, 3840, 480}, NoteSpec{100, 7680, 480}}) ==
+            std::vector<int>{1, 2, 3});
+    return store;
+}
+
+TEST_CASE("setKey and transposeFromKey carry the notes by the chords' larger move (+7), not the smaller one (-5)") {
+    DocumentStore on = lowChordsWithBassNotes();
+    REQUIRE(chooseKeyTranspose(on.doc().events, 7) == 7);
+    applyOk(on, {{"cmd", "setTransposeWithKey"}, {"on", true}});
+    applyOk(on, {{"cmd", "setKey"}, {"letter", "G"}, {"alter", 0}, {"mode", "Ionian"}});
+    CHECK(snapshot(on).at("events")[0].at("root") == 7);
+    CHECK(bassIdAndPitch(on) == IdPitches{{1, 47}, {2, 59}, {3, 107}});  // 40 -> 47, not 35
+
+    DocumentStore off = lowChordsWithBassNotes();
+    applyOk(off, {{"cmd", "setKey"}, {"letter", "G"}, {"alter", 0}, {"mode", "Ionian"}});  // switch off
+    CHECK(bassIdAndPitch(off) == IdPitches{{1, 40}, {2, 52}, {3, 100}});
+    applyOk(off, {{"cmd", "transposeFromKey"}, {"fromTonicPc", 0}});
+    CHECK(snapshot(off).at("events")[0].at("root") == 7);
+    CHECK(bassIdAndPitch(off) == IdPitches{{1, 47}, {2, 59}, {3, 107}});
 }
 
 TEST_CASE("rejection: transpose commands with missing, mistyped or out-of-range fields are refused whole") {

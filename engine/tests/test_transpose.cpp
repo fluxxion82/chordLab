@@ -239,6 +239,13 @@ TEST_CASE("chooseKeyTranspose: an interval of 0 (or a whole number of octaves) i
     CHECK(chooseKeyTranspose(cAmFG7Events(), -12) == 0);
 }
 
+TEST_CASE("trackOnlyInterval is chooseKeyTranspose with no chords, for every interval") {
+    // The no-chord branches of the store use trackOnlyInterval; they must not drift from the rule.
+    for (int interval = 0; interval < 12; ++interval) {
+        CHECK(trackOnlyInterval(interval) == chooseKeyTranspose({}, interval));
+    }
+}
+
 TEST_CASE("chooseKeyTranspose: a progression already an octave low goes up a fifth (+7), no clamp") {
     std::vector<ChordEvent> events = cAmFG7Events();
     for (ChordEvent& e : events) {

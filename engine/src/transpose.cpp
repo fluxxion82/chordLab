@@ -3,6 +3,7 @@
 #include "chordlab/voicing.h"
 
 #include <algorithm>
+#include <cassert>
 #include <cstddef>
 #include <cstdlib>
 
@@ -98,6 +99,7 @@ int trackOnlyInterval(int interval) {
 }
 
 int transposeNotes(std::vector<Track>& tracks, int interval) {
+    assert(interval >= -11 && interval <= 11);
     constexpr int kMaxPitch = 127;
     int folded = 0;
     for (Track& track : tracks) {
