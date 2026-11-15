@@ -2,11 +2,14 @@
 
 #include "chordlab/chord.h"
 #include "chordlab/document.h"
+#include "chordlab/limits.h"
 #include "chordlab/publication.h"
+#include "chordlab/tracks.h"
 
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
 using namespace chordlab;
@@ -22,7 +25,7 @@ std::vector<NoteEvent> eventsOf(const SnapshotSlot& slot) {
     return std::vector<NoteEvent>(slot.events.begin(), slot.events.begin() + static_cast<std::ptrdiff_t>(slot.count));
 }
 
-/// A slot on the heap: 4096 events is a lot of stack.
+/// A slot on the heap: kMaxSnapshotEvents events (~288 KB) is a lot of stack.
 std::unique_ptr<SnapshotSlot> newSlot() {
     return std::make_unique<SnapshotSlot>();
 }
@@ -439,4 +442,117 @@ TEST_CASE("publication: an over-budget non-tick-aligned document publishes the a
     CHECK(slot->endBeat == store.doc().endBeat());
     CHECK(slot->endBeat != 260.0);
     CHECK(slot->count == 650);
+}
+
+// --- tracks (design D8): fillSlot publishes compilePlayback -----------------------------------------------------
+
+namespace {
+
+/// Adds a track holding `specs` and returns its id.
+int addTrackWith(DocumentStore& store, const std::vector<NoteSpec>& specs) {
+    const int id = store.addTrack(TrackRole::Bass);
+    REQUIRE(id != kNoTrackId);
+    std::string why;
+    REQUIRE_MESSAGE(store.insertNotes(id, specs, &why).size() == specs.size(), why);
+    return id;
+}
+
+}  // namespace
+
+TEST_CASE("publication: fillSlot publishes the audible lanes merged, compilePlayback's events") {
+    DocumentStore store;
+    store.appendChord(chord(0, "maj"), 4.0, 100);
+    store.appendChord(chord(9, "min"), 4.0, 100);
+    addTrackWith(store, {NoteSpec{36, 0, 960, 90}, NoteSpec{60, 960, 960, 110}});  // the 60 cuts C's
+    const Compiled playback = compilePlayback(store.doc());
+    REQUIRE(playback.events != compile(store.doc()).events);
+    Publication last;
+    auto slot = newSlot();
+    REQUIRE(fillSlot(store.doc(), *slot, last));
+    CHECK(eventsOf(*slot) == playback.events);
+    CHECK(slot->endBeat == playback.endBeat);
+    CHECK(last.compiled.events == playback.events);
+}
+
+TEST_CASE("publication: the generation ignores a note selection, and moves with mute, solo and note edits that sound") {
+    DocumentStore store;
+    store.appendChord(chord(0, "maj"), 4.0, 100);
+    store.appendChord(chord(5, "maj"), 4.0, 100);
+    const int bass = addTrackWith(store, {NoteSpec{36, 0, 960}, NoteSpec{41, 3840, 960}});
+    const int lead = addTrackWith(store, {NoteSpec{72, 480, 480}});
+    Publication last;
+    auto slot = newSlot();
+    REQUIRE(fillSlot(store.doc(), *slot, last));
+    REQUIRE(last.generation == 1);
+    const std::vector<int> bassIds = [&] {
+        std::vector<int> ids;
+        for (const TrackNote& n : store.doc().tracks.at(0).notes) ids.push_back(n.id);
+        return ids;
+    }();
+
+    // A note selection is store state, not content: nothing to publish.
+    store.setNoteSelection(bass, bassIds);
+    REQUIRE(store.noteSelection().ids == bassIds);
+    CHECK_FALSE(fillSlot(store.doc(), *slot, last));
+    store.setNoteSelection(kNoTrackId, {});
+    CHECK_FALSE(fillSlot(store.doc(), *slot, last));
+    CHECK(last.generation == 1);
+
+    // A mute toggle changes what sounds: the generation moves, and moves back on with unmute.
+    REQUIRE(store.setTrackMute(bass, true));
+    REQUIRE(fillSlot(store.doc(), *slot, last));
+    CHECK(last.generation == 2);
+    CHECK(eventsOf(*slot) == compilePlayback(store.doc()).events);
+
+    // An edit of a muted track's note changes nothing that sounds: no publication.
+    REQUIRE(store.updateNotes(bass, {NoteEdit{bassIds[0], std::nullopt, std::nullopt, std::nullopt, 50}}));
+    CHECK_FALSE(fillSlot(store.doc(), *slot, last));
+    CHECK(last.generation == 2);
+
+    REQUIRE(store.setTrackMute(bass, false));
+    REQUIRE(fillSlot(store.doc(), *slot, last));
+    CHECK(last.generation == 3);
+
+    // A note edit of an audible track moves it: velocity, then pitch.
+    REQUIRE(store.updateNotes(bass, {NoteEdit{bassIds[0], std::nullopt, std::nullopt, std::nullopt, 70}}));
+    REQUIRE(fillSlot(store.doc(), *slot, last));
+    CHECK(last.generation == 4);
+    REQUIRE(store.updateNotes(lead, {NoteEdit{store.doc().tracks.at(1).notes.at(0).id, 74, std::nullopt, std::nullopt,
+                                              std::nullopt}}));
+    REQUIRE(fillSlot(store.doc(), *slot, last));
+    CHECK(last.generation == 5);
+
+    // Soloing the lead silences the chords and the bass; muting the chords then changes nothing that sounds.
+    REQUIRE(store.setTrackSolo(lead, true));
+    REQUIRE(fillSlot(store.doc(), *slot, last));
+    CHECK(last.generation == 6);
+    CHECK(eventsOf(*slot) == std::vector<NoteEvent>{{0.5, true, 74, 100}, {1.0, false, 74, 0}});
+    REQUIRE(store.setChordsMute(true));
+    CHECK_FALSE(fillSlot(store.doc(), *slot, last));
+    CHECK(last.generation == 6);
+}
+
+TEST_CASE("publication: a real document at the caps fills a slot with exactly kMaxSnapshotEvents events") {
+    // 128 one-bar sevenths played Pulse: 128 x 4 hits x 4 notes x 2 = kMaxChordEvents. Then kMaxTracks tracks of
+    // kMaxNotesPerTrack short notes spread evenly over the 512 beats, every track on its own pitch below the chords',
+    // so nothing merges: kMaxTracks x kMaxNotesPerTrack x 2 more events, the whole slot.
+    DocumentStore store;
+    for (int i = 0; i < 128; ++i) store.appendChord(chord(i % 12, "7"), 4.0, 100);
+    store.setFeel(Feel{Rhythm::Pulse});
+    const std::int64_t end = chordBoundaryTicks(store.doc()).back();
+    const std::int64_t spacing = end / kMaxNotesPerTrack;
+    REQUIRE(kMaxTracks * kFeelTicksPerBeat / spacing <= kMaxTrackOnsetsPerBeat);
+    REQUIRE(kMaxTracks <= kMaxTrackPolyphony);
+    for (int t = 0; t < kMaxTracks; ++t) {
+        std::vector<NoteSpec> specs;
+        for (int k = 0; k < kMaxNotesPerTrack; ++k) specs.push_back(NoteSpec{24 + 2 * t, k * spacing, kMinTrackNoteTicks, 100});
+        addTrackWith(store, specs);
+    }
+    REQUIRE(compile(store.doc()).events.size() == kMaxChordEvents);
+    Publication last;
+    auto slot = newSlot();
+    REQUIRE(fillSlot(store.doc(), *slot, last));
+    CHECK(slot->count == kMaxSnapshotEvents);
+    CHECK(eventsOf(*slot) == compilePlayback(store.doc()).events);
+    CHECK(slot->events[kMaxSnapshotEvents - 1].beat <= slot->endBeat);
 }

@@ -1,13 +1,17 @@
 #pragma once
 
+#include "chordlab/tracks.h"
+
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
 
 namespace chordlab {
 
-// Only references cross this interface, so the definitions (document.h, palette.h) are not needed here.
+// Only references cross this interface, so the definitions (document.h, palette.h) are not needed here; tracks.h is
+// included for `NoteSelection`, which `SnapshotExtras` holds by value.
 struct Document;
 class DocumentStore;
 struct Key;
@@ -61,6 +65,15 @@ constexpr int kMaxJsonDepth = 64;
 /// reads. A member that appears twice takes its last value (nlohmann's parse policy); the UI never
 /// sends such messages, but the behaviour is pinned by a test.
 
+/// What `snapshotJson` publishes that lives in the `DocumentStore`, not the `Document` (tracks design D6): the live
+/// note selection (`DocumentStore::noteSelection`) and the content revision (`DocumentStore::revision`). The shell
+/// fills it from its store in the same critical section as the document it serialises. The default (no selection,
+/// revision 0) is for callers that have no store.
+struct SnapshotExtras {
+    NoteSelection noteSelection;
+    std::uint64_t revision = 0;
+};
+
 /// The document as the UI shows it, with the given palette (normally
 /// `buildPalette(doc.browsedKey, doc.projectKey)`), so that the UI never computes theory:
 /// ```
@@ -79,7 +92,10 @@ constexpr int kMaxJsonDepth = 64;
 ///  "events":[{"id":1,"root":0,"type":"maj","symbol":"C","roman":"I","family":"Major","function":"T",
 ///             "tension":3,"startBeat":0.0,"lengthBeats":4.0,"velocity":100,
 ///             "inversion":0,"octave":0,"manualVoicing":false,"voicing":[60,64,67],
-///             "voicingNames":["C4","E4","G4"],"outOfKey":[],"outOfKeyNames":[],"why":null}, ...],
+///             "voicingNames":["C4","E4","G4"],"outOfKey":[],"outOfKeyNames":[],"why":null,
+///             "playStart":0.0,"playEnd":4.0,
+///             "guide":{"roles":["root","outside","tension", ...],"scale":2741,
+///                      "degrees":["R","b2","2", ...],"names":["C","Db","D", ...]}}, ...],
 ///  "sections":[{"id":1,"name":"Verse","colourIndex":0,"firstEventIndex":0}, ...],
 ///  "suggestions":[{"root":5,"type":"maj","symbol":"F","roman":"IV","function":"PD","score":2.35,
 ///                  "reasons":["commonTones","smooth","diatonic","predominant"],
@@ -93,6 +109,13 @@ constexpr int kMaxJsonDepth = 64;
 ///  "relationMode":"blend", "relationReference":{"eventId":3,"symbol":"F"}|null,
 ///  "presets":[{"id":"axis","name":"Axis","genre":"Pop","tonality":"Major","numerals":"I – V – vi – IV",
 ///              "fits":true}, ...],
+///  "ticksPerBeat":960, "revision":7,
+///  "tracks":[{"id":1,"name":"Bass","role":"bass","mute":false,"solo":false,"audible":true,
+///             "notes":{"id":[1,...],"pitch":[36,...],"start":[0,...],"length":[960,...],"velocity":[100,...],
+///                      "anchor":[1,...],"offset":[0,...],"active":[true,...]}}, ...],
+///  "chordsMuted":false, "chordsSolo":false, "chordsAudible":true,
+///  "noteSelection":{"trackId":1,"ids":[1]}|null,
+///  "trackLimits":{"maxTracks":4,"maxNotesPerTrack":1024,"minNoteTicks":30,"maxPolyphony":8,"maxOnsetsPerBeat":15},
 ///  "applied":[{"id":"applied-1-1","label":"V7/ii","target":"Dm","degree":1,"tier":1,"root":9,"type":"7",
 ///              "symbol":"A7","roman":"VI7","family":"Major","function":"D","tension":43,"filled":false,
 ///              "voicing":[69,73,76,79],"voicingNames":["A4","C#5","E5","G5"],"outOfKey":[1],"outOfKeyNames":["C#"],
@@ -164,7 +187,8 @@ constexpr int kMaxJsonDepth = 64;
 /// - `transposeWithKey`, `keyHintSeen`: `Document::transposeWithKey` (a tonic change transposes the
 ///   sequence) and `Document::keyHintSeen` (the one-time hint has shown); live state, false by default.
 /// - `midiThru`: `Document::midiThru` (the plug-in passes the MIDI it hears to its output); live state,
-///   true by default. With it, `selectedEventIds` and `newChordBeats` the snapshot has 29 top-level keys.
+///   true by default. With it, `selectedEventIds`, `newChordBeats` and the eight tracks keys below the snapshot has
+///   37 top-level keys.
 /// - `feel`, `meter`: `Document::feel` as seven wire-name strings (`rhythm` block|pulse|subdivided|offbeats|
 ///   lowThenUpper|arpeggio, `strum` off|down|up|downUp, `strumSpeed` tight|medium|loose, `humanise`
 ///   off|light|medium|heavy, `arpPattern` up|down|upDown|downUp|upAndDown|downAndUp|converge|diverge|
@@ -260,9 +284,42 @@ constexpr int kMaxJsonDepth = 64;
 ///   chord (`root`, `type`), the `Suggestion`'s `label` as `symbol` and its `roman`, `function` as the
 ///   events do (the chord's `functionOf` in the project key), the `score`, the `reasons` as `reasonName`
 ///   strings and the parallel `reasonTexts`.
+///
+/// Tracks fields (tracks design D6; all additive, schema still 1; ticks are JSON integers on the 960-per-beat grid):
+/// - per event, `playStart` and `playEnd`: the chord's playback span in beats, `chordPlaySpans(doc)` (compiler.h):
+///   the tick-rounded boundaries over 960 when a feel performs within budget (three 0.2506-beat chords: 241 / 960 for
+///   the second chord's start), the authored doubles otherwise, so on the block path and in the over-budget fallback
+///   they equal `startBeat` and `startBeat + lengthBeats` as accumulated. `startBeat` and `lengthBeats` stay authored
+///   (the strip draws them); what is shaded by playback (the roll's guide bands, chord lookups) uses these.
+/// - per event, `guide`: the chord's harmonic guide, `harmonicGuide(chord, doc.projectKey)` (guide.h, tracks design
+///   D9: the rules for roles, the chord scale, degrees and names live there), read against the PROJECT key like
+///   `roman`, never the browsed one. Four views indexed by absolute pitch class 0..11 (C = 0, not relative to the
+///   root): `roles` twelve `guideRoleName` strings ("root", "chord", "tension", "avoid", "outside"), `scale` the
+///   chord scale as a 12-bit integer (bit `pc` set when `pc` is in it; C major's 2741), `degrees` twelve ASCII
+///   degree labels above the root ("R", "b9", "#11", "bb7"), `names` twelve ASCII note names on the guide's
+///   letters ("E#", "G#", "Bb").
+/// - `ticksPerBeat`: 960 (`kFeelTicksPerBeat`), the grid of every tick field.
+/// - `revision`: `extras.revision`, the store's content revision (`DocumentStore::revision`, document.h: it moves
+///   with every content commit, undo, redo and state load, never with a selection or a live flag); 0 when the caller
+///   gives none. A note command's `baseRevision` names it.
+/// - `tracks`: `Document::tracks` in order, each `{id, name, role, mute, solo, audible, notes}`: `role`
+///   `trackRoleName` ("bass", "lead", "other"), `audible` `trackAudible` (tracks.h: the mute/solo outcome, so the UI
+///   never derives it), `notes` the track's notes column-wise (no object per note, a cheap decode): `{id, pitch,
+///   start, length, velocity, anchor, offset, active}`, each an array of the same length (the track's note count) in
+///   the track's note order, so note `i` is the `i`th entry of every array; an empty track keeps every key with an
+///   empty array. `start` is the derived absolute tick, `noteStart` (the anchor's boundary plus the offset, so the UI
+///   never resolves anchors), `anchor` the id of the chord it belongs to, `offset` the ticks into it, `active`
+///   `noteActive` (false once its chord is shorter than its offset: kept and drawn, not played). `tracks` is empty
+///   without tracks. (The state JSON keeps one object per note.)
+/// - `chordsMuted`, `chordsSolo`: `Document::chordsMuted` / `chordsSolo`; `chordsAudible`: `chordsAudible(doc)`.
+/// - `noteSelection`: `extras.noteSelection` as `{"trackId":n,"ids":[...]}`, normalised against `doc` as
+///   `selectedEventIds` is: the ids the track holds, in its note order, once each; null when the selection is empty,
+///   names no track of `doc`, or keeps no id.
+/// - `trackLimits`: the caps by name, `{maxTracks: kMaxTracks, maxNotesPerTrack: kMaxNotesPerTrack, minNoteTicks:
+///   kMinTrackNoteTicks, maxPolyphony: kMaxTrackPolyphony, maxOnsetsPerBeat: kMaxTrackOnsetsPerBeat}` (tracks.h).
 /// Allocates (compiles, ranks): the UI/message thread only.
 std::string snapshotJson(const Document& doc, const Palette& palette, int selectedEventId = -1,
-                         const std::vector<int>& selectedEventIds = {});
+                         const std::vector<int>& selectedEventIds = {}, const SnapshotExtras& extras = {});
 
 /// A key as the snapshot names it: the spelled tonic and the mode name, "C Ionian", "Bb HarmonicMinor"
 /// (the `projectKeyName` / `browsedKeyName` fields; the plug-in names its MIDI export after it).
@@ -286,7 +343,9 @@ std::string heardJson(const Listener& listener, const Key& projectKey);
 
 /// Applies one UI command, `{"schema":1,"cmd":"<name>", ...fields}`, to the store:
 /// - `setKey {letter,alter,mode}`: `setProjectKey` (a browsed key equal to the project key follows it, so
-///   the palette stays home; any other browsed key is left alone).
+///   the palette stays home; any other browsed key is left alone). With `transposeWithKey` on and a tonic
+///   change, the track notes move with the chords in the same undo step (D18, see `setProjectKey`); with it
+///   off, or for a mode-only change, no note moves.
 /// - `browseKey` with exactly one of `{"steps":n}` (`fifthsNeighbour` of the current browsed key),
 ///   `{"mode":"<Mode>"}` (the parallel mode on the same tonic pitch class, canonically spelled) or
 ///   `{"home":true}` (browsed key = project key).
@@ -297,9 +356,19 @@ std::string heardJson(const Listener& listener, const Key& projectKey);
 ///   without, root position and not manual. The new chord is selected (document.h), so the next
 ///   snapshot's `selectedEventId`, `suggestions` and `relationReference` follow it. Refused (false, an
 ///   error naming the reason, no change) when the document already holds `kMaxChords` chords or the id
-///   counter is exhausted.
+///   counter is exhausted, and, like every chord timing command, by the track invariant (below).
 /// - `moveChord {id,index}`, `setLength {id,lengthBeats}`, `setVelocity {id,velocity}`,
-///   `removeChord {id}`: the matching store call.
+///   `removeChord {id}`: the matching store call. An unknown id or a move to the current place is a valid no-op.
+/// - **Chord timing commands carry the notes** (tracks design D3): `appendChord`, `insertChords`, `loadPreset`,
+///   `moveChord`, `setLength`, `setLengths`, `removeChord` and `removeChords` move each note with its chord (a
+///   shorter chord leaves the notes past its end inactive, a longer one reactivates them), a removed chord takes
+///   its notes along and a "replace" preset removes every note, keeping the tracks (document.h). Each is refused
+///   (false, no change, no history, `documentChanged` false) when the result would break the track invariant,
+///   with the store's reason in the error: `"<command>" refused: <reason>`, in chord terms (D17a), for example
+///   `"setLength" refused: That change would leave more than 8 track notes sounding at once`, `... would leave
+///   more than 15 track notes starting within one beat` or `... would move a track note past the end of what
+///   ChordLab can hold` (the numbers are `kMaxTrackPolyphony` and `kMaxTrackOnsetsPerBeat`; any other
+///   `validateTracks` failure keeps its text). The note commands keep the validator's per-note messages.
 /// - `setProgressionLoop {on}`, `setFollowHost {on}`: the matching live-state setter.
 /// - `setInversion {id,inversion}`, `setOctave {id,octave}`, `resetVoicing {id}`: the matching store
 ///   call (the values are clamped by the store and the event is marked manual; see document.h).
@@ -314,9 +383,12 @@ std::string heardJson(const Listener& listener, const Key& projectKey);
 ///   2, 4 or 8. Both are undoable (`DocumentStore::setFeel` / `setMeter`); an equal value pushes no history.
 /// - `transposeFromKey {fromTonicPc}` (0..11): `transposeFromKey`, every chord moved from that tonic to the
 ///   project tonic, one undo step; `transposeProgression {semitones}` (-11..11): `transposeProgression`,
-///   every chord moved by the signed interval, one undo step. Neither changes the key. A move of nothing
-///   (interval 0, no chords) is a valid no-op that pushes no history. An out-of-range value is rejected.
-///   With `transposeWithKey` on, `setKey` also transposes the chords (document.h), in the same undo step.
+///   every chord moved by the signed interval, one undo step. Both carry the track notes in the same step
+///   (pitches only; D18): `transposeFromKey` by the interval the chords take, `transposeProgression` by
+///   exactly `semitones`. Neither changes the key. A move of nothing (interval 0, no chords) is a valid no-op
+///   that pushes no history and leaves the revision. An out-of-range value is rejected.
+///   With `transposeWithKey` on, `setKey` also transposes the chords and the notes (document.h), in the
+///   same undo step.
 /// - `addSection {index,name?}`: `addSection(index, name)`; `name` defaults to the store's "Section <n>"
 ///   and, given, must be at most `kMaxSectionNameBytes` UTF-8 bytes (longer is rejected, not cut: the UI
 ///   limits its field and a longer name is a malformed message). An `index` that is no chord position,
@@ -335,18 +407,19 @@ std::string heardJson(const Listener& listener, const Key& projectKey);
 ///   order).
 /// - `insertChords {index, chords}` (strip editing design D1): `insertChords(index, chords)`, ONE undo step;
 ///   `index` an integer (clamped to 0..size by the store); `chords` a non-empty array of at most `kMaxChords`
-///   objects `{root, type, lengthBeats?, velocity?, inversion?, octave?, manualVoicing?}`: `root` and `type` as
+///   objects `{root, type, lengthBeats?, velocity?, inversion?, octave?, manualVoicing?, notes?}`: `root` and `type` as
 ///   for `appendChord`, `lengthBeats` a finite number (the new-chord length when absent), `velocity` an integer,
 ///   `inversion` an integer in 0..tones - 1 of the chord, `octave` an integer in -1..1, `manualVoicing` a
-///   boolean (a given inversion or octave makes the chord manual unless it says otherwise). Every entry is
+///   boolean (a given inversion or octave makes the chord manual unless it says otherwise), `notes` the chord's
+///   track notes (below, D21). Every entry is
 ///   validated before anything changes, and an error names the field with its index ("chords[2].root must be an
 ///   integer in 0..11"). The inserted chords become the selection, the last the anchor. Refused (false, an
 ///   error naming the reason, no change, no id consumed) when the result would hold more than `kMaxChords`
-///   chords or the id counter cannot hand out one id per chord.
+///   chords or the id counter cannot hand out one id per chord, and by the track invariant (above).
 /// - `removeChords {ids}`, `setLengths {ids, lengthBeats}`: the store calls, ONE undo step each; `ids` a
 ///   non-empty array of integers (repeats count once; ids no event has are skipped, and a call that finds none,
 ///   or changes nothing, is a valid no-op that pushes no history); `lengthBeats` a finite number, clamped by
-///   the store.
+///   the store. Both can be refused by the track invariant (above).
 /// - `setNewChordLength {lengthBeats}`: `setNewChordLength`, live state (never history, kept across undo and
 ///   redo, persisted by `stateJson`); `lengthBeats` (required) a finite number, snapped to the quarter-beat grid
 ///   and clamped to 0.25..64 by the store, or null for one bar of the meter.
@@ -365,7 +438,60 @@ std::string heardJson(const Listener& listener, const Key& projectKey);
 ///   anchor. Refused (false, an error
 ///   naming the reason, no change, no id consumed) for the store's reasons (`progressionRefusal`,
 ///   document.h): the result would hold more than `kMaxChords` chords, or the event or section id
-///   counter cannot hand out the ids the load needs.
+///   counter cannot hand out the ids the load needs; and by the track invariant (above). "append" keeps every
+///   note, "replace" removes every note of every track (the tracks stay).
+/// - **Tracks and notes** (tracks design D4, D5, D21; tracks.h, document.h). Integers: `trackId`, `id`, `index`,
+///   `pitch`, `velocity` and the entries of `ids` are JSON integers that must fit an `int` (2147483648 is an error,
+///   not a wrapped value); the tick fields `start`, `length` and `offset` are read at 64 bits and may be any JSON
+///   integer that fits an `int64_t` (9223372036854775808 and -9223372036854775809 are errors), which the store then
+///   clamps into D1's domain (start first, then the length against the space left); `pitch` and `velocity` are
+///   clamped by the store, as an `insertChords` velocity is. Floats, strings and null are never integers. Every
+///   error names the field with its index ("notes[2].start must be an integer in -9223372036854775808..
+///   9223372036854775807", "chords[1].notes[0].lane.role must be \"bass\", \"lead\" or \"other\"", "missing
+///   notes[1].pitch").
+///   - `addTrack {role, name?}`: `addTrack`, one undo step. `role` is the lowercase string "bass", "lead" or "other"
+///     (as the snapshot will publish roles); `name` a string of at most `kMaxTrackNameBytes` UTF-8 bytes (longer is
+///     rejected, not cut: as a section name), empty or absent for the role's default name.
+///   - `removeTrack {id}`, `patchTrack {id, name?, role?}`, `moveTrack {id, index}`: the store calls, one undo step
+///     each (`name` bounded as above, empty allowed and stored empty; `index` clamped by the store). `patchTrack`
+///     with neither field is the store's refusal ("Give a name or a role"); a patch that changes nothing, and a move
+///     to the current place, are valid no-ops.
+///   - `setTrackMute {id, on}`, `setTrackSolo {id, on}`, `setChordsMute {on}`, `setChordsSolo {on}`: live state (no
+///     history, no revision, kept by undo and redo), persisted, so a toggle that changes a flag sets
+///     `documentChanged`. The value already held is a valid no-op; an `id` no track has is a refusal ("No track with
+///     id 9"), since the store's return cannot tell the two apart.
+///   - `insertNotes {trackId, notes, baseRevision?}`: `insertNotes`, one undo step; the inserted notes become the
+///     note selection. `notes` is an array of at most `kMaxNotesPerTrack` objects `{pitch, start, length,
+///     velocity?}` (`velocity` 100 when absent; `start` the absolute tick, resolved to its chord and offset by the
+///     store); an empty array is the store's refusal ("No notes to insert").
+///   - `removeNotes {trackId, ids, baseRevision?}`: `removeNotes`; `ids` at most `kMaxNotesPerTrack` integers (a longer
+///     list is an error before the store is touched); unknown ids are skipped and an empty list is a valid no-op.
+///   - `updateNotes {trackId, notes, baseRevision?}`: `updateNotes`, one undo step; `notes` at most `kMaxNotesPerTrack`
+///     objects `{id, pitch?, start?, length?, velocity?}` with absolute values (an absent field keeps the note's, null
+///     is an error); an empty array is a valid no-op, an unknown or repeated id the store's refusal.
+///   - `baseRevision` (optional, on those three): a non-negative JSON integer (read as `uint64_t`; negative, fractional
+///     or beyond 2^64 - 1 is an error). When present and not equal to `DocumentStore::revision()` the command is
+///     refused before anything else, store untouched, no history, `documentChanged` false: `"insertNotes" refused: The
+///     notes changed while you were dragging` (the wire name of the command). Absent: no check. The check lives
+///     in this layer: the store is not called for a stale command (it has no notion of a base revision).
+///   - `selectNotes {trackId, ids}`: `setNoteSelection`, live state (never history, never the revision, never
+///     `documentChanged`); `ids` at most `kMaxNotesPerTrack` integers, unknown ones dropped, repeats collapsed, the rest
+///     in the track's note order; an empty result clears. `trackId` is an integer or null: null clears the selection
+///     whatever `ids` holds (the documented form; the integer -1, `kNoTrackId`, is the same value and clears too),
+///     and a track no track has is a no-op, as `selectEvent` with an unknown id.
+///   - `insertChords` entries (above) take an optional `notes` array of objects `{lane, offset, length, pitch,
+///     velocity?}` (D21, the chord clipboard): `lane` is `{trackId?, name, role}` (`trackId` an integer, null or absent;
+///     `name` at most `kMaxTrackNameBytes` bytes; `role` as for `addTrack`), `offset` the ticks after the chord's
+///     start (`offset` and `length` 64-bit), `pitch` and `velocity` as above. All the notes of one message together
+///     number at most `kMaxTracks * kMaxNotesPerTrack` (an error beyond, naming the entry, before the store is
+///     touched). The store resolves each lane inside the one commit: the track with that id when it exists, else the
+///     unique track with that name and role, else a new track (one per absent name and role), anchoring each note to
+///     the chord it comes with, offsets past the chord's end carried as inactive notes. Refused, with the store's
+///     reason, when a name and role match more than one track, when a new track would pass `kMaxTracks`, or when the
+///     track invariant fails.
+///   Every store refusal above is `"<command>" refused: <reason>` with no change, no history and `documentChanged`
+///   false; every accepted command that changes content or a persisted flag sets `documentChanged`, `selectNotes` and
+///   no-ops do not.
 /// - `undo`, `redo`: no fields. A browsed key that is the project key stays so when they restore another
 ///   project key (document.h), so the UI never has to follow them with `browseKey {home}`.
 ///
@@ -376,7 +502,8 @@ std::string heardJson(const Listener& listener, const Key& projectKey);
 /// range-checked beyond that: lengths, velocities, inversions, octaves, colours and move targets are
 /// clamped by the store, exactly as the direct calls do.
 ///
-/// Returns true for every accepted command, including ones that change nothing: an edit naming an id no
+/// Returns true for every accepted command (a refusal by the store, listed above, is not one), including ones that
+/// change nothing: an edit naming an id no
 /// event or section has, a move to the chord's current position, and `undo`/`redo` with nothing to undo
 /// or redo are valid no-ops, not errors. `error` is cleared on success.
 ///
@@ -398,7 +525,10 @@ bool applyCommandJson(DocumentStore& store, std::string_view json, std::string& 
 ///  "events":[{"id":1,"root":0,"type":"maj","lengthBeats":4.0,"velocity":100,
 ///             "inversion":0,"octave":0,"manualVoicing":false}, ...],
 ///  "sections":[{"id":1,"name":"Verse","colourIndex":0,"firstEventIndex":0}, ...],
-///  "nextId":2, "nextSectionId":2, "editor":{"width":900,"height":620}}
+///  "tracks":[{"id":1,"name":"Bass","role":"bass","mute":false,"solo":false,
+///             "notes":[{"id":1,"pitch":36,"anchor":1,"offset":0,"length":960,"velocity":100}, ...]}, ...],
+///  "chordsMuted":false, "chordsSolo":false,
+///  "nextId":2, "nextSectionId":2, "nextTrackId":2, "nextNoteId":2, "editor":{"width":900,"height":620}}
 /// ```
 /// `nextId` is the store's id counter (`DocumentStore::nextId`), so that a reloaded document keeps
 /// handing out ids no saved event ever had, and `nextSectionId` the section counter likewise.
@@ -409,10 +539,15 @@ bool applyCommandJson(DocumentStore& store, std::string_view json, std::string& 
 /// `Document::relationMode`, live state that is nonetheless saved with the set, R5) later, and
 /// `transposeWithKey` and `keyHintSeen` (also live state) after it, and `midiThru` (live state) after
 /// those, and `newChordBeats` (live state, the length of a chord added without one, null for one bar of the meter) after that: a reader that predates them ignores them, and `loadStateJson` defaults them when they are
-/// missing, so states cross both ways.
-/// Size: the largest state the store can hold (`kMaxChords` chords, a section on each, every name at
-/// `kMaxSectionNameBytes` bytes of characters that escape to two) is pinned by test_json_api.cpp at
-/// well under a tenth of `kMaxJsonBytes`, so a saved state always loads.
+/// missing, so states cross both ways. `tracks`, `chordsMuted`, `chordsSolo`, `nextTrackId` and `nextNoteId` (tracks
+/// design D7) came after all of them: the tracks in order with their live `mute` and `solo`, each note as stored
+/// (`anchor` its chord's id, `offset` and `length` in ticks, no derived start), and the two counters
+/// (`DocumentStore::nextTrackId` / `nextNoteId`) so ids stay unused after a reload; the note selection and the revision
+/// are live and not written. A build from before tracks ignores these keys and drops the tracks on its next save.
+/// Size: the largest state the store can hold (`kMaxChords` chords, a section on each, every section and track name at
+/// its byte bound of control characters, which escape to six bytes each, `kMaxTracks` tracks of `kMaxNotesPerTrack`
+/// inactive notes with eight-digit offsets and seven-digit lengths, every id ten digits) is pinned by
+/// test_json_api.cpp under `kMaxJsonBytes`, so a saved state always loads.
 std::string stateJson(const DocumentStore& store, int editorWidth = kDefaultEditorWidth,
                       int editorHeight = kDefaultEditorHeight);
 
@@ -422,9 +557,10 @@ std::string stateJson(const DocumentStore& store, int editorWidth = kDefaultEdit
 /// not above every event id, a non-positive editor size, or sections that are not `sectionsWellFormed`
 /// (document.h): not starting at 0, unsorted or sharing a start, an index outside the progression, a
 /// section id outside 1..INT_MAX-1 or repeated, a name over `kMaxSectionNameBytes` bytes; or a
-/// `nextSectionId` below 1 or not above every section id) it returns false with a description in `error` and the store, its history, its selection and the
-/// out-params are untouched. Otherwise it replaces the store's document and both id counters
-/// (`DocumentStore::replace`, which clears the undo/redo history and the selection), writes the editor
+/// `nextSectionId` below 1 or not above every section id; a malformed track or note, or tracks that fail
+/// `validateTracks`, below) it returns false with a description in `error` and the store, its history, its selection and the
+/// out-params are untouched. Otherwise it replaces the store's document and its four id counters
+/// (`DocumentStore::replace`, which clears the undo/redo history and both selections and moves the revision), writes the editor
 /// size into the out-params that are non-null, and returns true with `error` cleared.
 /// Lengths, velocities, inversions, octaves and section colours are clamped to the store's ranges
 /// rather than rejected (a mistyped value is still rejected). Optional, with their defaults: `editor`
@@ -436,7 +572,19 @@ std::string stateJson(const DocumentStore& store, int editorWidth = kDefaultEdit
 /// ("blend"; when given, one of the five `relationModeName` strings, anything else rejecting the state),
 /// `sections` (none) and `nextSectionId`
 /// (derived, one past the largest section id, 1 without sections; when given it must be at least that and
-/// is kept, like `nextId`). Every other field is required.
+/// is kept, like `nextId`), `tracks` (none), `chordsMuted` and `chordsSolo` (false; when given, booleans), and
+/// `nextTrackId` / `nextNoteId` (derived, one past the largest track / note id, 1 without; when given, at least that
+/// and kept, like `nextSectionId`). Every other field is required.
+/// Tracks: `tracks` must be an array of objects with every member `stateJson` writes: `id` an integer in
+/// 1..INT_MAX-1, `name` a string, `role` "bass", "lead" or "other", `mute` and `solo` booleans, `notes` an array of
+/// objects `{id, pitch, anchor, offset, length, velocity}`: `id` an integer in 1..INT_MAX-1, `pitch`, `anchor` and
+/// `velocity` integers that fit an `int`, `offset` and `length` read at 64 bits and required to fit an `int32_t`
+/// (anything else, 2^63 included, is an error naming the field, never a wrapped value). Nothing of a track is clamped:
+/// after the chords are read and clamped, the candidate document runs `validateTracks` (tracks.h) with the candidate
+/// counters (given or derived), and any failure (a note anchored to no chord, a pitch, velocity, offset or length
+/// outside D1's domain, repeated ids, notes out of their (start, pitch, id) order, a name over `kMaxTrackNameBytes`,
+/// more than `kMaxTracks` tracks or `kMaxNotesPerTrack` notes, or the playback limits over the active notes of every
+/// track, muted ones included) rejects the whole state as `"tracks" rejected: <validateTracks' reason>`.
 bool loadStateJson(DocumentStore& store, std::string_view json, std::string& error, int* editorWidth = nullptr,
                    int* editorHeight = nullptr) noexcept;
 

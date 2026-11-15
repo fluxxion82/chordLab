@@ -6,6 +6,7 @@
 #include "chordlab/document.h"
 #include "chordlab/feel.h"
 #include "chordlab/function.h"
+#include "chordlab/guide.h"
 #include "chordlab/harmony.h"
 #include "chordlab/identify.h"
 #include "chordlab/listener.h"
@@ -19,6 +20,7 @@
 #include "chordlab/suggest.h"
 #include "chordlab/symbol.h"
 #include "chordlab/tension.h"
+#include "chordlab/tracks.h"
 #include "chordlab/voicing.h"
 
 #include <nlohmann/json.hpp>
@@ -28,6 +30,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <set>
 #include <string>
@@ -164,6 +167,22 @@ json voicingNamesJson(const Chord& chord, const std::vector<int>& voicing, const
         out.push_back(spelling.text() + std::to_string(octave));
     }
     return out;
+}
+
+/// An event's `guide`: `harmonicGuide(chord, projectKey)` (guide.h) as four parallel views indexed by pitch
+/// class, `{"roles":[12 guideRoleName], "scale":scaleMask, "degrees":[12], "names":[12]}`.
+json guideJson(const Chord& chord, const Key& projectKey) {
+    const Guide guide = harmonicGuide(chord, projectKey);
+    json roles = json::array();
+    json degrees = json::array();
+    json names = json::array();
+    for (std::size_t pc = 0; pc < 12; ++pc) {
+        roles.push_back(guideRoleName(guide.role[pc]));
+        degrees.push_back(guide.degree[pc]);
+        names.push_back(guide.name[pc]);
+    }
+    return json{{"roles", std::move(roles)}, {"scale", guide.scaleMask}, {"degrees", std::move(degrees)},
+                {"names", std::move(names)}};
 }
 
 /// One palette cell as the snapshot writes it (`palette.cells` and `homeTriads` alike): the cell's own
@@ -305,6 +324,84 @@ json sectionsJson(const Document& doc) {
     return sections;
 }
 
+/// A track's notes as the snapshot publishes them: one array per field, all of the track's note count, in its note
+/// order (tracks design D6). Built column by column in one pass over the notes, with no object per note.
+json snapshotNoteColumnsJson(const ChordTimeline& timeline, const Track& track) {
+    const std::size_t count = track.notes.size();
+    json::array_t id, pitch, start, length, velocity, anchor, offset, active;
+    for (json::array_t* column : {&id, &pitch, &start, &length, &velocity, &anchor, &offset, &active}) {
+        column->reserve(count);
+    }
+    for (const TrackNote& n : track.notes) {
+        id.emplace_back(n.id);
+        pitch.emplace_back(n.pitch);
+        start.emplace_back(noteStart(timeline, n));
+        length.emplace_back(n.lengthTicks);
+        velocity.emplace_back(n.velocity);
+        anchor.emplace_back(n.anchorEventId);
+        offset.emplace_back(n.offsetTick);
+        active.emplace_back(noteActive(timeline, n));
+    }
+    json columns = json::object();
+    columns["id"] = json(std::move(id));
+    columns["pitch"] = json(std::move(pitch));
+    columns["start"] = json(std::move(start));
+    columns["length"] = json(std::move(length));
+    columns["velocity"] = json(std::move(velocity));
+    columns["anchor"] = json(std::move(anchor));
+    columns["offset"] = json(std::move(offset));
+    columns["active"] = json(std::move(active));
+    return columns;
+}
+
+/// The snapshot's `tracks` (tracks design D6): each track with its audibility and its notes column-wise
+/// (`snapshotNoteColumnsJson`: derived start, anchor, offset, active). The chord timeline is built once for all notes.
+json snapshotTracksJson(const Document& doc) {
+    const ChordTimeline timeline = chordTimeline(doc);
+    json tracks = json::array();
+    for (std::size_t i = 0; i < doc.tracks.size(); ++i) {
+        const Track& t = doc.tracks[i];
+        tracks.push_back({{"id", t.id},
+                          {"name", t.name},
+                          {"role", trackRoleName(t.role)},
+                          {"mute", t.mute},
+                          {"solo", t.solo},
+                          {"audible", trackAudible(doc, i)},
+                          {"notes", snapshotNoteColumnsJson(timeline, t)}});
+    }
+    return tracks;
+}
+
+/// The snapshot's `noteSelection`: `selection` normalised against `doc` (the ids its track holds, in the track's note
+/// order, once each), or null when that leaves nothing or the track is not in `doc`.
+json noteSelectionJson(const Document& doc, const NoteSelection& selection) {
+    const auto track = std::find_if(doc.tracks.begin(), doc.tracks.end(),
+                                    [&](const Track& t) { return t.id == selection.trackId; });
+    if (selection.trackId == kNoTrackId || track == doc.tracks.end()) {
+        return json();
+    }
+    const std::set<int> wanted(selection.ids.begin(), selection.ids.end());
+    json ids = json::array();
+    for (const TrackNote& n : track->notes) {
+        if (wanted.count(n.id) != 0) {
+            ids.push_back(n.id);
+        }
+    }
+    if (ids.empty()) {
+        return json();
+    }
+    return {{"trackId", selection.trackId}, {"ids", std::move(ids)}};
+}
+
+/// The snapshot's `trackLimits`: the track caps by name (tracks.h).
+json trackLimitsJson() {
+    return {{"maxTracks", kMaxTracks},
+            {"maxNotesPerTrack", kMaxNotesPerTrack},
+            {"minNoteTicks", kMinTrackNoteTicks},
+            {"maxPolyphony", kMaxTrackPolyphony},
+            {"maxOnsetsPerBeat", kMaxTrackOnsetsPerBeat}};
+}
+
 /// The snapshot's `presets`: every record of `allPresets()` in table order, with `fits` read against
 /// `projectKey`.
 json presetsJson(const Key& projectKey) {
@@ -404,6 +501,30 @@ public:
         return fail(name, "must be an integer " + range);
     }
 
+    /// An integer in `lo`..`hi` inclusive, read at 64 bits: the JSON number must be an integer (no fraction or
+    /// exponent) that fits an `int64_t`, so nothing is narrowed or wrapped before the range check (2^63 and
+    /// -2^63 - 1 are errors, not wrapped values).
+    bool getInt64In(const char* name, std::int64_t lo, std::int64_t hi, std::int64_t& out) {
+        const json* v = require(name);
+        if (v == nullptr) {
+            return false;
+        }
+        if (v->is_number_unsigned()) {
+            const auto u = v->get<std::uint64_t>();
+            if (hi >= 0 && u <= static_cast<std::uint64_t>(hi) && static_cast<std::int64_t>(u) >= lo) {
+                out = static_cast<std::int64_t>(u);
+                return true;
+            }
+        } else if (v->is_number_integer()) {
+            const auto i = v->get<std::int64_t>();
+            if (i >= lo && i <= hi) {
+                out = i;
+                return true;
+            }
+        }
+        return fail(name, "must be an integer in " + std::to_string(lo) + ".." + std::to_string(hi));
+    }
+
     /// A finite number (integer or float).
     bool getNumber(const char* name, double& out) {
         const json* v = require(name);
@@ -481,7 +602,7 @@ public:
         return false;
     }
 
-private:
+    /// The field, or nullptr after recording "missing <field>".
     const json* require(const char* name) {
         const json* v = find(name);
         if (v == nullptr) {
@@ -490,6 +611,7 @@ private:
         return v;
     }
 
+private:
     const json& object_;
     std::string where_;
     std::string& error_;
@@ -810,6 +932,18 @@ struct Command {
         SetNewChordLength,
         SetRelationMode,
         LoadPreset,
+        AddTrack,
+        RemoveTrack,
+        PatchTrack,
+        MoveTrack,
+        SetTrackMute,
+        SetTrackSolo,
+        SetChordsMute,
+        SetChordsSolo,
+        InsertNotes,
+        RemoveNotes,
+        UpdateNotes,
+        SelectNotes,
         Undo,
         Redo
     };
@@ -823,10 +957,12 @@ struct Command {
     bool hasLength = false;
     int velocity = 100;        // AppendChord (optional, store default), SetVelocity
     // MoveChord, SetLength, SetVelocity, RemoveChord, the voicing, section and selection commands; SelectEvents' anchor
-    // (kNoEventId when absent or null)
+    // (kNoEventId when absent or null); the track of the track and note commands (wire `id`, or `trackId` for the note
+    // commands; SelectNotes: kNoTrackId for a null `trackId`)
     int id = 0;
-    int index = 0;             // MoveChord, AddSection, MoveSectionStart, InsertChords
-    // SetProgressionLoop, SetFollowHost, SetAutoVoiceLead, SetTransposeWithKey, SetKeyHintSeen, SetMidiThru
+    int index = 0;             // MoveChord, AddSection, MoveSectionStart, InsertChords, MoveTrack
+    // SetProgressionLoop, SetFollowHost, SetAutoVoiceLead, SetTransposeWithKey, SetKeyHintSeen, SetMidiThru,
+    // SetTrackMute, SetTrackSolo, SetChordsMute, SetChordsSolo
     bool on = false;
     Feel feel{};               // SetFeel
     Meter meter{};             // SetMeter
@@ -838,15 +974,23 @@ struct Command {
     RelationMode relationMode = RelationMode::Blend;  // SetRelationMode
     const Preset* preset = nullptr;                   // LoadPreset: a record of allPresets(), never null once parsed
     ProgressionLoad load = ProgressionLoad::Append;   // LoadPreset
+    TrackRole role = TrackRole::Other;                // AddTrack, PatchTrack (when `hasRole`)
+    bool hasRole = false;                             // PatchTrack: `role` was given
+    bool hasName = false;                             // AddTrack, PatchTrack: a `name` was given (it travels in `name`)
+    bool hasBaseRevision = false;                     // InsertNotes, RemoveNotes, UpdateNotes: `baseRevision` was given
+    std::uint64_t baseRevision = 0;                   // ... and this is it
 };
 static_assert(std::is_trivially_destructible_v<Command>, "Command must be plain data: destroying one must not allocate");
 
 /// What a command carries besides `Command`'s plain fields, owned by the reader's frame like the section name:
-/// the chords of `insertChords` and the ids of `removeChords`, `setLengths` and `selectEvents`. Its destructor
-/// frees, never allocates.
+/// the chords of `insertChords` (with their notes), the ids of `removeChords`, `setLengths`, `selectEvents`,
+/// `removeNotes` and `selectNotes`, and the notes of `insertNotes` and `updateNotes`. Its destructor frees,
+/// never allocates.
 struct CommandLists {
     std::vector<ChordSpec> chords;
     std::vector<int> ids;
+    std::vector<NoteSpec> notes;
+    std::vector<NoteEdit> edits;
 };
 
 // Phase A parsers: each reads the fields of one command kind into `out`, reporting through `Fields`.
@@ -977,15 +1121,20 @@ bool parseSetOctave(Fields& fields, Command& out) {
     return fields.getInt("id", out.id) && fields.getInt("octave", out.octave);
 }
 
-/// Reads a section `name` field: a string of at most `kMaxSectionNameBytes` UTF-8 bytes.
-bool getSectionName(Fields& fields, std::string& name) {
+/// Reads a `name` field: a string of at most `maxBytes` UTF-8 bytes.
+bool getBoundedName(Fields& fields, std::string& name, int maxBytes) {
     if (!fields.getString("name", name)) {
         return false;
     }
-    if (name.size() > static_cast<std::size_t>(kMaxSectionNameBytes)) {
-        return fields.fail("name", "must be at most " + std::to_string(kMaxSectionNameBytes) + " bytes");
+    if (name.size() > static_cast<std::size_t>(maxBytes)) {
+        return fields.fail("name", "must be at most " + std::to_string(maxBytes) + " bytes");
     }
     return true;
+}
+
+/// Reads a section `name` field: a string of at most `kMaxSectionNameBytes` UTF-8 bytes.
+bool getSectionName(Fields& fields, std::string& name) {
+    return getBoundedName(fields, name, kMaxSectionNameBytes);
 }
 
 /// `addSection {index, name?}`: the name, when given, goes to `name`; absent, it stays empty (the store's
@@ -1027,12 +1176,115 @@ bool parseSelectEvent(Fields& fields, Command& out) {
     return toInt(*id, out.id) || fields.fail("id", "must be an integer or null");
 }
 
+/// Reads the role at `fields[name]`: "bass", "lead" or "other" (lowercase, as the snapshot publishes them).
+/// Missing is "missing <field>"; mistyped and unknown values alike are one message listing the three.
+bool parseRoleField(Fields& fields, const char* name, TrackRole& out) {
+    const json* v = fields.require(name);
+    if (v == nullptr) {
+        return false;
+    }
+    if (v->is_string()) {
+        if (const std::optional<TrackRole> role = trackRoleFromName(v->get_ref<const std::string&>())) {
+            out = *role;
+            return true;
+        }
+    }
+    return fields.fail(name, "must be \"bass\", \"lead\" or \"other\"");
+}
+
+/// An optional integer: absent leaves `out` empty, present must be an integer (null is not one).
+bool getOptionalInt(Fields& fields, const char* name, std::optional<int>& out) {
+    if (!fields.has(name)) {
+        return true;
+    }
+    int value = 0;
+    if (!fields.getInt(name, value)) {
+        return false;
+    }
+    out = value;
+    return true;
+}
+
+/// An optional 64-bit tick count (`getInt64In` over the whole of int64; the store clamps it into the domain).
+bool getOptionalTicks(Fields& fields, const char* name, std::optional<std::int64_t>& out) {
+    if (!fields.has(name)) {
+        return true;
+    }
+    std::int64_t value = 0;
+    if (!fields.getInt64In(name, std::numeric_limits<std::int64_t>::min(), std::numeric_limits<std::int64_t>::max(), value)) {
+        return false;
+    }
+    out = value;
+    return true;
+}
+
+/// A required 64-bit tick count.
+bool getTicks(Fields& fields, const char* name, std::int64_t& out) {
+    return fields.getInt64In(name, std::numeric_limits<std::int64_t>::min(), std::numeric_limits<std::int64_t>::max(), out);
+}
+
+/// The most chord notes one `insertChords` batch may carry in all: every track's worth.
+constexpr std::size_t kMaxChordNotes = static_cast<std::size_t>(kMaxTracks) * static_cast<std::size_t>(kMaxNotesPerTrack);
+
+/// The `notes` of one `insertChords` entry, `chordFields` being `chords[i]`: an array of objects `{lane:{trackId?,
+/// name, role}, offset, length, pitch, velocity?}` (`velocity` 100 when absent). `noteTotal` counts the notes of the
+/// whole batch so far and may not pass `kMaxChordNotes`, checked before any element is read. Ticks are int64
+/// (the store clamps), pitch, velocity and the lane's `trackId` ints. Errors carry the whole path
+/// ("chords[1].notes[0].lane.role must be ...").
+bool parseChordNotes(Fields& chordFields, std::vector<ChordNoteSpec>& out, std::size_t& noteTotal, std::string& error) {
+    const json* list = chordFields.getArray("notes");
+    if (list == nullptr) {
+        return false;
+    }
+    if (list->size() > kMaxChordNotes - noteTotal) {
+        return chordFields.fail("notes", "must not bring the batch to more than " + std::to_string(kMaxChordNotes) + " notes");
+    }
+    noteTotal += list->size();
+    out.clear();
+    out.reserve(list->size());
+    for (std::size_t i = 0; i < list->size(); ++i) {
+        const std::string where = chordFields.label("notes") + "[" + std::to_string(i) + "]";
+        const json& item = (*list)[i];
+        if (!item.is_object()) {
+            error = where + " must be an object";
+            return false;
+        }
+        Fields noteFields(item, where, error);
+        ChordNoteSpec note;
+        const json* laneObject = noteFields.getObject("lane");
+        if (laneObject == nullptr) {
+            return false;
+        }
+        Fields laneFields(*laneObject, noteFields.label("lane"), error);
+        if (!getBoundedName(laneFields, note.lane.name, kMaxTrackNameBytes) ||
+            !parseRoleField(laneFields, "role", note.lane.role)) {
+            return false;
+        }
+        if (laneFields.has("trackId") && !laneFields.find("trackId")->is_null()) {
+            int trackId = 0;
+            if (!laneFields.getInt("trackId", trackId)) {
+                return false;
+            }
+            note.lane.trackId = trackId;
+        }
+        if (!getTicks(noteFields, "offset", note.offsetTick) || !getTicks(noteFields, "length", note.lengthTicks) ||
+            !noteFields.getInt("pitch", note.pitch)) {
+            return false;
+        }
+        if (noteFields.has("velocity") && !noteFields.getInt("velocity", note.velocity)) {
+            return false;
+        }
+        out.push_back(std::move(note));
+    }
+    return true;
+}
+
 /// One `insertChords` entry, `fields` being `chords[i]`: `root` (0..11) and `type` (a dictionary id) required;
 /// `lengthBeats` (a finite number), `velocity` (an integer), `inversion` (0..tones - 1 of the chord), `octave`
 /// (kMinVoicingOctave..kMaxVoicingOctave) and `manualVoicing` (a boolean) optional. Lengths and velocities
 /// are clamped by the store; the voicing fields are range-checked here, as `appendChord`'s inversion is. Every
 /// failure names the field with the entry's index ("chords[2].root must be an integer in 0..11").
-bool parseChordSpec(Fields& fields, ChordSpec& out) {
+bool parseChordSpec(Fields& fields, ChordSpec& out, std::size_t& noteTotal, std::string& error) {
     int root = 0;
     std::string typeId;
     if (!fields.getIntIn("root", 0, 11, root) || !fields.getString("type", typeId)) {
@@ -1074,7 +1326,10 @@ bool parseChordSpec(Fields& fields, ChordSpec& out) {
         }
         spec.manualVoicing = manual;
     }
-    out = spec;
+    if (fields.has("notes") && !parseChordNotes(fields, spec.notes, noteTotal, error)) {
+        return false;
+    }
+    out = std::move(spec);
     return true;
 }
 
@@ -1098,6 +1353,7 @@ bool parseInsertChords(Fields& fields, Command& out, std::vector<ChordSpec>& cho
     }
     chords.clear();
     chords.reserve(list->size());
+    std::size_t noteTotal = 0;
     for (std::size_t i = 0; i < list->size(); ++i) {
         const std::string where = "chords[" + std::to_string(i) + "]";
         const json& item = (*list)[i];
@@ -1107,10 +1363,10 @@ bool parseInsertChords(Fields& fields, Command& out, std::vector<ChordSpec>& cho
         }
         Fields itemFields(item, where, error);
         ChordSpec spec{Chord{0, nullptr}};
-        if (!parseChordSpec(itemFields, spec)) {
+        if (!parseChordSpec(itemFields, spec, noteTotal, error)) {
             return false;
         }
-        chords.push_back(spec);
+        chords.push_back(std::move(spec));
     }
     return true;
 }
@@ -1118,13 +1374,17 @@ bool parseInsertChords(Fields& fields, Command& out, std::vector<ChordSpec>& cho
 /// `ids`: an array of integers, non-empty unless `allowEmpty` (`selectEvents`, where an empty list clears).
 /// Repeats and ids no event has are kept here; the store skips them. A bad element is named by its index
 /// ("ids[1] must be an integer").
-bool parseIds(Fields& fields, bool allowEmpty, std::vector<int>& ids, std::string& error) {
+bool parseIds(Fields& fields, bool allowEmpty, std::vector<int>& ids, std::string& error,
+              std::size_t maxCount = std::numeric_limits<std::size_t>::max()) {
     const json* list = fields.getArray("ids");
     if (list == nullptr) {
         return false;
     }
     if (list->empty() && !allowEmpty) {
         return fields.fail("ids", "must hold at least one id");
+    }
+    if (list->size() > maxCount) {
+        return fields.fail("ids", "must hold at most " + std::to_string(maxCount) + " ids");
     }
     ids.clear();
     ids.reserve(list->size());
@@ -1152,6 +1412,155 @@ bool parseSelectEvents(Fields& fields, Command& out, std::vector<int>& ids, std:
         return true;
     }
     return toInt(*anchor, out.id) || fields.fail("anchor", "must be an integer or null");
+}
+
+/// The optional `baseRevision` of the note commands (tracks D4): absent, or a non-negative JSON integer (read as
+/// `uint64_t`, which nlohmann holds exactly); a negative, fractional or larger value is an error, not a wrapped one.
+bool parseBaseRevision(Fields& fields, Command& out) {
+    const json* v = fields.find("baseRevision");
+    if (v == nullptr) {
+        return true;
+    }
+    if (v->is_number_unsigned()) {
+        out.baseRevision = v->get<std::uint64_t>();
+    } else if (v->is_number_integer() && v->get<std::int64_t>() >= 0) {
+        out.baseRevision = static_cast<std::uint64_t>(v->get<std::int64_t>());
+    } else {
+        return fields.fail("baseRevision", "must be a non-negative integer");
+    }
+    out.hasBaseRevision = true;
+    return true;
+}
+
+/// `addTrack {role, name?}`: `role` "bass", "lead" or "other"; `name` a string of at most `kMaxTrackNameBytes` bytes
+/// (longer is rejected, not cut, as a section name), travelling in `name`; empty or absent takes the store's default.
+bool parseAddTrack(Fields& fields, Command& out, std::string& name) {
+    out.kind = Command::Kind::AddTrack;
+    if (!parseRoleField(fields, "role", out.role)) {
+        return false;
+    }
+    out.hasName = fields.has("name");
+    return !out.hasName || getBoundedName(fields, name, kMaxTrackNameBytes);
+}
+
+/// `patchTrack {id, name?, role?}`: either field may be absent; with neither the store refuses.
+bool parsePatchTrack(Fields& fields, Command& out, std::string& name) {
+    out.kind = Command::Kind::PatchTrack;
+    if (!fields.getInt("id", out.id)) {
+        return false;
+    }
+    out.hasName = fields.has("name");
+    if (out.hasName && !getBoundedName(fields, name, kMaxTrackNameBytes)) {
+        return false;
+    }
+    out.hasRole = fields.has("role");
+    return !out.hasRole || parseRoleField(fields, "role", out.role);
+}
+
+/// `setTrackMute {id, on}` / `setTrackSolo {id, on}`.
+bool parseTrackToggle(Fields& fields, Command::Kind kind, Command& out) {
+    out.kind = kind;
+    return fields.getInt("id", out.id) && fields.getBool("on", out.on);
+}
+
+/// `insertNotes {trackId, notes:[{pitch, start, length, velocity?}], baseRevision?}`: `notes` an array of at most
+/// `kMaxNotesPerTrack` objects (an empty one is the store's refusal); `pitch` and `velocity` ints (100 when
+/// absent), `start` and `length` 64-bit integers, all clamped by the store. Errors name the entry
+/// ("notes[2].start must be an integer in ...").
+bool parseInsertNotes(Fields& fields, Command& out, std::vector<NoteSpec>& notes, std::string& error) {
+    out.kind = Command::Kind::InsertNotes;
+    if (!fields.getInt("trackId", out.id)) {
+        return false;
+    }
+    const json* list = fields.getArray("notes");
+    if (list == nullptr) {
+        return false;
+    }
+    if (list->size() > static_cast<std::size_t>(kMaxNotesPerTrack)) {
+        return fields.fail("notes", "must hold at most " + std::to_string(kMaxNotesPerTrack) + " notes");
+    }
+    notes.clear();
+    notes.reserve(list->size());
+    for (std::size_t i = 0; i < list->size(); ++i) {
+        const std::string where = "notes[" + std::to_string(i) + "]";
+        const json& item = (*list)[i];
+        if (!item.is_object()) {
+            error = where + " must be an object";
+            return false;
+        }
+        Fields noteFields(item, where, error);
+        NoteSpec spec{};
+        spec.velocity = 100;
+        if (!noteFields.getInt("pitch", spec.pitch) || !getTicks(noteFields, "start", spec.startTick) ||
+            !getTicks(noteFields, "length", spec.lengthTicks)) {
+            return false;
+        }
+        if (noteFields.has("velocity") && !noteFields.getInt("velocity", spec.velocity)) {
+            return false;
+        }
+        notes.push_back(spec);
+    }
+    return parseBaseRevision(fields, out);
+}
+
+/// `updateNotes {trackId, notes:[{id, pitch?, start?, length?, velocity?}], baseRevision?}`: as `insertNotes`, with
+/// `id` required and every other field optional (absent keeps the note's value; null is an error).
+bool parseUpdateNotes(Fields& fields, Command& out, std::vector<NoteEdit>& edits, std::string& error) {
+    out.kind = Command::Kind::UpdateNotes;
+    if (!fields.getInt("trackId", out.id)) {
+        return false;
+    }
+    const json* list = fields.getArray("notes");
+    if (list == nullptr) {
+        return false;
+    }
+    if (list->size() > static_cast<std::size_t>(kMaxNotesPerTrack)) {
+        return fields.fail("notes", "must hold at most " + std::to_string(kMaxNotesPerTrack) + " notes");
+    }
+    edits.clear();
+    edits.reserve(list->size());
+    for (std::size_t i = 0; i < list->size(); ++i) {
+        const std::string where = "notes[" + std::to_string(i) + "]";
+        const json& item = (*list)[i];
+        if (!item.is_object()) {
+            error = where + " must be an object";
+            return false;
+        }
+        Fields noteFields(item, where, error);
+        NoteEdit edit{};
+        if (!noteFields.getInt("id", edit.id) || !getOptionalInt(noteFields, "pitch", edit.pitch) ||
+            !getOptionalTicks(noteFields, "start", edit.startTick) ||
+            !getOptionalTicks(noteFields, "length", edit.lengthTicks) ||
+            !getOptionalInt(noteFields, "velocity", edit.velocity)) {
+            return false;
+        }
+        edits.push_back(edit);
+    }
+    return parseBaseRevision(fields, out);
+}
+
+/// `removeNotes {trackId, ids, baseRevision?}`: `ids` an array of at most `kMaxNotesPerTrack` integers; empty is a
+/// valid no-op, as the store's.
+bool parseRemoveNotes(Fields& fields, Command& out, std::vector<int>& ids, std::string& error) {
+    out.kind = Command::Kind::RemoveNotes;
+    return fields.getInt("trackId", out.id) && parseIds(fields, true, ids, error, static_cast<std::size_t>(kMaxNotesPerTrack)) &&
+           parseBaseRevision(fields, out);
+}
+
+/// `selectNotes {trackId, ids}`: `trackId` an integer, or null for no track (null, like `kNoTrackId` = -1, clears the
+/// selection, as `selectEvent`); `ids` an array of at most `kMaxNotesPerTrack` integers, empty clears.
+bool parseSelectNotes(Fields& fields, Command& out, std::vector<int>& ids, std::string& error) {
+    out.kind = Command::Kind::SelectNotes;
+    const json* track = fields.require("trackId");
+    if (track == nullptr) {
+        return false;
+    }
+    if (track->is_null()) {
+        out.id = kNoTrackId;
+    } else if (!toInt(*track, out.id)) {
+        return fields.fail("trackId", "must be an integer or null");
+    }
+    return parseIds(fields, true, ids, error, static_cast<std::size_t>(kMaxNotesPerTrack));
 }
 
 /// `setNewChordLength {lengthBeats}`: a finite number, or null for one bar of the meter; the field is required.
@@ -1305,6 +1714,43 @@ bool parseCommand(std::string_view text, Command& out, std::string& name, Comman
     if (cmd == "loadPreset") {
         return parseLoadPreset(fields, out);
     }
+    if (cmd == "addTrack") {
+        return parseAddTrack(fields, out, name);
+    }
+    if (cmd == "removeTrack") {
+        return parseIdOnly(fields, Command::Kind::RemoveTrack, out);
+    }
+    if (cmd == "patchTrack") {
+        return parsePatchTrack(fields, out, name);
+    }
+    if (cmd == "moveTrack") {
+        out.kind = Command::Kind::MoveTrack;
+        return fields.getInt("id", out.id) && fields.getInt("index", out.index);
+    }
+    if (cmd == "setTrackMute") {
+        return parseTrackToggle(fields, Command::Kind::SetTrackMute, out);
+    }
+    if (cmd == "setTrackSolo") {
+        return parseTrackToggle(fields, Command::Kind::SetTrackSolo, out);
+    }
+    if (cmd == "setChordsMute") {
+        return parseToggle(fields, Command::Kind::SetChordsMute, out);
+    }
+    if (cmd == "setChordsSolo") {
+        return parseToggle(fields, Command::Kind::SetChordsSolo, out);
+    }
+    if (cmd == "insertNotes") {
+        return parseInsertNotes(fields, out, lists.notes, error);
+    }
+    if (cmd == "removeNotes") {
+        return parseRemoveNotes(fields, out, lists.ids, error);
+    }
+    if (cmd == "updateNotes") {
+        return parseUpdateNotes(fields, out, lists.edits, error);
+    }
+    if (cmd == "selectNotes") {
+        return parseSelectNotes(fields, out, lists.ids, error);
+    }
     if (cmd == "undo") {
         out.kind = Command::Kind::Undo;
         return true;
@@ -1328,13 +1774,76 @@ enum class Refusal {
     PresetDocumentFull,
     PresetIdsExhausted,
     PresetSectionIdsExhausted,
-    PresetInvalid
+    PresetInvalid,
+    Store  ///< the store (or the command, for a stale `baseRevision` or an unknown track of a live flag) refused and gave its reason
 };
+
+/// The wire name of a command that `Refusal::Store` can refuse, for its error message.
+const char* commandWireName(Command::Kind kind) {
+    switch (kind) {
+        case Command::Kind::AppendChord:
+            return "appendChord";
+        case Command::Kind::InsertChords:
+            return "insertChords";
+        case Command::Kind::MoveChord:
+            return "moveChord";
+        case Command::Kind::SetLength:
+            return "setLength";
+        case Command::Kind::SetLengths:
+            return "setLengths";
+        case Command::Kind::RemoveChord:
+            return "removeChord";
+        case Command::Kind::RemoveChords:
+            return "removeChords";
+        case Command::Kind::LoadPreset:
+            return "loadPreset";
+        case Command::Kind::AddTrack:
+            return "addTrack";
+        case Command::Kind::RemoveTrack:
+            return "removeTrack";
+        case Command::Kind::PatchTrack:
+            return "patchTrack";
+        case Command::Kind::MoveTrack:
+            return "moveTrack";
+        case Command::Kind::SetTrackMute:
+            return "setTrackMute";
+        case Command::Kind::SetTrackSolo:
+            return "setTrackSolo";
+        case Command::Kind::InsertNotes:
+            return "insertNotes";
+        case Command::Kind::RemoveNotes:
+            return "removeNotes";
+        case Command::Kind::UpdateNotes:
+            return "updateNotes";
+        default:
+            break;
+    }
+    return "command";  // no other command reaches Refusal::Store
+}
+
+/// Classifies a store call that reports through the `std::string* refusal` convention (document.h): `ok` its
+/// result, `reason` the string it filled. `Refusal::Store` when it failed with a reason (refused), else `None`
+/// (changed, or failed without one: a valid no-op).
+Refusal storeRefusal(bool ok, const std::string& reason) {
+    return !ok && !reason.empty() ? Refusal::Store : Refusal::None;
+}
+
+/// True, with the drag message in `reason`, when `command` carries a `baseRevision` that is not the store's
+/// revision: the gesture that produced the command was computed from an older document (tracks D4), so nothing is
+/// applied. Checked before the store sees the command, so a stale command is this refusal whatever else is wrong with it.
+bool staleBase(const DocumentStore& store, const Command& command, std::string& reason) {
+    if (!command.hasBaseRevision || command.baseRevision == store.revision()) {
+        return false;
+    }
+    reason = "The notes changed while you were dragging";
+    return true;
+}
 
 /// `loadPreset`: resolves the preset in the project key and hands it to the store, which builds the
 /// whole next document and commits it once; a refusal is the store's own reason
-/// (`progressionRefusal`), asked before the call so that nothing has changed.
-Refusal applyLoadPreset(DocumentStore& store, const Preset& preset, ProgressionLoad load) {
+/// (`progressionRefusal`), asked before the call so that nothing has changed, or else the track invariant's
+/// (`Refusal::Store`, the store's message in `reason`).
+Refusal applyLoadPreset(DocumentStore& store, const Preset& preset, ProgressionLoad load, std::string& reason) {
     const std::vector<std::pair<Chord, double>> steps = resolvePreset(preset, store.doc().projectKey, store.doc().meter);
     switch (store.progressionRefusal(steps, load)) {
         case ProgressionRefusal::None:
@@ -1349,9 +1858,14 @@ Refusal applyLoadPreset(DocumentStore& store, const Preset& preset, ProgressionL
         case ProgressionRefusal::NonFiniteLength:
             return Refusal::PresetInvalid;  // not in the table (test_presets.cpp), kept total
     }
-    const bool loaded = load == ProgressionLoad::Append ? store.appendProgression(steps, preset.name)
-                                                        : store.replaceProgression(steps, preset.name);
-    return loaded ? Refusal::None : Refusal::PresetInvalid;  // the refusal was asked first: always loaded
+    const bool loaded = load == ProgressionLoad::Append ? store.appendProgression(steps, preset.name, &reason)
+                                                        : store.replaceProgression(steps, preset.name, &reason);
+    if (loaded) {
+        return Refusal::None;
+    }
+    // The pre-checks passed, so only the track invariant can have refused (the notes of an append stay put and a
+    // replace removes them all, so it never does); kept total.
+    return reason.empty() ? Refusal::PresetInvalid : Refusal::Store;
 }
 
 /// True when `index` is a chord position of `doc` at which no section starts: the one case in which the
@@ -1370,10 +1884,13 @@ bool canStartSection(const Document& doc, int index) {
 
 /// Phase B of `applyCommandJson`: applies a validated command through one store call, which gives the
 /// strong guarantee. Takes nothing but the store, plain data, the section name and the lists, so no JSON
-/// object can be alive here. Refuses only an append or an insert, when the result would pass `kMaxChords`
-/// chords or the store's id counter is exhausted, and a section add when the section id counter is; either way
-/// nothing changes.
-Refusal applyCommand(DocumentStore& store, const Command& command, std::string& name, const CommandLists& lists) {
+/// object can be alive here. Refuses an append or an insert, when the result would pass `kMaxChords`
+/// chords or the store's id counter is exhausted, and a section add when the section id counter is (each
+/// classified by a pre-check that mirrors the store's); a preset load for the store's `progressionRefusal`; and
+/// any chord timing edit (append, insert, preset load, move, resize, removal) that the track invariant refuses
+/// (`Refusal::Store`, with the store's message in `reason`). Either way nothing changes.
+Refusal applyCommand(DocumentStore& store, const Command& command, std::string& name, const CommandLists& lists,
+                     std::string& reason) {
     const Document& doc = store.doc();
     switch (command.kind) {
         case Command::Kind::SetKey:
@@ -1392,26 +1909,28 @@ Refusal applyCommand(DocumentStore& store, const Command& command, std::string& 
             if (doc.events.size() >= static_cast<std::size_t>(kMaxChords)) {
                 return Refusal::DocumentFull;
             }
-            // No length: the document's new-chord length (D3; one bar of the meter until one is chosen).
+            if (store.nextId() >= INT_MAX) {
+                return Refusal::IdsExhausted;  // the store's own id check, asked first
+            }
+            // No length: the document's new-chord length (D3; one bar of the meter until one is chosen). The length
+            // is finite (validated), so only the track invariant can still refuse.
             return store.appendChord(command.chord,
                                      command.hasLength ? std::optional<double>(command.lengthBeats) : std::nullopt,
                                      command.velocity,
-                                     command.hasInversion ? std::optional<int>(command.inversion) : std::nullopt) !=
-                           kNoEventId
+                                     command.hasInversion ? std::optional<int>(command.inversion) : std::nullopt,
+                                     &reason) != kNoEventId
                        ? Refusal::None
-                       : Refusal::IdsExhausted;
+                       : Refusal::Store;
         case Command::Kind::MoveChord:
-            store.moveChord(command.id, command.index);
-            return Refusal::None;
+            return storeRefusal(store.moveChord(command.id, command.index, &reason), reason);
         case Command::Kind::SetLength:
-            store.setLength(command.id, command.lengthBeats);
-            return Refusal::None;
+            return storeRefusal(store.setLength(command.id, command.lengthBeats, &reason), reason);
         case Command::Kind::SetVelocity:
             store.setVelocity(command.id, command.velocity);
             return Refusal::None;
         case Command::Kind::RemoveChord:
-            store.removeChord(command.id);
-            return Refusal::None;
+            // An unknown id is a valid no-op.
+            return storeRefusal(store.removeChord(command.id, &reason), reason);
         case Command::Kind::SetProgressionLoop:
             store.setProgressionLoop(command.on);
             return Refusal::None;
@@ -1479,14 +1998,19 @@ Refusal applyCommand(DocumentStore& store, const Command& command, std::string& 
             if (lists.chords.size() > static_cast<std::size_t>(kMaxChords) - doc.events.size()) {
                 return Refusal::InsertDocumentFull;
             }
-            // Lengths are finite (validated) and the batch fits: only the id counter can still refuse.
-            return store.insertChords(command.index, lists.chords).empty() ? Refusal::InsertIdsExhausted : Refusal::None;
+            if (store.nextId() > INT_MAX - static_cast<int>(lists.chords.size())) {  // <= kMaxChords: no overflow
+                return Refusal::InsertIdsExhausted;  // the store's own id check, asked first
+            }
+            // Lengths are finite (validated), the batch fits and the ids suffice. The store can still refuse: a lane
+            // that matches more than one track, a new track past `kMaxTracks`, track or note ids exhausted, and the
+            // track invariant (a note pushed along leaves the note range (D1), or a pushed fractional chord gains a
+            // rounded tick and reactivates a note over a cap).
+            return store.insertChords(command.index, lists.chords, &reason).empty() ? Refusal::Store : Refusal::None;
         case Command::Kind::RemoveChords:
-            store.removeChords(lists.ids);  // no id that exists is a valid no-op
-            return Refusal::None;
+            // No id that exists is a valid no-op.
+            return storeRefusal(store.removeChords(lists.ids, &reason), reason);
         case Command::Kind::SetLengths:
-            store.setLengths(lists.ids, command.lengthBeats);
-            return Refusal::None;
+            return storeRefusal(store.setLengths(lists.ids, command.lengthBeats, &reason), reason);
         case Command::Kind::SetNewChordLength:
             store.setNewChordLength(command.hasLength ? std::optional<double>(command.lengthBeats) : std::nullopt);
             return Refusal::None;
@@ -1494,7 +2018,60 @@ Refusal applyCommand(DocumentStore& store, const Command& command, std::string& 
             store.setRelationMode(command.relationMode);
             return Refusal::None;
         case Command::Kind::LoadPreset:
-            return applyLoadPreset(store, *command.preset, command.load);
+            return applyLoadPreset(store, *command.preset, command.load, reason);
+        case Command::Kind::AddTrack:
+            return store.addTrack(command.role, command.hasName ? std::optional<std::string>(std::move(name)) : std::nullopt,
+                                  &reason) != kNoTrackId
+                       ? Refusal::None
+                       : Refusal::Store;
+        case Command::Kind::RemoveTrack:
+            return storeRefusal(store.removeTrack(command.id, &reason), reason);
+        case Command::Kind::PatchTrack:
+            return storeRefusal(store.patchTrack(command.id,
+                                                 command.hasName ? std::optional<std::string>(std::move(name)) : std::nullopt,
+                                                 command.hasRole ? std::optional<TrackRole>(command.role) : std::nullopt,
+                                                 &reason),
+                                reason);
+        case Command::Kind::MoveTrack:
+            return storeRefusal(store.moveTrack(command.id, command.index, &reason), reason);
+        case Command::Kind::SetTrackMute:
+        case Command::Kind::SetTrackSolo:
+            // The store cannot tell an unknown id from a value already held (both false), so the command asks first:
+            // an unknown track is an error, the value already held a valid no-op.
+            if (store.findTrackIndex(command.id) < 0) {
+                reason = "No track with id " + std::to_string(command.id);
+                return Refusal::Store;
+            }
+            if (command.kind == Command::Kind::SetTrackMute) {
+                store.setTrackMute(command.id, command.on);
+            } else {
+                store.setTrackSolo(command.id, command.on);
+            }
+            return Refusal::None;
+        case Command::Kind::SetChordsMute:
+            store.setChordsMute(command.on);
+            return Refusal::None;
+        case Command::Kind::SetChordsSolo:
+            store.setChordsSolo(command.on);
+            return Refusal::None;
+        case Command::Kind::InsertNotes:
+            if (staleBase(store, command, reason)) {
+                return Refusal::Store;
+            }
+            return store.insertNotes(command.id, lists.notes, &reason).empty() ? Refusal::Store : Refusal::None;
+        case Command::Kind::RemoveNotes:
+            if (staleBase(store, command, reason)) {
+                return Refusal::Store;
+            }
+            return storeRefusal(store.removeNotes(command.id, lists.ids, &reason), reason);
+        case Command::Kind::UpdateNotes:
+            if (staleBase(store, command, reason)) {
+                return Refusal::Store;
+            }
+            return storeRefusal(store.updateNotes(command.id, lists.edits, &reason), reason);
+        case Command::Kind::SelectNotes:
+            store.setNoteSelection(command.id, lists.ids);  // live state; an unknown track is a no-op, as selectEvent
+            return Refusal::None;
         case Command::Kind::Undo:
             store.undo();  // nothing to undo is a no-op, not an error
             return Refusal::None;
@@ -1543,11 +2120,97 @@ bool parseSections(Fields& fields, Document& doc, int& maxSectionId, std::string
     return true;
 }
 
-/// Phase A of `loadStateJson`: parses and validates `text` into a document, the two id counters and an
+/// A state note's tick field (`offset`, `length`): read at 64 bits over the whole of `int32_t` (`getInt64In`, so 2^63
+/// or a fraction is an error, never a wrapped value) and only then narrowed. The domain is `validateTracks`' to check.
+bool getStateTicks(Fields& fields, const char* name, std::int32_t& out) {
+    std::int64_t value = 0;
+    if (!fields.getInt64In(name, std::numeric_limits<std::int32_t>::min(), std::numeric_limits<std::int32_t>::max(),
+                           value)) {
+        return false;
+    }
+    out = static_cast<std::int32_t>(value);
+    return true;
+}
+
+/// Reads the optional `tracks` array of a state into `doc.tracks` (tracks design D7): each entry needs `id` (1..INT_MAX-1,
+/// so a derived counter cannot overflow), `name`, `role`, `mute`, `solo` and `notes`, each note `id` (1..INT_MAX-1),
+/// `pitch`, `anchor`, `offset`, `length` and `velocity`. Types only: nothing is clamped, and the invariant (anchors,
+/// domain, ids, order, names, counts, playback limits) is `validateTracks`', run by `parseState` on the whole.
+/// `maxTrackId` / `maxNoteId` are the largest ids read (0 without any).
+bool parseTracks(Fields& fields, Document& doc, int& maxTrackId, int& maxNoteId, std::string& error) {
+    maxTrackId = 0;
+    maxNoteId = 0;
+    if (!fields.has("tracks")) {
+        return true;
+    }
+    const json* tracks = fields.getArray("tracks");
+    if (tracks == nullptr) {
+        return false;
+    }
+    for (std::size_t i = 0; i < tracks->size(); ++i) {
+        const std::string where = "tracks[" + std::to_string(i) + "]";
+        const json& trackObject = (*tracks)[i];
+        if (!trackObject.is_object()) {
+            error = where + " must be an object";
+            return false;
+        }
+        Fields trackFields(trackObject, where, error);
+        Track track{0, std::string(), TrackRole::Other, false, false, {}};
+        if (!trackFields.getIntIn("id", 1, INT_MAX - 1, track.id) || !trackFields.getString("name", track.name) ||
+            !parseRoleField(trackFields, "role", track.role) || !trackFields.getBool("mute", track.mute) ||
+            !trackFields.getBool("solo", track.solo)) {
+            return false;
+        }
+        const json* notes = trackFields.getArray("notes");
+        if (notes == nullptr) {
+            return false;
+        }
+        track.notes.reserve(notes->size());
+        for (std::size_t j = 0; j < notes->size(); ++j) {
+            const std::string noteWhere = trackFields.label("notes") + "[" + std::to_string(j) + "]";
+            const json& noteObject = (*notes)[j];
+            if (!noteObject.is_object()) {
+                error = noteWhere + " must be an object";
+                return false;
+            }
+            Fields noteFields(noteObject, noteWhere, error);
+            TrackNote note{0, 0, 0, 0, 0, 0};
+            if (!noteFields.getIntIn("id", 1, INT_MAX - 1, note.id) || !noteFields.getInt("pitch", note.pitch) ||
+                !noteFields.getInt("anchor", note.anchorEventId) || !getStateTicks(noteFields, "offset", note.offsetTick) ||
+                !getStateTicks(noteFields, "length", note.lengthTicks) || !noteFields.getInt("velocity", note.velocity)) {
+                return false;
+            }
+            maxNoteId = std::max(maxNoteId, note.id);
+            track.notes.push_back(note);
+        }
+        maxTrackId = std::max(maxTrackId, track.id);
+        doc.tracks.push_back(std::move(track));
+    }
+    return true;
+}
+
+/// Reads the optional id counter `name` of a state: absent leaves `out` 0 (`replace` derives one past the largest
+/// id); present it must be an integer in 1..INT_MAX greater than `maxId`, as `nextSectionId` (`what` names the ids in
+/// the message: "track", "note").
+bool parseCounter(Fields& fields, const char* name, int maxId, const char* what, int& out) {
+    out = 0;
+    if (!fields.has(name)) {
+        return true;
+    }
+    if (!fields.getIntIn(name, 1, INT_MAX, out)) {
+        return false;
+    }
+    if (out <= maxId) {
+        return fields.fail(name, std::string("must exceed every ") + what + " id (" + std::to_string(maxId) + ")");
+    }
+    return true;
+}
+
+/// Phase A of `loadStateJson`: parses and validates `text` into a document, the four id counters and an
 /// editor size. `Document` holds vectors and strings, whose destruction frees but never allocates.
-/// `nextSectionId` is 0 when the state carries none: `replace` then derives it.
-bool parseState(std::string_view text, Document& doc, int& nextId, int& nextSectionId, int& width, int& height,
-                std::string& error) {
+/// `nextSectionId`, `nextTrackId` and `nextNoteId` are 0 when the state carries none: `replace` then derives them.
+bool parseState(std::string_view text, Document& doc, int& nextId, int& nextSectionId, int& nextTrackId,
+                int& nextNoteId, int& width, int& height, std::string& error) {
     json message;
     if (!parseMessage(text, message, error)) {
         return false;
@@ -1606,6 +2269,11 @@ bool parseState(std::string_view text, Document& doc, int& nextId, int& nextSect
     }
     // Optional (states saved before the relation modes have none): the default, blend.
     if (fields.has("relationMode") && !parseRelationModeField(fields, "relationMode", doc.relationMode)) {
+        return false;
+    }
+    // Optional (states saved before tracks have neither): the chords lane neither muted nor soloed.
+    if ((fields.has("chordsMuted") && !fields.getBool("chordsMuted", doc.chordsMuted)) ||
+        (fields.has("chordsSolo") && !fields.getBool("chordsSolo", doc.chordsSolo))) {
         return false;
     }
 
@@ -1676,6 +2344,24 @@ bool parseState(std::string_view text, Document& doc, int& nextId, int& nextSect
         if (nextSectionId <= maxSectionId) {
             return fields.fail("nextSectionId", "must exceed every section id (" + std::to_string(maxSectionId) + ")");
         }
+    }
+
+    // Tracks (optional: states saved before tracks have none) after the chords, whose ids the anchors name and whose
+    // clamped lengths place the notes. Read for types only; the invariant runs on the whole candidate below.
+    int maxTrackId = 0;
+    int maxNoteId = 0;
+    if (!parseTracks(fields, doc, maxTrackId, maxNoteId, error) ||
+        !parseCounter(fields, "nextTrackId", maxTrackId, "track", nextTrackId) ||
+        !parseCounter(fields, "nextNoteId", maxNoteId, "note", nextNoteId)) {
+        return false;
+    }
+    // The track invariant (D7) with the counters `replace` will publish: given, or one past the largest id (the ids
+    // are below INT_MAX, so neither overflows). A failure rejects the whole state; nothing of a track is clamped.
+    std::string reason;
+    if (!validateTracks(doc, nextTrackId != 0 ? nextTrackId : maxTrackId + 1, nextNoteId != 0 ? nextNoteId : maxNoteId + 1,
+                        reason)) {
+        error = "\"tracks\" rejected: " + reason;
+        return false;
     }
 
     width = kDefaultEditorWidth;
@@ -1762,7 +2448,7 @@ std::string heardJson(const Listener& listener, const Key& projectKey) {
 static_assert(kNoEventId == -1, "snapshotJson's default selectedEventId must be kNoEventId");
 
 std::string snapshotJson(const Document& doc, const Palette& palette, int selectedEventId,
-                         const std::vector<int>& selectedEventIds) {
+                         const std::vector<int>& selectedEventIds, const SnapshotExtras& extras) {
     // The selection and its anchor, normalised together (strip editing design D2): the given ids that name an
     // event, in strip order; when none does, the anchor alone if it names one. A non-empty selection whose
     // anchor is absent, unknown or not one of its blocks takes its last block as the anchor. The suggestions and
@@ -1797,6 +2483,8 @@ std::string snapshotJson(const Document& doc, const Palette& palette, int select
     // performing feel the period is the last chord's end tick / 960 (tick-rounded), otherwise, and in the
     // over-budget fallback, the authored sum. Event positions below stay authored.
     const Compiled compiled = compile(doc);
+    // Each chord's playback span, from the same compile's verdict (tracks design D8).
+    const std::vector<PlaySpan> spans = chordPlaySpans(doc, compiled);
     json events = json::array();
     double beat = 0.0;  // accumulated left to right, exactly as Document::startBeatOf does
     for (std::size_t i = 0; i < doc.events.size(); ++i) {
@@ -1819,7 +2507,10 @@ std::string snapshotJson(const Document& doc, const Palette& palette, int select
                       {"voicingNames", voicingNamesJson(e.chord, compiledVoicings[i], doc.projectKey)},
                       {"outOfKey", outOfKeyJson(e.chord, doc.projectKey)},
                       {"outOfKeyNames", outOfKeyNamesJson(e.chord, doc.projectKey, doc.projectKey)},
-                      {"why", i == 0 ? json() : whyJson(doc.events[i - 1].chord, e.chord, doc.projectKey)}};
+                      {"why", i == 0 ? json() : whyJson(doc.events[i - 1].chord, e.chord, doc.projectKey)},
+                      {"playStart", spans[i].start},
+                      {"playEnd", spans[i].end},
+                      {"guide", guideJson(e.chord, doc.projectKey)}};
         events.push_back(std::move(event));
         beat += e.lengthBeats;
     }
@@ -1893,9 +2584,45 @@ std::string snapshotJson(const Document& doc, const Palette& palette, int select
                            {"relationReference", std::move(relationReference)},
                            {"presets", presetsJson(doc.projectKey)},
                            {"applied", appliedJson(doc, applied, appliedCellList, appliedRelations)},
-                           {"palette", {{"tiers", palette.tiers}, {"cells", std::move(cells)}}}};
+                           {"palette", {{"tiers", palette.tiers}, {"cells", std::move(cells)}}},
+                           {"ticksPerBeat", kFeelTicksPerBeat},
+                           {"revision", extras.revision},
+                           {"tracks", snapshotTracksJson(doc)},
+                           {"chordsMuted", doc.chordsMuted},
+                           {"chordsSolo", doc.chordsSolo},
+                           {"chordsAudible", chordsAudible(doc)},
+                           {"noteSelection", noteSelectionJson(doc, extras.noteSelection)},
+                           {"trackLimits", trackLimitsJson()}};
     return snapshot.dump();
 }
+
+namespace {
+
+/// The state's `tracks` (tracks design D7): every track with its live flags, each note as stored (anchor and offset,
+/// no derived start), in the track's note order.
+json stateTracksJson(const Document& doc) {
+    json tracks = json::array();
+    for (const Track& t : doc.tracks) {
+        json notes = json::array();
+        for (const TrackNote& n : t.notes) {
+            notes.push_back({{"id", n.id},
+                             {"pitch", n.pitch},
+                             {"anchor", n.anchorEventId},
+                             {"offset", n.offsetTick},
+                             {"length", n.lengthTicks},
+                             {"velocity", n.velocity}});
+        }
+        tracks.push_back({{"id", t.id},
+                          {"name", t.name},
+                          {"role", trackRoleName(t.role)},
+                          {"mute", t.mute},
+                          {"solo", t.solo},
+                          {"notes", std::move(notes)}});
+    }
+    return tracks;
+}
+
+}  // namespace
 
 std::string stateJson(const DocumentStore& store, int editorWidth, int editorHeight) {
     const Document& doc = store.doc();
@@ -1926,8 +2653,13 @@ std::string stateJson(const DocumentStore& store, int editorWidth, int editorHei
                         {"relationMode", relationModeName(doc.relationMode)},
                         {"events", std::move(events)},
                         {"sections", sectionsJson(doc)},
+                        {"tracks", stateTracksJson(doc)},
+                        {"chordsMuted", doc.chordsMuted},
+                        {"chordsSolo", doc.chordsSolo},
                         {"nextId", store.nextId()},
                         {"nextSectionId", store.nextSectionId()},
+                        {"nextTrackId", store.nextTrackId()},
+                        {"nextNoteId", store.nextNoteId()},
                         {"editor", {{"width", editorWidth}, {"height", editorHeight}}}};
     return state.dump();
 }
@@ -1950,8 +2682,9 @@ bool applyCommandJson(DocumentStore& store, std::string_view text, std::string& 
         // field. A refused command leaves the document as it was, so the flag stays false for one.
         const std::optional<Document> before =
             documentChanged != nullptr ? std::optional<Document>(store.doc()) : std::nullopt;
-        // Phase B: only the store, plain data and the name in scope.
-        const Refusal refusal = applyCommand(store, command, name, lists);
+        // Phase B: only the store, plain data, the name and the store's refusal reason in scope.
+        std::string reason;
+        const Refusal refusal = applyCommand(store, command, name, lists, reason);
         if (before.has_value() && refusal == Refusal::None) {
             *documentChanged = store.doc() != *before;
         }
@@ -1988,6 +2721,9 @@ bool applyCommandJson(DocumentStore& store, std::string_view text, std::string& 
             case Refusal::PresetInvalid:
                 error = "\"loadPreset\" refused: the preset has no loadable steps";
                 return false;
+            case Refusal::Store:
+                error = std::string("\"") + commandWireName(command.kind) + "\" refused: " + reason;
+                return false;
         }
         return true;
     } catch (...) {
@@ -2003,12 +2739,16 @@ bool loadStateJson(DocumentStore& store, std::string_view text, std::string& err
         Document doc;
         int nextId = 0;
         int nextSectionId = 0;
+        int nextTrackId = 0;
+        int nextNoteId = 0;
         int width = kDefaultEditorWidth;
         int height = kDefaultEditorHeight;
-        if (!parseState(text, doc, nextId, nextSectionId, width, height, error)) {  // Phase A: the tree is destroyed on return
+        // Phase A: the tree is destroyed on return; the tracks have passed validateTracks with the counters below.
+        if (!parseState(text, doc, nextId, nextSectionId, nextTrackId, nextNoteId, width, height, error)) {
             return false;
         }
-        store.replace(std::move(doc), nextId, nextSectionId);  // Phase B: cannot throw, nor can the writes below
+        // Phase B: cannot throw, nor can the writes below
+        store.replace(std::move(doc), nextId, nextSectionId, nextTrackId, nextNoteId);
         if (editorWidth != nullptr) {
             *editorWidth = width;
         }

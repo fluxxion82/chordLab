@@ -49,6 +49,48 @@ std::vector<std::vector<int>> voicings(const Document& doc);
 /// checked): a document that came from outside the process is validated by the store before it gets here.
 Compiled compile(const Document& doc);
 
+/// Compiles what the plug-in plays (tracks design D8): the audible lanes of `doc`, the chords and every track,
+/// merged into one event list. `fillSlot` is its only caller; `compile` keeps meaning the chords alone (snapshot,
+/// export, sections). Main thread: allocates.
+///
+/// - **Audible lanes** (`laneAudible`, tracks.h): with no solo anywhere (chords or tracks), every unmuted lane; with
+///   any solo, only the soloed lanes, mute ignored on a soloed lane. The chords lane is `chordsAudible(doc)`, track i
+///   `trackAudible(doc, i)`.
+/// - **Chord notes** are `compile(doc)`'s, in its beats exactly (authored doubles on the block path and in the
+///   over-budget fallback, `tick / 960.0` when a feel performs), paired back into notes per pitch in event order:
+///   per pitch `compile` alternates on, off, on, off (block chords do not overlap themselves, a retrigger's off
+///   sorts before the on at its beat, and the feel's safety leaves the notes of one pitch disjoint), so the n-th
+///   off of a pitch closes its n-th on.
+/// - **Track notes**: the active notes (`noteActive`) of the audible tracks, inactive ones skipped. A note of
+///   derived start `s` (`noteStart`, D3) and length `l` ticks becomes `[s / 960.0, min((s + l) / 960.0, endBeat))`
+///   with `endBeat` = `compile(doc).endBeat`; one starting at or after `endBeat` is skipped (in a store's document
+///   an active note always starts before it, so this is a guard). Nothing is re-rounded.
+/// - **Paired merge** (the feel's D10 safety over lanes, on notes before any event exists): two notes of one pitch
+///   start together when their starts round to the same tick, `llround(start * 960)` (an off-grid block chord's
+///   notes sit at the authored beat, a track note on that chord's boundary at the rounded tick / 960: they start
+///   together). Per pitch the notes are ordered by that rounded start, then lane (the chords first, then the tracks
+///   in document order), then id (a track note's id; a chord note's index in that order of pairing, which never
+///   decides anything, since chord notes of one pitch are at least five ticks apart), then the exact start. Notes
+///   of one pitch starting together become one note at the start of the first in that order (a chord note's beat
+///   when one is among them, so the chords keep `compile`'s beats), with the latest end and the highest velocity;
+///   that note counts as untouched (no member is cut short: the merged end is the longest member's). Otherwise a
+///   note still sounding when the next note of its pitch starts ends at that start (the later note retriggers),
+///   and is then "shortened". A shortened note whose length in rounded ticks,
+///   `llround((end - start) * 960)`, is under `kMinNoteTicks` (feel.h) is dropped; a note the merge did not
+///   shorten is never dropped, so a track can never remove an exact five-tick feel note (`96005 / 960.0 - 96000 /
+///   960.0` is a hair under `5 / 960.0`). Clipping a track note at `endBeat` is not a merge either: a note
+///   clipped to under five ticks is kept.
+/// - **Events**: an on at each note's start (its velocity) and an off at its end (velocity 0), sorted by `(beat,
+///   off before on, pitch)` as `compile` sorts them; per pitch the merged notes are disjoint with positive length,
+///   so the order is total. Every beat lies in [0, endBeat].
+///
+/// `endBeat` and `feelLimited` are `compile(doc)`'s: tracks never lengthen the loop. When the chords lane is
+/// audible and no track contributes a note, `events` equals `compile(doc).events` exactly (nothing is merged,
+/// shortened or dropped, and the events are re-emitted bit for bit in the same order). At most
+/// `kMaxSnapshotEvents` events: `kMaxChordEvents` for the chords, two per track note, and the merge only removes.
+/// Same preconditions as `compile`; the tracks must satisfy `validateTracks` (every anchor a chord of `doc`).
+Compiled compilePlayback(const Document& doc);
+
 /// Compiles the `count` chords from `firstEvent` on, as they sound in the whole document, re-based to 0:
 /// each chord takes the voicing `voicings(doc)` gives it in the whole progression (the context of auto
 /// voice-leading is the whole progression, so a chord at the start of a range still follows the chord
@@ -68,5 +110,31 @@ Compiled compileRange(const Document& doc, int firstEvent, int count);
 /// behaves as one unnamed section over every chord, and `sectionIndex` must then be 0; otherwise it must be
 /// in 0..sections.size()-1. The section invariants of `Document::sections` are preconditions (asserted).
 Compiled compileSection(const Document& doc, int sectionIndex);
+
+/// One chord's playback span in beats, half-open: [start, end).
+struct PlaySpan {
+    double start;
+    double end;
+};
+
+/// Each chord's span as playback uses it (tracks design D8), one per event in playback order (empty for an empty
+/// document): the one helper for the snapshot's `playStart`/`playEnd`, the harmonic guides, section slicing and the
+/// generator, so their boundaries are exactly the ones `compile` sounds.
+/// - With a feel that performs (`feelPerforms(doc.feel)`) and is within budget, `chordTicks[i] / 960.0` to
+///   `chordTicks[i + 1] / 960.0` of `performDocument` (that is `chordBoundaryTicks(doc)`, tracks.h): the beats
+///   `compile` gives the performed notes of chord i, all of which lie inside it, and the last end is `compile`'s
+///   `endBeat`.
+/// - Otherwise (block chords, and the over-budget fallback, `Compiled::feelLimited`) the authored boundaries,
+///   accumulated left to right exactly as `compile`'s block path does (`Document::startBeatOf`): chord i's ons sit at
+///   `start` and its offs at `end`, bit for bit, and adjacent spans share their boundary value.
+/// So for a fractional length the two paths differ by under half a tick (three 0.2506-beat chords: 0.2506 authored,
+/// 241 / 960 performed). Same preconditions as `compile`; runs `performDocument` when the feel performs.
+std::vector<PlaySpan> chordPlaySpans(const Document& doc);
+
+/// `chordPlaySpans(doc)` for a caller that already holds `compiled == compile(doc)`, whose `feelLimited` verdict it
+/// reuses instead of performing the document again (the snapshot compiles once for both). `compiled` must be
+/// `compile(doc)`'s result for this very document, not `compileSection`'s or `compileRange`'s: a debug build asserts
+/// that its `endBeat` is the spans' last end (0 for an empty document).
+std::vector<PlaySpan> chordPlaySpans(const Document& doc, const Compiled& compiled);
 
 }  // namespace chordlab

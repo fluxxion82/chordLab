@@ -1,13 +1,17 @@
 #include "chordlab/compiler.h"
 
 #include "chordlab/feel.h"
+#include "chordlab/tracks.h"
 #include "chordlab/voicing.h"
+#include "note_merge.h"
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <climits>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <tuple>
 #include <utility>
@@ -148,6 +152,87 @@ Compiled compile(const Document& doc) {
     return compiled;
 }
 
+namespace {
+
+/// `compiled`'s events paired back into notes per pitch, appended to `notes` in the order of their ons.
+void pairChordNotes(const std::vector<NoteEvent>& events, std::vector<LaneNote>& notes) {
+    constexpr std::size_t kClosed = static_cast<std::size_t>(-1);
+    std::array<std::size_t, 128> open;  // pitch -> index into `notes` of its sounding note, or kClosed
+    open.fill(kClosed);
+    for (const NoteEvent& e : events) {
+        assert(e.pitch >= 0 && e.pitch < 128);
+        if (e.pitch < 0 || e.pitch >= 128) continue;
+        std::size_t& sounding = open[static_cast<std::size_t>(e.pitch)];
+        if (e.on) {
+            assert(sounding == kClosed);  // compile never overlaps a pitch with itself
+            if (sounding != kClosed) continue;
+            sounding = notes.size();
+            notes.push_back(LaneNote{e.beat, e.beat, e.pitch, e.velocity, 0, static_cast<int>(notes.size())});
+        } else {
+            assert(sounding != kClosed);  // every off closes an on of its pitch
+            if (sounding == kClosed) continue;
+            notes[sounding].end = e.beat;
+            sounding = kClosed;
+        }
+    }
+    assert(std::all_of(open.begin(), open.end(), [](std::size_t i) { return i == kClosed; }));
+}
+
+}  // namespace
+
+Compiled compilePlayback(const Document& doc) {
+    const Compiled chords = compile(doc);
+    Compiled playback;
+    playback.endBeat = chords.endBeat;
+    playback.feelLimited = chords.feelLimited;
+
+    std::vector<LaneNote> notes;
+    if (chordsAudible(doc)) {
+        notes.reserve(chords.events.size() / 2);
+        pairChordNotes(chords.events, notes);
+    }
+    bool anyTrack = false;
+    for (std::size_t i = 0; i < doc.tracks.size(); ++i) {
+        anyTrack = anyTrack || (trackAudible(doc, i) && !doc.tracks[i].notes.empty());
+    }
+    if (anyTrack) {
+        const ChordTimeline timeline = chordTimeline(doc);
+        for (std::size_t i = 0; i < doc.tracks.size(); ++i) {
+            if (!trackAudible(doc, i)) continue;
+            for (const TrackNote& note : doc.tracks[i].notes) {
+                if (!noteActive(timeline, note)) continue;
+                const std::int64_t start = noteStart(timeline, note);
+                const double startBeat = static_cast<double>(start) / kFeelTicksPerBeat;
+                if (startBeat >= playback.endBeat) continue;
+                const double endBeat =
+                    std::min(static_cast<double>(start + note.lengthTicks) / kFeelTicksPerBeat, playback.endBeat);
+                notes.push_back(
+                    LaneNote{startBeat, endBeat, note.pitch, note.velocity, 1 + static_cast<int>(i), note.id});
+            }
+        }
+    }
+
+    // The merge (note_merge.h): per pitch in (rounded start tick, lane, id) order, equal starts one note, the rest retriggered.
+    const std::vector<LaneNote> merged = mergeLaneNotes(std::move(notes));
+    playback.events.reserve(2 * merged.size());
+    for (const LaneNote& note : merged) {
+        // Only a note the merge shortened may be dropped, judged in rounded ticks (never on the raw beats).
+        if (note.shortened && std::llround((note.end - note.start) * kFeelTicksPerBeat) < kMinNoteTicks) continue;
+        assert(note.start < note.end);
+        if (!(note.start < note.end)) continue;  // impossible for valid input; never emit an off before its on
+        assert(note.start >= 0.0 && note.end <= playback.endBeat);
+        playback.events.push_back(NoteEvent{note.start, true, note.pitch, note.velocity});
+        playback.events.push_back(NoteEvent{note.end, false, note.pitch, 0});
+    }
+    std::sort(playback.events.begin(), playback.events.end(), keyLess);
+    // Per pitch the kept notes are disjoint with positive length, so no two events share the key.
+    assert(std::adjacent_find(playback.events.begin(), playback.events.end(),
+                              [](const NoteEvent& a, const NoteEvent& b) { return !keyLess(a, b); }) ==
+           playback.events.end());
+    assert(playback.events.size() <= kMaxSnapshotEvents);
+    return playback;
+}
+
 Compiled compileSection(const Document& doc, int sectionIndex) {
     const int size = static_cast<int>(doc.events.size());
     if (doc.sections.empty()) {
@@ -160,6 +245,51 @@ Compiled compileSection(const Document& doc, int sectionIndex) {
     const int end = at + 1 < doc.sections.size() ? doc.sections[at + 1].firstEventIndex : size;
     assert(first >= 0 && first < end && end <= size);
     return compileRange(doc, first, end - first);
+}
+
+namespace {
+
+/// The spans on the performance's tick grid (`performed`) or on the authored, accumulated boundaries; the last end is
+/// written to `end` (0 for an empty document).
+std::vector<PlaySpan> playSpans(const Document& doc, bool performed, double& end) {
+    std::vector<PlaySpan> spans;
+    spans.reserve(doc.events.size());
+    end = 0.0;
+    if (performed) {
+        // performDocument's chordTicks is chordBoundaryTicks (tracks.h), so this is the performance's own grid.
+        const std::vector<std::int32_t> ticks = chordBoundaryTicks(doc);
+        for (std::size_t i = 0; i < doc.events.size(); ++i) {
+            spans.push_back(PlaySpan{static_cast<double>(ticks[i]) / kFeelTicksPerBeat,
+                                     static_cast<double>(ticks[i + 1]) / kFeelTicksPerBeat});
+        }
+        end = static_cast<double>(ticks.back()) / kFeelTicksPerBeat;
+        return spans;
+    }
+    double beat = 0.0;  // the block path's accumulation (blockRange over the whole document)
+    for (const ChordEvent& event : doc.events) {
+        const double start = beat;
+        beat += event.lengthBeats;
+        spans.push_back(PlaySpan{start, beat});
+    }
+    end = beat;
+    return spans;
+}
+
+}  // namespace
+
+std::vector<PlaySpan> chordPlaySpans(const Document& doc, const Compiled& compiled) {
+    double end = 0.0;
+    std::vector<PlaySpan> spans = playSpans(doc, feelPerforms(doc.feel) && !compiled.feelLimited, end);
+    // `compiled` must be compile(doc)'s (not compileSection's, nor another document's): its end is the spans' end on
+    // either path, bit for bit (an empty document: compile's 0).
+    assert(compiled.endBeat == end);
+    (void)end;
+    return spans;
+}
+
+std::vector<PlaySpan> chordPlaySpans(const Document& doc) {
+    double end = 0.0;
+    return playSpans(doc, feelPerforms(doc.feel) && !performDocument(doc).feelLimited, end);
 }
 
 }  // namespace chordlab

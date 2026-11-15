@@ -982,3 +982,164 @@ TEST_CASE("exportClipName: a section is named after itself, or after its chords 
     CHECK(exportClipName(store.doc(), 1) == "F G7");
     CHECK(exportClipName(store.doc(), 0) == "Section 1");
 }
+
+// --- writeSmf1 (tracks plan, Task 9) ---------------------------------------------------------------------------
+
+namespace {
+
+/// Two lanes: "Bass" holds C2 for beat 0..1 at velocity 100; "Lead" holds C4 for beat 0.5..4 at velocity 90.
+std::vector<SmfLane> bassAndLead() {
+    return {SmfLane{"Bass", {{0.0, true, 36, 100}, {1.0, false, 36, 0}}},
+            SmfLane{"Lead", {{0.5, true, 60, 90}, {4.0, false, 60, 0}}}};
+}
+
+}  // namespace
+
+TEST_CASE("writeSmf1: exact bytes for a two-lane file, every MTrk ending at the end beat") {
+    const Bytes expected = {
+        'M', 'T', 'h', 'd', 0, 0, 0, 6, 0, 1, 0, 3, 0x01, 0xE0,  // format 1, three tracks, 480 ppq
+        'M', 'T', 'r', 'k', 0, 0, 0, 0x14,                       // the conductor: 20 bytes
+        0x00, 0xFF, 0x51, 0x03, 0x07, 0xA1, 0x20,                // tempo 500000 us
+        0x00, 0xFF, 0x58, 0x04, 0x04, 0x02, 0x18, 0x08,          // 4/4
+        0x8F, 0x00, 0xFF, 0x2F, 0x00,                            // end of track at tick 1920 (beat 4)
+        'M', 'T', 'r', 'k', 0, 0, 0, 0x16,                       // "Bass": 22 bytes
+        0x00, 0xFF, 0x03, 0x04, 'B', 'a', 's', 's',              // track name
+        0x00, 0x90, 0x24, 0x64,                                  // on C2 at tick 0
+        0x83, 0x60, 0x80, 0x24, 0x00,                            // off at tick 480
+        0x8B, 0x20, 0xFF, 0x2F, 0x00,                            // end of track at 1920: 1440 after the last off
+        'M', 'T', 'r', 'k', 0, 0, 0, 0x16,                       // "Lead": 22 bytes
+        0x00, 0xFF, 0x03, 0x04, 'L', 'e', 'a', 'd',              // track name
+        0x81, 0x70, 0x90, 0x3C, 0x5A,                            // on C4 at tick 240
+        0x8D, 0x10, 0x80, 0x3C, 0x00,                            // off at tick 1920
+        0x00, 0xFF, 0x2F, 0x00,                                  // end of track: with the last off
+    };
+    const Bytes actual = writeSmf1(bassAndLead(), 120.0, 4, 4, 480, 4.0);
+    INFO("actual:   " << hex(actual));
+    INFO("expected: " << hex(expected));
+    CHECK(actual == expected);
+}
+
+TEST_CASE("writeSmf1: a lane's end-of-track is the shared end tick, and an event past it moves every track's end") {
+    // "A" holds C2 from 0 to beat 5, past endBeat 4; "B" has no events: its MTrk is its name and the end.
+    const std::vector<SmfLane> lanes = {SmfLane{"A", {{0.0, true, 36, 100}, {5.0, false, 36, 0}}}, SmfLane{"B", {}}};
+    const Bytes expected = {
+        'M', 'T', 'h', 'd', 0, 0, 0, 6, 0, 1, 0, 3, 0x01, 0xE0,
+        'M', 'T', 'r', 'k', 0, 0, 0, 0x14,                       // the conductor ends with the longest lane: tick 2400
+        0x00, 0xFF, 0x51, 0x03, 0x07, 0xA1, 0x20,
+        0x00, 0xFF, 0x58, 0x04, 0x04, 0x02, 0x18, 0x08,
+        0x92, 0x60, 0xFF, 0x2F, 0x00,
+        'M', 'T', 'r', 'k', 0, 0, 0, 0x12,
+        0x00, 0xFF, 0x03, 0x01, 'A',
+        0x00, 0x90, 0x24, 0x64,
+        0x92, 0x60, 0x80, 0x24, 0x00,
+        0x00, 0xFF, 0x2F, 0x00,
+        'M', 'T', 'r', 'k', 0, 0, 0, 0x0A,                       // an empty lane still has the full length
+        0x00, 0xFF, 0x03, 0x01, 'B',
+        0x92, 0x60, 0xFF, 0x2F, 0x00,
+    };
+    const Bytes actual = writeSmf1(lanes, 120.0, 4, 4, 480, 4.0);
+    INFO("actual:   " << hex(actual));
+    CHECK(actual == expected);
+}
+
+TEST_CASE("writeSmf1: a lane's MTrk is writeSmf0's track after its tempo and meter, byte for byte") {
+    const std::vector<NoteEvent> events = {{0.0, true, 60, 100}, {0.0, true, 64, 90},    {1.25, false, 64, 0},
+                                           {1.25, false, 60, 0}, {1.0 / 3.0, true, 67, 80}, {2.0, false, 67, 0}};
+    Compiled compiled;
+    compiled.events = events;
+    compiled.endBeat = 6.0;
+    for (const std::string name : {std::string("Name"), std::string()}) {
+        const Bytes zero = writeSmf0(compiled, 97.5, 6, 8, 960, 0, name);
+        const Bytes one = writeSmf1({SmfLane{name, events}}, 97.5, 6, 8, 960, 6.0);
+        REQUIRE(!zero.empty());
+        REQUIRE(!one.empty());
+        // smf0: header 14, MTrk header 8, tempo 7 and meter 8; smf1: header 14, conductor 8 + 20, lane header 8.
+        const Bytes zeroTail(zero.begin() + 14 + 8 + 15, zero.end());
+        const Bytes oneTail(one.begin() + 14 + 8 + 20 + 8, one.end());
+        CHECK(oneTail == zeroTail);
+        // And the conductor carries writeSmf0's tempo and meter bytes.
+        const Bytes zeroHead(zero.begin() + 14 + 8, zero.begin() + 14 + 8 + 15);
+        const Bytes oneHead(one.begin() + 14 + 8, one.begin() + 14 + 8 + 15);
+        CHECK(oneHead == zeroHead);
+        CHECK(one[11] == 2);  // ntrks
+        CHECK(one[9] == 1);   // format
+        CHECK(one[12] == 0x03);
+        CHECK(one[13] == 0xC0);  // 960
+    }
+}
+
+TEST_CASE("writeSmf1: ntrks is the lanes plus the conductor, and the track names are carried byte for byte") {
+    std::vector<SmfLane> lanes;
+    for (int i = 0; i < 5; ++i) lanes.push_back(SmfLane{i == 2 ? std::string() : "Lane \xE2\x80\x93 " + std::to_string(i),
+                                                        {{0.0, true, 60 + i, 100}, {1.0, false, 60 + i, 0}}});
+    const Bytes bytes = writeSmf1(lanes, 120.0, 4, 4, 480, 4.0);
+    REQUIRE(bytes.size() > 14);
+    CHECK(bytes[9] == 1);
+    CHECK(bytes[11] == 6);
+    // Count the MTrk chunks by walking the lengths.
+    std::size_t at = 14;
+    int chunks = 0;
+    while (at < bytes.size()) {
+        REQUIRE(at + 8 <= bytes.size());
+        CHECK(std::string(bytes.begin() + static_cast<std::ptrdiff_t>(at), bytes.begin() + static_cast<std::ptrdiff_t>(at) + 4) ==
+              "MTrk");
+        at += 8 + be32(bytes, at + 4);
+        ++chunks;
+    }
+    CHECK(at == bytes.size());
+    CHECK(chunks == 6);
+    const std::string all(bytes.begin(), bytes.end());
+    CHECK(all.find(std::string("Lane \xE2\x80\x93 0")) != std::string::npos);
+    CHECK(all.find(std::string("Lane \xE2\x80\x93 4")) != std::string::npos);
+    CHECK(all.find("Lane \xE2\x80\x93 2") == std::string::npos);  // the empty name wrote no meta event
+}
+
+TEST_CASE("writeSmf1: events are quantised and re-sorted per lane as writeSmf0 does") {
+    // An off and an on of one pitch that collapse onto one tick: the off still goes first, whatever the input order.
+    const Compiled compiled = [] {
+        Compiled c;
+        c.events = {{1.0, true, 60, 100}, {0.0, true, 60, 100}, {1.0 + 1e-9, false, 60, 0}, {0.5, false, 60, 0}};
+        c.endBeat = 2.0;
+        return c;
+    }();
+    const Bytes zero = writeSmf0(compiled, 120.0, 4, 4, 480, 0, "x");
+    const Bytes one = writeSmf1({SmfLane{"x", compiled.events}}, 120.0, 4, 4, 480, 2.0);
+    CHECK(Bytes(one.begin() + 14 + 8 + 20 + 8, one.end()) == Bytes(zero.begin() + 14 + 8 + 15, zero.end()));
+}
+
+TEST_CASE("writeSmf1: arguments that cannot be encoded give an empty vector") {
+    const std::vector<SmfLane> good = bassAndLead();
+    REQUIRE_FALSE(writeSmf1(good, 120.0, 4, 4, 480, 4.0).empty());
+
+    CHECK(writeSmf1({}, 120.0, 4, 4, 480, 4.0).empty());  // no lanes: no conductor-only file
+    for (const double bpm : {0.0, -1.0, 3.0, 2e8, std::numeric_limits<double>::quiet_NaN(),
+                             std::numeric_limits<double>::infinity()}) {
+        CHECK(writeSmf1(good, bpm, 4, 4, 480, 4.0).empty());
+    }
+    CHECK(writeSmf1(good, 120.0, 0, 4, 480, 4.0).empty());
+    CHECK(writeSmf1(good, 120.0, 256, 4, 480, 4.0).empty());
+    CHECK(writeSmf1(good, 120.0, 4, 3, 480, 4.0).empty());
+    CHECK(writeSmf1(good, 120.0, 4, 0, 480, 4.0).empty());
+    CHECK(writeSmf1(good, 120.0, 4, 256, 480, 4.0).empty());
+    CHECK(writeSmf1(good, 120.0, 4, 4, 0, 4.0).empty());
+    CHECK(writeSmf1(good, 120.0, 4, 4, 32768, 4.0).empty());
+    CHECK_FALSE(writeSmf1(good, 120.0, 4, 4, 32767, 4.0).empty());
+    CHECK(writeSmf1(good, 120.0, 4, 4, 480, -1.0).empty());
+    CHECK(writeSmf1(good, 120.0, 4, 4, 480, std::numeric_limits<double>::quiet_NaN()).empty());
+    CHECK(writeSmf1(good, 120.0, 4, 4, 480, std::numeric_limits<double>::infinity()).empty());
+
+    // Any lane's event is refused: pitch, velocity and beat.
+    const auto withEvent = [&](NoteEvent e) {
+        std::vector<SmfLane> lanes = good;
+        lanes[1].events.push_back(e);
+        return writeSmf1(lanes, 120.0, 4, 4, 480, 4.0);
+    };
+    CHECK(withEvent({1.0, true, 128, 100}).empty());
+    CHECK(withEvent({1.0, true, -1, 100}).empty());
+    CHECK(withEvent({1.0, true, 60, 128}).empty());
+    CHECK(withEvent({1.0, true, 60, -1}).empty());
+    CHECK(withEvent({-0.5, true, 60, 100}).empty());
+    CHECK(withEvent({std::numeric_limits<double>::quiet_NaN(), true, 60, 100}).empty());
+    CHECK(withEvent({1e9, true, 60, 100}).empty());  // a tick past four VLQ bytes
+    CHECK_FALSE(withEvent({1.0, true, 127, 127}).empty());
+}

@@ -6,8 +6,10 @@
 #include "chordlab/compiler.h"
 #include "chordlab/document.h"
 #include "chordlab/limits.h"
+#include "chordlab/tracks.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <ostream>
@@ -1039,13 +1041,13 @@ TEST_CASE("densestBeat: half-open windows of 960 ticks, across the wrap and over
     CHECK(densestBeat({ev(0, true), ev(240, false)}, 240) == 8);
 }
 
-TEST_CASE("budgets: 4096 events fit exactly; 4097 or more fall back for the whole document") {
+TEST_CASE("budgets: 4096 events (kMaxChordEvents) fit exactly; 4097 or more fall back for the whole document") {
     SUBCASE("64 one-bar four-note chords, Subdivided: 64 x 8 hits x 4 notes x 2 = 4096") {
         std::vector<ChordEvent> events;
         for (int i = 0; i < 64; ++i) events.push_back(chordEvent(i + 1, chordOf(7, "7"), 4.0));
         const Performance p = performDocument(docOf(events, kSubdivided));
         CHECK_FALSE(p.feelLimited);
-        CHECK(p.events.size() == kMaxSnapshotEvents);
+        CHECK(p.events.size() == kMaxChordEvents);
     }
     SUBCASE("64 one-bar ninths, Subdivided: 5120 events") {
         std::vector<ChordEvent> events;
@@ -1223,6 +1225,70 @@ TEST_CASE("budgets: Chord over two octaves plays one octave a hit, so dictionary
     // One octave at the same settings: the same count (one octave per hit either way).
     p = performDocument(docOf(bars, arp(ArpPattern::Chord, ArpRate::Half, ArpRange::One)));
     CHECK(p.feelLimited);
+}
+
+TEST_CASE("budgets: the chord budget is kMaxChordEvents, and tracks, four full ones included, never count against it") {
+    CHECK(kMaxChordEvents == 4096);
+    CHECK(kMaxSnapshotEvents ==
+          kMaxChordEvents + static_cast<std::size_t>(kMaxTracks) * static_cast<std::size_t>(kMaxNotesPerTrack) * 2);
+    // The boundary of the test above, now as a store document holding kMaxTracks tracks of kMaxNotesPerTrack notes
+    // each: one start every 960 / kMaxTrackOnsetsPerBeat ticks across the tracks in turn (each track's notes
+    // kMaxTracks times that apart), so the onset limit is met exactly. The last chords are lengthened while the
+    // notes go in (as many as the notes need) and restored after, so the notes past their ends are kept, inactive
+    // (they could not be inserted past the end of the progression).
+    static_assert(kFeelTicksPerBeat % kMaxTrackOnsetsPerBeat == 0, "one start every step ticks meets the cap exactly");
+    const Feel dense = arp(ArpPattern::Chord, ArpRate::Half, ArpRange::Two);
+    DocumentStore store;
+    for (int i = 0; i < 32; ++i) REQUIRE(store.appendChord(chordOf(i % 12, "maj7"), 4.0, 100) == i + 1);
+    const std::int64_t step = kFeelTicksPerBeat / kMaxTrackOnsetsPerBeat;
+    const std::int64_t spacing = step * kMaxTracks;
+    int lengthened = 0;
+    while (chordBoundaryTicks(store.doc()).back() <= (kMaxNotesPerTrack * kMaxTracks - 1) * step) {
+        REQUIRE(store.setLength(32 - lengthened, kMaxLengthBeats));
+        ++lengthened;
+    }
+    for (int t = 0; t < kMaxTracks; ++t) {
+        const int id = store.addTrack(TrackRole::Bass);
+        REQUIRE(id != kNoTrackId);
+        std::vector<NoteSpec> specs;
+        for (int k = 0; k < kMaxNotesPerTrack; ++k) {
+            specs.push_back(NoteSpec{24 + 2 * t, k * spacing + t * step, kMinTrackNoteTicks, 100});
+        }
+        std::string why;
+        REQUIRE_MESSAGE(store.insertNotes(id, specs, &why).size() == specs.size(), why);
+    }
+    for (int i = 0; i < lengthened; ++i) REQUIRE(store.setLength(32 - i, 4.0));
+    store.setFeel(dense);
+    REQUIRE(store.doc().tracks.size() == static_cast<std::size_t>(kMaxTracks));
+    std::size_t active = 0;
+    for (const Track& track : store.doc().tracks) {
+        REQUIRE(track.notes.size() == static_cast<std::size_t>(kMaxNotesPerTrack));
+        for (const TrackNote& note : track.notes) active += noteActive(store.doc(), note) ? 1 : 0;
+    }
+    CHECK(active == 32 * 3840 / static_cast<std::size_t>(step));
+    CHECK(densestOnsetWindow(store.doc()) == kMaxTrackOnsetsPerBeat);
+
+    Performance p = performDocument(store.doc());
+    CHECK_FALSE(p.feelLimited);
+    CHECK(p.events.size() == kMaxChordEvents);
+    Compiled c = compile(store.doc());
+    CHECK_FALSE(c.feelLimited);
+    CHECK(c.events.size() == kMaxChordEvents);
+    // The tracks sound beside the full chord budget (their pitches are below every chord's), within one slot.
+    const Compiled playback = compilePlayback(store.doc());
+    CHECK_FALSE(playback.feelLimited);
+    CHECK(playback.events.size() == kMaxChordEvents + 2 * active);
+    CHECK(playback.events.size() <= kMaxSnapshotEvents);
+
+    // The 33rd chord falls back exactly as without tracks; the notes past the 32nd chord's end stay inactive.
+    REQUIRE(store.appendChord(chordOf(4, "maj7"), 4.0, 100) == 33);
+    p = performDocument(store.doc());
+    CHECK(p.feelLimited);
+    CHECK(p.events.empty());
+    c = compile(store.doc());
+    CHECK(c.feelLimited);
+    CHECK(c.events.size() == 33 * 8);
+    CHECK(compilePlayback(store.doc()).events.size() == 33 * 8 + 2 * active);
 }
 
 TEST_CASE("rhythmHits: over two octaves the pattern runs on the voicing and each cycle steps an octave up") {

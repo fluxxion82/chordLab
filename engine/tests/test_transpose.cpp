@@ -6,11 +6,13 @@
 #include "chordlab/pitch.h"
 #include "chordlab/publication.h"
 #include "chordlab/scale.h"
+#include "chordlab/tracks.h"
 #include "chordlab/transpose.h"
 #include "chordlab/voicing.h"
 
 #include <cstddef>
 #include <cstdint>
+#include <initializer_list>
 #include <memory>
 #include <string_view>
 #include <vector>
@@ -235,6 +237,13 @@ TEST_CASE("chooseKeyTranspose: an interval of 0 (or a whole number of octaves) i
     CHECK(chooseKeyTranspose(cAmFG7Events(), 0) == 0);
     CHECK(chooseKeyTranspose(cAmFG7Events(), 12) == 0);
     CHECK(chooseKeyTranspose(cAmFG7Events(), -12) == 0);
+}
+
+TEST_CASE("trackOnlyInterval is chooseKeyTranspose with no chords, for every interval") {
+    // The no-chord branches of the store use trackOnlyInterval; they must not drift from the rule.
+    for (int interval = 0; interval < 12; ++interval) {
+        CHECK(trackOnlyInterval(interval) == chooseKeyTranspose({}, interval));
+    }
 }
 
 TEST_CASE("chooseKeyTranspose: a progression already an octave low goes up a fifth (+7), no clamp") {
@@ -754,4 +763,133 @@ TEST_CASE("resetVoicing: a non-manual chord a transpose left at octave -1 return
     CHECK(store.doc().events[0].octave == -1);
     CHECK(notesOf(store.doc().events[0]) == Notes{55, 59, 62});
     CHECK_FALSE(store.doc().events[0].manualVoicing);
+}
+
+// --- track notes: trackOnlyInterval and transposeNotes (tracks design D18) ---------------------------
+
+namespace {
+
+std::vector<Track> oneTrackWith(std::initializer_list<int> pitches) {
+    Track track{1, "Bass", TrackRole::Bass, false, false, {}};
+    int id = 1;
+    for (const int pitch : pitches) {
+        track.notes.push_back(TrackNote{id, pitch, 7, 100 + id, 480 + id, 90 + id});
+        ++id;
+    }
+    return {track};
+}
+
+std::vector<int> pitchesOf(const std::vector<Track>& tracks, std::size_t index = 0) {
+    std::vector<int> pitches;
+    for (const TrackNote& n : tracks.at(index).notes) {
+        pitches.push_back(n.pitch);
+    }
+    return pitches;
+}
+
+}  // namespace
+
+TEST_CASE("trackOnlyInterval: the signed -5..+6 reduction of all twelve intervals, the tritone going up") {
+    const int expected[12] = {0, 1, 2, 3, 4, 5, 6, -5, -4, -3, -2, -1};
+    for (int interval = 0; interval < 12; ++interval) {
+        CAPTURE(interval);
+        CHECK(trackOnlyInterval(interval) == expected[interval]);
+    }
+}
+
+TEST_CASE("trackOnlyInterval: reduces modulo 12 first, so 12 is 0 and negatives wrap") {
+    CHECK(trackOnlyInterval(12) == 0);
+    CHECK(trackOnlyInterval(-12) == 0);
+    CHECK(trackOnlyInterval(13) == 1);
+    CHECK(trackOnlyInterval(-1) == -1);
+    CHECK(trackOnlyInterval(-6) == 6);
+    CHECK(trackOnlyInterval(-7) == 5);
+}
+
+TEST_CASE("transposeNotes: moves each pitch by the interval, exactly, away from the edges") {
+    std::vector<Track> tracks = oneTrackWith({40, 60, 100});
+    CHECK(transposeNotes(tracks, 7) == 0);
+    CHECK(pitchesOf(tracks) == std::vector<int>{47, 67, 107});
+    CHECK(transposeNotes(tracks, -7) == 0);
+    CHECK(pitchesOf(tracks) == std::vector<int>{40, 60, 100});
+}
+
+TEST_CASE("transposeNotes: a note that would pass 127 moves by the interval minus an octave, and one below 0 plus an octave") {
+    std::vector<Track> up = oneTrackWith({125, 120, 121, 127});
+    CHECK(transposeNotes(up, 7) == 3);
+    CHECK(pitchesOf(up) == std::vector<int>{120, 127, 116, 122});  // 120 + 7 = 127 still fits: no fold
+
+    std::vector<Track> down = oneTrackWith({2, 7, 6, 0});
+    CHECK(transposeNotes(down, -7) == 3);
+    CHECK(pitchesOf(down) == std::vector<int>{7, 0, 11, 5});  // 7 - 7 = 0 still fits: no fold
+}
+
+TEST_CASE("transposeNotes: the edges 0 and 127 move by one semitone in the only way that fits") {
+    std::vector<Track> tracks = oneTrackWith({0, 127});
+    CHECK(transposeNotes(tracks, -1) == 1);
+    CHECK(pitchesOf(tracks) == std::vector<int>{11, 126});
+    tracks = oneTrackWith({0, 127});
+    CHECK(transposeNotes(tracks, 1) == 1);
+    CHECK(pitchesOf(tracks) == std::vector<int>{1, 116});
+}
+
+TEST_CASE("transposeNotes: every pitch and every interval -11..11 lands inside 0..127 on the same pitch class") {
+    for (int interval = -11; interval <= 11; ++interval) {
+        std::vector<Track> tracks(1, Track{1, "All", TrackRole::Other, false, false, {}});
+        for (int pitch = 0; pitch <= 127; ++pitch) {
+            tracks[0].notes.push_back(TrackNote{pitch + 1, pitch, 1, 0, 30, 100});
+        }
+        transposeNotes(tracks, interval);
+        for (int pitch = 0; pitch <= 127; ++pitch) {
+            const int moved = tracks[0].notes[static_cast<std::size_t>(pitch)].pitch;
+            CAPTURE(interval);
+            CAPTURE(pitch);
+            CHECK(moved >= 0);
+            CHECK(moved <= 127);
+            CHECK((((moved - pitch - interval) % 12) + 12) % 12 == 0);
+            const int direct = pitch + interval;
+            if (direct >= 0 && direct <= 127) {
+                CHECK(moved == direct);
+            }
+        }
+    }
+}
+
+TEST_CASE("transposeNotes: only pitches change, in every track; zero changes nothing") {
+    std::vector<Track> tracks = oneTrackWith({40, 125});
+    tracks.push_back(Track{2, "Lead", TrackRole::Lead, true, true, {TrackNote{9, 60, 3, 5, 300, 80}}});
+    const std::vector<Track> before = tracks;
+
+    CHECK(transposeNotes(tracks, 0) == 0);
+    CHECK(tracks == before);
+
+    CHECK(transposeNotes(tracks, 7) == 1);
+    REQUIRE(tracks.size() == before.size());
+    for (std::size_t t = 0; t < tracks.size(); ++t) {
+        CHECK(tracks[t].id == before[t].id);
+        CHECK(tracks[t].name == before[t].name);
+        CHECK(tracks[t].role == before[t].role);
+        CHECK(tracks[t].mute == before[t].mute);
+        CHECK(tracks[t].solo == before[t].solo);
+        REQUIRE(tracks[t].notes.size() == before[t].notes.size());
+        for (std::size_t i = 0; i < tracks[t].notes.size(); ++i) {
+            const TrackNote& a = tracks[t].notes[i];
+            const TrackNote& b = before[t].notes[i];
+            CHECK(a.id == b.id);
+            CHECK(a.anchorEventId == b.anchorEventId);
+            CHECK(a.offsetTick == b.offsetTick);
+            CHECK(a.lengthTicks == b.lengthTicks);
+            CHECK(a.velocity == b.velocity);
+        }
+    }
+    CHECK(pitchesOf(tracks, 0) == std::vector<int>{47, 120});
+    CHECK(pitchesOf(tracks, 1) == std::vector<int>{67});
+}
+
+TEST_CASE("transposeNotes: no tracks, or empty tracks, is a no-op") {
+    std::vector<Track> none;
+    CHECK(transposeNotes(none, 5) == 0);
+    std::vector<Track> empty(2, Track{1, "x", TrackRole::Other, false, false, {}});
+    CHECK(transposeNotes(empty, 5) == 0);
+    CHECK(empty[0].notes.empty());
 }

@@ -95,24 +95,6 @@ bool hasIntervalClass(const ChordType& type, int semitones) {
                        [semitones](int i) { return pitchClassOf(i) == pitchClassOf(semitones); });
 }
 
-/// Letter steps above the root of the tone `semitones` above it: the interval's major degree, except
-/// the diminished fifth, augmented fifth and diminished seventh the chord's structure says it holds
-/// (see `chordToneSpelling`).
-int chordToneDegree(const ChordType& type, int semitones) {
-    const int interval = pitchClassOf(semitones);
-    const bool perfectFifth = hasIntervalClass(type, 7);
-    if (interval == 6 && !perfectFifth) {
-        return 4;  // the diminished fifth of dim, dim7 and m7b5
-    }
-    if (interval == 8 && !perfectFifth) {
-        return 4;  // the augmented fifth of aug and augMaj7
-    }
-    if (interval == 9 && !perfectFifth && hasIntervalClass(type, 6)) {
-        return 6;  // the diminished seventh of dim7
-    }
-    return majorDegreeOfInterval(interval);
-}
-
 /// Lowercase numerals carry a minor third; anything else (major third, no third) is uppercase.
 bool isMinorQuality(const ChordType& type) {
     return hasInterval(type, 3) && !hasInterval(type, 4);
@@ -130,6 +112,21 @@ void assertValidChord([[maybe_unused]] const Chord& chord) {
 }
 
 }  // namespace
+
+int chordToneDegree(const ChordType& type, int semitones) {
+    const int interval = pitchClassOf(semitones);
+    const bool perfectFifth = hasIntervalClass(type, 7);
+    if (interval == 6 && !perfectFifth) {
+        return 4;  // the diminished fifth of dim, dim7 and m7b5
+    }
+    if (interval == 8 && !perfectFifth) {
+        return 4;  // the augmented fifth of aug and augMaj7
+    }
+    if (interval == 9 && !perfectFifth && hasIntervalClass(type, 6)) {
+        return 6;  // the diminished seventh of dim7
+    }
+    return majorDegreeOfInterval(interval);
+}
 
 std::string chordSymbol(const Chord& chord, const Key& spellingKey, SymbolStyle style) {
     assertValidChord(chord);

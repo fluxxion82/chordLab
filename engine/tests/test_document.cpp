@@ -8,10 +8,12 @@
 #include "chordlab/pitch.h"
 #include "chordlab/relatedness.h"
 #include "chordlab/scale.h"
+#include "chordlab/tracks.h"
 #include "chordlab/voicing.h"
 
 #include <climits>
 #include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <optional>
 #include <random>
@@ -140,6 +142,9 @@ TEST_CASE("Document: defaults to C Ionian, empty, looping and following the host
     CHECK(doc.keyHintSeen == false);
     CHECK(doc.midiThru == true);
     CHECK_FALSE(doc.newChordBeats.has_value());
+    CHECK(doc.tracks.empty());
+    CHECK(doc.chordsMuted == false);
+    CHECK(doc.chordsSolo == false);
 }
 
 TEST_CASE("Document: empty document has endBeat 0 and startBeatOf(0) 0") {
@@ -220,6 +225,22 @@ TEST_CASE("ChordEvent / Document: equality compares every field") {
     CHECK(x != y);
     y = x;
     y.keyHintSeen = true;
+    CHECK(x != y);
+    y = x;
+    y.tracks.push_back(Track{1, "Bass", TrackRole::Bass});
+    CHECK(x != y);
+    Document z = y;
+    CHECK(z == y);
+    z.tracks.front().notes.push_back(TrackNote{1, 36, 1, 0, 480, 100});
+    CHECK(z != y);
+    z = y;
+    z.tracks.front().mute = true;  // live flags inside a track count too
+    CHECK(z != y);
+    y = x;
+    y.chordsMuted = true;
+    CHECK(x != y);
+    y = x;
+    y.chordsSolo = true;
     CHECK(x != y);
 }
 
@@ -388,9 +409,9 @@ TEST_CASE("appendChord: returns -1 and changes nothing once the id counter reach
     CHECK_FALSE(exhausted.undo());
 }
 
-TEST_CASE("kMaxChords: plan value, and a full document of eight-note chords still fits a snapshot") {
+TEST_CASE("kMaxChords: plan value, and a full document of eight-note chords still fits the chord budget") {
     CHECK(kMaxChords == 256);
-    CHECK(static_cast<std::size_t>(kMaxChords) * 8 * 2 <= kMaxSnapshotEvents);
+    CHECK(static_cast<std::size_t>(kMaxChords) * 8 * 2 <= kMaxChordEvents);
 }
 
 TEST_CASE("appendChord: the chord past kMaxChords is refused, changing nothing and keeping the history") {
@@ -2818,4 +2839,174 @@ TEST_CASE("DocumentStore: 200 random chord and section operations keep the secti
     for (const Section& s : final.sections) {
         CHECK(store.nextSectionId() > s.id);
     }
+}
+
+// --- revision ----------------------------------------------------------------------------
+
+TEST_CASE("revision: starts at 1; every content commit moves it by one, chord edits included") {
+    DocumentStore store;
+    CHECK(store.revision() == 1);
+    REQUIRE(store.appendChord(kC, 4.0) == 1);
+    CHECK(store.revision() == 2);
+    store.setLength(1, 2.0);
+    CHECK(store.revision() == 3);
+    store.setProjectKey(key('D', 0, Mode::Dorian));
+    CHECK(store.revision() == 4);
+    store.setFeel(Feel{Rhythm::Pulse});
+    CHECK(store.revision() == 5);
+    REQUIRE(store.addSection(0, "A") == 1);
+    CHECK(store.revision() == 6);
+    REQUIRE(store.addTrack(TrackRole::Bass) == 1);
+    CHECK(store.revision() == 7);
+}
+
+TEST_CASE("revision: refusals and no-ops leave it, chord and track edits alike") {
+    DocumentStore store = threeChords();
+    const std::uint64_t r = store.revision();
+    CHECK(store.appendChord(kC, kNaN) == kNoEventId);
+    store.setLength(1, 4.0);   // the current length
+    store.setLength(99, 1.0);  // unknown id
+    store.moveChord(2, 1);     // where it is
+    CHECK_FALSE(store.removeChords({98}));
+    CHECK(store.addSection(7, "X") == kNoSectionId);
+    CHECK_FALSE(store.removeTrack(1));
+    CHECK(store.insertNotes(1, {NoteSpec{36, 0, 480}}).empty());
+    CHECK(store.revision() == r);
+}
+
+TEST_CASE("revision: live state and the selection never move it") {
+    DocumentStore store = threeChords();
+    const std::uint64_t r = store.revision();
+    store.setBrowsedKey(key('E', -1, Mode::Lydian));
+    store.setProgressionLoop(false);
+    store.setFollowHost(false);
+    store.setRelationMode(RelationMode::Off);
+    store.setTransposeWithKey(true);
+    store.setKeyHintSeen(true);
+    store.setMidiThru(false);
+    store.setNewChordLength(2.0);
+    store.setSelectedEvent(2);
+    store.setSelectedEvents({1, 3});
+    CHECK(store.revision() == r);
+}
+
+TEST_CASE("revision: a successful undo and redo each move it; with nothing to undo or redo it stays") {
+    DocumentStore store;
+    CHECK_FALSE(store.undo());
+    CHECK_FALSE(store.redo());
+    CHECK(store.revision() == 1);
+    REQUIRE(store.appendChord(kC) == 1);
+    CHECK(store.revision() == 2);
+    REQUIRE(store.undo());
+    CHECK(store.revision() == 3);  // back to the empty document, but a newer revision: never reused
+    CHECK_FALSE(store.undo());
+    CHECK(store.revision() == 3);
+    REQUIRE(store.redo());
+    CHECK(store.revision() == 4);
+    CHECK_FALSE(store.redo());
+    CHECK(store.revision() == 4);
+}
+
+TEST_CASE("revision: replace moves it, even to an equal document") {
+    DocumentStore store = threeChords();
+    const std::uint64_t r = store.revision();
+    store.replace(store.doc(), store.nextId());
+    CHECK(store.revision() == r + 1);
+    store.replace(Document{}, 1);
+    CHECK(store.revision() == r + 2);
+}
+
+// --- chord timing edits: status returns and reasons (tracks Task 2a) ---------------------------------
+
+TEST_CASE("chord timing edits return whether they changed the document; a no-op is false with no reason") {
+    DocumentStore store = threeChords();
+    std::string refusal = "stale";
+    const auto noOp = [&](bool result) {
+        CHECK_FALSE(result);
+        CHECK(refusal.empty());
+        refusal = "stale";
+    };
+    noOp(store.moveChord(99, 0, &refusal));  // unknown id
+    noOp(store.moveChord(1, -5, &refusal));  // clamped to its own index
+    noOp(store.setLength(99, 2.0, &refusal));
+    noOp(store.setLength(1, kNaN, &refusal));
+    noOp(store.setLength(1, 4.0, &refusal));  // the current length
+    noOp(store.removeChord(99, &refusal));
+    noOp(store.removeChords({}, &refusal));
+    noOp(store.removeChords({98, 99}, &refusal));
+    noOp(store.setLengths({1, 2, 3}, 4.0, &refusal));
+    noOp(store.setLengths({1}, kInf, &refusal));
+    CHECK(store.moveChord(1, 2, &refusal));
+    CHECK(refusal.empty());
+    CHECK(store.setLength(2, 2.0, &refusal));
+    CHECK(store.setLengths({2, 3}, 1.0, &refusal));
+    CHECK(store.removeChords({2, 99}, &refusal));
+    CHECK(store.removeChord(3, &refusal));
+    CHECK(refusal.empty());
+    CHECK(store.doc().events.size() == 1);
+    // The refusal channel is optional.
+    CHECK(store.setLength(1, 3.0));
+    CHECK_FALSE(store.moveChord(1, 0));
+    CHECK_FALSE(store.removeChord(42));
+}
+
+TEST_CASE("insertChords / appendChord: their own refusals carry a reason and leave no history") {
+    std::string refusal;
+    {
+        DocumentStore store = threeChords();
+        const DocumentStore reference = store;
+        CHECK(store.insertChords(0, {}, &refusal).empty());
+        CHECK(refusal == "No chords to insert");
+        CHECK(store.insertChords(0, {ChordSpec{kC, kNaN}}, &refusal).empty());
+        CHECK(refusal == "Chord lengths must be finite");
+        CHECK(store.appendChord(kC, kNaN, 100, std::nullopt, &refusal) == kNoEventId);
+        CHECK(refusal == "Chord lengths must be finite");
+        CHECK(store.doc() == reference.doc());
+        CHECK(sameHistoryTop(store, reference));
+        CHECK(store.nextId() == reference.nextId());
+    }
+    {
+        DocumentStore store;
+        for (int i = 0; i < kMaxChords; ++i) {
+            REQUIRE(store.appendChord(kC, 1.0) != kNoEventId);
+        }
+        const DocumentStore reference = store;
+        CHECK(store.appendChord(kC, 1.0, 100, std::nullopt, &refusal) == kNoEventId);
+        CHECK(refusal == "At most " + std::to_string(kMaxChords) + " chords");
+        CHECK(store.insertChords(0, {ChordSpec{kC}}, &refusal).empty());
+        CHECK(refusal == "At most " + std::to_string(kMaxChords) + " chords");
+        CHECK(store.doc() == reference.doc());
+        CHECK(sameHistoryTop(store, reference));
+    }
+    {
+        DocumentStore store(INT_MAX);
+        CHECK(store.appendChord(kC, 1.0, 100, std::nullopt, &refusal) == kNoEventId);
+        CHECK(refusal == "No event ids are left");
+        CHECK(store.doc().events.empty());
+        CHECK_FALSE(store.undo());
+    }
+}
+
+TEST_CASE("appendProgression / replaceProgression: the progressionRefusal pre-checks carry a reason") {
+    std::string refusal;
+    DocumentStore store = threeChords();
+    const DocumentStore reference = store;
+    CHECK_FALSE(store.appendProgression({}, "A", &refusal));
+    CHECK(refusal == "The progression is empty");
+    CHECK_FALSE(store.replaceProgression({{kC, kNaN}}, "A", &refusal));
+    CHECK(refusal == "Chord lengths must be finite");
+    const std::vector<std::pair<Chord, double>> tooMany(static_cast<std::size_t>(kMaxChords) - 2, {kC, 1.0});
+    CHECK_FALSE(store.appendProgression(tooMany, "A", &refusal));
+    CHECK(refusal == "At most " + std::to_string(kMaxChords) + " chords");
+    CHECK(store.doc() == reference.doc());
+    CHECK(sameHistoryTop(store, reference));
+    CHECK(store.replaceProgression(tooMany, "A", &refusal));  // alone they fit
+    CHECK(refusal.empty());
+    DocumentStore noIds(INT_MAX - 1);
+    CHECK_FALSE(noIds.replaceProgression({{kC, 1.0}, {kF, 1.0}}, "A", &refusal));
+    CHECK(refusal == "No event ids are left");
+    DocumentStore noSections;
+    noSections.replace(Document{}, 1, INT_MAX);
+    CHECK_FALSE(noSections.appendProgression({{kC, 1.0}}, "A", &refusal));
+    CHECK(refusal == "No section ids are left");
 }

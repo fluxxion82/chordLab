@@ -967,7 +967,10 @@ void ChordLab::PushSnapshot()
     std::string json;
     {
       std::lock_guard<std::mutex> lock(mModelMutex);
-      json = chordlab::snapshotJson(mStore.doc(), mPalette, mStore.selectedEventId(), mStore.selectedEventIds());  // the live selection: the anchor drives suggestions
+      // The note selection and the revision live in the store, not the document: read them in this same section.
+      const chordlab::SnapshotExtras extras{mStore.noteSelection(), mStore.revision()};
+      json = chordlab::snapshotJson(mStore.doc(), mPalette, mStore.selectedEventId(), mStore.selectedEventIds(),
+                                    extras);  // the live selection: the anchor drives suggestions
     }
     SendArbitraryMsgFromDelegate((int) kMsgTagSnapshot, (int) json.size(), json.data());
   });

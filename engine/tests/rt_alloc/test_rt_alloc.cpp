@@ -15,6 +15,7 @@
 #include "chordlab/note_event.h"
 #include "chordlab/publication.h"
 #include "chordlab/scheduler.h"
+#include "chordlab/tracks.h"
 #include "chordlab/triple_buffer.h"
 
 #include <algorithm>
@@ -340,9 +341,9 @@ TEST_CASE("rt alloc: the raw MIDI ring allocates nothing on push, pop or an over
     CHECK(resets == 25);  // one per bump
 }
 
-TEST_CASE("rt alloc: handing over full 4096-event performed snapshots allocates nothing on the audio thread") {
-    // 64 one-bar four-note chords, Subdivided: 64 x 8 hits x 4 notes x 2 = 4096 performed events, the most a
-    // snapshot holds. Two such progressions (G7 and Dm7, strummed and humanised differently) are published in
+TEST_CASE("rt alloc: handing over 4096-event performed snapshots allocates nothing on the audio thread") {
+    // 64 one-bar four-note chords, Subdivided: 64 x 8 hits x 4 notes x 2 = 4096 performed events, the chord budget
+    // (kMaxChordEvents; the full slot, chords and tracks, is the next test). Two such progressions (G7 and Dm7, strummed and humanised differently) are published in
     // turn through the plug-in's slot type; everything that allocates (the store, compile inside fillSlot)
     // happens outside the measured scopes.
     const auto buffer = std::make_unique<TripleBuffer<SnapshotSlot>>();
@@ -394,13 +395,83 @@ TEST_CASE("rt alloc: handing over full 4096-event performed snapshots allocates 
     play(ppq);
     const std::size_t secondAllocations = second.count();
 
-    CHECK(firstCount == kMaxSnapshotEvents);
-    CHECK(secondCount == kMaxSnapshotEvents);
+    CHECK(firstCount == kMaxChordEvents);
+    CHECK(secondCount == kMaxChordEvents);
     CHECK(firstAllocations == 0);
     CHECK(secondAllocations == 0);
     CHECK(missing == 0);
     CHECK(emitted > 1000);
     CHECK(incomplete == 0);  // 512-frame blocks at 120 bpm: the density never outruns a block
+}
+
+TEST_CASE("rt alloc: adopting and playing a full kMaxSnapshotEvents slot, seeks and re-adopts included, allocates nothing") {
+    // A real document at the caps (tracks design D8): 128 one-bar sevenths played Pulse, 128 x 4 hits x 4 notes x 2 =
+    // kMaxChordEvents, and kMaxTracks tracks of kMaxNotesPerTrack short notes spread evenly over its 512 beats, each
+    // track on its own pitch below the chords' so nothing merges: kMaxTracks x kMaxNotesPerTrack x 2 events more,
+    // exactly kMaxSnapshotEvents. Published through fillSlot (compilePlayback) into the plug-in's slot type; the
+    // store, the compile and the slot buffer all exist before the measured scope.
+    DocumentStore store;
+    for (int i = 0; i < 128; ++i) {
+        store.appendChord(chord(i % 12, "7"), 4.0, 100);
+    }
+    store.setFeel(Feel{Rhythm::Pulse});
+    const std::int64_t end = chordBoundaryTicks(store.doc()).back();
+    const std::int64_t spacing = end / kMaxNotesPerTrack;
+    REQUIRE(kMaxTracks * kFeelTicksPerBeat / spacing <= kMaxTrackOnsetsPerBeat);
+    for (int t = 0; t < kMaxTracks; ++t) {
+        const int id = store.addTrack(TrackRole::Bass);
+        REQUIRE(id != kNoTrackId);
+        std::vector<NoteSpec> specs;
+        for (int k = 0; k < kMaxNotesPerTrack; ++k) {
+            specs.push_back(NoteSpec{24 + 2 * t, k * spacing, kMinTrackNoteTicks, 100});
+        }
+        REQUIRE(store.insertNotes(id, specs).size() == specs.size());
+    }
+    const auto buffer = std::make_unique<TripleBuffer<SnapshotSlot>>();  // three slots, ~864 KB: off the stack
+    Publication publication;
+    SnapshotSlot& back = buffer->beginWrite();
+    REQUIRE(fillSlot(store.doc(), back, publication));
+    const std::size_t count = back.count;
+    buffer->publish(publication.generation);
+    std::array<MidiOut, 512> out{};  // ChordLab.h: kMidiOutCapacity
+    Scheduler scheduler;
+    scheduler.reset(kSr);
+    std::mt19937 rng(20261114);
+    std::uniform_real_distribution<double> anywhere(0.0, 520.0);
+
+    int incomplete = 0;
+    int missing = 0;
+    std::size_t emitted = 0;
+    AllocationProbe probe;
+    const SnapshotSlot* slot = buffer->acquire();
+    if (slot == nullptr) {
+        ++missing;
+    } else {
+        std::uint32_t generation = buffer->currentGeneration();
+        scheduler.adopt(Snapshot{slot->events.data(), slot->count, slot->endBeat, slot->loop, generation});
+        double ppq = 0.0;
+        // 512-frame blocks at 120 bpm and 48 kHz cover 1/46.875 beat: 26000 blocks play the whole 512 beats and wrap.
+        for (int block = 0; block < 26000; ++block) {
+            if (block % 2000 == 1999) {
+                ppq = anywhere(rng);  // a seek: flush and chase over the full slot
+            } else if (block % 5000 == 4999) {
+                // The same content under a new generation: adopt flushes and re-chases the full slot.
+                scheduler.adopt(Snapshot{slot->events.data(), slot->count, slot->endBeat, slot->loop, ++generation});
+            }
+            std::size_t written = 0;
+            const BlockInfo info{ppq, 512, kSr, 120.0, true, true};
+            incomplete += scheduler.process(info, out.data(), out.size(), written) ? 0 : 1;
+            emitted += written;
+            ppq += 512.0 / 24000.0;
+        }
+    }
+    const std::size_t allocations = probe.count();
+
+    CHECK(count == kMaxSnapshotEvents);
+    CHECK(allocations == 0);
+    CHECK(missing == 0);
+    CHECK(emitted > kMaxSnapshotEvents);
+    CHECK(incomplete == 0);
 }
 
 TEST_CASE("rt alloc: the heard ring and the MIDI adapter allocate nothing across 10k pushes, pops and messages") {
