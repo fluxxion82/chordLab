@@ -19,6 +19,7 @@
 #include "chordlab/suggest.h"
 #include "chordlab/symbol.h"
 #include "chordlab/tension.h"
+#include "chordlab/tracks.h"
 #include "chordlab/voicing.h"
 
 #include <nlohmann/json.hpp>
@@ -1080,9 +1081,6 @@ bool parseSelectEvent(Fields& fields, Command& out) {
     return toInt(*id, out.id) || fields.fail("id", "must be an integer or null");
 }
 
-/// Wire names of `TrackRole`, in enum order: what `addTrack`, `patchTrack` and a lane's `role` carry.
-constexpr const char* kTrackRoleNames[] = {"bass", "lead", "other"};
-
 /// Reads the role at `fields[name]`: "bass", "lead" or "other" (lowercase, as the snapshot publishes them).
 /// Missing is "missing <field>"; mistyped and unknown values alike are one message listing the three.
 bool parseRoleField(Fields& fields, const char* name, TrackRole& out) {
@@ -1091,12 +1089,9 @@ bool parseRoleField(Fields& fields, const char* name, TrackRole& out) {
         return false;
     }
     if (v->is_string()) {
-        const std::string text = v->get<std::string>();
-        for (int i = 0; i < 3; ++i) {
-            if (text == kTrackRoleNames[i]) {
-                out = static_cast<TrackRole>(i);
-                return true;
-            }
+        if (const std::optional<TrackRole> role = trackRoleFromName(v->get_ref<const std::string&>())) {
+            out = *role;
+            return true;
         }
     }
     return fields.fail(name, "must be \"bass\", \"lead\" or \"other\"");
@@ -1239,7 +1234,7 @@ bool parseChordSpec(Fields& fields, ChordSpec& out, std::size_t& noteTotal, std:
     if (fields.has("notes") && !parseChordNotes(fields, spec.notes, noteTotal, error)) {
         return false;
     }
-    out = spec;
+    out = std::move(spec);
     return true;
 }
 
@@ -1276,7 +1271,7 @@ bool parseInsertChords(Fields& fields, Command& out, std::vector<ChordSpec>& cho
         if (!parseChordSpec(itemFields, spec, noteTotal, error)) {
             return false;
         }
-        chords.push_back(spec);
+        chords.push_back(std::move(spec));
     }
     return true;
 }
@@ -1911,9 +1906,10 @@ Refusal applyCommand(DocumentStore& store, const Command& command, std::string& 
             if (store.nextId() > INT_MAX - static_cast<int>(lists.chords.size())) {  // <= kMaxChords: no overflow
                 return Refusal::InsertIdsExhausted;  // the store's own id check, asked first
             }
-            // Lengths are finite (validated), the batch fits and the ids suffice: only the track invariant can still
-            // refuse, when a note pushed along leaves the note range (D1) or a pushed fractional chord gains a rounded
-            // tick and reactivates a note over a cap.
+            // Lengths are finite (validated), the batch fits and the ids suffice. The store can still refuse: a lane
+            // that matches more than one track, a new track past `kMaxTracks`, track or note ids exhausted, and the
+            // track invariant (a note pushed along leaves the note range (D1), or a pushed fractional chord gains a
+            // rounded tick and reactivates a note over a cap).
             return store.insertChords(command.index, lists.chords, &reason).empty() ? Refusal::Store : Refusal::None;
         case Command::Kind::RemoveChords:
             // No id that exists is a valid no-op.

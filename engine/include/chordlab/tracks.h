@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -16,6 +17,13 @@ struct Document;
 /// What a track is for (tracks design D2). A role sets defaults only (the default name, and in the UI the
 /// register, colour and guide emphasis), never what the user may write; it is editable (`patchTrack`).
 enum class TrackRole { Bass, Lead, Other };
+
+/// The wire and message name of a role, lowercase: "bass", "lead" or "other". The one table of role names:
+/// `addTrack`, `patchTrack`, a clipboard lane's `role`, refusal messages and the snapshot all use it.
+const char* trackRoleName(TrackRole role) noexcept;
+
+/// The role named `name` exactly as `trackRoleName` spells it, or empty (case matters, no trimming).
+std::optional<TrackRole> trackRoleFromName(std::string_view name) noexcept;
 
 /// One note of a track (D1). Its position is derived, not stored (D3): the note belongs to the chord it starts
 /// in, `anchorEventId`, and starts `offsetTick` ticks (960 per beat) after that chord's canonical boundary

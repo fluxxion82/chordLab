@@ -5129,3 +5129,68 @@ TEST_CASE("insertChords: note entries' errors name the chord, the note and the f
     // A chord entry without notes (or with an empty list) is as before.
     CHECK(changes(store, withNotes(json::array())));
 }
+
+TEST_CASE("insertChords: the note cap counts across entries, so the error names the entry that passes it") {
+    DocumentStore store = chordsAndBass();
+    // Short notes, minimal whitespace: 4097 notes stay far under kMaxJsonBytes.
+    const std::string note = R"({"lane":{"name":"B","role":"bass"},"offset":0,"length":30,"pitch":40})";
+    const auto notes = [&](int count) {
+        std::string out = "[";
+        for (int i = 0; i < count; ++i) {
+            out += (i > 0 ? "," : "") + note;
+        }
+        return out + "]";
+    };
+    const std::string text = R"({"schema":1,"cmd":"insertChords","index":0,"chords":[{"root":0,"type":"maj","notes":)" +
+                             notes(4000) + R"(},{"root":5,"type":"maj","notes":)" + notes(97) + "}]}";
+    REQUIRE(text.size() < kMaxJsonBytes);
+    checkErrorRaw(store, text,
+                  "chords[1].notes must not bring the batch to more than " + std::to_string(kMaxTracks * kMaxNotesPerTrack) +
+                      " notes");
+}
+
+TEST_CASE("insertChords: the largest clipboard message the bounds allow is under kMaxJsonBytes and accepted") {
+    // 256 chords of four beats, 16 notes each (4096 in all, four tracks' worth), every note with a lane of a 64-byte
+    // name of slashes and a trackId, compact JSON with the slashes escaped as Swift's JSONEncoder writes them.
+    constexpr int chordCount = kMaxChords;
+    constexpr int notesPerChord = kMaxTracks * kMaxNotesPerTrack / chordCount;
+    static_assert(chordCount * notesPerChord == kMaxTracks * kMaxNotesPerTrack, "the batch is exactly the note cap");
+    const auto laneName = [](int track) { return std::string(kMaxTrackNameBytes - 1, '/') + static_cast<char>('a' + track); };
+    const auto escaped = [](const std::string& name) {
+        std::string out;
+        for (const char c : name) {
+            out += c == '/' ? "\\/" : std::string(1, c);
+        }
+        return out;
+    };
+    DocumentStore store;
+    for (int t = 0; t < kMaxTracks; ++t) {
+        REQUIRE(store.addTrack(TrackRole::Other, laneName(t)) == t + 1);
+    }
+    std::string text = R"({"schema":1,"cmd":"insertChords","index":0,"chords":[)";
+    for (int c = 0; c < chordCount; ++c) {
+        text += (c > 0 ? "," : "") + std::string(R"({"root":0,"type":"maj","lengthBeats":4,"notes":[)");
+        for (int n = 0; n < notesPerChord; ++n) {
+            const int track = n % kMaxTracks;
+            const int slot = n / kMaxTracks;  // 0..3: one note per beat per track, four tracks sounding together
+            text += (n > 0 ? "," : "") + std::string(R"({"lane":{"trackId":)") + std::to_string(track + 1) + R"(,"name":")" +
+                    escaped(laneName(track)) + R"(","role":"other"},"offset":)" + std::to_string(slot * 960) +
+                    R"(,"length":480,"pitch":)" + std::to_string(36 + track * 12 + slot) + R"(,"velocity":100})";
+        }
+        text += "]}";
+    }
+    text += "]}";
+    MESSAGE("worst-case clipboard insertChords message: " << text.size() << " bytes of " << kMaxJsonBytes);
+    REQUIRE(text.size() < kMaxJsonBytes);
+    std::string error;
+    bool changed = false;
+    REQUIRE_MESSAGE(applyCommandJson(store, text, error, &changed), error);
+    CHECK(changed);
+    CHECK(store.doc().events.size() == static_cast<std::size_t>(chordCount));
+    std::size_t total = 0;
+    for (const Track& track : store.doc().tracks) {
+        CHECK(track.notes.size() == static_cast<std::size_t>(kMaxNotesPerTrack));
+        total += track.notes.size();
+    }
+    CHECK(total == static_cast<std::size_t>(kMaxTracks * kMaxNotesPerTrack));
+}

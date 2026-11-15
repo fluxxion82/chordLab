@@ -532,10 +532,19 @@ std::string feed(DocumentStore& cmdStore, DocumentStore& stateStore, const std::
         const DocumentStore storeBefore = cmdStore;
         std::string error = "stale";
         bool ok = false;
+        bool changed = true;  // applyCommandJson sets it on every call
+        const Document docBefore = cmdStore.doc();
         try {
-            ok = applyCommandJson(cmdStore, text, error);
+            ok = applyCommandJson(cmdStore, text, error, &changed);
         } catch (...) {
             return "applyCommandJson let an exception escape";
+        }
+        if (!ok && changed) {
+            return "applyCommandJson rejected but reported documentChanged";
+        }
+        if (ok && changed != (cmdStore.doc() != docBefore)) {
+            return std::string("applyCommandJson reported documentChanged ") + (changed ? "true" : "false") +
+                   " but the document " + (changed ? "is the same" : "differs");
         }
         if (ok && !error.empty()) {
             return "applyCommandJson accepted but left error \"" + error + "\"";
@@ -830,6 +839,13 @@ TEST_CASE("json robustness: integers at the edges of 64 and 32 bits are refused 
     sweep(R"({"schema":1,"cmd":"selectNotes","trackId":)", R"(,"ids":[1]})");
     sweep(R"({"schema":1,"cmd":"moveTrack","id":1,"index":)", "}");
     sweep(R"({"schema":1,"cmd":"setTrackMute","on":true,"id":)", "}");
+    sweep(R"({"schema":1,"cmd":"removeTrack","id":)", "}");
+    sweep(R"({"schema":1,"cmd":"patchTrack","name":"x","id":)", "}");
+    sweep(R"({"schema":1,"cmd":"setTrackSolo","on":true,"id":)", "}");
+    sweep(R"({"schema":1,"cmd":"insertChords","index":)",
+          R"(,"chords":[{"root":0,"type":"maj","notes":[{"lane":{"name":"B","role":"bass"},"length":480,"pitch":40,"offset":0}]}]})");
+    sweep(R"({"schema":1,"cmd":"insertChords","index":0,"chords":[{"root":0,"type":"maj","notes":[{"lane":{"name":"B","role":"bass"},"length":480,"pitch":40,"offset":0,"velocity":)",
+          "}]}]}");
     sweep(R"({"schema":1,"cmd":"insertChords","index":0,"chords":[{"root":0,"type":"maj","notes":[{"lane":{"name":"B","role":"bass"},"length":480,"pitch":40,"offset":)",
           "}]}]}");
     sweep(R"({"schema":1,"cmd":"insertChords","index":0,"chords":[{"root":0,"type":"maj","notes":[{"lane":{"name":"B","role":"bass","trackId":)",

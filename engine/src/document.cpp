@@ -793,19 +793,6 @@ bool DocumentStore::removeChord(int id, std::string* refusal) {
 
 namespace {
 
-/// The wire and message name of a role.
-const char* roleName(TrackRole role) {
-    switch (role) {
-        case TrackRole::Bass:
-            return "bass";
-        case TrackRole::Lead:
-            return "lead";
-        case TrackRole::Other:
-            return "other";
-    }
-    return "other";
-}
-
 /// `insertChords`' notes (D21): resolves the lane of every note of `chords` and appends the note, anchored to the
 /// chord it comes with (`chordIds[i]` for `chords[i]`, all in `next`), to its track in `next`, creating the tracks the
 /// lanes need. `original` is the document before the insert: ids and names are looked up there, so a track created
@@ -856,7 +843,7 @@ bool attachChordNotes(const Document& original, Document& next, const std::vecto
                     }
                 }
                 if (matches > 1) {
-                    refuse(refusal, "Lane \"" + laneName + "\" (" + roleName(n.lane.role) +
+                    refuse(refusal, "Lane \"" + laneName + "\" (" + trackRoleName(n.lane.role) +
                                         ") matches more than one track");
                     return false;
                 }

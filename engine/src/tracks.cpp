@@ -16,6 +16,32 @@ static_assert(static_cast<long long>(kMaxNoteTick) ==
               "the note domain ends where the longest progression ends");
 static_assert(kMaxTrackNameBytes == kMaxSectionNameBytes, "track names are bounded as section names are");
 
+static_assert(static_cast<int>(TrackRole::Bass) == 0 && static_cast<int>(TrackRole::Lead) == 1 &&
+                  static_cast<int>(TrackRole::Other) == 2,
+              "the role name table is indexed by the enum's values");
+
+namespace {
+
+constexpr const char* kRoleNames[] = {"bass", "lead", "other"};
+constexpr int kRoleCount = static_cast<int>(sizeof(kRoleNames) / sizeof(kRoleNames[0]));
+static_assert(kRoleCount == static_cast<int>(TrackRole::Other) + 1, "one name per role");
+
+}  // namespace
+
+const char* trackRoleName(TrackRole role) noexcept {
+    const int i = static_cast<int>(role);
+    return i >= 0 && i < kRoleCount ? kRoleNames[i] : "other";
+}
+
+std::optional<TrackRole> trackRoleFromName(std::string_view name) noexcept {
+    for (int i = 0; i < kRoleCount; ++i) {
+        if (name == kRoleNames[i]) {
+            return static_cast<TrackRole>(i);
+        }
+    }
+    return std::nullopt;
+}
+
 std::vector<std::int32_t> chordBoundaryTicks(const Document& doc) {
     std::vector<std::int32_t> ticks;
     ticks.reserve(doc.events.size() + 1);

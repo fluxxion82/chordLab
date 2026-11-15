@@ -407,7 +407,8 @@ std::string heardJson(const Listener& listener, const Key& projectKey);
 ///   - `baseRevision` (optional, on those three): a non-negative JSON integer (read as `uint64_t`; negative, fractional
 ///     or beyond 2^64 - 1 is an error). When present and not equal to `DocumentStore::revision()` the command is
 ///     refused before anything else, store untouched, no history, `documentChanged` false: `"insertNotes" refused: The
-///     notes changed while you were dragging` (the wire name of the command). Absent: no check.
+///     notes changed while you were dragging` (the wire name of the command). Absent: no check. The check lives
+///     in this layer: the store is not called for a stale command (it has no notion of a base revision).
 ///   - `selectNotes {trackId, ids}`: `setNoteSelection`, live state (never history, never the revision, never
 ///     `documentChanged`); `ids` at most `kMaxNotesPerTrack` integers, unknown ones dropped, repeats collapsed, the rest
 ///     in the track's note order; an empty result clears. `trackId` is an integer or null: null clears the selection
