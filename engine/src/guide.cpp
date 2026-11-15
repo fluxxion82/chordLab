@@ -63,22 +63,35 @@ bool hasIntervalClass(const ChordType& type, int semitones) {
                        [semitones](int i) { return pitchClassOf(i) == semitones; });
 }
 
-/// A non-chord tone's degree label, `interval` (0..11) above the root (see `harmonicGuide`, step 6).
-std::string otherToneLabel(int interval, bool hasSeventh, bool majorThird, bool perfectFifth) {
+/// A non-chord tone's degree label, `interval` (0..11) above the root (see `harmonicGuide`, step 6). The
+/// chord's own fifth never renames a neighbour: an altered fifth (b5, #5) is a chord tone, so the pitch class
+/// beside it is the #11/#4 or the b13/b6 whatever the fifth.
+std::string otherToneLabel(int interval, bool hasSeventh, bool majorThird) {
     switch (interval) {
         case 1: return hasSeventh ? "b9" : "b2";
         case 2: return hasSeventh ? "9" : "2";
-        case 3: return majorThird ? (hasSeventh ? "#9" : "#2") : "b3";
+        case 3: return majorThird && hasSeventh ? "#9" : "b3";
         case 4: return "3";
         case 5: return hasSeventh ? "11" : "4";
-        case 6: return perfectFifth ? (hasSeventh ? "#11" : "#4") : "b5";
+        case 6: return hasSeventh ? "#11" : "#4";
         case 7: return "5";
-        case 8: return perfectFifth ? (hasSeventh ? "b13" : "b6") : "#5";
+        case 8: return hasSeventh ? "b13" : "b6";
         case 9: return hasSeventh ? "13" : "6";
         case 10: return "b7";
         case 11: return "7";
         default: return "R";  // unreachable: the root is a chord tone
     }
+}
+
+/// The letter steps above the root a degree label implies: its number less one, mod 7 ("#9" 1, "b13" 5, "7" 6).
+int labelLetterSteps(const std::string& label) {
+    int number = 0;
+    for (const char ch : label) {
+        if (ch >= '0' && ch <= '9') {
+            number = number * 10 + (ch - '0');
+        }
+    }
+    return number == 0 ? 0 : (number - 1) % 7;
 }
 
 bool inMaskOf(std::uint16_t mask, PitchClass pc) {
@@ -189,7 +202,6 @@ Guide harmonicGuide(const Chord& chord, const Key& projectKey) {
 
     const bool majorThird = hasIntervalClass(type, 4);
     const bool minorThird = hasIntervalClass(type, 3);
-    const bool perfectFifth = hasIntervalClass(type, 7);
     const bool hasSeventh = hasIntervalClass(type, 10) || hasIntervalClass(type, 11) ||
                             std::any_of(type.intervals.begin(), type.intervals.end(),
                                         [&type](int i) { return pitchClassOf(i) == 9 && chordToneDegree(type, i) == 6; });
@@ -214,7 +226,7 @@ Guide harmonicGuide(const Chord& chord, const Key& projectKey) {
         }
     }
 
-    // Step 6: degrees; step 7 for Outside pitch classes.
+    // Step 6: degrees; step 7 for Outside pitch classes, on the letter the degree label implies.
     for (const int interval : type.intervals) {
         const std::size_t i = static_cast<std::size_t>(pitchClassOf(root + interval));
         if (guide.degree[i].empty()) {
@@ -224,10 +236,11 @@ Guide harmonicGuide(const Chord& chord, const Key& projectKey) {
     for (PitchClass pc = 0; pc < 12; ++pc) {
         const std::size_t i = static_cast<std::size_t>(pc);
         if (!inChord[i]) {
-            guide.degree[i] = otherToneLabel(pitchClassOf(pc - root), hasSeventh, majorThird, perfectFifth);
+            guide.degree[i] = otherToneLabel(pitchClassOf(pc - root), hasSeventh, majorThird);
         }
         if (!named[i]) {
-            guide.name[i] = spell(pc, projectKey).text();
+            const char letter = letterSteps(rootLetter, labelLetterSteps(guide.degree[i]));
+            guide.name[i] = spellOn(letter, pc, spell(pc, projectKey)).text();
         }
     }
     return guide;

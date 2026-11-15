@@ -34,10 +34,13 @@ struct Guide {
 /// 1. **Letters are structural, never display spelling.** The root's letter is `spell(chord.root,
 ///    projectKey).letter`; each chord tone (interval `i` of the type) takes the letter `chordToneDegree(type, i)`
 ///    steps above it (symbol.h), with the accidental that reaches its pitch class from that letter, unfolded:
-///    C# major's own third is E# on letter E, and in C# major a D major chord's third is F# on letter F. (Should
-///    no spelling on that letter lie within a double accidental, the tone keeps `spell`'s; no dictionary chord
-///    reaches that in a key the engine names canonically.) The key's seven scale tones carry their letters from
-///    the key signature (`spellDegree`, every mode, harmonic and melodic minor included).
+///    C# major's own third is E# on letter E, and in C# major a D major chord's third is F# on letter F. Should
+///    no spelling on that letter lie within a double accidental, the tone keeps `spell`'s, which names the right
+///    pitch class on another letter. That is rare, even in the keys the engine names canonically: the #5 of an
+///    aug or augMaj7 chord on a double-sharp root (B#+ in C# harmonic minor: G#, not F#x; Cx+, Fx+), the #11 of
+///    a 7#11 or maj7#11 on one (Cx7#11 in D# harmonic minor: G#), the bb7 of a dim7 on a flat root (Cbdim7 in
+///    F Locrian: Ab, not Bbbb). The key's seven scale tones carry their letters from the key signature
+///    (`spellDegree`, every mode, harmonic and melodic minor included).
 /// 2. **Chord scale.** It starts as the key's seven lettered scale tones. Each chord tone, in interval order,
 ///    whose pitch class is not among them replaces the scale tone on its letter (E7 in C: G# on G replaces G,
 ///    giving E F G# A B C D; D7 in C: F# replaces F); when that letter's scale tone was already replaced or is
@@ -58,11 +61,18 @@ struct Guide {
 ///    "6" for tones below the octave (sus2, sus4, the 6 of 6/m6/69); "9", "#11" and the like for tones the type
 ///    writes at 12 semitones or more (add9's 9, 7#11's #11). A non-chord tone `i` semitones (mod 12) above the
 ///    root, where "has a seventh" means a chord tone of interval class 10 or 11 or dim7's diminished seventh:
-///    1 "b9"/"b2" and 2 "9"/"2" (with/without a seventh); 3 "#9"/"#2" when the chord has a major third, else
-///    "b3"; 4 "3"; 5 "11"/"4"; 6 "#11"/"#4" when the chord has a perfect fifth, else "b5"; 7 "5"; 8 "b13"/"b6"
-///    when it has a perfect fifth, else "#5"; 9 "13"/"6"; 10 "b7"; 11 "7".
-/// 7. **Names.** A chord tone by its structural letter (step 1); a chord-scale tone and a replaced key tone by
-///    its key letter (or the letter it was added on); an Outside pitch class by `spell(pc, projectKey)`.
+///    1 "b9"/"b2" and 2 "9"/"2" (with/without a seventh); 3 "#9" when the chord has a major third and a
+///    seventh, else "b3"; 4 "3"; 5 "11"/"4"; 6 "#11"/"#4"; 7 "5"; 8 "b13"/"b6"; 9 "13"/"6"; 10 "b7"; 11 "7".
+///    An altered fifth is a chord tone, so it never renames its neighbour: G over Bm7b5 is the b13 beside the
+///    chord's b5, F# over C+ the #4 beside its #5.
+/// 7. **Names.** A chord tone by its structural letter (step 1). A chord-scale tone and a replaced key tone by
+///    its key letter (or the letter it was added on), even where that letter is not the one its degree label
+///    implies: G over E7 in C is labelled "#9" but named G, as it is conventionally written (and as the key
+///    writes it). An Outside pitch class on the letter its degree label implies, the root's letter moved
+///    (label number - 1) mod 7 steps, with the accidental that reaches it from there, unfolded, up to a double
+///    accidental: B7 in C names its 9, 13 and 7 C#, G# and A#; E7 in A harmonic minor its #9 Fx; F#maj7 in
+///    F# major its #9 Gx. When no double accidental reaches it from that letter (only in keys the engine never
+///    names canonically, such as Fb Locrian), `spell(pc, projectKey)`.
 ///
 /// `chord.type` must be non-null and `chord.root` in 0..11. Allocates (the strings): not for the audio thread.
 Guide harmonicGuide(const Chord& chord, const Key& projectKey);
