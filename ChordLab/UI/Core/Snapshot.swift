@@ -270,6 +270,13 @@ struct GuideJSON: Codable, Equatable {
     let index = Self.pitchClass(pc)
     return index < names.count ? ChordSymbol.glyphs(names[index]) : ""
   }
+
+  /// The glyph degree of `pc` (mod 12) ("b2" reads "♭2", "R" stays "R"); empty when `degrees` has no entry for it.
+  /// Converts the one string, as `displayName(pc:)` does, never the whole array as `displayDegrees` does.
+  func displayDegree(pc: Int) -> String {
+    let index = Self.pitchClass(pc)
+    return index < degrees.count ? ChordSymbol.glyphs(degrees[index]) : ""
+  }
 }
 
 /// One track's notes, column-wise (tracks design D6): eight parallel arrays, entry `i` of each being note `i` in
@@ -277,7 +284,12 @@ struct GuideJSON: Codable, Equatable {
 /// absolute tick, `anchor` the id of the note's chord, `offset` the ticks into it, `active` false once the chord
 /// is shorter than the offset. A well-formed snapshot has equal lengths; `count` is the shortest column's, so a
 /// ragged one never traps `subscript`, `indices` or `index(ofId:)`.
-struct TrackNotesJSON: Codable, Equatable {
+///
+/// A `RandomAccessCollection` of `RollNote` (indices `0..<count`, each element built on demand), so views can
+/// iterate, `reversed()`, `first(where:)` and slice it. The engine keeps every track's notes sorted by (derived
+/// start, pitch, id) after each store edit (`Track::notes`, engine/include/chordlab/tracks.h; `sortTrackNotes`), so
+/// `start` is non-decreasing in note order and a view may binary-search the notes that overlap a visible tick window.
+struct TrackNotesJSON: Codable, Equatable, RandomAccessCollection {
   let id: [Int]
   let pitch: [Int]
   let start: [Int]
@@ -289,8 +301,11 @@ struct TrackNotesJSON: Codable, Equatable {
 
   /// The number of notes: the minimum of the column counts.
   var count: Int {
-    min(id.count, pitch.count, start.count, length.count, velocity.count, anchor.count, offset.count, active.count)
+    Swift.min(id.count, pitch.count, start.count, length.count, velocity.count, anchor.count, offset.count, active.count)
   }
+
+  var startIndex: Int { 0 }
+  var endIndex: Int { count }
 
   /// `0..<count`.
   var indices: Range<Int> { 0..<count }
@@ -301,9 +316,17 @@ struct TrackNotesJSON: Codable, Equatable {
              offset: offset[i], active: active[i])
   }
 
-  /// The position of the note with this id in the columns, nil for none.
+  /// The position of the note with this id in the columns, nil for none. O(n): for a single lookup; use
+  /// `indices(ofIds:)` for many.
   func index(ofId noteId: Int) -> Int? {
     id.prefix(count).firstIndex(of: noteId)
+  }
+
+  /// The positions of the notes whose ids are in `ids`, ascending (note order), in one pass over the columns; ids
+  /// that name no note are skipped.
+  func indices(ofIds ids: Set<Int>) -> [Int] {
+    guard !ids.isEmpty else { return [] }
+    return (0..<count).filter { ids.contains(id[$0]) }
   }
 }
 

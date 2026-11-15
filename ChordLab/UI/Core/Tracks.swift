@@ -5,6 +5,14 @@ import Foundation
 enum Lane: Hashable {
   case chords
   case track(Int)
+
+  /// The lane to show given the snapshot's tracks (design D13): `.track(id)` while a track with that id exists,
+  /// else `.chords` (a removed track falls back to Chords; so does a track lane while no `tracks` have arrived);
+  /// `.chords` stays `.chords`.
+  func resolved(in tracks: [TrackJSON]?) -> Lane {
+    guard case .track(let id) = self else { return self }
+    return tracks?.contains { $0.id == id } == true ? self : .chords
+  }
 }
 
 /// A track's role (tracks design D2): it sets defaults only (name, register, colour, guide emphasis,
@@ -13,7 +21,7 @@ enum Lane: Hashable {
 ///
 /// Decoding is tolerant: a role this UI does not know (a newer plug-in's) is `.other`, so one unfamiliar track
 /// never loses the whole snapshot. Encoding writes the raw value.
-enum TrackRole: String, Codable {
+enum TrackRole: String, Codable, CaseIterable {
   case bass, lead, other
 
   init(from decoder: Decoder) throws {
@@ -36,7 +44,8 @@ enum TrackRole: String, Codable {
     }
   }
 
-  /// The role's name as a menu item or tab default shows it: "Bass", "Lead", "Other".
+  /// The role's name as the + menu and the Role submenu show it (D13): "Bass", "Lead", "Other". Default track
+  /// names come from the engine (D2: Bass, Lead, Track), not from here.
   var displayName: String {
     switch self {
     case .bass: return "Bass"

@@ -193,11 +193,74 @@ final class TracksTests: XCTestCase {
     XCTAssertEqual(s.tracks?.first?.role, .other)
   }
 
+  // MARK: - Notes as a collection
+
+  private func notesOfTrack(ids: [Int]) -> TrackNotesJSON {
+    TrackNotesJSON(id: ids, pitch: ids.map { 60 + $0 }, start: ids.map { $0 * 480 }, length: ids.map { _ in 240 },
+                   velocity: ids.map { _ in 90 }, anchor: ids.map { _ in 1 }, offset: ids.map { $0 * 480 },
+                   active: ids.map { _ in true })
+  }
+
+  func testNotesAreARandomAccessCollectionOfRollNotes() {
+    let notes = notesOfTrack(ids: [7, 3, 9, 4])
+    XCTAssertEqual(notes.startIndex, 0)
+    XCTAssertEqual(notes.endIndex, 4)
+    XCTAssertEqual(notes.map(\.id), [7, 3, 9, 4])
+    XCTAssertEqual(notes.reversed().map(\.id), [4, 9, 3, 7])
+    XCTAssertEqual(notes.first(where: { $0.pitch > 62 })?.id, 7)
+    XCTAssertEqual(notes.last?.id, 4)
+    XCTAssertEqual(notes.index(notes.startIndex, offsetBy: 2), 2)
+    XCTAssertEqual(notes[1].pitch, 63)
+  }
+
+  func testARaggedColumnSetShortensTheCollection() {
+    var notes = notesOfTrack(ids: [1, 2, 3])
+    notes = TrackNotesJSON(id: notes.id, pitch: Array(notes.pitch.prefix(2)), start: notes.start, length: notes.length,
+                           velocity: notes.velocity, anchor: notes.anchor, offset: notes.offset, active: notes.active)
+    XCTAssertEqual(Array(notes).map(\.id), [1, 2])
+    XCTAssertEqual(notes.endIndex, 2)
+  }
+
+  func testIndicesOfIdsAreAscendingNoteOrderAndSkipUnknownIds() {
+    let notes = notesOfTrack(ids: [7, 3, 9, 4])
+    XCTAssertEqual(notes.indices(ofIds: [4, 7, 100]), [0, 3])
+    XCTAssertEqual(notes.indices(ofIds: [9, 3, 7, 4]), [0, 1, 2, 3])
+    XCTAssertEqual(notes.indices(ofIds: []), [])
+    XCTAssertEqual(notes.indices(ofIds: [55]), [])
+    XCTAssertEqual(notes.index(ofId: 9), 2)
+  }
+
+  // MARK: - Lane fallback
+
+  func testALaneResolvesToItselfWhileItsTrackExists() throws {
+    let s = try snapshot(tracks: "[\(trackJSON(1)), \(trackJSON(4))]")
+    XCTAssertEqual(Lane.chords.resolved(in: s.tracks), .chords)
+    XCTAssertEqual(Lane.track(4).resolved(in: s.tracks), .track(4))
+    XCTAssertEqual(Lane.track(1).resolved(in: s.tracks), .track(1))
+  }
+
+  func testALaneOfARemovedTrackFallsBackToChords() throws {
+    let s = try snapshot(tracks: "[\(trackJSON(1))]")
+    XCTAssertEqual(Lane.track(2).resolved(in: s.tracks), .chords)
+    XCTAssertEqual(Lane.track(2).resolved(in: []), .chords)
+  }
+
+  func testALaneWithoutTracksFallsBackToChords() {
+    XCTAssertEqual(Lane.track(1).resolved(in: nil), .chords)
+    XCTAssertEqual(Lane.chords.resolved(in: nil), .chords)
+  }
+
+  func testTrackRolesAreCaseIterableInMenuOrder() {
+    XCTAssertEqual(TrackRole.allCases, [.bass, .lead, .other])
+  }
+
   // MARK: - Worst case
 
   /// The decode the roll's note edits wait on (design D6): 256 events each with a guide and a play span, and four
-  /// tracks of 1024 notes, column-wise. Informational timing (`measure`); the counts are the assertion. Run it in
-  /// Release for the number the design records: `cd ChordLab && swift test -c release --filter testTheWorstCaseSnapshotDecodes`.
+  /// tracks of 1024 notes, column-wise. The first decode is a plain `try`, so a failure shows the decode error and
+  /// the counts are the assertion; `measure` is informational timing only. This synthetic payload (~321 KB)
+  /// underestimates the real worst snapshot (longer names, ids and notes), so the number the design records for D6
+  /// comes from `engine/tools/latency_bench/decode_bench.sh` on the bench's dump, not from here.
   func testTheWorstCaseSnapshotDecodes() throws {
     let url = try SnapshotTests.fixturesDirectory().appendingPathComponent("snapshot-tracks.json")
     var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
@@ -227,11 +290,10 @@ final class TracksTests: XCTestCase {
     let data = try JSONSerialization.data(withJSONObject: object)
     print("worst-case snapshot JSON: \(data.count) bytes")
 
-    var snapshot: Snapshot?
+    let decoded = try JSONDecoder().decode(Snapshot.self, from: data)
     measure {
-      snapshot = try? JSONDecoder().decode(Snapshot.self, from: data)
+      _ = try? JSONDecoder().decode(Snapshot.self, from: data)
     }
-    let decoded = try XCTUnwrap(snapshot)
     XCTAssertEqual(decoded.events.count, 256)
     XCTAssertTrue(decoded.events.allSatisfy { $0.guide?.roles.count == 12 && $0.playEnd == $0.playStart.map { $0 + 4 } })
     XCTAssertEqual(decoded.tracks?.count, 4)

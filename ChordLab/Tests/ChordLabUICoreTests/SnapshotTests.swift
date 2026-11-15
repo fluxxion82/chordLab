@@ -911,6 +911,11 @@ final class SnapshotTests: XCTestCase {
     XCTAssertEqual(am.role(pc: 0), .chord)
     XCTAssertEqual(am.names[1], "C#")
     XCTAssertEqual(am.displayName(pc: 10), "B♭")
+    XCTAssertEqual(am.role(pc: 5), .avoid)
+    XCTAssertEqual(am.displayDegree(pc: 10), "♭2")
+    XCTAssertEqual(am.displayDegree(pc: 22), "♭2")
+    XCTAssertEqual(am.displayDegree(pc: 9), "R")
+    XCTAssertEqual(GuideJSON(roles: [], scale: 0, degrees: ["R"], names: ["C"]).displayDegree(pc: 5), "")
   }
 
   /// Every fixture that predates the tracks (the legacy Phase 1 file, the inline Phase 2 string) decodes with
