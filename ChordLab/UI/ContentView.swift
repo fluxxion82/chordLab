@@ -54,7 +54,7 @@ struct ContentView: View {
         // Chords open: the suggestions, the palette and the home row. A track open: its roll in their place
         // (tracks design D13), so the palette's switch row, and the Heard group in it, hide with them.
         if case .track(let id) = state.openLane, let track = state.snapshot?.track(id: id) {
-          RollAreaPlaceholder(name: track.name.isEmpty ? track.role.displayName : track.name)
+          RollAreaPlaceholder(name: LaneTabs.label(for: track))
         } else {
           SuggestionsView()
 

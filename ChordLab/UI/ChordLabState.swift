@@ -44,9 +44,9 @@ class ChordLabState: NSObject, ObservableObject {
       if target != keyTarget { keyTarget = target }
     }
   }
-  /// The track ids when an `addTrack` was sent, until its answer: the next snapshot opens the one new track
-  /// (`LaneTabs.newTrackId`); a refusal (`applyError`) forgets it.
-  private var pendingAddTrackIds: [Int]?
+  /// The pending `addTrack`, until its answer: the next snapshot opens the one new track (`LaneOpener`,
+  /// `LaneTabs.laneAfterSnapshot`); a refusal (`applyError`) forgets it.
+  private var laneOpener = LaneOpener()
   /// The row under the key bar (`KeyTransposeRow`): the one-time "chords kept their notes" hint after a tonic
   /// change with Transpose with key off, or the four-second "moved" note after one with it on (D8, D9).
   /// Either closes as soon as a snapshot browses a key other than the project key.
@@ -347,7 +347,7 @@ class ChordLabState: NSObject, ObservableObject {
   /// Nothing at the track limit or for an engine without tracks.
   @MainActor func addTrack(role: TrackRole) {
     guard LaneTabs.canAddTrack(snapshot), let tracks = snapshot?.tracks else { return }
-    pendingAddTrackIds = tracks.map(\.id)
+    laneOpener.addSent(trackIds: tracks.map(\.id))
     send(command: LaneTabs.addCommand(role: role))
   }
 
@@ -387,17 +387,10 @@ class ChordLabState: NSObject, ObservableObject {
     send(command: LaneTabs.soloCommand(lane: lane, on: on))
   }
 
-  /// After a snapshot is decoded: opens the track a pending add created (the next snapshot after the add decides,
-  /// `LaneTabs.newTrackId`), else keeps the open lane while its track exists and falls back to Chords otherwise.
+  /// After a snapshot is decoded: the lane `LaneOpener` gives (the track a pending add created, else the open lane
+  /// while its track exists, else Chords); a change resets the key target in `openLane`'s observer.
   private func updateOpenLane(for snapshot: Snapshot) {
-    if let before = pendingAddTrackIds {
-      pendingAddTrackIds = nil
-      if let id = LaneTabs.newTrackId(before: before, after: snapshot.tracks?.map(\.id) ?? before) {
-        openLane = .track(id)
-        return
-      }
-    }
-    let lane = openLane.resolved(in: snapshot.tracks)
+    let lane = laneOpener.lane(afterSnapshotWith: snapshot.tracks, open: openLane)
     if lane != openLane { openLane = lane }
   }
 
@@ -608,7 +601,7 @@ class ChordLabState: NSObject, ObservableObject {
   /// track add (a refused add opens nothing).
   func applyError(json: Data) {
     pendingKeyChange = nil
-    pendingAddTrackIds = nil
+    laneOpener.refused()
     if let message = try? JSONDecoder().decode(ErrorJSON.self, from: json) {
       reportError(message.error)
     } else {

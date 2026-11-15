@@ -54,8 +54,8 @@ struct AddTrackEntry: Equatable, Identifiable {
 
 /// The lane tab row's rules (tracks design D13), so the views only read and call this: the tabs a snapshot gives
 /// (Chords first, then the tracks in snapshot order), the + menu, the track menu, every command the row sends,
-/// the rename rule (the section rename's), and which track opens after an add. The open lane itself is UI state
-/// in `ChordLabState.openLane`.
+/// the rename rule (the section rename's), and the lane a snapshot leaves open (`laneAfterSnapshot`, `LaneOpener`).
+/// The open lane itself is UI state in `ChordLabState.openLane`.
 ///
 /// A snapshot without `tracks` (an engine from before tracks) gives the Chords tab alone, without M/S, and no +:
 /// the row keeps its place and height, so the layout does not depend on the engine's age.
@@ -82,11 +82,17 @@ enum LaneTabs {
                         audible: snapshot?.chordsAudible ?? true, hasMuteSolo: chordsFlags != nil,
                         isOpen: resolved == .chords)]
     for track in snapshot?.tracks ?? [] {
-      tabs.append(LaneTab(lane: .track(track.id), label: track.name.isEmpty ? track.role.displayName : track.name,
+      tabs.append(LaneTab(lane: .track(track.id), label: label(for: track),
                           role: track.role, muted: track.mute, soloed: track.solo, audible: track.audible,
                           hasMuteSolo: true, isOpen: resolved == .track(track.id)))
     }
     return tabs
+  }
+
+  /// What names `track` in the row and the roll area: its name, or its role's name while the name is empty, so a
+  /// track never shows blank.
+  static func label(for track: TrackJSON) -> String {
+    track.name.isEmpty ? track.role.displayName : track.name
   }
 
   // MARK: - The + menu
@@ -183,6 +189,37 @@ enum LaneTabs {
     let old = Set(before)
     let new = after.filter { !old.contains($0) }
     return new.count == 1 ? new[0] : nil
+  }
+
+  /// The lane to show once a snapshot with `tracks` is applied, `open` being the lane shown before it and
+  /// `pendingAdd` the track ids when an unanswered `addTrack` was sent (nil when none is): the one new track when
+  /// this snapshot answers the add with exactly one (`newTrackId`), else `open` resolved against `tracks`
+  /// (`Lane.resolved`: an open track the snapshot lacks, or any track lane without `tracks`, falls back to Chords).
+  static func laneAfterSnapshot(open: Lane, pendingAdd: [Int]?, tracks: [TrackJSON]?) -> Lane {
+    if let before = pendingAdd, let after = tracks?.map(\.id), let id = newTrackId(before: before, after: after) {
+      return .track(id)
+    }
+    return open.resolved(in: tracks)
+  }
+}
+
+/// Which track an add opens, over time (tracks design D13): `addSent` remembers the track ids when an `addTrack`
+/// goes out; the next snapshot decides the lane (`LaneTabs.laneAfterSnapshot`) and forgets the add, answered or
+/// not; a refusal (`kMsgTagError`) forgets it at once, so a track that arrives later is never opened as the add's.
+/// `ChordLabState` keeps one and sets its `openLane` from what it returns.
+struct LaneOpener: Equatable {
+  /// The track ids when the unanswered add was sent; nil when there is none.
+  private(set) var pendingAdd: [Int]?
+
+  mutating func addSent(trackIds: [Int]) { pendingAdd = trackIds }
+
+  /// The add (or whatever command was pending) was refused: the next snapshot opens nothing new.
+  mutating func refused() { pendingAdd = nil }
+
+  /// The lane once a snapshot with `tracks` is applied while `open` is shown; the pending add, if any, is spent.
+  mutating func lane(afterSnapshotWith tracks: [TrackJSON]?, open: Lane) -> Lane {
+    defer { pendingAdd = nil }
+    return LaneTabs.laneAfterSnapshot(open: open, pendingAdd: pendingAdd, tracks: tracks)
   }
 }
 

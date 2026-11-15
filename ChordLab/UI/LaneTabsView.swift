@@ -7,7 +7,9 @@ import SwiftUI
 /// - Click a tab's name → that lane opens (`ChordLabState.open`): Chords shows the suggestions, palette and home
 ///   row; a track shows its roll in their place (`ContentView`).
 /// - M and S → `setChordsMute` / `setChordsSolo` for Chords, `setTrackMute` / `setTrackSolo` for a track, the
-///   toggle showing the snapshot's flag; the whole tab dims while the lane is not audible (the engine's outcome).
+///   toggle showing the snapshot's flag in its own fixed colour (`muteOn`, `soloOn`); the tab's mark and name dim
+///   while the lane is not audible (the engine's outcome), the toggles never, so an on M or S reads the same on
+///   every tab.
 /// - `+` → Bass, Lead, Other (`addTrack {role}`; the engine names it); disabled at the snapshot's track limit.
 ///   The new track opens with the snapshot that answers the add.
 /// - Right-click a track tab → Rename… (an inline field with the section rename's rules and its `editingText`
@@ -29,8 +31,16 @@ struct LaneTabsView: View {
   static let maxNameWidth: CGFloat = 120
   /// The M and S toggles' square.
   static let toggleSize: CGFloat = 16
-  /// M's colour while on (the section palette's amber, `SectionStyle` index 5); S on is the accent colour.
+  /// How far a toggle's click target reaches past its drawn square (the 3-pt gap between M and S is split).
+  static let toggleHitOutset = CGSize(width: 1.5, height: 2)
+  /// What a not-audible tab's mark and name are drawn at.
+  static let silentOpacity = 0.45
+  /// M's colour while on (the section palette's amber, `SectionStyle` index 5).
   static let muteOn = Color(red: 0.878, green: 0.659, blue: 0.227)   // #E0A83A
+  /// S's colour while on: a fixed light cyan, never the host's accent (a Graphite accent would grey it, and the
+  /// accent is the open tab's stroke), apart from M's amber, the guide bands (#6E8FD8, #D9904A) and the track
+  /// colours (`TrackStyle`).
+  static let soloOn = Color(red: 0.310, green: 0.827, blue: 0.910)   // #4FD3E8
 
   @State private var renamingId: Int?
   @State private var draft = ""
@@ -66,7 +76,7 @@ struct LaneTabsView: View {
           toggle("M", on: tab.muted, colour: Self.muteOn,
                  help: tab.muted ? "Unmute \(tab.label)" : "Mute \(tab.label)",
                  label: "Mute \(tab.label)") { state.setMute(tab.lane, on: !tab.muted) }
-          toggle("S", on: tab.soloed, colour: .accentColor,
+          toggle("S", on: tab.soloed, colour: Self.soloOn,
                  help: tab.soloed ? "Stop soloing \(tab.label)" : "Solo \(tab.label): only soloed lanes play",
                  label: "Solo \(tab.label)") { state.setSolo(tab.lane, on: !tab.soloed) }
         }
@@ -84,7 +94,6 @@ struct LaneTabsView: View {
       RoundedRectangle(cornerRadius: 5)
         .strokeBorder(tab.isOpen ? Color.accentColor.opacity(0.9) : Color.white.opacity(0.12), lineWidth: 1)
     )
-    .opacity(tab.dimmed ? 0.45 : 1)
     .contextMenu {
       if let menu { trackMenu(menu) }
     }
@@ -92,7 +101,7 @@ struct LaneTabsView: View {
     .accessibilityLabel(tab.label + " lane")
   }
 
-  /// The tab's name (with the role mark for a track): a click opens the lane.
+  /// The tab's name (with the role mark for a track), dimmed while the lane is not audible: a click opens the lane.
   private func openButton(_ tab: LaneTab) -> some View {
     Button { state.open(tab.lane) } label: {
       HStack(spacing: 5) {
@@ -110,17 +119,20 @@ struct LaneTabsView: View {
             .truncationMode(.tail)
         }
       }
+      .opacity(tab.dimmed ? Self.silentOpacity : 1)
       .frame(height: Self.tabHeight)
       .contentShape(Rectangle())
     }
     .buttonStyle(.plain)
     .help(tab.role == nil ? "Show the chords: suggestions and palette" : "Show the \(tab.label) piano roll")
-    .accessibilityLabel("Open " + tab.label)
+    .accessibilityLabel(tab.role.map { "Open \(tab.label), \($0.displayName) track" } ?? "Open " + tab.label)
     .accessibilityAddTraits(tab.isOpen ? .isSelected : [])
+    .accessibilityValue(tab.dimmed ? "Silent" : "")   // on the button: the tab's group drops a value
   }
 
   /// A small square M or S: filled with `colour` while on, translucent while off. Shows `on` (the snapshot's
-  /// flag); a click sends the flipped value and the answering snapshot redraws it.
+  /// flag); a click sends the flipped value and the answering snapshot redraws it. The click target reaches
+  /// `toggleHitOutset` past the drawn square, inside the tab, without changing its layout.
   private func toggle(_ letter: String, on: Bool, colour: Color, help: String, label: String,
                       action: @escaping () -> Void) -> some View {
     Button(action: action) {
@@ -129,7 +141,8 @@ struct LaneTabsView: View {
         .foregroundStyle(on ? Color.black.opacity(0.85) : Color.white.opacity(0.7))
         .frame(width: Self.toggleSize, height: Self.toggleSize)
         .background(RoundedRectangle(cornerRadius: 3).fill(on ? colour : Color.white.opacity(0.12)))
-        .contentShape(Rectangle())
+        .contentShape(Rectangle().path(in: CGRect(x: 0, y: 0, width: Self.toggleSize, height: Self.toggleSize)
+          .insetBy(dx: -Self.toggleHitOutset.width, dy: -Self.toggleHitOutset.height)))
     }
     .buttonStyle(.plain)
     .help(help)
@@ -200,33 +213,45 @@ struct LaneTabsView: View {
         let bounded = LaneTabs.boundedName(now)
         if bounded != now { draft = bounded }
       }
-      .onSubmit { commitRename(menu) }
-      .onExitCommand { cancelRename() }
+      .onSubmit { commitRename(menu.trackId) }
+      .onExitCommand { cancelRename(menu.trackId) }
       .onChange(of: renameFocused) { _, focused in
-        if !focused { commitRename(menu) }
+        if !focused { commitRename(menu.trackId) }
       }
-      .onDisappear { cancelRename() }
+      .onDisappear { cancelRename(menu.trackId) }
       .accessibilityLabel("Track name")
   }
 
+  /// Opens the field on `menu`'s track. A rename of another track still in progress is committed first (its
+  /// field's disappearance then cancels nothing, `cancelRename` being for its own id); Rename on the track being
+  /// renamed keeps the draft and only refocuses. The focus is cleared with the hand-over, so the new field never
+  /// sees the old one's focus going as its own loss (which would commit it at once).
   private func beginRename(_ menu: TrackTabMenu) {
-    draft = menu.name
-    renamingId = menu.trackId
+    if let current = renamingId, current != menu.trackId {
+      commitRename(current)
+      renameFocused = false
+    }
+    if renamingId != menu.trackId {
+      draft = menu.name
+      renamingId = menu.trackId
+    }
     state.editingText = true
     DispatchQueue.main.async { renameFocused = true }   // the field exists on the next pass
   }
 
-  /// Sends the new name through `ChordLabState.renameTrack` (`LaneTabs.renameCommand`: trimmed, bounded, a blank
-  /// or unchanged draft is a cancel).
-  private func commitRename(_ menu: TrackTabMenu) {
-    guard renamingId == menu.trackId else { return }
+  /// Sends the new name of track `id` through `ChordLabState.renameTrack` (`LaneTabs.renameCommand`: trimmed,
+  /// bounded, a blank or unchanged draft is a cancel), while `id` is the track being renamed.
+  private func commitRename(_ id: Int) {
+    guard renamingId == id else { return }
     renamingId = nil
     state.editingText = false
-    state.renameTrack(id: menu.trackId, draft: draft)
+    state.renameTrack(id: id, draft: draft)
   }
 
-  private func cancelRename() {
-    guard renamingId != nil else { return }
+  /// Closes the field of track `id` without sending, while `id` is the track being renamed (a stale field's
+  /// Escape or disappearance never closes another track's rename).
+  private func cancelRename(_ id: Int) {
+    guard renamingId == id else { return }
     renamingId = nil
     state.editingText = false
   }

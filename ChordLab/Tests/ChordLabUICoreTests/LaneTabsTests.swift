@@ -101,6 +101,14 @@ final class LaneTabsTests: XCTestCase {
     XCTAssertEqual(LaneTabs.tabs(in: s, open: .chords).map(\.label), ["Chords", "Bass", "Other"])
   }
 
+  func testATracksLabelIsItsNameElseItsRolesName() {
+    XCTAssertEqual(LaneTabs.label(for: track(1, "Walking", .bass)), "Walking")
+    XCTAssertEqual(LaneTabs.label(for: track(1, "", .bass)), "Bass")
+    XCTAssertEqual(LaneTabs.label(for: track(2, "", .lead)), "Lead")
+    XCTAssertEqual(LaneTabs.label(for: track(3, "", .other)), "Other")
+    XCTAssertEqual(LaneTabs.label(for: track(4, " ", .other)), " ", "only an empty name falls back (the engine's rule)")
+  }
+
   func testAnEmptyTrackListIsTheChordsTabAlone() throws {
     let s = try snapshot(tracks: [])
     XCTAssertEqual(LaneTabs.tabs(in: s, open: .chords).map(\.lane), [.chords])
@@ -200,6 +208,29 @@ final class LaneTabsTests: XCTestCase {
     assertCommand(LaneTabs.moveCommand(trackId: 2, index: 0), ["cmd": "moveTrack", "id": 2, "index": 0])
   }
 
+  /// The engine reads `index` as the track's place in the order after the move (`DocumentStore::moveTrack`,
+  /// engine/src/document.cpp: the index is clamped to the row and the track rotated there, so from 0 to 1 moves it
+  /// one place right, not before the track now at 1). So Move right on the track at `i` must send `i + 1`, and Move
+  /// left `i - 1`, straight from the menu into the command.
+  func testTheMenusMoveIndexesBecomeMoveCommandsOnePlaceOver() throws {
+    let s = try snapshot(tracks: [track(4, "Bass", .bass), track(2, "Lead", .lead), track(9, "Pad", .other)])
+    for (i, id) in [4, 2, 9].enumerated() {
+      let menu = try XCTUnwrap(LaneTabs.menu(for: .track(id), in: s))
+      if let right = menu.moveRightIndex {
+        assertCommand(LaneTabs.moveCommand(trackId: menu.trackId, index: right),
+                      ["cmd": "moveTrack", "id": id, "index": i + 1])
+      } else {
+        XCTAssertEqual(i, 2, "only the last track has no Move right")
+      }
+      if let left = menu.moveLeftIndex {
+        assertCommand(LaneTabs.moveCommand(trackId: menu.trackId, index: left),
+                      ["cmd": "moveTrack", "id": id, "index": i - 1])
+      } else {
+        XCTAssertEqual(i, 0, "only the first track has no Move left")
+      }
+    }
+  }
+
   func testRemoveSendsTheId() {
     assertCommand(LaneTabs.removeCommand(trackId: 7), ["cmd": "removeTrack", "id": 7])
   }
@@ -260,6 +291,86 @@ final class LaneTabsTests: XCTestCase {
     XCTAssertNil(LaneTabs.newTrackId(before: [1, 2], after: [1, 2]), "the add was not this snapshot's")
     XCTAssertNil(LaneTabs.newTrackId(before: [1, 2], after: [1]))
     XCTAssertNil(LaneTabs.newTrackId(before: [1], after: [1, 2, 3]), "ambiguous: open nothing")
+  }
+
+  // MARK: - The open lane after a snapshot
+
+  func testAnAddAnsweredByOneNewTrackOpensIt() {
+    let tracks = [track(1, "Bass", .bass), track(2, "Lead", .lead), track(5, "Track", .other)]
+    XCTAssertEqual(LaneTabs.laneAfterSnapshot(open: .chords, pendingAdd: [1, 2], tracks: tracks), .track(5))
+    XCTAssertEqual(LaneTabs.laneAfterSnapshot(open: .track(1), pendingAdd: [1, 2], tracks: tracks), .track(5))
+  }
+
+  func testAnAddAnsweredByNoNewTrackKeepsTheResolvedOpenLane() {
+    let tracks = [track(1, "Bass", .bass), track(2, "Lead", .lead)]
+    XCTAssertEqual(LaneTabs.laneAfterSnapshot(open: .track(2), pendingAdd: [1, 2], tracks: tracks), .track(2))
+    XCTAssertEqual(LaneTabs.laneAfterSnapshot(open: .chords, pendingAdd: [1, 2], tracks: tracks), .chords)
+    XCTAssertEqual(LaneTabs.laneAfterSnapshot(open: .track(7), pendingAdd: [1, 2], tracks: tracks), .chords,
+                   "a lane the snapshot lacks resolves to Chords")
+  }
+
+  func testAnAddAnsweredBySeveralNewTracksOpensNoneOfThem() {
+    let tracks = [track(1, "Bass", .bass), track(3, "Lead", .lead), track(4, "Track", .other)]
+    XCTAssertEqual(LaneTabs.laneAfterSnapshot(open: .track(1), pendingAdd: [1], tracks: tracks), .track(1))
+    XCTAssertEqual(LaneTabs.laneAfterSnapshot(open: .chords, pendingAdd: [1], tracks: tracks), .chords)
+  }
+
+  func testAnAddAnsweredByASnapshotWithoutTracksOpensChords() {
+    XCTAssertEqual(LaneTabs.laneAfterSnapshot(open: .chords, pendingAdd: [1], tracks: nil), .chords)
+    XCTAssertEqual(LaneTabs.laneAfterSnapshot(open: .track(1), pendingAdd: [1], tracks: nil), .chords,
+                   "the same fallback as Lane.resolved")
+  }
+
+  func testWithoutAPendingAddTheOpenTrackStaysWhileItExists() {
+    let tracks = [track(1, "Bass", .bass), track(2, "Lead", .lead)]
+    XCTAssertEqual(LaneTabs.laneAfterSnapshot(open: .track(2), pendingAdd: nil, tracks: tracks), .track(2))
+    XCTAssertEqual(LaneTabs.laneAfterSnapshot(open: .chords, pendingAdd: nil, tracks: tracks + [track(3, "", .other)]),
+                   .chords, "a track that appears without an add of ours (an undo, a host load) does not open")
+  }
+
+  func testARemovedOpenTrackFallsBackToChords() {
+    XCTAssertEqual(LaneTabs.laneAfterSnapshot(open: .track(2), pendingAdd: nil, tracks: [track(1, "Bass", .bass)]),
+                   .chords)
+    XCTAssertEqual(LaneTabs.laneAfterSnapshot(open: .track(2), pendingAdd: nil, tracks: []), .chords)
+  }
+
+  func testTheOpenerOpensTheTrackItsAddCreatedOnceAndThenForgetsTheAdd() {
+    var opener = LaneOpener()
+    opener.addSent(trackIds: [1])
+    XCTAssertEqual(opener.pendingAdd, [1])
+    let two = [track(1, "Bass", .bass), track(2, "Lead", .lead)]
+    XCTAssertEqual(opener.lane(afterSnapshotWith: two, open: .chords), .track(2))
+    XCTAssertNil(opener.pendingAdd, "the first snapshot after the add decides")
+    let three = two + [track(3, "Track", .other)]
+    XCTAssertEqual(opener.lane(afterSnapshotWith: three, open: .track(2)), .track(2),
+                   "a later new track (an undo of a remove, say) does not open")
+  }
+
+  func testARefusedAddOpensNothingWithTheNextSnapshot() {
+    var opener = LaneOpener()
+    opener.addSent(trackIds: [1])
+    opener.refused()
+    XCTAssertNil(opener.pendingAdd)
+    let two = [track(1, "Bass", .bass), track(2, "Lead", .lead)]
+    XCTAssertEqual(opener.lane(afterSnapshotWith: two, open: .chords), .chords,
+                   "a track that arrives after the refusal (another source's) is not opened as the add's")
+    XCTAssertEqual(opener.lane(afterSnapshotWith: two, open: .track(1)), .track(1))
+  }
+
+  func testALaneChangeAfterASnapshotNeverLeavesTheKeysOnNotes() {
+    // `ChordLabState.applySnapshot`: the key target resolves against the tracks, then the open lane's change resets it.
+    let tracks = [track(1, "Bass", .bass), track(2, "Lead", .lead)]
+    let cases: [(open: Lane, pending: [Int]?, tracks: [TrackJSON], target: KeyTarget)] = [
+      (.track(1), [1], tracks, .notes(trackId: 1)),            // the add opens 2: the keys leave Bass's notes
+      (.track(9), nil, tracks, .notes(trackId: 9)),            // the open track is gone
+      (.track(1), nil, [track(2, "Lead", .lead)], .notes(trackId: 1)),
+    ]
+    for c in cases {
+      let lane = LaneTabs.laneAfterSnapshot(open: c.open, pendingAdd: c.pending, tracks: c.tracks)
+      XCTAssertNotEqual(lane, c.open)
+      let target = c.target.resolved(in: c.tracks).afterOpenLaneChange(from: c.open, to: lane)
+      XCTAssertEqual(target, .chords, "\(c.open) -> \(lane)")
+    }
   }
 
   // MARK: - Track colours
