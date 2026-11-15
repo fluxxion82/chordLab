@@ -2861,42 +2861,57 @@ namespace {
 /// widest printing form, built as a document and installed with `replace` (the store's own ids start at 1):
 /// - ids at the top of their ranges (chords, sections, tracks and notes at INT_MAX - n .. INT_MAX - 1, every counter
 ///   INT_MAX), so each prints ten digits;
-/// - chords: maj7#11 (the longest type id) on root 11, octave -1, lengthBeats 63.99999999999999 (the longest
-///   printing length under the cap), a section on every one, each name at `kMaxSectionNameBytes` bytes of the
-///   characters JSON escapes to two;
-/// - tracks: names of `kMaxTrackNameBytes` such characters; `kMaxNotesPerTrack` notes each, 16 per chord taking turns
-///   over the four tracks, at offsets 10000 + 2200 k (k = 0..15, five digits), each 17599 ticks long (five digits),
-///   so at most eight sound at once (starts 2200 apart, lengths under 8 x 2200: `kMaxTrackPolyphony`), at most one
-///   starts per beat (`kMaxTrackOnsetsPerBeat`) and the last chord's last note ends inside the note domain (43000 +
-///   17599 < 61440 ticks per chord), pitches and velocities 100..127 (three digits);
-/// - the relation mode with the longest name, the longest new-chord length.
+/// - chords: maj7#11 (the longest type id) on root 11, octave -1, velocity 127, a length in [kMinLengthBeats, 1)
+///   that needs all 17 significant digits (`kWidestLengthBeats`, 19 characters; a length of 1 beat or more has a
+///   digit fewer after the point), a section on every one;
+/// - names (sections and tracks) of `kMaxSectionNameBytes` / `kMaxTrackNameBytes` bytes of '\x01': both readers
+///   accept control characters in a name, and JSON writes each as six bytes (`\u0001`), the widest escape there is
+///   (`"` and `\` take two, other bytes one);
+/// - notes: `kMaxNotesPerTrack` on each track, all anchored to the first chord and inactive (past its end), which
+///   lifts the polyphony and onset caps (they count active notes only) and so allows the widest offsets and lengths:
+///   offsets 10000000 + j (eight digits; the note domain ends at `kMaxNoteTick`, 15728640, so none has nine) and
+///   lengths 5000000 (seven digits: an eight-digit offset leaves under 10000000 ticks, and an eight-digit length
+///   leaves an offset of seven), pitches and velocities 100..127 (three digits);
+/// - the top-level fields at their longest: Bb HarmonicMinor keys, the longest feel names, a 16/4 meter, the live
+///   flags that default to true set false, the relation mode with the longest name, the longest new-chord length.
+constexpr double kWidestLengthBeats = 0.30000000000000004;
+
 DocumentStore worstCaseStore() {
-    REQUIRE(kMaxTracks * kMaxNotesPerTrack == 16 * kMaxChords);  // 16 notes per chord, as laid out below
-    REQUIRE(kMaxTrackPolyphony >= 8);
-    REQUIRE(kMaxTrackOnsetsPerBeat >= 1);
+    REQUIRE(json(kWidestLengthBeats).dump().size() == 19);
+    REQUIRE(kWidestLengthBeats >= kMinLengthBeats);
+    REQUIRE(json(kMaxNoteTick).dump().size() == 8);  // no nine-digit offset or length
     Document doc;
     doc.relationMode = RelationMode::VoiceLeading;
     doc.newChordBeats = 63.75;  // the longest value, five characters
+    doc.projectKey = key('B', -1, Mode::HarmonicMinor);
+    doc.browsedKey = doc.projectKey;
+    doc.feel = Feel{Rhythm::LowThenUpper, Strum::DownUp, StrumSpeed::Medium, Humanise::Medium, ArpPattern::ConAndDiverge,
+                    ArpRate::Subdivision, ArpRange::One};
+    doc.meter = Meter{16, 4};
+    doc.progressionLoop = false;  // false prints a character longer than true
+    doc.followHost = false;
+    doc.midiThru = false;
     std::string name;
     for (int i = 0; i < kMaxSectionNameBytes; ++i) {
-        name.push_back(i % 2 == 0 ? '"' : '\\');
+        name.push_back('\x01');
     }
     for (int i = 0; i < kMaxChords; ++i) {
-        doc.events.push_back(ChordEvent{INT_MAX - kMaxChords + i, chord(11, "maj7#11"), 63.99999999999999, 127, 0, -1, false});
+        doc.events.push_back(ChordEvent{INT_MAX - kMaxChords + i, chord(11, "maj7#11"), kWidestLengthBeats, 127, 0, -1, false});
         doc.sections.push_back(Section{INT_MAX - kMaxChords + i, name, 0, i});
     }
     std::string trackName;
     for (int i = 0; i < kMaxTrackNameBytes; ++i) {
-        trackName.push_back(i % 2 == 0 ? '"' : '\\');
+        trackName.push_back('\x01');
     }
     for (int t = 0; t < kMaxTracks; ++t) {
         doc.tracks.push_back(Track{INT_MAX - kMaxTracks + t, trackName, TrackRole::Other, false, false, {}});
     }
+    const int firstChord = INT_MAX - kMaxChords;
     int noteId = INT_MAX - kMaxTracks * kMaxNotesPerTrack;
-    for (int i = 0; i < kMaxChords; ++i) {
-        for (int k = 0; k < 16; ++k) {
-            doc.tracks[static_cast<std::size_t>(k % kMaxTracks)].notes.push_back(
-                TrackNote{noteId++, 100 + (k + i) % 28, INT_MAX - kMaxChords + i, 10000 + 2200 * k, 17599, 100 + k});
+    for (int t = 0; t < kMaxTracks; ++t) {
+        for (int j = 0; j < kMaxNotesPerTrack; ++j) {
+            doc.tracks[static_cast<std::size_t>(t)].notes.push_back(
+                TrackNote{noteId++, 100 + (j + t) % 28, firstChord, 10000000 + j, 5000000, 100 + j % 28});
         }
     }
     REQUIRE(noteId == INT_MAX);
@@ -2910,7 +2925,7 @@ DocumentStore worstCaseStore() {
 /// `stateJson` of `worstCaseStore()` at the default editor size, measured; pinned so that a change to the
 /// state's shape shows up here against `kMaxJsonBytes` (1 MiB) before it shows up as a state that will
 /// not load.
-constexpr std::size_t kWorstCaseStateBytes = 476028;
+constexpr std::size_t kWorstCaseStateBytes = 563624;
 
 }  // namespace
 
@@ -2922,8 +2937,8 @@ TEST_CASE("capacity: the largest possible state is under kMaxJsonBytes and round
     for (const Track& t : original.doc().tracks) {
         REQUIRE(t.notes.size() == static_cast<std::size_t>(kMaxNotesPerTrack));
     }
-    CHECK(trackPolyphony(original.doc()) <= kMaxTrackPolyphony);
-    CHECK(densestOnsetWindow(original.doc()) <= kMaxTrackOnsetsPerBeat);
+    CHECK(trackPolyphony(original.doc()) == 0);  // every note inactive, as laid out
+    CHECK(densestOnsetWindow(original.doc()) == 0);
     const std::string text = stateJson(original);
     MESSAGE("worst-case state: " << text.size() << " bytes");
     CHECK(text.size() == kWorstCaseStateBytes);
@@ -5701,4 +5716,43 @@ TEST_CASE("state: over the polyphony cap or the onset cap on a MUTED track is re
     run.pop_back();
     REQUIRE_MESSAGE(loadStateJson(probe, stateWithMutedNotes(run), error), error);
     CHECK(densestOnsetWindow(probe.doc()) == kMaxTrackOnsetsPerBeat);
+}
+
+TEST_CASE("state: tracks are validated against the clamped chord lengths, not the saved ones") {
+    // Chord 1 saved 100 beats long loads 64 (61440 ticks): a note at offset 61440 or later is past its end, inactive,
+    // and so out of the polyphony and onset counts; under the saved 96000 ticks every one below would sound.
+    REQUIRE(kMaxLengthBeats * kFeelTicksPerBeat == 61440);
+    std::vector<std::vector<int>> notes;  // kMaxTrackPolyphony + 1 at once, kMaxTrackOnsetsPerBeat + 1 in one beat
+    for (int i = 0; i <= std::max(kMaxTrackPolyphony, kMaxTrackOnsetsPerBeat); ++i) {
+        notes.push_back({40 + i, 1, 61440 + i, 960});
+    }
+    json state = json::parse(stateWithMutedNotes(notes));
+    state["events"][0]["lengthBeats"] = 100;
+
+    std::string error;
+    DocumentStore probe;
+    REQUIRE_MESSAGE(loadStateJson(probe, state.dump(), error), error);
+    CHECK(probe.doc().events.at(0).lengthBeats == kMaxLengthBeats);
+    CHECK(trackPolyphony(probe.doc()) == 0);
+    CHECK(densestOnsetWindow(probe.doc()) == 0);
+    const json snapNotes = shellSnapshot(probe).at("tracks").at(0).at("notes");
+    REQUIRE(snapNotes.size() == notes.size());
+    for (const json& n : snapNotes) {
+        CHECK(n.at("active") == false);
+    }
+
+    // The same notes under a chord saved at 64 beats: identical document, so identical verdict.
+    state["events"][0]["lengthBeats"] = 64;
+    DocumentStore same;
+    REQUIRE_MESSAGE(loadStateJson(same, state.dump(), error), error);
+    CHECK(same.doc() == probe.doc());
+
+    // And the arrangement is a real one: with the notes inside the chord (offsets 0..), the caps reject it.
+    for (std::vector<int>& n : notes) {
+        n.at(2) -= 61440;
+    }
+    json inside = json::parse(stateWithMutedNotes(notes));
+    inside["events"][0]["lengthBeats"] = 100;
+    CHECK_FALSE(loadStateJson(same, inside.dump(), error));
+    CHECK(error.rfind(kStateTracksRejected, 0) == 0);
 }

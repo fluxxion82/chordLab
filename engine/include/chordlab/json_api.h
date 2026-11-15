@@ -524,9 +524,10 @@ bool applyCommandJson(DocumentStore& store, std::string_view json, std::string& 
 /// (`anchor` its chord's id, `offset` and `length` in ticks, no derived start), and the two counters
 /// (`DocumentStore::nextTrackId` / `nextNoteId`) so ids stay unused after a reload; the note selection and the revision
 /// are live and not written. A build from before tracks ignores these keys and drops the tracks on its next save.
-/// Size: the largest state the store can hold (`kMaxChords` chords, a section on each, every name at
-/// `kMaxSectionNameBytes` bytes of characters that escape to two, `kMaxTracks` tracks of `kMaxNotesPerTrack` notes,
-/// every id ten digits) is pinned by test_json_api.cpp under `kMaxJsonBytes`, so a saved state always loads.
+/// Size: the largest state the store can hold (`kMaxChords` chords, a section on each, every section and track name at
+/// its byte bound of control characters, which escape to six bytes each, `kMaxTracks` tracks of `kMaxNotesPerTrack`
+/// inactive notes with eight-digit offsets and seven-digit lengths, every id ten digits) is pinned by
+/// test_json_api.cpp under `kMaxJsonBytes`, so a saved state always loads.
 std::string stateJson(const DocumentStore& store, int editorWidth = kDefaultEditorWidth,
                       int editorHeight = kDefaultEditorHeight);
 

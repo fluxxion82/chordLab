@@ -625,6 +625,8 @@ TEST_CASE("json robustness: seeded mutation fuzz of both readers keeps every inv
     corpus.push_back(readFixture("state-feel.json"));
     corpus.push_back(readFixture("state-legacy-feel.json"));
     corpus.push_back(readFixture("state-legacy-length.json"));
+    corpus.push_back(readFixture("state-tracks.json"));
+    corpus.push_back(readFixture("state-legacy-tracks.json"));
     for (std::size_t i = commandCount; i < corpus.size(); ++i) {
         REQUIRE_MESSAGE(!corpus[i].empty(), "state fixture missing");
     }
@@ -1048,7 +1050,8 @@ TEST_CASE("json robustness: worst-case inputs are rejected cleanly") {
 }
 
 TEST_CASE("json robustness: a mistyped midiThru is rejected by both readers") {
-    for (const char* name : {"state-progression.json", "state-legacy-phase1.json", "state-feel.json", "state-legacy-feel.json"}) {
+    for (const char* name : {"state-progression.json", "state-legacy-phase1.json", "state-feel.json", "state-legacy-feel.json",
+                             "state-tracks.json", "state-legacy-tracks.json"}) {
         const std::string fixture = readFixture(name);
         REQUIRE_FALSE(fixture.empty());
         for (const json& bad : {json(1), json("yes"), json(nullptr), json::array()}) {

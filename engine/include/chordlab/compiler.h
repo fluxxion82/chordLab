@@ -90,7 +90,9 @@ struct PlaySpan {
 std::vector<PlaySpan> chordPlaySpans(const Document& doc);
 
 /// `chordPlaySpans(doc)` for a caller that already holds `compiled == compile(doc)`, whose `feelLimited` verdict it
-/// reuses instead of performing the document again (the snapshot compiles once for both).
+/// reuses instead of performing the document again (the snapshot compiles once for both). `compiled` must be
+/// `compile(doc)`'s result for this very document, not `compileSection`'s or `compileRange`'s: a debug build asserts
+/// that its `endBeat` is the spans' last end (0 for an empty document).
 std::vector<PlaySpan> chordPlaySpans(const Document& doc, const Compiled& compiled);
 
 }  // namespace chordlab

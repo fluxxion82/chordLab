@@ -164,16 +164,22 @@ Compiled compileSection(const Document& doc, int sectionIndex) {
     return compileRange(doc, first, end - first);
 }
 
-std::vector<PlaySpan> chordPlaySpans(const Document& doc, const Compiled& compiled) {
+namespace {
+
+/// The spans on the performance's tick grid (`performed`) or on the authored, accumulated boundaries; the last end is
+/// written to `end` (0 for an empty document).
+std::vector<PlaySpan> playSpans(const Document& doc, bool performed, double& end) {
     std::vector<PlaySpan> spans;
     spans.reserve(doc.events.size());
-    if (feelPerforms(doc.feel) && !compiled.feelLimited) {
+    end = 0.0;
+    if (performed) {
         // performDocument's chordTicks is chordBoundaryTicks (tracks.h), so this is the performance's own grid.
         const std::vector<std::int32_t> ticks = chordBoundaryTicks(doc);
         for (std::size_t i = 0; i < doc.events.size(); ++i) {
             spans.push_back(PlaySpan{static_cast<double>(ticks[i]) / kFeelTicksPerBeat,
                                      static_cast<double>(ticks[i + 1]) / kFeelTicksPerBeat});
         }
+        end = static_cast<double>(ticks.back()) / kFeelTicksPerBeat;
         return spans;
     }
     double beat = 0.0;  // the block path's accumulation (blockRange over the whole document)
@@ -182,16 +188,25 @@ std::vector<PlaySpan> chordPlaySpans(const Document& doc, const Compiled& compil
         beat += event.lengthBeats;
         spans.push_back(PlaySpan{start, beat});
     }
+    end = beat;
+    return spans;
+}
+
+}  // namespace
+
+std::vector<PlaySpan> chordPlaySpans(const Document& doc, const Compiled& compiled) {
+    double end = 0.0;
+    std::vector<PlaySpan> spans = playSpans(doc, feelPerforms(doc.feel) && !compiled.feelLimited, end);
+    // `compiled` must be compile(doc)'s (not compileSection's, nor another document's): its end is the spans' end on
+    // either path, bit for bit (an empty document: compile's 0).
+    assert(compiled.endBeat == end);
+    (void)end;
     return spans;
 }
 
 std::vector<PlaySpan> chordPlaySpans(const Document& doc) {
-    if (!feelPerforms(doc.feel)) {
-        return chordPlaySpans(doc, Compiled{});  // the block path; nothing to perform
-    }
-    Compiled verdict;
-    verdict.feelLimited = performDocument(doc).feelLimited;
-    return chordPlaySpans(doc, verdict);
+    double end = 0.0;
+    return playSpans(doc, feelPerforms(doc.feel) && !performDocument(doc).feelLimited, end);
 }
 
 }  // namespace chordlab
