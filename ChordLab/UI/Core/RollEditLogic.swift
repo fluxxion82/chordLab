@@ -138,12 +138,12 @@ enum RollEffect: Equatable {
 /// `RollEditLogic` call and draws from it: `previewNotes` (minus the snapshot's `hiddenIds`) during a drag, and
 /// `rubberBand` and `insertMarker`.
 struct RollEditState: Equatable {
-  /// The last insert a click made (pitch, start tick, the up's timestamp): the double-click rules compare against it.
-  /// Forgotten at the next single-click down, so only the first click of the SAME double-click counts.
+  /// The last insert a click made (pitch, start tick): the double-click rules compare against it. Forgotten at the
+  /// next single-click down (clickCount ≤ 1), so only the first click of the SAME double-click counts; AppKit's
+  /// clickCount already encodes the double-click interval, so no timestamp is kept.
   struct Insert: Equatable {
     var pitch: Int
     var start: Int
-    var timestamp: TimeInterval
   }
 
   /// What the down landed on, fixed for the gesture.
@@ -159,8 +159,11 @@ struct RollEditState: Equatable {
   /// A press: everything captured at the down.
   struct Press: Equatable {
     var target: Target
-    /// The down's content point (the drag threshold and every delta are measured from it).
+    /// The down's content point in the down's geometry (`geometry`). The drag threshold, every delta and the rubber
+    /// band's corner are measured from `origin(in:)`, this point in the CURRENT geometry.
     var at: CGPoint
+    /// The geometry of the down: a zoom mid-gesture maps `at` to the same tick and row through `origin(in:)`.
+    var geometry: RollGeometry
     var modifiers: RollModifiers
     var clickCount: Int
     var mode: RollMode
@@ -177,6 +180,14 @@ struct RollEditState: Equatable {
     var group: [RollNote]
     /// The pitch of the held preview, nil when none is held.
     var heldPitch: Int?
+
+    /// The down's point in the content coordinates of `current`: the same (fractional) tick and row, so a zoom
+    /// during the gesture (`pxPerBeat` or `rowHeight` changed, D14) moves neither the drag's origin nor its delta.
+    /// Exactly `at` while the geometry is the down's.
+    func origin(in current: RollGeometry) -> CGPoint {
+      guard current != geometry else { return at }
+      return CGPoint(x: at.x / geometry.pxPerBeat * current.pxPerBeat, y: at.y / geometry.rowHeight * current.rowHeight)
+    }
   }
 
   /// A drag in progress: its kind, the clamped delta, the local preview and the rubber band.
@@ -198,8 +209,11 @@ struct RollEditState: Equatable {
   /// The length the last insert or resize left (design D15: an insert takes the last used length); nil until one.
   var lastLength: Int?
   var lastInsert: Insert?
-  /// The insert marker (design D15 paste): the grid tick of the last empty-space down inside the progression; nil
-  /// before one, and after a down in the area after the progression's end.
+  /// The insert marker (design D15 paste: a paste lands here, else after the selection's end, else at 0): the grid
+  /// tick (`grid.snapDown`, bar-relative) of the last PLAIN click on empty space inside the progression (an up
+  /// without a drag: the deselect click and the insert click, either mode). Nil before one; cleared by a press on a
+  /// note (any zone, either mode, at the down), by a committed rubber band and by a plain click at or after the
+  /// progression's end. A down alone, a drag in progress and a cancelled gesture leave it as it was.
   var insertMarker: Int?
   var gesture: Gesture = .idle
 
@@ -257,18 +271,27 @@ struct RollEditState: Equatable {
 /// - **Drag past 3 pt** from the down (velocity mode: 3 pt vertically) starts the drag: body → `move` (⌥ held AT THE
 ///   DOWN → `duplicate`), start/end edge → `resizeStart`/`resizeEnd`, velocity mode → `velocity`, empty space →
 ///   `rubberBand`. Once dragging, a return inside the threshold stays a drag (and commits nothing at zero delta).
+/// - **Deltas and zoom:** every delta, the threshold and the rubber band's corner are measured from the down's point
+///   mapped into the CURRENT geometry (`Press.origin(in:)`: the down's tick and row), so a zoom mid-gesture neither
+///   makes the delta jump nor starts a drag by itself.
 /// - **Move / duplicate:** pitch delta = the row under the pointer minus the row under the down; time delta from the
 ///   anchor (the pressed note): its new start = `grid.snapNearest(start + Δx in ticks)` (bar-relative), the delta
-///   the difference; with Snap pitch on, a SINGLE-note move or duplicate snaps its pitch by the guide of the chord at
-///   its new start (`PlaySpans`), a group moves by exact rows; then the group clamp (`RollGroupMath.move`). The clamp
-///   wins over the grid (a group stopped by the end lands on the last tick before it).
+///   the difference, through the group clamp (`RollGroupMath.move`). When the clamp's upper bound bites (a start
+///   would reach the progression's end, or an end `kMaxNoteTick`) and the grid is not Off, the anchor goes to the
+///   last grid point the clamp allows (`grid.snapDown(anchor.start + clamped)`), unless that point is behind the
+///   anchor (an off-grid anchor in its last cell): then the raw clamp (the last tick before the end), so a drag
+///   right never moves left. With Snap pitch on, a SINGLE-note move or duplicate snaps its pitch by the guide of
+///   the chord at its new start (`PlaySpans`) once it actually moves (the row or the clamped tick delta is not 0;
+///   decision: a purely horizontal move of an out-of-set note snaps it too, a drag back to its origin does not);
+///   a group moves by exact rows; then the clamp again for the pitch.
 /// - **Resize:** the anchor's dragged edge snaps to the nearest grid point; the shared delta through
 ///   `RollGroupMath.resize` (shortest ≥ `minNoteTicks`, start ≥ 0, starts before the end, end ≤ `kMaxNoteTick`).
 /// - **Velocity:** 1 pt up = one step louder; the shared delta through `RollGroupMath.velocity` (1...127).
 /// - **Up after a drag** commits: the preview is dropped and EXACTLY ONE command is sent, carrying `baseRevision` =
 ///   the down's revision: `updateNotes` (move, resize, velocity; edits carry only the changed fields, absolute
 ///   values), `insertNotes` (duplicate, the moved copies), or nothing when the clamped delta is zero; a rubber band
-///   sends `selectNotes` of every note it touches (⇧ at the down: added to the selection before the down). A resize
+///   sends `selectNotes` of every note it touches (⇧ at the down: added to the selection before the down), or
+///   nothing when those ids equal the selection at the down, and clears `insertMarker`. A resize
 ///   sets `lastLength` to the anchor's new length; a velocity commit also previews the anchor at its new velocity
 ///   (`previewOneShot`). The up's location is applied as a last drag first, so an up away from the last drag event
 ///   still counts.
@@ -282,12 +305,17 @@ struct RollEditState: Equatable {
 ///   velocity mode an empty click never inserts; a second click of a double-click (clickCount ≥ 2) on empty space at
 ///   the same cell as the insert its first click made inserts nothing (the snapshot with the new note may not have
 ///   arrived).
-/// - **The empty-space down** sets `insertMarker` to its grid tick (decision: a down at or after the progression's
-///   end clears it, so a paste never aims at the hatched area).
+/// - **The insert marker** (decision, D15 says only where a paste lands): set by a plain empty-space click inside
+///   the progression to its grid tick, cleared by a note press, a committed rubber band and a plain click at or
+///   after the end (see `RollEditState.insertMarker`), so after a band ⌘C ⌘V pastes after the selection.
 /// - **Cancel** (`cancel` phase, or `snapshotChanged` with a revision other than the down's): the gesture and its
 ///   preview are dropped, a held preview stops, nothing is sent. A same-revision snapshot (a selection echo)
 ///   changes nothing. Decision: a `down` while not idle (a lost up) cancels the old gesture first, then starts the
 ///   new one.
+/// - **Lane switch:** an event whose context names another track than the press (a gesture parked on a lane that
+///   is no longer open) first cancels that gesture (its held preview stops, nothing is sent), then is handled as
+///   if idle. The view must still send `cancel` itself when the open lane changes, so the old preview stops at once
+///   rather than at the next event.
 ///
 /// Depends on nothing but Foundation and CoreGraphics; unit-tested on whole event sequences by the `ChordLabUICore`
 /// package (Tests/ChordLabUICoreTests/RollEditLogicTests.swift).
@@ -303,12 +331,19 @@ enum RollEditLogic {
   /// The next state and the effects of `event`.
   static func handle(_ event: RollPointerEvent, state: RollEditState, context: RollContext)
     -> (RollEditState, [RollEffect]) {
-    switch event.phase {
-    case .down: return down(event, state: state, context: context)
-    case .drag: return drag(event, state: state, context: context)
-    case .up: return up(event, state: state, context: context)
-    case .cancel: return cancelled(state)
+    var state = state
+    var parked: [RollEffect] = []
+    if let press = state.press, press.trackId != context.trackId {
+      (state, parked) = cancelled(state)
     }
+    let (next, effects): (RollEditState, [RollEffect])
+    switch event.phase {
+    case .down: (next, effects) = down(event, state: state, context: context)
+    case .drag: (next, effects) = drag(event, state: state, context: context)
+    case .up: (next, effects) = up(event, state: state, context: context)
+    case .cancel: (next, effects) = cancelled(state)
+    }
+    return (next, parked + effects)
   }
 
   /// A new snapshot arrived with `revision` (0 when it has none): a revision other than the one the press started
@@ -333,11 +368,12 @@ enum RollEditLogic {
     var (next, effects) = cancelled(state)
     if event.clickCount <= 1 { next.lastInsert = nil }
     let point = event.location
-    var press = Press(target: .empty, at: point, modifiers: event.modifiers, clickCount: event.clickCount,
-                      mode: context.mode, trackId: context.trackId, baseRevision: context.revision,
+    var press = Press(target: .empty, at: point, geometry: context.geometry, modifiers: event.modifiers,
+                      clickCount: event.clickCount, mode: context.mode, trackId: context.trackId, baseRevision: context.revision,
                       selection: context.selectedIds, anchor: nil, group: [], heldPitch: nil)
     if let hit = RollHit.hit(at: point, context: context) {
       let note = context.notes[hit.index]
+      next.insertMarker = nil
       var selection = context.selectedIds
       var toggledOut = false
       if event.modifiers.shift {
@@ -361,10 +397,6 @@ enum RollEditLogic {
           effects.append(.previewStart(pitch: note.pitch, velocity: note.velocity))
         }
       }
-    } else {
-      let tick = context.geometry.tick(atX: point.x)
-      next.insertMarker = tick < context.timing.endTick
-        ? context.grid.snapDown(tick, barTicks: context.timing.barTicks, ticksPerBeat: context.timing.ticksPerBeat) : nil
     }
     next.gesture = .pressed(press)
     return (next, effects)
@@ -376,7 +408,7 @@ enum RollEditLogic {
     case .idle:
       return (state, [])
     case .pressed(let press):
-      guard let kind = dragKind(press, at: event.location) else { return (state, []) }
+      guard let kind = dragKind(press, at: event.location, geometry: context.geometry) else { return (state, []) }
       return update(press, kind: kind, at: event.location, state: state, context: context)
     case .dragging(let press, let drag):
       return update(press, kind: drag.kind, at: event.location, state: state, context: context)
@@ -391,7 +423,7 @@ enum RollEditLogic {
     case .idle:
       return (state, [])
     case .pressed(let press):
-      if let kind = dragKind(press, at: event.location) {
+      if let kind = dragKind(press, at: event.location, geometry: context.geometry) {
         current = update(press, kind: kind, at: event.location, state: state, context: context).0
       }
     case .dragging(let press, let drag):
@@ -404,17 +436,19 @@ enum RollEditLogic {
     if let drag = current.drag {
       effects += commit(press, drag, state: &next, context: context)
     } else {
-      effects += click(press, event: event, state: &next, context: context)
+      effects += click(press, state: &next, context: context)
     }
     return (next, effects)
   }
 
   // MARK: - Dragging
 
-  /// The drag a press turns into at `point`, nil while it is still a click (or may not drag).
-  private static func dragKind(_ press: Press, at point: CGPoint) -> RollEditState.DragKind? {
-    let dx = point.x - press.at.x
-    let dy = point.y - press.at.y
+  /// The drag a press turns into at `point` (content coordinates of `geometry`), nil while it is still a click (or
+  /// may not drag).
+  private static func dragKind(_ press: Press, at point: CGPoint, geometry: RollGeometry) -> RollEditState.DragKind? {
+    let origin = press.origin(in: geometry)
+    let dx = point.x - origin.x
+    let dy = point.y - origin.y
     let travelled = (dx * dx + dy * dy).squareRoot() > dragThreshold
     switch press.target {
     case .empty:
@@ -447,24 +481,25 @@ enum RollEditLogic {
     var effects: [RollEffect] = []
     let timing = context.timing
     let limits = context.limits
-    let dxTicks = ticks(point.x - press.at.x, geometry: context.geometry)
+    let origin = press.origin(in: context.geometry)
+    let dxTicks = ticks(point.x - origin.x, geometry: context.geometry)
     func snapNearest(_ tick: Int) -> Int {
       context.grid.snapNearest(tick, barTicks: timing.barTicks, ticksPerBeat: timing.ticksPerBeat)
     }
     switch kind {
     case .rubberBand:
-      drag.band = CGRect(x: min(press.at.x, point.x), y: min(press.at.y, point.y), width: abs(point.x - press.at.x),
-                         height: abs(point.y - press.at.y))
+      drag.band = CGRect(x: min(origin.x, point.x), y: min(origin.y, point.y), width: abs(point.x - origin.x),
+                         height: abs(point.y - origin.y))
     case .velocity:
-      let wanted = Int(min(max(Double(press.at.y - point.y), -1000), 1000).rounded())
+      let wanted = Int(min(max(Double(origin.y - point.y), -1000), 1000).rounded())
       drag.dVelocity = RollGroupMath.velocity(press.group, dVelocity: wanted)
       drag.preview = RollGroupMath.applying(press.group, dVelocity: drag.dVelocity)
     case .move, .duplicate:
       guard let anchor = press.anchor else { break }
-      var dPitch = context.geometry.pitch(atY: point.y) - context.geometry.pitch(atY: press.at.y)
-      let dTick = RollGroupMath.move(press.group, dPitch: 0, dTick: snapNearest(anchor.start + dxTicks) - anchor.start,
-                                     limits: limits).dTick
-      if press.group.count == 1, context.snap != .off {
+      var dPitch = context.geometry.pitch(atY: point.y) - context.geometry.pitch(atY: origin.y)
+      let dTick = moveTicks(press.group, anchor: anchor, wanted: snapNearest(anchor.start + dxTicks) - anchor.start,
+                            context: context)
+      if press.group.count == 1, context.snap != .off, dPitch != 0 || dTick != 0 {
         let guide = PlaySpans.event(atTick: anchor.start + dTick, in: context.events, ticksPerBeat: timing.ticksPerBeat)?.guide
         dPitch = context.snap.snap(pitch: min(max(anchor.pitch + dPitch, 0), 127), guide: guide) - anchor.pitch
       }
@@ -493,6 +528,19 @@ enum RollEditLogic {
     return (next, effects)
   }
 
+  /// The shared time delta of a move whose anchor wants to move by `wanted` (already on the grid): the group clamp,
+  /// and when its upper bound bites on a grid other than Off, the anchor's last grid point the clamp allows
+  /// (bar-relative `snapDown`), unless that point is behind the anchor (then the raw clamp). Sound: the result lies
+  /// in `0...clamped`, inside the clamp's range (an interval containing 0), so it satisfies every note's bound.
+  private static func moveTicks(_ group: [RollNote], anchor: RollNote, wanted: Int, context: RollContext) -> Int {
+    let clamped = RollGroupMath.move(group, dPitch: 0, dTick: wanted, limits: context.limits).dTick
+    guard clamped < wanted, context.grid != .off else { return clamped }
+    let timing = context.timing
+    let onGrid = context.grid.snapDown(anchor.start + clamped, barTicks: timing.barTicks,
+                                       ticksPerBeat: timing.ticksPerBeat) - anchor.start
+    return onGrid >= 0 ? onGrid : clamped
+  }
+
   // MARK: - Committing
 
   /// The one command a finished drag sends (none at zero delta), and its effect on the persistent state.
@@ -502,9 +550,11 @@ enum RollEditLogic {
     let base = press.baseRevision
     switch drag.kind {
     case .rubberBand:
+      state.insertMarker = nil
       guard let band = drag.band else { return [] }
       var ids = RollHit.ids(inBand: band, context: context)
       if press.modifiers.shift { ids.formUnion(press.selection) }
+      guard ids != press.selection else { return [] }
       return [.send(.selectNotes(trackId: trackId, ids: context.ordered(ids)))]
     case .move:
       let edits = RollGroupMath.moveEdits(press.group, dPitch: drag.dPitch, dTick: drag.dTick)
@@ -528,23 +578,26 @@ enum RollEditLogic {
   }
 
   /// What an up without a drag does: a double-click delete, a deselect, or an insert.
-  private static func click(_ press: Press, event: RollPointerEvent, state: inout RollEditState, context: RollContext)
-    -> [RollEffect] {
+  private static func click(_ press: Press, state: inout RollEditState, context: RollContext) -> [RollEffect] {
     switch press.target {
     case .note:
       guard press.clickCount == 2, let anchor = press.anchor else { return [] }
       if let insert = state.lastInsert, insert.pitch == anchor.pitch, insert.start == anchor.start { return [] }
       return [.send(.removeNotes(trackId: press.trackId, ids: [anchor.id], baseRevision: press.baseRevision))]
     case .empty:
+      let timing = context.timing
+      let tick = context.geometry.tick(atX: press.origin(in: context.geometry).x)
+      state.insertMarker = tick < timing.endTick
+        ? context.grid.snapDown(tick, barTicks: timing.barTicks, ticksPerBeat: timing.ticksPerBeat) : nil
       if !press.selection.isEmpty { return [.send(.selectNotes(trackId: press.trackId, ids: []))] }
-      guard press.mode == .notes, let spec = insertion(at: press.at, lastLength: state.lastLength, context: context) else {
+      guard press.mode == .notes, let spec = insertion(at: press.origin(in: context.geometry), lastLength: state.lastLength, context: context) else {
         return []
       }
       if press.clickCount >= 2, let insert = state.lastInsert, insert.pitch == spec.pitch, insert.start == spec.start {
         return []
       }
       state.lastLength = spec.length
-      state.lastInsert = RollEditState.Insert(pitch: spec.pitch, start: spec.start, timestamp: event.timestamp)
+      state.lastInsert = RollEditState.Insert(pitch: spec.pitch, start: spec.start)
       return [.send(.insertNotes(trackId: press.trackId, notes: [spec], baseRevision: press.baseRevision)),
               .previewOneShot(pitch: spec.pitch, velocity: spec.velocity)]
     }

@@ -42,6 +42,12 @@ struct RollLimits: Equatable {
 /// after the progression's end, design D3; the group then cannot move right but can move left). An empty group
 /// moves by 0.
 ///
+/// Accepted limitation: because the range always contains 0, a group holding such an inactive note whose start is
+/// at or after `endTick` can still take a delta that leaves that start unowned (a pitch move, a resize, a velocity
+/// change, a move left that stays past the end, or a duplicate, whose copy starts there too); the engine refuses
+/// that `updateNotes` / `insertNotes` whole and the roll shows the refusal like any other, leaving every note as it
+/// was. The roll does not pre-filter such groups.
+///
 /// Depends on nothing but Foundation; unit-tested by the `ChordLabUICore` package
 /// (Tests/ChordLabUICoreTests/RollGroupMathTests.swift).
 enum RollGroupMath {

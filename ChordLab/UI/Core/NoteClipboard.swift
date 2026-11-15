@@ -107,8 +107,10 @@ enum NoteClipboard {
     pasteboard.data(forType: pasteboardType).flatMap(decode)
   }
 
-  /// Where a paste lands (design D15): the insert marker when there is one (`RollEditState.insertMarker`), else
-  /// right after the selection's end (the latest end of the selected notes still in `notes`), else tick 0.
+  /// Where a paste lands (design D15): the insert marker when there is one (`RollEditState.insertMarker`, set only
+  /// by a plain empty-space click and cleared by a note press, a rubber band or a click past the end, so after a
+  /// band or a note click the selection decides), else right after the selection's end (the latest end of the
+  /// selected notes still in `notes`), else tick 0.
   static func pastePosition(marker: Int?, notes: TrackNotesJSON, selectedIds: Set<Int>) -> Int {
     if let marker { return marker }
     return notes.indices(ofIds: selectedIds).map { notes[$0].end }.max() ?? 0

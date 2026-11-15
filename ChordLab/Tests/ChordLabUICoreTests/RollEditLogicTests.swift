@@ -55,10 +55,11 @@ final class RollEditLogicTests: XCTestCase {
   }
 
   private func context(_ rows: [NoteRow]? = nil, selected: Set<Int> = [], revision: UInt64? = nil,
-                       mode: RollMode = .notes, grid: RollGrid = .eighth, snap: PitchSnap = .off) -> RollContext {
-    RollContext(trackId: trackId, notes: columns(rows ?? standardNotes), selectedIds: selected,
-                revision: revision ?? self.revision, events: events, timing: timing, geometry: geometry, mode: mode,
-                grid: grid, snap: snap)
+                       mode: RollMode = .notes, grid: RollGrid = .eighth, snap: PitchSnap = .off, track: Int? = nil,
+                       geometry: RollGeometry? = nil) -> RollContext {
+    RollContext(trackId: track ?? trackId, notes: columns(rows ?? standardNotes), selectedIds: selected,
+                revision: revision ?? self.revision, events: events, timing: timing, geometry: geometry ?? self.geometry,
+                mode: mode, grid: grid, snap: snap)
   }
 
   /// The middle of the row of `pitch`, at `tick`.
@@ -176,7 +177,7 @@ final class RollEditLogicTests: XCTestCase {
     ])
     XCTAssertEqual(state.lastLength, 480)
     XCTAssertEqual(state.insertMarker, 7680)
-    XCTAssertEqual(state.lastInsert, RollEditState.Insert(pitch: 50, start: 7680, timestamp: 1.2))
+    XCTAssertEqual(state.lastInsert, RollEditState.Insert(pitch: 50, start: 7680))
     XCTAssertTrue(state.isIdle)
   }
 
@@ -230,15 +231,48 @@ final class RollEditLogicTests: XCTestCase {
                                  baseRevision: 5)])
   }
 
-  func testTheInsertMarkerFollowsEmptySpaceDowns() {
+  func testTheInsertMarkerIsSetOnlyByAPlainEmptyClick() {
+    let (pressed, _) = run([down(point(7700, 50))], context(selected: [10]))
+    XCTAssertNil(pressed.insertMarker, "the down alone sets nothing")
+    let (marked, _) = run([up(point(7700, 50))], context(selected: [10]), from: pressed)
+    XCTAssertEqual(marked.insertMarker, 7680, "the deselect click sets it to its grid tick")
+    XCTAssertEqual(NoteClipboard.pastePosition(marker: marked.insertMarker, notes: columns(standardNotes), selectedIds: [11]),
+                   7680, "a paste lands at the marker")
+    let (inserted, _) = run([down(point(9700, 50)), up(point(9700, 50))], context())
+    XCTAssertEqual(inserted.insertMarker, 9600, "so does the insert click")
+    let (velocityClick, _) = run([down(point(9700, 50)), up(point(9700, 50))], context(mode: .velocity))
+    XCTAssertEqual(velocityClick.insertMarker, 9600, "in either mode")
+  }
+
+  func testARubberBandClearsTheInsertMarkerSoAPasteFollowsTheSelection() {
     let (marked, _) = run([down(point(7700, 50)), up(point(7700, 50))], context(selected: [10]))
-    XCTAssertEqual(marked.insertMarker, 7680, "set by the down, even when the click deselects")
-    let (onNote, _) = run([down(point(1200, 64)), up(point(1200, 64))], context(), from: marked)
-    XCTAssertEqual(onNote.insertMarker, 7680, "a note press leaves it")
-    let (banded, _) = run([down(point(3000, 70)), drag(point(100, 63)), up(point(100, 63))], context(), from: marked)
-    XCTAssertEqual(banded.insertMarker, 2880, "a rubber band's down sets it too")
+    let (banded, effects) = run([down(point(3000, 70)), drag(point(100, 63)), up(point(100, 63))], context(), from: marked)
+    XCTAssertEqual(sends(effects), [.selectNotes(trackId: 7, ids: [11, 12])])
+    XCTAssertNil(banded.insertMarker, "a committed rubber band clears it")
+    XCTAssertEqual(NoteClipboard.pastePosition(marker: banded.insertMarker, notes: columns(standardNotes), selectedIds: [11, 12]),
+                   2880, "⌘C ⌘V after a band pastes after the selection's end")
+    let (cancelled, _) = run([down(point(3000, 70)), drag(point(100, 63)), cancel], context(), from: marked)
+    XCTAssertEqual(cancelled.insertMarker, 7680, "a cancelled band changes nothing")
+  }
+
+  func testANotePressClearsTheInsertMarker() {
+    let (marked, _) = run([down(point(7700, 50)), up(point(7700, 50))], context(selected: [10]))
+    XCTAssertEqual(marked.insertMarker, 7680)
+    let (onNote, _) = run([down(point(1200, 64))], context(), from: marked)
+    XCTAssertNil(onNote.insertMarker, "a body press clears it at the down")
+    let (onEdge, _) = run([down(CGPoint(x: 143, y: point(0, 67).y)), up(CGPoint(x: 143, y: point(0, 67).y))], context(),
+                          from: marked)
+    XCTAssertNil(onEdge.insertMarker, "an edge press too")
+    let (inVelocity, _) = run([down(point(1200, 64)), up(point(1200, 64))], context(mode: .velocity), from: marked)
+    XCTAssertNil(inVelocity.insertMarker, "and a press in velocity mode")
+  }
+
+  func testAClickPastTheEndClearsTheInsertMarker() {
+    let (marked, _) = run([down(point(7700, 50)), up(point(7700, 50))], context(selected: [10]))
     let (cleared, _) = run([down(point(20_000, 50)), up(point(20_000, 50))], context(selected: [10]), from: marked)
-    XCTAssertNil(cleared.insertMarker, "a down past the end clears it")
+    XCTAssertNil(cleared.insertMarker, "a click in the hatched area clears it")
+    let (atEnd, _) = run([down(point(15_360, 50)), up(point(15_360, 50))], context(), from: marked)
+    XCTAssertNil(atEnd.insertMarker, "so does one exactly at the end")
   }
 
   // MARK: - Double-clicks
@@ -302,13 +336,22 @@ final class RollEditLogicTests: XCTestCase {
     let (state, effects) = run([up(to)], context(selected: [10]), from: dragging)
     XCTAssertEqual(effects, [.send(.selectNotes(trackId: 7, ids: [11, 12]))], "the band replaces the selection")
     XCTAssertNil(state.rubberBand)
-    XCTAssertEqual(state.insertMarker, 2880)
+    XCTAssertNil(state.insertMarker)
   }
 
   func testAShiftRubberBandAddsToTheSelection() {
     let (_, effects) = run([down(point(3000, 70), shift: true), drag(point(100, 63)), up(point(100, 63))],
                            context(selected: [10]))
     XCTAssertEqual(effects, [.send(.selectNotes(trackId: 7, ids: [10, 11, 12]))])
+  }
+
+  func testARubberBandEndingOnTheSelectionItStartedWithSendsNothing() {
+    let band = [down(point(3000, 70)), drag(point(100, 63)), up(point(100, 63))]
+    XCTAssertEqual(run(band, context(selected: [11, 12])).effects, [], "the same notes: nothing changes")
+    let shiftBand = [down(point(3000, 70), shift: true), drag(point(100, 63)), up(point(100, 63))]
+    XCTAssertEqual(run(shiftBand, context(selected: [10, 11, 12])).effects, [], "⇧ adding nothing new")
+    XCTAssertEqual(run([down(point(9000, 100)), drag(point(12_000, 90)), up(point(12_000, 90))], context()).effects, [],
+                   "nothing selected before or after")
   }
 
   func testARubberBandOverNothingClearsTheSelection() {
@@ -404,10 +447,36 @@ final class RollEditLogicTests: XCTestCase {
     let rows = standardNotes + [(30, 60, 14_880, 480, 100, true)]
     let p = point(240, 60)
     let target = offset(p, x: 1000)   // 20,000 ticks right
-    let (_, effects) = run([down(p), drag(target), up(target)], context(rows, selected: [10, 30]))
+    let (_, effects) = run([down(p), drag(target), up(target)], context(rows, selected: [10, 30], grid: .off))
     XCTAssertEqual(sends(effects), [.updateNotes(trackId: 7, edits: [
       RollNoteEdit(id: 10, start: 479), RollNoteEdit(id: 30, start: 15_359),
-    ], baseRevision: 5)])
+    ], baseRevision: 5)], "grid Off: the raw clamp, the last tick before the end")
+    XCTAssertEqual(sends(run([down(p), drag(target), up(target)], context(rows, selected: [10, 30])).effects), [],
+                   "on a grid the anchor's last allowed grid point is where it is")
+  }
+
+  func testAGroupStoppedByTheEndPutsTheAnchorOnTheLastGridPoint() {
+    let rows = standardNotes + [(30, 60, 14_600, 480, 100, true)]
+    let p = point(240, 60)
+    let target = offset(p, x: 1000)   // 20,000 ticks right; the clamp allows 759
+    XCTAssertEqual(sends(run([down(p), drag(target), up(target)], context(rows, selected: [10, 30])).effects), [
+      .updateNotes(trackId: 7, edits: [RollNoteEdit(id: 10, start: 480), RollNoteEdit(id: 30, start: 15_080)], baseRevision: 5),
+    ], "the anchor lands on 480, the last eighth the clamp allows")
+    XCTAssertEqual(sends(run([down(p), drag(target), up(target)], context(rows, selected: [10, 30], grid: .off)).effects), [
+      .updateNotes(trackId: 7, edits: [RollNoteEdit(id: 10, start: 759), RollNoteEdit(id: 30, start: 15_359)], baseRevision: 5),
+    ])
+    let alone = point(14_700, 60)
+    XCTAssertEqual(sends(run([down(alone), drag(offset(alone, x: 1000)), up(offset(alone, x: 1000))],
+                             context(rows, selected: [30])).effects),
+                   [.updateNotes(trackId: 7, edits: [RollNoteEdit(id: 30, start: 14_880)], baseRevision: 5)],
+                   "a single note stops on the last eighth, not on 15,359")
+    // An off-grid anchor whose last grid point lies behind it: the raw clamp, so a drag right never moves left.
+    let offGrid = standardNotes + [(31, 72, 100, 480, 100, true), (32, 60, 15_200, 120, 100, true)]
+    let a = point(200, 72)
+    XCTAssertEqual(sends(run([down(a), drag(offset(a, x: 1000)), up(offset(a, x: 1000))],
+                             context(offGrid, selected: [31, 32])).effects), [
+      .updateNotes(trackId: 7, edits: [RollNoteEdit(id: 31, start: 259), RollNoteEdit(id: 32, start: 15_359)], baseRevision: 5),
+    ])
   }
 
   func testAGroupAtTheTopRowKeepsItsPitches() {
@@ -434,6 +503,39 @@ final class RollEditLogicTests: XCTestCase {
     XCTAssertEqual(sends(group), [.updateNotes(trackId: 7, edits: [
       RollNoteEdit(id: 10, pitch: 62), RollNoteEdit(id: 11, pitch: 66),
     ], baseRevision: 5)], "a group moves by exact rows")
+  }
+
+  func testASnappedSingleNoteDraggedBackToItsOriginSendsNothing() {
+    let rows = standardNotes + [(40, 66, 2400, 480, 100, true)]   // F♯4 over C: not a chord tone
+    let p = point(2600, 66)
+    let roll = context(rows, selected: [40], snap: .chordTones)
+    let (_, back) = run([down(p), drag(point(2600, 69)), drag(p), up(p)], roll)
+    XCTAssertEqual(sends(back), [], "back at its origin the note is not snapped")
+    XCTAssertEqual(back.last, .previewStop)
+    assertPaired(back)
+    let (_, still) = run([down(p), drag(offset(p, x: 3)), drag(offset(p, x: 4)), up(offset(p, x: 4))], roll)
+    XCTAssertEqual(sends(still), [], "a drag that changes neither row nor tick does not snap")
+    let right = offset(p, x: 24)   // +480 ticks on the same row
+    XCTAssertEqual(sends(run([down(p), drag(right), up(right)], roll).effects),
+                   [.updateNotes(trackId: 7, edits: [RollNoteEdit(id: 40, pitch: 67, start: 2880)], baseRevision: 5)],
+                   "once it actually moves, a horizontal move snaps it too")
+  }
+
+  func testAnUpPastTheThresholdWithNoDragEventCommitsTheMove() {
+    let p = point(1200, 64)
+    XCTAssertEqual(run([down(p), up(offset(p, x: 24))], context()).effects, [
+      .send(.selectNotes(trackId: 7, ids: [11])), .previewStart(pitch: 64, velocity: 90), .previewStop,
+      .send(.updateNotes(trackId: 7, edits: [RollNoteEdit(id: 11, start: 1440)], baseRevision: 5)),
+    ])
+  }
+
+  func testAnUpOnAnotherRowThanTheLastDragCommitsTheUpsRow() {
+    let p = point(1200, 64)
+    let (_, effects) = run([down(p), drag(point(1200, 66)), up(point(1200, 68))], context(selected: [11]))
+    XCTAssertEqual(effects, [
+      .previewStart(pitch: 64, velocity: 90), .previewStop, .previewStart(pitch: 66, velocity: 90), .previewStop,
+      .send(.updateNotes(trackId: 7, edits: [RollNoteEdit(id: 11, pitch: 68)], baseRevision: 5)),
+    ], "the up stops the held pitch once and starts nothing")
   }
 
   func testASingleNoteSnapsByTheGuideAtItsNewStart() {
@@ -572,6 +674,52 @@ final class RollEditLogicTests: XCTestCase {
     let (_, effects) = run([down(p), drag(offset(p, x: 48)), down(point(1200, 64))], context(selected: [10]))
     XCTAssertEqual(effects, [.previewStart(pitch: 60, velocity: 100), .previewStop,
                              .send(.selectNotes(trackId: 7, ids: [11])), .previewStart(pitch: 64, velocity: 90)])
+  }
+
+  func testAGestureFromAnotherTrackIsCancelledBeforeTheEvent() {
+    let p = point(240, 60)
+    let (dragging, started) = run([down(p), drag(offset(p, x: 48))], context(selected: [10]))
+    XCTAssertEqual(started.first, .previewStart(pitch: 60, velocity: 100))
+    let other = context(selected: [], track: 8)
+    let (switched, effects) = run([drag(offset(p, x: 96))], other, from: dragging)
+    XCTAssertEqual(effects, [.previewStop], "the parked drag stops its preview and sends nothing")
+    XCTAssertTrue(switched.isIdle)
+    XCTAssertEqual(run([up(offset(p, x: 96))], other, from: dragging).effects, [.previewStop], "an up commits nothing")
+    let (fresh, downEffects) = run([down(point(1200, 64))], other, from: dragging)
+    XCTAssertEqual(downEffects, [.previewStop, .send(.selectNotes(trackId: 8, ids: [11])), .previewStart(pitch: 64, velocity: 90)])
+    XCTAssertEqual(fresh.press?.trackId, 8)
+    let (emptyPress, _) = run([down(point(7700, 50))], context())
+    let (idle, none) = run([up(point(7700, 50))], other, from: emptyPress)
+    XCTAssertEqual(none, [], "a parked empty click inserts nothing on the new track")
+    XCTAssertTrue(idle.isIdle)
+    assertPaired(started + effects)
+  }
+
+  func testAZoomMidDragKeepsTheDelta() {
+    let p = point(1200, 64)
+    let zoomed = RollGeometry(pxPerBeat: 96, rowHeight: 20, ticksPerBeat: 960)
+    func zoomedPoint(_ tick: Int, _ pitch: Int) -> CGPoint {
+      CGPoint(x: zoomed.x(tick: tick), y: zoomed.y(pitch: pitch) + 10)
+    }
+    let (pressed, _) = run([down(p)], context(selected: [11]))
+    let after = context(selected: [11], geometry: zoomed)
+    let (stillPressed, none) = run([drag(zoomedPoint(1200, 64))], after, from: pressed)
+    XCTAssertEqual(none, [], "the same tick and row after the zoom: no travel")
+    XCTAssertNil(stillPressed.drag)
+    let target = zoomedPoint(1680, 66)   // +480 ticks, two rows up
+    let (dragging, _) = run([drag(target)], after, from: stillPressed)
+    XCTAssertEqual(dragging.previewNotes.map(\.start), [1440])
+    XCTAssertEqual(dragging.previewNotes.map(\.pitch), [66])
+    XCTAssertEqual(sends(run([up(target)], after, from: dragging).effects),
+                   [.updateNotes(trackId: 7, edits: [RollNoteEdit(id: 11, pitch: 66, start: 1440)], baseRevision: 5)])
+    // A rubber band keeps its corner on the down's tick and pitch.
+    let (band, _) = run([down(point(3000, 70))], context())
+    let (banding, _) = run([drag(zoomedPoint(100, 63))], context(geometry: zoomed), from: band)
+    let corner = zoomedPoint(3000, 70)
+    let end = zoomedPoint(100, 63)
+    XCTAssertEqual(banding.rubberBand, CGRect(x: end.x, y: corner.y, width: corner.x - end.x, height: end.y - corner.y))
+    XCTAssertEqual(sends(run([up(end)], context(geometry: zoomed), from: banding).effects),
+                   [.selectNotes(trackId: 7, ids: [11, 12])])
   }
 
   func testEdgeDownsPreviewAndPairInEverySequence() {
