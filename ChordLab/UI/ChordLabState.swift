@@ -827,19 +827,33 @@ class ChordLabState: NSObject, ObservableObject {
     sendCommand(kMsgTagRequestSnapshot, Data())
   }
 
-  /// Asks the plugin to write the progression as a MIDI file. The round trip is synchronous on the main
-  /// thread (`OnMessage` runs inline and answers through the delegate at once), so `exportPath` holds the
-  /// new file, or nil after a failure, when this returns.
-  @MainActor func requestExport() {
+  /// Asks the plugin to write a clip (`kMsgTagExportClip`, tracks design D12): `request`'s lanes over the whole
+  /// progression or its section. The round trip is synchronous on the main thread (`OnMessage` runs inline and
+  /// answers through the delegate at once), so `exportPath` holds the new file, or nil after a failure
+  /// (`kMsgTagError`), when this returns. The legacy `kMsgTagExport` / `kMsgTagExportSection` messages stay in the
+  /// shell (D12) but the UI no longer sends them: the chords lane through this path is byte-identical to them.
+  @MainActor func requestExportClip(_ request: ClipExportRequest) {
     exportPath = nil
-    sendCommand(kMsgTagExport, Data())
+    send(request.fields, tag: kMsgTagExportClip)
   }
 
-  /// The same for one section (`kMsgTagExportSection {id}`): the section's chords alone, re-based to
-  /// beat 0; an unknown id comes back as `kMsgTagError`.
-  @MainActor func requestExportSection(id: Int) {
-    exportPath = nil
-    send(["id": id], tag: kMsgTagExportSection)
+  /// Writes `grip`'s clip ahead of a drag (the drag-out's hover) when it has anything to export
+  /// (`ClipExport.request` against the current snapshot and open lane); sends nothing otherwise. Returns whether it
+  /// asked.
+  @MainActor @discardableResult func prepareExport(_ grip: ExportGrip) -> Bool {
+    guard let request = ClipExport.request(for: grip, in: snapshot, open: openLane) else { return false }
+    requestExportClip(request)
+    return true
+  }
+
+  /// The body of every drag-out's `.onDrag` (the lane grips, All, the bottom drag-out, the section handles): the
+  /// request `grip` makes against the current snapshot and open lane (`ClipExport.request`), sent through
+  /// `requestExportClip`, and an item provider for the file that comes back. With nothing to export, or when the
+  /// shell answers with an error, nothing is written and the provider is empty. One function, so the harness checks
+  /// exactly what a drag sends without dragging.
+  @MainActor func dragExport(_ grip: ExportGrip) -> NSItemProvider {
+    guard prepareExport(grip), let path = exportPath else { return NSItemProvider() }
+    return NSItemProvider(contentsOf: URL(fileURLWithPath: path)) ?? NSItemProvider()
   }
 
   // MARK: - Messages from the plugin

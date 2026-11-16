@@ -10,8 +10,10 @@ import SwiftUI
 /// - right-click → Rename…, the Colour submenu (`setSectionColour`) and Remove section (`removeSection`);
 /// - drag a span's left edge → `moveSectionStart` to the nearest block boundary when the drag ends (the
 ///   edge follows the mouse meanwhile; the first section is pinned to the start and has no edge handle);
-/// - drag the "♫" at a span's right end onto a MIDI track → that section alone as a .mid clip
-///   (`kMsgTagExportSection` → `kMsgTagExportReady`, as `ExportDragView` does for the whole progression).
+/// - drag the "♫" at a span's right end onto a MIDI track → that section of the OPEN lane as a .mid clip
+///   (tracks design D13: the chords with Chords open, the track's own notes with a track open;
+///   `kMsgTagExportClip` → `kMsgTagExportReady`, as `ExportDragView` does for the whole progression); dimmed and
+///   inert when the open track has no notes there.
 /// The sequence bar draws the matching boundary lines through the block row.
 struct SectionsHeaderView: View {
   @EnvironmentObject var state: ChordLabState
@@ -72,7 +74,10 @@ struct SectionsHeaderView: View {
     let dragging = edgeDrag?.id == section.id
     let first = sections.first?.id == section.id
     return ZStack(alignment: .leading) {
+      // The name's help sits on the span's background and name, not around the whole span, so the export handle's
+      // own help (which says why it is inert when it is) is not overridden by it.
       RoundedRectangle(cornerRadius: Self.cornerRadius).fill(color.opacity(dragging ? 0.55 : 0.35))
+        .help(section.name)
       RoundedRectangle(cornerRadius: Self.cornerRadius).strokeBorder(color.opacity(0.9), lineWidth: 1)
       HStack(spacing: 4) {
         if renamingId == section.id {
@@ -83,6 +88,7 @@ struct SectionsHeaderView: View {
             .foregroundStyle(.white)
             .lineLimit(1)
             .truncationMode(.tail)
+            .help(section.name)
         }
         Spacer(minLength: 0)
         exportHandle(section)
@@ -95,7 +101,6 @@ struct SectionsHeaderView: View {
     .contentShape(Rectangle())
     .onTapGesture(count: 2) { beginRename(section) }
     .contextMenu { menu(section) }
-    .help(section.name)
     .accessibilityElement(children: .contain)
     .accessibilityLabel("Section " + section.name)
   }
@@ -128,25 +133,25 @@ struct SectionsHeaderView: View {
       .accessibilityHidden(true)
   }
 
-  /// "♫": drag it onto a MIDI track and the section lands there as a .mid clip. The plug-in writes the
-  /// file when the mouse arrives over the handle and again when the drag starts (synchronous round trip,
-  /// like `ExportDragView`), so the clip is the section as it is at that moment.
+  /// "♫": drag it onto a MIDI track and the open lane's part of the section lands there as a .mid clip
+  /// (`ChordLabState.dragExport(.openLaneSection)`). The plug-in writes the file when the mouse arrives over the
+  /// handle and again when the drag starts (synchronous round trip, like `ExportDragView`), so the clip is the
+  /// section as it is at that moment. With nothing to export there (an open track without notes in the section) the
+  /// handle is dimmed and inert, and its help says why.
   private func exportHandle(_ section: SectionJSON) -> some View {
-    Text("♫")
+    let grip = ExportGrip.openLaneSection(section.id)
+    let text = ClipExport.text(for: grip, in: state.snapshot, open: state.openLane)
+    return Text("♫")
       .font(.system(size: 11))
-      .foregroundStyle(.white.opacity(0.8))
+      .foregroundStyle(.white.opacity(text.enabled ? 0.8 : 0.3))
       .padding(.horizontal, 3)
       .contentShape(Rectangle())
       .onHover { over in
-        if over { state.requestExportSection(id: section.id) }
+        if over { state.prepareExport(grip) }
       }
-      .onDrag {
-        state.requestExportSection(id: section.id)
-        guard let path = state.exportPath else { return NSItemProvider() }
-        return NSItemProvider(contentsOf: URL(fileURLWithPath: path)) ?? NSItemProvider()
-      }
-      .help("Drag this section onto a MIDI track in Live")
-      .accessibilityLabel("Drag the section " + section.name + " to Live as a MIDI clip")
+      .exportDragSource(enabled: text.enabled) { state.dragExport(grip) }
+      .help(text.help)
+      .accessibilityLabel(text.label)
   }
 
   // MARK: - Context menu

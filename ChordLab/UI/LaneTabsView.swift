@@ -17,10 +17,15 @@ import SwiftUI
 ///   name}`), Role ▸ (the current one checked; `patchTrack {id, role}`), Move left / Move right (`moveTrack`,
 ///   each disabled at its end of the row) and Remove (`removeTrack`, undoable, no confirmation). Chords has no
 ///   menu.
+/// - The ♫ grip at a tab's trailing end → drag that lane to Live as a MIDI clip (D12; `ChordLabState.dragExport
+///   (.lane)`: `kMsgTagExportClip` with that lane over the whole progression, whichever lane is open). The "♫ All"
+///   grip at the row's trailing end → the chords plus every track with notes, muted ones included (Q4), one clip
+///   per lane in Live (S0 item 2). A grip with nothing to export (no chords; a track without notes) is dimmed and
+///   inert: it starts no drag and its help says why (`ClipExport.text`).
 /// A track tab carries a small mark in its role's colour (`TrackStyle`). Names truncate at the tail before any
-/// control shrinks, so Chords, four tracks and + stay in one line at the 700-pt minimum width. An engine without
-/// tracks shows the Chords tab alone (no M/S, no +), so the row keeps its height. The lane drag grips and the All
-/// grip come with the per-lane export (plan Task 21).
+/// control shrinks, so Chords, four tracks, their grips, + and All stay in one line at the 700-pt minimum width. An
+/// engine without tracks shows the Chords tab alone (no M/S, no +, no All; its grip stays), so the row keeps its
+/// height.
 struct LaneTabsView: View {
   @EnvironmentObject var state: ChordLabState
 
@@ -31,6 +36,8 @@ struct LaneTabsView: View {
   static let maxNameWidth: CGFloat = 120
   /// The M and S toggles' square.
   static let toggleSize: CGFloat = 16
+  /// A lane grip's width (the tab's full height is its target).
+  static let gripWidth: CGFloat = 12
   /// How far a toggle's click target reaches past its drawn square (the 3-pt gap between M and S is split).
   static let toggleHitOutset = CGSize(width: 1.5, height: 2)
   /// What a not-audible tab's mark and name are drawn at.
@@ -48,7 +55,7 @@ struct LaneTabsView: View {
 
   var body: some View {
     let snapshot = state.snapshot
-    HStack(spacing: 6) {
+    HStack(spacing: 5) {
       ForEach(LaneTabs.tabs(in: snapshot, open: state.openLane)) { tab in
         tabView(tab, menu: LaneTabs.menu(for: tab.lane, in: snapshot))
       }
@@ -56,6 +63,9 @@ struct LaneTabsView: View {
         addMenu(snapshot)
       }
       Spacer(minLength: 0)
+      if LaneTabs.showsTracks(snapshot) {
+        allGrip()
+      }
     }
     .frame(height: Self.height)
     .accessibilityElement(children: .contain)
@@ -65,14 +75,14 @@ struct LaneTabsView: View {
   // MARK: - One tab
 
   private func tabView(_ tab: LaneTab, menu: TrackTabMenu?) -> some View {
-    HStack(spacing: 6) {
+    HStack(spacing: 4) {
       if let menu, renamingId == menu.trackId {
         renameField(menu)
       } else {
         openButton(tab)
       }
-      if tab.hasMuteSolo {
-        HStack(spacing: 3) {
+      HStack(spacing: 3) {
+        if tab.hasMuteSolo {
           toggle("M", on: tab.muted, colour: Self.muteOn,
                  help: tab.muted ? "Unmute \(tab.label)" : "Mute \(tab.label)",
                  label: "Mute \(tab.label)") { state.setMute(tab.lane, on: !tab.muted) }
@@ -80,11 +90,12 @@ struct LaneTabsView: View {
                  help: tab.soloed ? "Stop soloing \(tab.label)" : "Solo \(tab.label): only soloed lanes play",
                  label: "Solo \(tab.label)") { state.setSolo(tab.lane, on: !tab.soloed) }
         }
-        .fixedSize()
+        laneGrip(tab)
       }
+      .fixedSize()
     }
     .padding(.leading, 8)
-    .padding(.trailing, tab.hasMuteSolo ? 3 : 8)
+    .padding(.trailing, 1)
     .frame(height: Self.tabHeight)
     .background(
       RoundedRectangle(cornerRadius: 5)
@@ -149,6 +160,41 @@ struct LaneTabsView: View {
     .accessibilityLabel(label)
     .accessibilityAddTraits(.isToggle)
     .accessibilityValue(on ? "On" : "Off")
+  }
+
+  // MARK: - Grips
+
+  /// The tab's ♫ grip: drags its lane over the whole progression (`ChordLabState.dragExport(.lane)`); dimmed and
+  /// inert (no drag) with nothing to export.
+  private func laneGrip(_ tab: LaneTab) -> some View {
+    let grip = ExportGrip.lane(tab.lane)
+    let text = ClipExport.text(for: grip, in: state.snapshot, open: state.openLane)
+    return Text("♫")
+      .font(.system(size: 10))
+      .foregroundStyle(Color.white.opacity(text.enabled ? 0.8 : 0.25))
+      .frame(width: Self.gripWidth, height: Self.tabHeight)
+      .contentShape(Rectangle())
+      .exportDragSource(enabled: text.enabled) { state.dragExport(grip) }
+      .help(text.help)
+      .accessibilityLabel(text.label)
+  }
+
+  /// "♫ All" at the row's trailing end: drags the chords and every track with notes, muted ones included
+  /// (`ChordLabState.dragExport(.all)`); dimmed and inert without chords.
+  private func allGrip() -> some View {
+    let text = ClipExport.text(for: .all, in: state.snapshot, open: state.openLane)
+    // One Text (a static text to accessibility, like the lane grips), so its label and help stay its own.
+    return (Text("♫ ").font(.system(size: 10)) + Text("All").font(.system(size: 11, weight: .semibold)))
+    .foregroundStyle(Color.white.opacity(text.enabled ? 0.85 : 0.3))
+    .padding(.horizontal, 6)
+    .frame(height: Self.tabHeight)
+    .background(RoundedRectangle(cornerRadius: 5).fill(Color.white.opacity(0.06)))
+    .overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(Color.white.opacity(0.12), lineWidth: 1))
+    .fixedSize()
+    .contentShape(Rectangle())
+    .exportDragSource(enabled: text.enabled) { state.dragExport(.all) }
+    .help(text.help)
+    .accessibilityLabel(text.label)
   }
 
   // MARK: - +
