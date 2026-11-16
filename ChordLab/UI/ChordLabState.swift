@@ -34,10 +34,11 @@ class ChordLabState: NSObject, ObservableObject {
   /// down meanwhile, so typing a name never appends or removes chords.
   @Published var editingText = false
   /// What the keyboard edits (tracks design D15 "Keyboard", `KeyTarget`): the chords, or one track's notes; the key
-  /// routes ask the map with it (`EditorKeyRouter`). Every applied snapshot resolves it (`KeyTarget.resolved`: a
-  /// removed track's notes fall back to the chords), and every open-lane change resets it
-  /// (`KeyTarget.afterOpenLaneChange`, in `openLane`'s observer). The roll's mouse-down will set `.notes` (plan
-  /// Task 20, in `handleRollPointer`); until then it stays `.chords`.
+  /// routes ask the map with it (`EditorKeyRouter`) and `perform` dispatches by it (`KeyCommand.route`). Set by the
+  /// last press: the roll's mouse-down and its context-menu click target that track's notes (`handleRollPointer`,
+  /// `rollContextMenu`); a press on the strip, a palette or home-row cell or a suggestion chip targets the chords
+  /// (`targetChords`). Every applied snapshot resolves it (`KeyTarget.resolved`: a removed track's notes fall back to
+  /// the chords), and every open-lane change resets it (`KeyTarget.afterOpenLaneChange`, in `openLane`'s observer).
   @Published var keyTarget: KeyTarget = .chords
   /// The lane the editor shows (tracks design D13): Chords (suggestions, palette, home row) or one track's roll.
   /// UI state, never saved; every applied snapshot resolves it (`Lane.resolved`: a removed track falls back to
@@ -158,6 +159,7 @@ class ChordLabState: NSObject, ObservableObject {
   /// same id (and the scheduler's 4 s watchdog ends a preview whose Stop never arrived; `extend`s every second keep a
   /// held one alive).
   @MainActor func pressCell(_ cell: CellJSON) {
+    targetChords()
     route(previews.hold(.cell(cell.id), pitches: Array(cell.voicing.filter { (0...127).contains($0) }.prefix(8)),
                         velocity: 100).outputs)
   }
@@ -304,19 +306,34 @@ class ChordLabState: NSObject, ObservableObject {
     send(command, tag: kMsgTagCommand)
   }
 
-  /// Runs a keyboard command. Digits append the suggestion chip of that number (nothing when there is no such
-  /// chip); Delete removes every selected chord in one step; ⌘C copies the selection, ⌘X cuts it, ⌘V pastes
-  /// after the anchor (else at the end), ⌘D duplicates the selection after its last block, ⌘A selects every
-  /// block (strip editing design D5, D6); undo and redo are the key bar's commands; an arrow nudge (mapped only
-  /// with a track's notes targeted, tracks design D15) does nothing yet (plan Task 20); with notes targeted only
-  /// undo and redo run (`KeyCommand.runsBeforeNoteDispatch`). Each does nothing when it has nothing to act on,
-  /// and the router consumes every mapped key whether or not it did anything, so the host never acts on it (see
+  /// Runs a keyboard command, dispatched by the key target (`KeyCommand.route`, tracks design D15 "Keyboard"): undo and
+  /// redo are the key bar's commands (one history for chords and notes); with the chords targeted the rest acts on
+  /// them (`performOnChords`); with a track's notes targeted on those notes (`NoteKeys`: Delete, ⌘C ⌘X ⌘V ⌘D ⌘A and
+  /// the arrows, each at most one command, one undo step). Each does nothing when it has nothing to act on, and the
+  /// router consumes every mapped key whether or not it did anything, so the host never acts on it (see
   /// `KeyCommandMap`, `EditorKeyRouter`).
   @MainActor func perform(_ command: KeyCommand) {
-    // Everything below acts on the chords. With a track's notes targeted only the shared undo history runs, so
-    // a key meant for the notes never edits the chords the open track hides; plan Task 20 replaces this guard
-    // with the dispatch by target.
-    guard command.runsBeforeNoteDispatch(target: keyTarget) else { return }
+    switch command.route(target: keyTarget) {
+    case .shared:
+      send(command: ["cmd": command == .redo ? "redo" : "undo"])
+    case .chords:
+      performOnChords(command)
+    case .notes(let trackId):
+      guard let snapshot, let timing = rollTiming else { return }
+      let view = rolls.states[trackId]
+      for note in NoteKeys.commands(for: command, trackId: trackId, snapshot: snapshot, timing: timing, grid: view.grid,
+                                    insertMarker: view.editState.insertMarker, pasteboard: pasteboard) {
+        send(command: note.json)
+      }
+    }
+  }
+
+  /// A key with the chords targeted: digits append the suggestion chip of that number (nothing when there is no such
+  /// chip); Delete removes every selected chord in one step; ⌘C copies the selection, ⌘X cuts it, ⌘V pastes after the
+  /// anchor (else at the end), ⌘D duplicates the selection after its last block, ⌘A selects every block (strip editing
+  /// design D5, D6; the chords carry their notes, tracks design D21); an arrow is never mapped with the chords
+  /// targeted (the host keeps it).
+  @MainActor private func performOnChords(_ command: KeyCommand) {
     let selection = snapshot?.selection ?? []
     switch command {
     case .appendSuggestion(let n):
@@ -326,10 +343,6 @@ class ChordLabState: NSObject, ObservableObject {
     case .deleteSelection:
       guard !selection.isEmpty else { return }
       send(command: ClipboardChords.removeCommand(selection))
-    case .undo:
-      send(command: ["cmd": "undo"])
-    case .redo:
-      send(command: ["cmd": "redo"])
     case .copy:
       copyChords(selection)
     case .cut:
@@ -340,9 +353,15 @@ class ChordLabState: NSObject, ObservableObject {
       duplicateChords(selection)
     case .selectAll:
       select(SelectionLogic.all(eventIds))
-    case .nudge:
-      break   // mapped only with notes targeted, which needs the roll (M3); plan Task 20 sends the nudge
+    case .undo, .redo, .nudge:
+      break   // undo and redo are routed as shared; arrows are mapped only with notes targeted
     }
+  }
+
+  /// A press on the strip, a palette or home-row cell or a suggestion chip (tracks design D15 "Keyboard"): the keys
+  /// act on the chords from now on.
+  @MainActor func targetChords() {
+    if keyTarget != .chords { keyTarget = .chords }
   }
 
   // MARK: - Strip editing (the clipboard and the selection, strip editing design D5–D7)
@@ -350,6 +369,11 @@ class ChordLabState: NSObject, ObservableObject {
   /// Where the clipboard is written and read (`ChordPasteboard`): the general pasteboard; a harness may put a fake
   /// here.
   var pasteboard: any ChordPasteboard = NSPasteboard.general
+
+  /// This instance's clipboard token (tracks design D21), made when the state starts: a chord copy carries it, and a
+  /// paste whose payload carries another (another instance, whose track ids mean nothing here) drops the notes' track
+  /// ids so the engine matches lanes by name and role or creates tracks.
+  let clipboardToken = UUID().uuidString
 
   /// The ids of the strip's blocks in order; empty before the first snapshot.
   private var eventIds: [Int] { snapshot?.events.map(\.id) ?? [] }
@@ -359,13 +383,15 @@ class ChordLabState: NSObject, ObservableObject {
   /// pasteboard untouched, when none of them is on the strip.
   @MainActor @discardableResult func copyChords(_ ids: [Int]) -> Bool {
     guard let events = snapshot?.events else { return false }
-    return ClipboardChords.copy(ids, from: events, to: pasteboard)
+    return ClipboardChords.copy(ids, from: events, tracks: snapshot?.tracks, token: clipboardToken, to: pasteboard)
   }
 
   /// ⌘X and the block menu's Cut: the copy, then `removeChords` (one undo step), sent only once the copy is
   /// published (`ClipboardChords.cut`); a failed copy removes nothing.
   @MainActor func cutChords(_ ids: [Int]) {
-    guard let events = snapshot?.events, let removal = ClipboardChords.cut(ids, from: events, to: pasteboard) else { return }
+    guard let events = snapshot?.events,
+          let removal = ClipboardChords.cut(ids, from: events, tracks: snapshot?.tracks, token: clipboardToken,
+                                            to: pasteboard) else { return }
     send(command: removal)
   }
 
@@ -374,21 +400,22 @@ class ChordLabState: NSObject, ObservableObject {
     ClipboardChords.paste(from: pasteboard) != nil
   }
 
-  /// ⌘V and Paste after: inserts the pasteboard's chords at `index` (one undo step; they become the selection).
-  /// A pasteboard without ChordLab's chords (text only, or nothing) pastes nothing; a paste past 256 chords is
-  /// the engine's refusal, shown like any other (`lastError`), and the pasteboard keeps its content.
+  /// ⌘V and Paste after: inserts the pasteboard's chords with their notes at `index` (one undo step; they become the
+  /// selection). A payload another instance copied loses its notes' track ids (`ClipboardChords.paste(from:ownToken:)`,
+  /// D21). A pasteboard without ChordLab's chords (text only, or nothing) pastes nothing; a paste past 256 chords, an
+  /// ambiguous lane or no room for a new track is the engine's refusal, shown like any other (`lastError`), and the
+  /// pasteboard keeps its content.
   @MainActor func pasteChords(at index: Int) {
-    guard let chords = ClipboardChords.paste(from: pasteboard) else { return }
+    guard let chords = ClipboardChords.paste(from: pasteboard, ownToken: clipboardToken) else { return }
     send(command: ClipboardChords.insertCommand(chords, at: index))
   }
 
-  /// ⌘D and the block menu's Duplicate: the chords `ids` again, right after the last of them, without touching
-  /// the pasteboard.
+  /// ⌘D and the block menu's Duplicate: the chords `ids` again with their notes (each to its own track, D21), right
+  /// after the last of them, without touching the pasteboard.
   @MainActor func duplicateChords(_ ids: [Int]) {
-    guard let events = snapshot?.events else { return }
-    let chords = ClipboardChords.chords(of: events, ids: ids)
-    guard !chords.isEmpty else { return }
-    send(command: ClipboardChords.insertCommand(chords, at: SelectionLogic.index(after: ids, ids: eventIds)))
+    guard let events = snapshot?.events,
+          let command = ClipboardChords.duplicateCommand(ids, events: events, tracks: snapshot?.tracks) else { return }
+    send(command: command)
   }
 
   /// Makes `selection` the store's (one `selectEvent` or `selectEvents`), unless it already is.
@@ -552,8 +579,8 @@ class ChordLabState: NSObject, ObservableObject {
   /// and hands the effects to `performRollEffects`, the one place they go.
   @MainActor func handleRollPointer(_ event: RollPointerEvent, trackId: Int) {
     guard let snapshot, let timing = rollTiming else { return }
-    // Plan Task 20: a `.down` sets `keyTarget = .notes(trackId)` here (design D15 "Keyboard": the roll's mouse-down
-    // targets its notes). Until then the roll leaves the key target alone.
+    // Design D15 "Keyboard": the roll's mouse-down targets its notes.
+    if event.phase == .down, keyTarget != .notes(trackId: trackId) { keyTarget = .notes(trackId: trackId) }
     // A press here ends a key's or a cell's held preview (and another track's roll hold) before the machine runs, so
     // a press that starts no preview of its own never leaves one sounding (`PreviewBook.rollPressed`).
     if event.phase == .down { route(previews.rollPressed(trackId: trackId)) }
@@ -600,6 +627,33 @@ class ChordLabState: NSObject, ObservableObject {
           let command = RollNudge.command(direction, trackId: trackId, snapshot: snapshot, timing: timing,
                                           grid: rolls.states[trackId].grid) else { return }
     send(command: command.json)
+  }
+
+  /// Whether the pasteboard holds ChordLab notes (the roll menu's Paste here is disabled otherwise).
+  @MainActor var canPasteNotes: Bool {
+    NoteClipboard.paste(from: pasteboard) != nil
+  }
+
+  /// The roll's context menu for a right-click or ⌃-click at content `point` of track `trackId` (`RollContextMenu`):
+  /// targets that track's notes (like the roll's mouse-down), sends the right-clicked note's selection when it was
+  /// not selected, and returns the model the view turns into an `NSMenu`; nil for a track the snapshot lacks.
+  @MainActor func rollContextMenu(trackId: Int, at point: CGPoint) -> RollContextMenu? {
+    guard let snapshot, let timing = rollTiming else { return nil }
+    let view = rolls.states[trackId]
+    guard let menu = RollContextMenu.make(at: point, trackId: trackId, snapshot: snapshot, timing: timing,
+                                          geometry: view.geometry(ticksPerBeat: timing.ticksPerBeat), grid: view.grid,
+                                          notesOnPasteboard: canPasteNotes) else { return nil }
+    if keyTarget != .notes(trackId: trackId) { keyTarget = .notes(trackId: trackId) }
+    if let select = menu.select { send(command: select.json) }
+    return menu
+  }
+
+  /// A roll context-menu item chosen: what it sends against the snapshot current now (`RollContextMenu.commands`).
+  @MainActor func performRollMenu(_ item: RollContextMenu.Item, _ menu: RollContextMenu) {
+    guard let snapshot, let timing = rollTiming else { return }
+    for command in menu.commands(for: item, snapshot: snapshot, timing: timing, pasteboard: pasteboard) {
+      send(command: command.json)
+    }
   }
 
   /// Sees every call of `performRollEffects` (the effects, in order, and the track); nil in production. Tests and the

@@ -22,6 +22,9 @@ final class PresetStyleTests: XCTestCase {
   func testLoadModesInPickerOrderWithTitles() {
     XCTAssertEqual(PresetLoadMode.allCases, [.append, .replace])
     XCTAssertEqual(PresetLoadMode.allCases.map(\.title), ["Add to end", "Replace progression"])
+    XCTAssertEqual(PresetLoadMode.allCases.map { $0.title(tracksHaveNotes: false) }, ["Add to end", "Replace progression"])
+    XCTAssertEqual(PresetLoadMode.allCases.map { $0.title(tracksHaveNotes: true) }, ["Add to end", "Replace progression and notes"],
+                   "plan Task 20: Replace also clears the tracks' notes")
     XCTAssertEqual(PresetLoadMode.allCases.map(\.id), ["append", "replace"])
   }
 
@@ -157,5 +160,29 @@ final class PresetStyleTests: XCTestCase {
   func testNothingChangedIsPending() {
     XCTAssertEqual(PresetLoadWatch(snapshot: 1, errorSerial: 0).outcome(snapshot: 1, errorSerial: 0), .pending)
     XCTAssertEqual(PresetLoadWatch(snapshot: 1, errorSerial: 9).outcome(snapshot: 1, errorSerial: 9), .pending)
+  }
+
+  // MARK: - Whether any track has notes (the Replace label, plan Task 20)
+
+  private func track(_ id: Int, notes: Int) -> TrackJSON {
+    TrackJSON(id: id, name: "T\(id)", role: .bass, mute: false, solo: false, audible: true,
+              notes: TrackNotesJSON(id: Array(0..<notes), pitch: Array(repeating: 36, count: notes),
+                                    start: Array(repeating: 0, count: notes), length: Array(repeating: 480, count: notes),
+                                    velocity: Array(repeating: 100, count: notes), anchor: Array(repeating: 1, count: notes),
+                                    offset: Array(repeating: 0, count: notes), active: Array(repeating: true, count: notes)))
+  }
+
+  func testTracksHaveNotesWhenAnyTrackHasOne() {
+    XCTAssertFalse(PresetStyle.tracksHaveNotes(nil), "an engine without tracks")
+    XCTAssertFalse(PresetStyle.tracksHaveNotes([]))
+    XCTAssertFalse(PresetStyle.tracksHaveNotes([track(1, notes: 0), track(2, notes: 0)]))
+    XCTAssertTrue(PresetStyle.tracksHaveNotes([track(1, notes: 0), track(2, notes: 1)]))
+  }
+
+  func testThePopoverWidensForTheLongReplaceLabel() {
+    // The segmented control gives both segments the longer title's width: "Replace progression and notes" needs two
+    // 211-pt segments (measured offscreen), 422 pt plus the 12-pt padding on each side.
+    XCTAssertEqual(PresetStyle.popoverWidth(tracksHaveNotes: false), 360)
+    XCTAssertEqual(PresetStyle.popoverWidth(tracksHaveNotes: true), 450)
   }
 }

@@ -56,6 +56,7 @@ struct SuggestionsView: View {
     HStack(spacing: compact ? 5 : 8) {
       ForEach(Array(suggestions.enumerated()), id: \.element.id) { index, suggestion in
         SuggestionChip(suggestion: suggestion, number: index + 1, compact: compact) {
+          state.targetChords()
           state.send(command: ["cmd": "appendChord", "root": suggestion.root, "type": suggestion.type])
         }
       }

@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 /// How a clicked preset is loaded (plan P4, P7): appended after the last chord, or replacing the chords and
@@ -15,6 +16,13 @@ enum PresetLoadMode: String, CaseIterable, Identifiable {
     case .append: return "Add to end"
     case .replace: return "Replace progression"
     }
+  }
+
+  /// The segmented control's title (plan Task 20): Replace reads "Replace progression and notes" while any track has
+  /// notes (`PresetStyle.tracksHaveNotes`), since replacing the progression also drops the notes anchored to it;
+  /// otherwise `title`.
+  func title(tracksHaveNotes: Bool) -> String {
+    self == .replace && tracksHaveNotes ? "Replace progression and notes" : title
   }
 }
 
@@ -68,6 +76,18 @@ enum PresetStyle {
   }
 
   /// The command a click sends (`json_api.h`, plan P4).
+  /// Whether any of the snapshot's `tracks` has a note (inactive ones count); false without tracks.
+  static func tracksHaveNotes(_ tracks: [TrackJSON]?) -> Bool {
+    tracks?.contains { !$0.notes.isEmpty } ?? false
+  }
+
+  /// The Presets popover's width (plan Task 20): 360 pt, or 450 while Replace reads "Replace progression and notes"
+  /// (`tracksHaveNotes`), because the segmented control gives both segments the longer title's width (two 211-pt
+  /// segments measured offscreen) and would overflow 360 pt with its 12-pt padding.
+  static func popoverWidth(tracksHaveNotes: Bool) -> CGFloat {
+    tracksHaveNotes ? 450 : 360
+  }
+
   static func loadCommand(id: String, mode: PresetLoadMode) -> [String: Any] {
     ["cmd": "loadPreset", "id": id, "mode": mode.rawValue]
   }

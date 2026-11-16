@@ -198,24 +198,30 @@ final class KeyCommandTests: XCTestCase {
     XCTAssertEqual(KeyTarget.notes(trackId: 1).afterOpenLaneChange(from: .track(1), to: .track(1)), .notes(trackId: 1))
   }
 
-  // MARK: - What perform may run before notes get their own dispatch (plan Task 20)
+  // MARK: - Where perform sends a command (plan Task 20: the dispatch by target)
 
   private let everyCommand: [KeyCommand] = [
     .appendSuggestion(1), .deleteSelection, .undo, .redo, .copy, .cut, .paste, .duplicate, .selectAll,
     .nudge(.up, octave: false), .nudge(.left, octave: true),
   ]
 
-  func testEveryCommandRunsWithTheChordsTargeted() {
-    for command in everyCommand {
-      XCTAssertTrue(command.runsBeforeNoteDispatch(target: .chords), "\(command)")
+  func testUndoAndRedoAreTheSharedHistoryForBothTargets() {
+    for target in [KeyTarget.chords, .notes(trackId: 3)] {
+      XCTAssertEqual(KeyCommand.undo.route(target: target), .shared)
+      XCTAssertEqual(KeyCommand.redo.route(target: target), .shared)
     }
   }
 
-  func testOnlyUndoAndRedoRunWithNotesTargeted() {
-    for command in everyCommand {
-      let expected = command == .undo || command == .redo
-      XCTAssertEqual(command.runsBeforeNoteDispatch(target: .notes(trackId: 3)), expected,
-                     "\(command) must never act on the hidden chords")
+  func testEveryOtherCommandGoesToTheChordsWithTheChordsTargeted() {
+    for command in everyCommand where command != .undo && command != .redo {
+      XCTAssertEqual(command.route(target: .chords), .chords, "\(command)")
+    }
+  }
+
+  func testEveryOtherCommandGoesToTheNotesWithNotesTargeted() {
+    for command in everyCommand where command != .undo && command != .redo {
+      XCTAssertEqual(command.route(target: .notes(trackId: 3)), .notes(trackId: 3),
+                     "\(command) must never act on the chords the open track hides")
     }
   }
 

@@ -148,7 +148,10 @@ struct SequenceBarView: View {
               Color.clear
                 .frame(width: contentWidth, height: Self.blockHeight)
                 .contentShape(Rectangle())
-                .onTapGesture { state.select(.none) }          // click the empty strip: deselect
+                .onTapGesture {                                // click the empty strip: deselect
+                  state.targetChords()
+                  state.select(.none)
+                }
               HStack(spacing: 0) {
                 ForEach(Array(events.enumerated()), id: \.element.id) { index, event in
                   block(event, frame: layout.frames[index])
@@ -471,6 +474,7 @@ struct SequenceBarView: View {
   /// result in one command, and the snapshot it answers with draws the rings. A chord removed or undone away is
   /// dropped from the selection by the store itself.
   private func click(_ event: EventJSON) {
+    state.targetChords()   // a press on the strip: the keys act on the chords (tracks design D15 "Keyboard")
     state.select(SelectionLogic.resolve(click: event.id, modifiers: Self.clickModifiers(), ids: events.map(\.id),
                                         current: selection, anchor: selectedEventId))
   }
@@ -483,6 +487,7 @@ struct SequenceBarView: View {
 
   /// `event` alone, as the anchor (a drag or the voicing popover starting on a block outside the selection).
   private func select(_ event: EventJSON) {
+    state.targetChords()
     state.select(StripSelection(ids: [event.id], anchor: event.id))
   }
 
@@ -495,7 +500,10 @@ struct SequenceBarView: View {
         state = Resize(id: event.id, lengthBeats: Self.resizedLength(event.lengthBeats, by: value.translation.width),
                        startEndX: startEndX)
       }
-      .onChanged { _ in if !selection.contains(event.id) { select(event) } }
+      .onChanged { _ in
+        state.targetChords()
+        if !selection.contains(event.id) { select(event) }
+      }
       .onEnded { value in
         let length = Self.resizedLength(event.lengthBeats, by: value.translation.width)
         if length != event.lengthBeats {
@@ -508,7 +516,10 @@ struct SequenceBarView: View {
   private func moveGesture(_ event: EventJSON) -> some Gesture {
     DragGesture(minimumDistance: Self.moveThreshold, coordinateSpace: .global)
       .updating($move) { value, state, _ in state = Move(id: event.id, offset: value.translation.width) }
-      .onChanged { _ in if !selection.contains(event.id) { select(event) } }
+      .onChanged { _ in
+        state.targetChords()
+        if !selection.contains(event.id) { select(event) }
+      }
       .onEnded { value in
         let events = self.events
         guard let from = events.firstIndex(where: { $0.id == event.id }) else { return }
