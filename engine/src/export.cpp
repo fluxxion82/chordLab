@@ -301,7 +301,7 @@ std::string trackClipName(const Document& doc, int trackId, int sectionIndex) {
     if (track->name.empty()) {
         return section;  // no dash after nothing
     }
-    return track->name + " \xE2\x80\x93 " + section;  // an EN DASH, U+2013, between single spaces
+    return track->name + " - " + section;  // an ASCII hyphen between single spaces (Live reads the name as Mac Roman)
 }
 
 std::vector<std::uint8_t> exportClip(const Document& doc, const ClipSpec& spec, double bpm) {

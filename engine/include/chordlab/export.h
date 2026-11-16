@@ -107,8 +107,10 @@ PlaySpan sectionSpanBeats(const Document& doc, int sectionIndex);
 Compiled compileTrack(const Document& doc, int trackId, int sectionIndex);
 
 /// The name Live gives a track's clip: the track's name for the whole progression (`sectionIndex` < 0, or 0 in a
-/// document without sections); for a section, the track's name, a space, an EN DASH (U+2013, the UTF-8 bytes
-/// `E2 80 93`), a space and the section's name; a section with an empty name takes `exportClipName`'s summary of
+/// document without sections); for a section, the track's name, a space, an ASCII hyphen (`2D`), a space and the
+/// section's name ("Bass - Verse"; not an en dash: Live reads a MIDI file's track name as Mac Roman, so the UTF-8
+/// bytes of U+2013 showed there as three wrong characters, Live Test 15); a section with an empty name takes
+/// `exportClipName`'s summary of
 /// its chords instead (the fallback the chords lane's own clip name uses). A track with an empty name has no
 /// separator to put before the section: the name is the section part alone ("F G7", or the section's name). Empty
 /// for an unknown track id or an invalid section index; the track's name, even an empty one, for the whole
