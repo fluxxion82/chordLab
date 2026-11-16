@@ -70,10 +70,12 @@ struct RollContext {
 /// - Only the open track's notes are hit-testable; inactive (dashed) notes exactly like active ones.
 /// - Draw order is note order and the TOPMOST note is the last in note order that contains the point, so the view
 ///   must draw the open track's notes in note order (later notes over earlier ones).
-/// - A note's rectangle is `RollGeometry.noteRect`, half-open on both axes: x in `[start, end)`, and the row per
-///   `RollGeometry` (a point on a row boundary belongs to the row below it on screen). Nothing is hit above pitch
-///   127's row or below pitch 0's.
-/// - Each edge zone is `min(4 pt, width / 4)` wide, so a narrow note always keeps a body (half its width).
+/// - A note's rectangle is the one the roll shows, `RollGeometry.displayedNoteRect` (the logical rect widened to
+///   `RollGeometry.minDisplayedNoteWidth`, so a short note is hit where it is drawn), half-open on both axes: x in
+///   `[start, start + displayed width)`, and the row per `RollGeometry` (a point on a row boundary belongs to the row
+///   below it on screen). Nothing is hit above pitch 127's row or below pitch 0's.
+/// - Each edge zone is `min(4 pt, width / 4)` of the displayed width, so a narrow note always keeps a body (half its
+///   width).
 struct RollHit: Equatable {
   enum Zone: Equatable {
     case body, startEdge, endEdge
@@ -93,7 +95,7 @@ struct RollHit: Equatable {
     }
     let pitch = geometry.pitch(atY: point.y)
     for index in notes.indices.reversed() where notes.pitch[index] == pitch {
-      let rect = geometry.noteRect(start: notes.start[index], length: notes.length[index], pitch: pitch)
+      let rect = geometry.displayedNoteRect(start: notes.start[index], length: notes.length[index], pitch: pitch)
       guard point.x >= rect.minX, point.x < rect.maxX else { continue }
       let edge = min(maxEdgeWidth, rect.width / 4)
       let zone: Zone = point.x < rect.minX + edge ? .startEdge : point.x >= rect.maxX - edge ? .endEdge : .body
@@ -107,14 +109,16 @@ struct RollHit: Equatable {
     hit(at: point, notes: context.notes, geometry: context.geometry)
   }
 
-  /// The ids of the notes a rubber band touches: every note whose half-open rectangle meets the CLOSED `band`, so a
-  /// band of zero height (a purely horizontal drag) still selects along its row, and a band edge exactly on a row
-  /// or note boundary takes the row or note that boundary belongs to.
+  /// The ids of the notes a rubber band touches: every note whose half-open displayed rectangle
+  /// (`RollGeometry.displayedNoteRect`) meets the CLOSED `band`, so a band of zero height (a purely horizontal drag)
+  /// still selects along its row, and a band edge exactly on a row or note boundary takes the row or note that
+  /// boundary belongs to.
   static func ids(inBand band: CGRect, context: RollContext) -> Set<Int> {
     var ids = Set<Int>()
     let notes = context.notes
     for index in notes.indices {
-      let rect = context.geometry.noteRect(start: notes.start[index], length: notes.length[index], pitch: notes.pitch[index])
+      let rect = context.geometry.displayedNoteRect(start: notes.start[index], length: notes.length[index],
+                                                    pitch: notes.pitch[index])
       if band.minX < rect.maxX, band.maxX >= rect.minX, band.minY < rect.maxY, band.maxY >= rect.minY {
         ids.insert(notes.id[index])
       }

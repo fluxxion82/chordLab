@@ -120,6 +120,25 @@ final class RollGeometryTests: XCTestCase {
     XCTAssertEqual(RollGeometry().noteRect(start: 0, length: -10, pitch: 60).width, 0)
   }
 
+  func testTheDisplayedRectOfAShortNoteIsWidenedToTheMinimum() {
+    // 30 ticks at 12 pt per beat: 0.375 pt logically, drawn and hit 2 pt wide from the same start and row.
+    let geometry = RollGeometry(pxPerBeat: 12, rowHeight: 14)
+    XCTAssertEqual(RollGeometry.minDisplayedNoteWidth, 2)
+    let logical = geometry.noteRect(start: 960, length: 30, pitch: 60)
+    XCTAssertEqual(logical.width, 0.375, accuracy: 1e-9)
+    let displayed = geometry.displayedNoteRect(start: 960, length: 30, pitch: 60)
+    XCTAssertEqual(displayed, CGRect(x: logical.minX, y: logical.minY, width: 2, height: logical.height))
+    XCTAssertEqual(geometry.displayedNoteRect(start: 0, length: 0, pitch: 60).width, 2, "even an empty note shows")
+  }
+
+  func testTheDisplayedRectOfANoteWiderThanTheMinimumIsItsRect() {
+    let geometry = RollGeometry(pxPerBeat: 48, rowHeight: 14)
+    XCTAssertEqual(geometry.displayedNoteRect(start: 960, length: 480, pitch: 60),
+                   geometry.noteRect(start: 960, length: 480, pitch: 60))
+    XCTAssertEqual(geometry.displayedNoteRect(start: 0, length: 40, pitch: 60).width, 2, accuracy: 1e-9,
+                   "exactly the minimum")
+  }
+
   func testRowRectSpansTheGivenWidth() {
     let rect = RollGeometry(rowHeight: 20).rowRect(pitch: 100, width: 500)
     XCTAssertEqual(rect, CGRect(x: 0, y: 27 * 20, width: 500, height: 20))

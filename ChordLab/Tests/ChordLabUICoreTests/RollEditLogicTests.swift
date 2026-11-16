@@ -166,6 +166,50 @@ final class RollEditLogicTests: XCTestCase {
     XCTAssertEqual(RollHit.hit(at: point(6000, 62), context: context())?.id, 13)
   }
 
+  // MARK: - Short notes hit where they draw (RollGeometry.displayedNoteRect)
+
+  /// 12 pt per beat: a 30-tick note is 0.375 pt logically and drawn 2 pt wide.
+  private let zoomedOut = RollGeometry(pxPerBeat: 12, rowHeight: 14, ticksPerBeat: 960)
+
+  func testAClickOnAShortNotesDisplayedCentreHitsIt() {
+    let roll = context([(1, 60, 960, 30, 100, true)], geometry: zoomedOut)
+    let left = zoomedOut.x(tick: 960)   // 12
+    let y = point(0, 60).y
+    XCTAssertEqual(RollHit.hit(at: CGPoint(x: left + 1, y: y), context: roll), RollHit(index: 0, id: 1, zone: .body),
+                   "the displayed centre, well past the logical end (12.375)")
+    // The edge zones follow the displayed width: min(4 pt, 2 / 4) = 0.5 pt each.
+    XCTAssertEqual(RollHit.hit(at: CGPoint(x: left + 0.4, y: y), context: roll)?.zone, .startEdge)
+    XCTAssertEqual(RollHit.hit(at: CGPoint(x: left + 1.6, y: y), context: roll)?.zone, .endEdge)
+    XCTAssertNil(RollHit.hit(at: CGPoint(x: left + 2, y: y), context: roll), "just right of the displayed rect")
+    XCTAssertNil(RollHit.hit(at: CGPoint(x: left - 0.01, y: y), context: roll))
+  }
+
+  func testAClickOnAShortNoteSelectsItRatherThanInsertingOne() {
+    let roll = context([(1, 60, 960, 30, 100, true)], geometry: zoomedOut)
+    let p = CGPoint(x: zoomedOut.x(tick: 960) + 1, y: point(0, 60).y)
+    let (_, effects) = run([down(p), up(p)], roll)
+    XCTAssertEqual(sends(effects), [.selectNotes(trackId: 7, ids: [1])])
+  }
+
+  func testShortNotesStartingTogetherHitTheLastInNoteOrder() {
+    let roll = context([(1, 60, 960, 30, 100, true), (2, 60, 960, 60, 100, true)], geometry: zoomedOut)
+    let y = point(0, 60).y
+    XCTAssertEqual(RollHit.hit(at: CGPoint(x: zoomedOut.x(tick: 960) + 1, y: y), context: roll)?.id, 2)
+    // A short note right after another, inside the first one's displayed width: the later one is on top.
+    let adjacent = context([(1, 60, 960, 30, 100, true), (2, 60, 990, 30, 100, true)], geometry: zoomedOut)
+    XCTAssertEqual(RollHit.hit(at: CGPoint(x: zoomedOut.x(tick: 960) + 1, y: y), context: adjacent)?.id, 2)
+    XCTAssertEqual(RollHit.hit(at: CGPoint(x: zoomedOut.x(tick: 960) + 0.2, y: y), context: adjacent)?.id, 1)
+  }
+
+  func testARubberBandMeetsAShortNotesDisplayedRect() {
+    let roll = context([(1, 60, 960, 30, 100, true)], geometry: zoomedOut)
+    let y = point(0, 60).y
+    let left = zoomedOut.x(tick: 960)
+    XCTAssertEqual(RollHit.ids(inBand: CGRect(x: left + 1.5, y: y, width: 10, height: 1), context: roll), [1])
+    XCTAssertEqual(RollHit.ids(inBand: CGRect(x: left + 2, y: y, width: 10, height: 1), context: roll), [],
+                   "the displayed rect is half-open")
+  }
+
   // MARK: - Empty space: insert and deselect
 
   func testAnEmptyClickWithoutASelectionInsertsOneNoteAtTheGridCell() {

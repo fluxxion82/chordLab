@@ -221,12 +221,16 @@ struct PianoRollCanvas: View, Equatable {
     }
   }
 
-  /// A note's rect in view coordinates: one row inset by a point (half a point under 12-pt rows) top and bottom,
-  /// and a point shorter, so neighbours never merge.
+  /// A note's rect in view coordinates: its displayed rect (`RollGeometry.displayedNoteRect`, at least
+  /// `minDisplayedNoteWidth` wide, the rect `RollHit` tests) inset by a point (half a point under 12-pt rows) top and
+  /// bottom, and a point shorter while that keeps the minimum, so neighbours never merge and what is drawn never
+  /// reaches past what is hit.
   private func noteRect(start: Int, length: Int, pitch: Int, geometry: RollGeometry, scroll: CGPoint) -> CGRect {
-    let rect = geometry.noteRect(start: start, length: length, pitch: pitch).offsetBy(dx: -scroll.x, dy: -scroll.y)
+    let rect = geometry.displayedNoteRect(start: start, length: length, pitch: pitch)
+      .offsetBy(dx: -scroll.x, dy: -scroll.y)
     let inset: CGFloat = geometry.rowHeight >= 12 ? 1 : 0.5
-    return CGRect(x: rect.minX, y: rect.minY + inset, width: max(rect.width - 1, 2), height: rect.height - 2 * inset)
+    return CGRect(x: rect.minX, y: rect.minY + inset,
+                  width: max(rect.width - 1, RollGeometry.minDisplayedNoteWidth), height: rect.height - 2 * inset)
   }
 
   private func roundedNote(_ rect: CGRect) -> Path {
