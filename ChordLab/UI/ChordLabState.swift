@@ -122,19 +122,24 @@ class ChordLabState: NSObject, ObservableObject {
     self.endEdit = { _ in }
     self.sendCommand = { _, _ in }
     self.mouseButtonsDown = { NSEvent.pressedMouseButtons != 0 }
+    self.clipboardToken = ClipboardToken.resolve(nil)
     super.init()
   }
 
+  /// `clipboardToken` is the plug-in instance's (`ClipboardToken`: the view controller passes the one the C++ shell
+  /// made); nil makes one for this state alone.
   public init(beginEdit: @MainActor @escaping (Int) -> Void = { _ in },
               doEdit: @MainActor @escaping (Int, Double) -> Void = { _, _ in },
               endEdit: @MainActor @escaping (Int) -> Void = { _ in },
               sendCommand: @MainActor @escaping (Int, Data?) -> Void = { _, _ in },
-              mouseButtonsDown: @escaping () -> Bool = { NSEvent.pressedMouseButtons != 0 }) {
+              mouseButtonsDown: @escaping () -> Bool = { NSEvent.pressedMouseButtons != 0 },
+              clipboardToken: String? = nil) {
     self.beginEdit = beginEdit
     self.doEdit = doEdit
     self.endEdit = endEdit
     self.sendCommand = sendCommand
     self.mouseButtonsDown = mouseButtonsDown
+    self.clipboardToken = ClipboardToken.resolve(clipboardToken)
     super.init()
   }
 
@@ -313,7 +318,7 @@ class ChordLabState: NSObject, ObservableObject {
   /// router consumes every mapped key whether or not it did anything, so the host never acts on it (see
   /// `KeyCommandMap`, `EditorKeyRouter`).
   @MainActor func perform(_ command: KeyCommand) {
-    switch command.route(target: keyTarget) {
+    switch command.route(target: keyTarget, openLane: openLane) {
     case .shared:
       send(command: ["cmd": command == .redo ? "redo" : "undo"])
     case .chords:
@@ -325,6 +330,8 @@ class ChordLabState: NSObject, ObservableObject {
                                     insertMarker: view.editState.insertMarker, pasteboard: pasteboard) {
         send(command: note.json)
       }
+    case .ignored:
+      return   // the targeted track is not the open lane: nothing acts on a hidden track
     }
   }
 
@@ -370,10 +377,11 @@ class ChordLabState: NSObject, ObservableObject {
   /// here.
   var pasteboard: any ChordPasteboard = NSPasteboard.general
 
-  /// This instance's clipboard token (tracks design D21), made when the state starts: a chord copy carries it, and a
-  /// paste whose payload carries another (another instance, whose track ids mean nothing here) drops the notes' track
-  /// ids so the engine matches lanes by name and role or creates tracks.
-  let clipboardToken = UUID().uuidString
+  /// The plug-in instance's clipboard token (tracks design D21, `ClipboardToken`): made once per instance by the C++
+  /// shell and passed in by the view controller, so it outlives this state (an editor window closed and reopened keeps
+  /// it). A chord copy carries it, and a paste whose payload carries another (another instance, whose track ids mean
+  /// nothing here) drops the notes' track ids so the engine matches lanes by name and role or creates tracks.
+  let clipboardToken: String
 
   /// The ids of the strip's blocks in order; empty before the first snapshot.
   private var eventIds: [Int] { snapshot?.events.map(\.id) ?? [] }
@@ -636,7 +644,8 @@ class ChordLabState: NSObject, ObservableObject {
 
   /// The roll's context menu for a right-click or ⌃-click at content `point` of track `trackId` (`RollContextMenu`):
   /// targets that track's notes (like the roll's mouse-down), sends the right-clicked note's selection when it was
-  /// not selected, and returns the model the view turns into an `NSMenu`; nil for a track the snapshot lacks.
+  /// not selected (clearing the insert marker, as a note press does: `RollContextMenu.editState(afterOpening:)`), and
+  /// returns the model the view turns into an `NSMenu`; nil for a track the snapshot lacks.
   @MainActor func rollContextMenu(trackId: Int, at point: CGPoint) -> RollContextMenu? {
     guard let snapshot, let timing = rollTiming else { return nil }
     let view = rolls.states[trackId]
@@ -644,6 +653,7 @@ class ChordLabState: NSObject, ObservableObject {
                                           geometry: view.geometry(ticksPerBeat: timing.ticksPerBeat), grid: view.grid,
                                           notesOnPasteboard: canPasteNotes) else { return nil }
     if keyTarget != .notes(trackId: trackId) { keyTarget = .notes(trackId: trackId) }
+    editRoll(trackId: trackId) { state, _, _ in state.editState = menu.editState(afterOpening: state.editState) }
     if let select = menu.select { send(command: select.json) }
     return menu
   }

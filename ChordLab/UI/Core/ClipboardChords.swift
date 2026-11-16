@@ -192,6 +192,19 @@ enum ClipboardChords {
   }
 }
 
+/// The clipboard token of one plug-in instance (tracks design D21, Task 20 review): the C++ shell makes it once per
+/// instance (`ChordLab::mClipboardToken`, a UUID made in the constructor) and `ChordLab::OpenWindow` hands it to the
+/// view controller before the editor's state exists, so every editor window of the same instance (Live closes and
+/// reopens them routinely) carries the same token and pastes its own copies with their track ids. Without one (a
+/// harness, a test, an older shell) each state makes its own.
+enum ClipboardToken {
+  /// `given` when it holds anything but whitespace, else a fresh UUID string.
+  static func resolve(_ given: String?) -> String {
+    guard let given, !given.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return UUID().uuidString }
+    return given
+  }
+}
+
 /// The two forms of one copy (strip editing D5, tracks design D15): ChordLab's payload under its custom `type`
 /// (`ClipboardChords.pasteboardType` with `ClipboardChords.encode`'s bytes, or `NoteClipboard.pasteboardType` with
 /// `NoteClipboard.encode`'s) and the plain-text line (the chord symbols, or the note names). A pasteboard writes

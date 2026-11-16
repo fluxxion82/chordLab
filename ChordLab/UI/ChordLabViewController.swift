@@ -4,6 +4,11 @@ public typealias MIDINoteNumber = UInt8
 public typealias MIDIVelocity = UInt8
 
 @objc class ChordLabViewController: IPlugCocoaViewController {
+  /// The plug-in instance's clipboard token (tracks design D21): `ChordLab::OpenWindow` sets it right after creating
+  /// this controller and before touching its view, so the lazy `state` below is created with it. One per plug-in
+  /// instance, not per window: an editor closed and reopened pastes its own chord copies with their track ids.
+  @objc var clipboardToken: String?
+
   // All callbacks capture `self` weakly: the controller owns the state, and the
   // state owns these closures, so strong captures would form a retain cycle.
   lazy var state = ChordLabState(
@@ -12,7 +17,8 @@ public typealias MIDIVelocity = UInt8
     endEdit: { [weak self] idx in self?.endInformHostOfParamChangeFromUI(paramIdx: idx) },
     sendCommand: { [weak self] tag, data in
       self?.sendArbitraryMsgFromUI(msgTag: tag, ctrlTag: kNoCtrlTag, msg: data)
-    })
+    },
+    clipboardToken: clipboardToken)
 
   /// The keyboard routes (`EditorKeyRouter`): installed while the view is on screen.
   private lazy var keyRouter = EditorKeyRouter(view: view, state: state)

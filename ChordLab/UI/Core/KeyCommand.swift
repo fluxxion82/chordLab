@@ -92,17 +92,21 @@ enum KeyRoute: Equatable {
   case chords
   /// That track's notes (`NoteKeys`).
   case notes(trackId: Int)
+  /// Nothing: the targeted track's roll is not the open lane (defence in depth; the target resets on every lane
+  /// change, so this should never happen).
+  case ignored
 }
 
 extension KeyCommand {
-  /// The route for this command with `target`: undo and redo are `.shared`; everything else follows the target, so a
-  /// key with a track's notes targeted never acts on the chords the open track hides, and one with the chords
-  /// targeted never acts on notes.
-  func route(target: KeyTarget) -> KeyRoute {
+  /// The route for this command with `target` while `openLane` is shown: undo and redo are `.shared`; everything else
+  /// follows the target, so a key with a track's notes targeted never acts on the chords the open track hides, and one
+  /// with the chords targeted never acts on notes. A notes target whose track is not the open lane is `.ignored`, so
+  /// nothing ever acts on a track that is not open.
+  func route(target: KeyTarget, openLane: Lane) -> KeyRoute {
     if self == .undo || self == .redo { return .shared }
     switch target {
     case .chords: return .chords
-    case .notes(let trackId): return .notes(trackId: trackId)
+    case .notes(let trackId): return openLane == .track(trackId) ? .notes(trackId: trackId) : .ignored
     }
   }
 }

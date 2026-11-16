@@ -138,6 +138,26 @@ final class ClipboardChordNotesTests: XCTestCase {
                    #"{"cmd":"removeChords","ids":[1]}"#)
   }
 
+  // MARK: - The token (one per plug-in instance, Task 20 review)
+
+  func testTheInstanceTokenComesFromTheShellElseAFreshOne() {
+    XCTAssertEqual(ClipboardToken.resolve("6F1C-shell"), "6F1C-shell", "the plug-in instance's token is kept")
+    let fresh = ClipboardToken.resolve(nil)
+    XCTAssertFalse(fresh.isEmpty)
+    XCTAssertNotEqual(fresh, ClipboardToken.resolve(nil), "without one (a harness, a test) each state makes its own")
+    XCTAssertFalse(ClipboardToken.resolve("").isEmpty, "an empty token is no token")
+    XCTAssertNotEqual(ClipboardToken.resolve("  "), "  ")
+  }
+
+  func testAnEditorReopenedWithTheSameTokenPastesItsEarlierCopyAsItsOwn() throws {
+    let instance = ClipboardToken.resolve("instance-1")
+    let board = FakeChordBoard()
+    XCTAssertTrue(ClipboardChords.copy([1], from: events, tracks: tracks, token: instance, to: board))
+    // The window closed and reopened: a new state, the same instance token.
+    let reopened = ClipboardToken.resolve("instance-1")
+    XCTAssertEqual(try XCTUnwrap(ClipboardChords.paste(from: board, ownToken: reopened)).first?.notes?.map(\.lane), [bass, lead])
+  }
+
   // MARK: - The insertChords entries (paste and ⌘D)
 
   func testTheInsertCommandCarriesTheNotesAsTheEngineTakesThem() throws {

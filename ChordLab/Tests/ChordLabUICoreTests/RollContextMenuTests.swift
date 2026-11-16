@@ -146,4 +146,33 @@ final class RollContextMenuTests: XCTestCase {
     _ = NoteKeys.copy(ids: [4], trackId: 2, snapshot: snapshot, pasteboard: board)
     XCTAssertEqual(commands(.pasteHere, m, snapshot, board: board), [])
   }
+
+  // MARK: - The insert marker (Task 20 review)
+
+  func testAMenuThatSelectsANoteClearsTheInsertMarker() throws {
+    let m = try XCTUnwrap(menu(try fixture(), track: 1, at: point(tick: 4800, pitch: 45)))
+    let state = RollEditState(lastLength: 480, insertMarker: 1920)
+    XCTAssertEqual(m.editState(afterOpening: state), RollEditState(lastLength: 480, insertMarker: nil),
+                   "a note press clears the marker (M2); a right-click that selects a note does the same")
+  }
+
+  func testAMenuThatKeepsTheSelectionKeepsTheInsertMarker() throws {
+    let state = RollEditState(insertMarker: 1920)
+    let empty = try XCTUnwrap(menu(try fixture(), track: 2, at: point(tick: 3000, pitch: 50)))
+    XCTAssertEqual(empty.editState(afterOpening: state), state)
+    let selected = try XCTUnwrap(menu(try fixture(), track: 2, at: point(tick: 1200, pitch: 72)))
+    XCTAssertEqual(selected.editState(afterOpening: state), state)
+  }
+
+  // MARK: - One menu per click (Task 20 review)
+
+  func testAClickIsKnownByItsTypeTimestampAndNumber() {
+    let click = RollMenuClick(type: 3, timestamp: 12.5, eventNumber: 7)
+    XCTAssertEqual(click, RollMenuClick(type: 3, timestamp: 12.5, eventNumber: 7), "the same click, another NSEvent object")
+    XCTAssertNotEqual(click, RollMenuClick(type: 3, timestamp: 12.5, eventNumber: 8))
+    XCTAssertNotEqual(click, RollMenuClick(type: 1, timestamp: 12.5, eventNumber: 7), "a ⌃-click is not the right-click")
+    XCTAssertNotEqual(click, RollMenuClick(type: 3, timestamp: 13, eventNumber: 7))
+    XCTAssertTrue(click.isSame(as: RollMenuClick(type: 3, timestamp: 12.5, eventNumber: 7)))
+    XCTAssertFalse(click.isSame(as: nil))
+  }
 }

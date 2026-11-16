@@ -74,6 +74,16 @@ struct RollContextMenu: Equatable {
                            notesOnPasteboard: notesOnPasteboard)
   }
 
+  /// The track's edit state once the menu has opened: a menu that selects the right-clicked note clears the insert
+  /// marker, as a note press does (M2 "As built"), so a ⌘V afterwards pastes after that note rather than at an old
+  /// marker; a menu that keeps the selection keeps the marker.
+  func editState(afterOpening state: RollEditState) -> RollEditState {
+    guard select != nil else { return state }
+    var next = state
+    next.insertMarker = nil
+    return next
+  }
+
   /// What choosing `item` sends against the CURRENT `snapshot` (zero or one command); Copy writes `pasteboard` and
   /// sends nothing. A disabled Paste here sends nothing.
   func commands(for item: Item, snapshot: Snapshot, timing: RollTiming, pasteboard: ChordPasteboard) -> [RollCommand] {
@@ -94,4 +104,16 @@ struct RollContextMenu: Equatable {
     }
     return result.map { [$0] } ?? []
   }
+}
+
+/// One context-menu click as `RollInputNSView` knows it (Task 20 review): its event type, timestamp and event number,
+/// so the view asks for the menu once per click whether AppKit asks (`menu(for:)`) and then delivers the same click to
+/// `rightMouseDown` or a ⌃-`mouseDown`, possibly as another `NSEvent` object, or does not ask at all.
+struct RollMenuClick: Equatable {
+  let type: UInt
+  let timestamp: TimeInterval
+  let eventNumber: Int
+
+  /// Whether `other` is this click.
+  func isSame(as other: RollMenuClick?) -> Bool { other == self }
 }

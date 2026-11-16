@@ -207,22 +207,34 @@ final class KeyCommandTests: XCTestCase {
 
   func testUndoAndRedoAreTheSharedHistoryForBothTargets() {
     for target in [KeyTarget.chords, .notes(trackId: 3)] {
-      XCTAssertEqual(KeyCommand.undo.route(target: target), .shared)
-      XCTAssertEqual(KeyCommand.redo.route(target: target), .shared)
+      XCTAssertEqual(KeyCommand.undo.route(target: target, openLane: .track(3)), .shared)
+      XCTAssertEqual(KeyCommand.redo.route(target: target, openLane: .track(3)), .shared)
     }
   }
 
   func testEveryOtherCommandGoesToTheChordsWithTheChordsTargeted() {
     for command in everyCommand where command != .undo && command != .redo {
-      XCTAssertEqual(command.route(target: .chords), .chords, "\(command)")
+      XCTAssertEqual(command.route(target: .chords, openLane: .track(3)), .chords, "\(command)")
     }
   }
 
   func testEveryOtherCommandGoesToTheNotesWithNotesTargeted() {
     for command in everyCommand where command != .undo && command != .redo {
-      XCTAssertEqual(command.route(target: .notes(trackId: 3)), .notes(trackId: 3),
+      XCTAssertEqual(command.route(target: .notes(trackId: 3), openLane: .track(3)), .notes(trackId: 3),
                      "\(command) must never act on the chords the open track hides")
     }
+  }
+
+  func testNotesOfATrackThatIsNotOpenAreNeverActedOn() {
+    // Defence in depth (Task 20 review): the target resets on every lane change, but a notes route also needs the
+    // targeted track's roll to be the open lane; otherwise the key does nothing (undo and redo stay shared).
+    for command in everyCommand where command != .undo && command != .redo {
+      XCTAssertEqual(command.route(target: .notes(trackId: 3), openLane: .track(4)), .ignored, "\(command)")
+      XCTAssertEqual(command.route(target: .notes(trackId: 3), openLane: .chords), .ignored, "\(command)")
+    }
+    XCTAssertEqual(KeyCommand.undo.route(target: .notes(trackId: 3), openLane: .chords), .shared)
+    XCTAssertEqual(KeyCommand.deleteSelection.route(target: .chords, openLane: .track(4)), .chords,
+                   "the chords stay editable with a track open (the strip is visible)")
   }
 
   // MARK: - The AppKit adapter's key (route A: macOS key code and charactersIgnoringModifiers)

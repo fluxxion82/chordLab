@@ -197,6 +197,11 @@ ChordLab::ChordLab(const InstanceInfo& info)
   
   MakeDefaultPreset();
 
+  @autoreleasepool   // ARC is off here: the UUID and its string are autoreleased
+  {
+    mClipboardToken = [[[NSUUID UUID] UUIDString] UTF8String];
+  }
+
   std::lock_guard<std::mutex> lock(mModelMutex);
   RebuildPaletteLocked();
   PublishSnapshotLocked();                                       // the empty progression, generation 1
@@ -265,6 +270,8 @@ void* ChordLab::OpenWindow(void* pParent)
 #endif
   PLATFORM_VIEW* platformParent = (PLATFORM_VIEW*) pParent;
   auto* vc = [[ChordLabViewController alloc] initWithEditorDelegateAndBundleID: this : GetBundleID()];
+  // Before anything touches vc.view: the view's load creates the editor state, which reads the token (D21).
+  vc.clipboardToken = [NSString stringWithUTF8String: mClipboardToken.c_str()];   // autoreleased; the property copies it
   mViewController = vc;
   int width = PLUG_WIDTH;
   int height = PLUG_HEIGHT;

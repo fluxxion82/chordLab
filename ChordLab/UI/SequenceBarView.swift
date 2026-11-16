@@ -390,14 +390,18 @@ struct SequenceBarView: View {
   @ViewBuilder private func blockMenu(_ event: EventJSON) -> some View {
     let targets = SelectionLogic.targets(block: event.id, selection: selection)
     let count = targets.count > 1 ? " \(targets.count) chords" : ""
-    Button("Copy" + count) { state.copyChords(targets) }
-    Button("Cut" + count) { state.cutChords(targets) }
+    // Each action first targets the chords (a right-click on the strip is a press on it), so the keys that follow
+    // (a ⌘V after Cut) act on the chords, not on the notes a roll click targeted before.
+    Button("Copy" + count) { state.targetChords(); state.copyChords(targets) }
+    Button("Cut" + count) { state.targetChords(); state.cutChords(targets) }
     Button("Paste after") {
+      state.targetChords()
       state.pasteChords(at: (events.firstIndex { $0.id == event.id } ?? events.count - 1) + 1)
     }
     .disabled(!state.canPaste)
-    Button("Duplicate" + count) { state.duplicateChords(targets) }
+    Button("Duplicate" + count) { state.targetChords(); state.duplicateChords(targets) }
     Button(targets.count > 1 ? "Remove" + count : "Remove chord") {
+      state.targetChords()
       state.send(command: ClipboardChords.removeCommand(targets))
     }
     if event.inversion != nil {
@@ -409,10 +413,11 @@ struct SequenceBarView: View {
   /// The voicing choices: the voicing popover, the inversions and octaves directly, Auto, and Transpose all
   /// chords (the whole sequence by a semitone).
   @ViewBuilder private func voicingMenu(_ event: EventJSON) -> some View {
-    Button("Voicing…") { openVoicing(event) }
+    Button("Voicing…") { state.targetChords(); openVoicing(event) }
     Menu("Inversion") {
       ForEach(0..<max(1, event.voicing.count), id: \.self) { inversion in
         Button(VoicingPopoverView.inversionName(inversion) + ((event.inversion ?? 0) == inversion ? "  ✓" : "")) {
+          state.targetChords()
           state.send(command: ["cmd": "setInversion", "id": event.id, "inversion": inversion])
         }
       }
@@ -420,16 +425,17 @@ struct SequenceBarView: View {
     Menu("Octave") {
       ForEach([1, 0, -1], id: \.self) { octave in
         Button(HarmonyText.octaveLabel(octave) + ((event.octave ?? 0) == octave ? "  ✓" : "")) {
+          state.targetChords()
           state.send(command: ["cmd": "setOctave", "id": event.id, "octave": octave])
         }
       }
     }
-    Button("Auto voicing") { state.send(command: ["cmd": "resetVoicing", "id": event.id]) }
+    Button("Auto voicing") { state.targetChords(); state.send(command: ["cmd": "resetVoicing", "id": event.id]) }
       .disabled(!VoicingReset.isAvailable(manual: event.manualVoicing, inversion: event.inversion, octave: event.octave))
     // Every chord in the sequence, not just this one (one undo step each).
     Menu("Transpose all chords") {
-      Button("Up a semitone") { state.send(command: ["cmd": "transposeProgression", "semitones": 1]) }
-      Button("Down a semitone") { state.send(command: ["cmd": "transposeProgression", "semitones": -1]) }
+      Button("Up a semitone") { state.targetChords(); state.send(command: ["cmd": "transposeProgression", "semitones": 1]) }
+      Button("Down a semitone") { state.targetChords(); state.send(command: ["cmd": "transposeProgression", "semitones": -1]) }
     }
   }
 

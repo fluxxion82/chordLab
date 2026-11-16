@@ -1,4 +1,3 @@
-import CoreGraphics
 import Foundation
 
 /// How a clicked preset is loaded (plan P4, P7): appended after the last chord, or replacing the chords and
@@ -75,7 +74,6 @@ enum PresetStyle {
     return parts.joined(separator: ", ")
   }
 
-  /// The command a click sends (`json_api.h`, plan P4).
   /// Whether any of the snapshot's `tracks` has a note (inactive ones count); false without tracks.
   static func tracksHaveNotes(_ tracks: [TrackJSON]?) -> Bool {
     tracks?.contains { !$0.notes.isEmpty } ?? false
@@ -88,6 +86,7 @@ enum PresetStyle {
     tracksHaveNotes ? 450 : 360
   }
 
+  /// The command a click sends (`json_api.h`, plan P4).
   static func loadCommand(id: String, mode: PresetLoadMode) -> [String: Any] {
     ["cmd": "loadPreset", "id": id, "mode": mode.rawValue]
   }

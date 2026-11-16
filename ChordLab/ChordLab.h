@@ -233,6 +233,10 @@ private:
   // The host tempo as ProcessBlock last saw it, for the MIDI export and the listener; 120 until the first block.
   std::atomic<double> mHostBpm{120.0};
   std::string mLastExportPath;                                 // main thread: the path the UI was last given
+  // This instance's clipboard token (tracks design D21): a UUID made once in the constructor and handed to every
+  // editor's view controller in OpenWindow, so a chord copy pasted back into the same instance keeps its track ids
+  // even after the editor window was closed and reopened. Written once in the constructor, read on the main thread.
+  std::string mClipboardToken;
   std::vector<std::string> mExportPaths;                       // main thread: this instance's exports, for the destructor's cleanup
   uint32_t mExportCounter = 0;                                 // main thread: part of every export's unique name
   static constexpr std::chrono::milliseconds kTransportPushInterval{67};   // at most ~15 Hz

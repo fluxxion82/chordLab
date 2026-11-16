@@ -128,8 +128,8 @@ final class RollMenuItem: NSMenuItem {
 ///   `handlers.contextMenu` at the click's content point, so AppKit shows it; a ⌃-click is never a `down`. A ⌃-click
 ///   with a gesture still marked in progress (its up was lost) cancels that gesture first, and the button's later drags
 ///   and up are ignored; a right-click while a left drag is in progress shows nothing (and asks nothing). When AppKit
-///   did not ask for this event (`rightMouseDown` or a ⌃-`mouseDown` arriving without a `menu(for:)` call for that
-///   very event), the view asks and pops the menu up itself, so the menu is asked once per click either way. Asking
+///   did not ask for this click (`rightMouseDown` or a ⌃-`mouseDown` arriving without a `menu(for:)` call for that
+///   click, known by type, timestamp and event number: `RollMenuClick`), the view asks and pops the menu up itself, so the menu is asked once per click either way. Asking
 ///   targets the notes and may select the clicked note (`ChordLabState.rollContextMenu`).
 /// - **Cancel:** on its window resigning key, the application resigning active and the view leaving its window, a
 ///   `cancel` event is sent whether or not a gesture is in progress (the machine leaves an idle state as it is, with
@@ -179,7 +179,7 @@ final class RollInputNSView: NSView {
   override func mouseDown(with event: NSEvent) {
     if Self.modifiers(event.modifierFlags).control {
       // AppKit has usually asked `menu(for:)` already (and showed what it returned); otherwise ask now.
-      if lastMenuEvent !== event { showContextMenu(for: event) }
+      if !Self.click(event).isSame(as: lastMenuClick) { showContextMenu(for: event) }
       return
     }
     gestureActive = true
@@ -205,25 +205,32 @@ final class RollInputNSView: NSView {
 
   override func rightMouseDown(with event: NSEvent) {
     // Not `super`: NSView's own would pass a click with no menu up the responder chain (to SwiftUI's views).
-    if lastMenuEvent !== event { showContextMenu(for: event) }
+    if !Self.click(event).isSame(as: lastMenuClick) { showContextMenu(for: event) }
   }
 
-  /// The last event `menu(for:)` was asked for, so one click never asks twice (see the type's "Context menu").
-  private weak var lastMenuEvent: NSEvent?
+  /// The last click `menu(for:)` was asked for, so one click never asks twice (see the type's "Context menu"); known
+  /// by its type, timestamp and event number (`RollMenuClick`), not by the `NSEvent` object, which AppKit may copy.
+  private var lastMenuClick: RollMenuClick?
+
+  /// A right- or left-mouse-down event as a `RollMenuClick` (`eventNumber` is valid for mouse events only).
+  private static func click(_ event: NSEvent) -> RollMenuClick {
+    RollMenuClick(type: UInt(event.type.rawValue), timestamp: event.timestamp, eventNumber: event.eventNumber)
+  }
 
   /// AppKit's question for a right-click or ⌃-click (and the view's own, `showContextMenu`): the roll's context menu at
   /// the click, nil during a left drag (right-click) or for any other event. Never starts a gesture; a ⌃-click ends a
   /// stale one first (this button is down, so a gesture still in progress lost its up).
   override func menu(for event: NSEvent) -> NSMenu? {
-    lastMenuEvent = event
     switch event.type {
     case .rightMouseDown:
+      lastMenuClick = Self.click(event)
       // The right button itself counts as down here, so this rarely finds a lost left up; the move that brought the
       // pointer here usually has (`mouseMoved`).
       cancelIfButtonLost()
       guard !gestureActive else { return nil }
     case .leftMouseDown:
       guard Self.modifiers(event.modifierFlags).control else { return nil }
+      lastMenuClick = Self.click(event)
       if gestureActive { cancelGesture() }
     default:
       return nil
