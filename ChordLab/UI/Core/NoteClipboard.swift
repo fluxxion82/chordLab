@@ -118,16 +118,17 @@ enum NoteClipboard {
 
   /// The `insertNotes` of a paste at `base`: each note at `base` + its relative start with its pitch, velocity and
   /// length, the length clamped into the domain (at most `limits.maxNoteTick` − start, never below
-  /// `limits.minNoteTicks`). No `baseRevision` (decision: a paste names no existing ids, so a newer snapshot cannot
-  /// make it wrong). A start the progression does not own is the engine's refusal, shown like any other. nil for no
-  /// notes.
-  static func pasteCommand(_ clip: [ClipNote], trackId: Int, at base: Int, limits: RollLimits) -> RollCommand? {
+  /// `limits.minNoteTicks`). No `baseRevision` by default (decision: a paste names no existing ids, so a newer snapshot
+  /// cannot make it wrong); ⌘D passes the revision its notes came from (`NoteKeys.duplicate`). A start the
+  /// progression does not own is the engine's refusal, shown like any other. nil for no notes.
+  static func pasteCommand(_ clip: [ClipNote], trackId: Int, at base: Int, limits: RollLimits,
+                           baseRevision: UInt64? = nil) -> RollCommand? {
     guard !clip.isEmpty else { return nil }
     let specs = clip.map { note -> RollNoteSpec in
       let start = base + note.start
       let length = max(limits.minNoteTicks, min(note.length, limits.maxNoteTick - start))
       return RollNoteSpec(pitch: note.pitch, start: start, length: length, velocity: note.velocity)
     }
-    return .insertNotes(trackId: trackId, notes: specs, baseRevision: nil)
+    return .insertNotes(trackId: trackId, notes: specs, baseRevision: baseRevision)
   }
 }

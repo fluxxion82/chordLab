@@ -16,9 +16,10 @@ final class GuideStyleTests: XCTestCase {
     XCTAssertGreaterThan(opacity(.avoid, .bass), 0)
   }
 
-  func testLeadEmphasisesChordTonesAndTensionsEqually() {
+  func testLeadEmphasisesRootChordTonesAndTensionsEqually() {
     XCTAssertEqual(opacity(.chord, .lead), opacity(.tension, .lead))
-    XCTAssertGreaterThan(opacity(.chord, .lead), opacity(.root, .lead))
+    XCTAssertEqual(opacity(.root, .lead), opacity(.chord, .lead))
+    XCTAssertEqual(opacity(.root, .lead), 0.30, accuracy: 1e-12)
     XCTAssertGreaterThan(opacity(.root, .lead), opacity(.avoid, .lead))
     XCTAssertGreaterThan(opacity(.avoid, .lead), 0)
   }
@@ -46,7 +47,7 @@ final class GuideStyleTests: XCTestCase {
   func testOpacitiesAreFractionsAndTheTableIsPinned() {
     let table: [(TrackRole, [Double])] = [   // root, chord, tension, avoid, outside
       (.bass, [0.36, 0.24, 0.12, 0.06, 0]),
-      (.lead, [0.18, 0.30, 0.30, 0.06, 0]),
+      (.lead, [0.30, 0.30, 0.30, 0.06, 0]),
       (.other, [0.20, 0.20, 0.20, 0.06, 0]),
     ]
     for (track, values) in table {

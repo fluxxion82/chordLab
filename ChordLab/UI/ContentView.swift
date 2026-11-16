@@ -1,8 +1,10 @@
 import SwiftUI
 
-/// Key bar, the key transpose row (only while it has something to say), transport row, sequence bar,
-/// suggestions strip, palette grid and (only while another key is browsed) the home-key compare row, with a
-/// temporary status line and the MIDI drag-out control along the bottom. When the engine could not play the
+/// Key bar, the key transpose row (only while it has something to say), transport row, sequence bar, the lane
+/// tab row (`LaneTabsView`, tracks design D13) and the open lane: with Chords open the suggestions strip, palette
+/// grid and (only while another key is browsed) the home-key compare row; with a track open its piano roll
+/// (`PianoRollView`, tracks design D14) in their place. A temporary status line and the
+/// MIDI drag-out control run along the bottom. When the engine could not play the
 /// feel (`feelLimited`, plan D11), the bottom row says so beside the drag-out control, since the clip falls
 /// back to block chords too (in place of the counts line, which would leave the sentence too little room at
 /// 700 pt).
@@ -12,8 +14,8 @@ import SwiftUI
 /// Diatonic / Applied switch keeps its row above the palette (not while the key transpose row shows in a
 /// window shorter than `compactHeight`, unless the listener is active: the row then holds the Heard group and
 /// always shows), and whether the key transpose row draws compact (in a window shorter than `compactHeight`).
-/// The palette viewport is the row that gives up height; the status and export row along the bottom never
-/// does.
+/// The palette viewport (or, with a track open, the roll area) is the row that gives up height; the status and
+/// export row along the bottom never does.
 struct ContentView: View {
   @EnvironmentObject var state: ChordLabState
 
@@ -47,13 +49,23 @@ struct ContentView: View {
 
         SequenceBarView()
 
-        SuggestionsView()
+        LaneTabsView()
 
-        // While the listener is active the switch row carries the Heard group and always shows (D15).
-        PaletteView(showsViewSwitch: state.keyRow == nil || size.height >= Self.compactHeight
-                      || state.heard?.active == true)
+        // Chords open: the suggestions, the palette and the home row. A track open: its roll in their place
+        // (tracks design D13), so the palette's switch row, and the Heard group in it, hide with them.
+        if case .track(let id) = state.openLane, let track = state.snapshot?.track(id: id) {
+          // A fresh roll per track (`id`), so each one measures its grid, and first opens, when it shows.
+          PianoRollView(rolls: state.rolls, track: track)
+            .id(track.id)
+        } else {
+          SuggestionsView()
 
-        HomeRowView()
+          // While the listener is active the switch row carries the Heard group and always shows (D15).
+          PaletteView(showsViewSwitch: state.keyRow == nil || size.height >= Self.compactHeight
+                        || state.heard?.active == true)
+
+          HomeRowView()
+        }
 
         HStack(spacing: 16) {
           if state.snapshot?.feelLimited == true {

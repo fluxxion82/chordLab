@@ -7,7 +7,12 @@ class ChordLabState: NSObject, ObservableObject {
   var params: [Param] = []
   @Published var bundleID = String("")
   /// The last snapshot the plugin pushed; nil until the first one arrives.
-  @Published var snapshot: Snapshot?
+  @Published var snapshot: Snapshot? {
+    didSet { rollTiming = snapshot.map(RollTiming.init(snapshot:)) }
+  }
+  /// The roll's timing of `snapshot` (`RollTiming`), computed once per snapshot: its `contentEndTick` walks every
+  /// track's notes, and the roll's setters and canvases read it at display rate.
+  private(set) var rollTiming: RollTiming?
   /// The last command the plugin rejected, or a decode failure; cleared by the next good snapshot.
   @Published var lastError: String?
   /// Counts every error reported into `lastError`, so a watcher can tell a repeated identical error
@@ -22,6 +27,8 @@ class ChordLabState: NSObject, ObservableObject {
   var bpm: Double { transport?.tempo ?? 120 }
   /// The MIDI file of the last export request (`kMsgTagExportReady`), or nil while none is ready.
   @Published var exportPath: String?
+  /// The drag-outs' round trip (`ClipExportExchange`): each request's outcome, and which errors answer an export.
+  private let exports = ClipExportExchange()
   /// What the plug-in hears on its MIDI input (`kMsgTagHeard`, design D14); nil until the first push. The
   /// Heard group (`HeardView`) shows only while `active` is true.
   @Published var heard: HeardJSON?
@@ -29,11 +36,34 @@ class ChordLabState: NSObject, ObservableObject {
   /// down meanwhile, so typing a name never appends or removes chords.
   @Published var editingText = false
   /// What the keyboard edits (tracks design D15 "Keyboard", `KeyTarget`): the chords, or one track's notes; the key
-  /// routes ask the map with it (`EditorKeyRouter`). Every applied snapshot resolves it (`KeyTarget.resolved`: a
-  /// removed track's notes fall back to the chords). The roll's mouse-down sets `.notes` and an open-lane change
-  /// resets it (`KeyTarget.afterOpenLaneChange`), both wired in M3 with `openLane` (plan Tasks 16, 18); until then
-  /// it stays `.chords`.
+  /// routes ask the map with it (`EditorKeyRouter`) and `perform` dispatches by it (`KeyCommand.route`). Set by the
+  /// last press: the roll's mouse-down and its context-menu click target that track's notes (`handleRollPointer`,
+  /// `rollContextMenu`); a press on the strip, a palette or home-row cell or a suggestion chip targets the chords
+  /// (`targetChords`). Every applied snapshot resolves it (`KeyTarget.resolved`: a removed track's notes fall back to
+  /// the chords), and every open-lane change resets it (`KeyTarget.afterOpenLaneChange`, in `openLane`'s observer).
   @Published var keyTarget: KeyTarget = .chords
+  /// The lane the editor shows (tracks design D13): Chords (suggestions, palette, home row) or one track's roll.
+  /// UI state, never saved; every applied snapshot resolves it (`Lane.resolved`: a removed track falls back to
+  /// Chords). Changing it resets the key target, so a key never acts on a lane that has just been hidden.
+  @Published var openLane: Lane = .chords {
+    didSet {
+      guard openLane != oldValue else { return }
+      // The roll being left drops its gesture now (its held preview stops), not at its next event. Lane changes
+      // come from the main thread (the editor's views and the snapshot's fallback).
+      if case .track(let left) = oldValue { MainActor.assumeIsolated { cancelRollGesture(trackId: left) } }
+      let target = keyTarget.afterOpenLaneChange(from: oldValue, to: openLane)
+      if target != keyTarget { keyTarget = target }
+    }
+  }
+  /// The pending `addTrack`, until its answer: the next snapshot opens the one new track (`LaneOpener`,
+  /// `LaneTabs.laneAfterSnapshot`); a refusal (`applyError`) forgets it.
+  private var laneOpener = LaneOpener()
+  /// Every track's piano roll view state (scroll, zoom, grid, snap, mode, other tracks, the gesture state) and the
+  /// roll's viewport, by track id (tracks design D14; UI-only, never saved). A separate observable object, not a
+  /// `@Published` property here: the roll scrolls at display rate, and a change published by this object would
+  /// re-run the body of every view that observes it (the key bar, the transport row, the strip, the tabs). Only the
+  /// roll observes `rolls`; it changes through the `Roll` methods below.
+  let rolls = RollViewStore()
   /// The row under the key bar (`KeyTransposeRow`): the one-time "chords kept their notes" hint after a tonic
   /// change with Transpose with key off, or the four-second "moved" note after one with it on (D8, D9).
   /// Either closes as soon as a snapshot browses a key other than the project key.
@@ -53,33 +83,35 @@ class ChordLabState: NSObject, ObservableObject {
   /// Counts moved notes, so a note's timer clears that note only, never a later one.
   private var movedNoteSerial = 0
 
-  /// Id of the palette cell whose voicing is sounding (pressed), or nil.
+  /// Id of the palette cell whose voicing is sounding (pressed), or nil (`PreviewBook.heldCellId`, published here so
+  /// the cell draws pressed).
   @Published private(set) var heldCellId: String?
-  /// Preview id of the held cell: a per-press counter, so that Start and Stop pair up in the scheduler.
-  private var heldPreviewId: Int?
+  /// The note previews' bookkeeping (`PreviewBook`): the one held preview (a palette cell, the roll's note press, a
+  /// keyboard key), the roll's one-shots, the id counter. Start and Stop pair up by id in the scheduler.
+  private var previews = PreviewBook()
   /// The transport row's Record switch (strip editing design D9): while on, releasing a palette or home-row cell
   /// inserts its chord after the anchor (else at the end), as long as the cell was held. UI state: off whenever
   /// the window opens, never saved.
   @Published var recording = false
-  private var previewCounter = 0
-  /// While a cell is held, an `extend` for its preview every `keepAliveInterval` from a main-run-loop
-  /// timer in the common modes (so it fires during mouse tracking). The scheduler ends a preview four
-  /// seconds of processed audio after its Start or its last applied Extend, so it ends a held one only
-  /// when the extends stop reaching it: a main thread stalled for several seconds (the cell then shows
+  /// While a preview is held (a cell, the roll's note press, a keyboard key), an `extend` for it every
+  /// `keepAliveInterval` from a main-run-loop timer in the common modes (so it fires during mouse tracking). The
+  /// scheduler ends a preview four seconds of processed audio after its Start or its last applied Extend, so it ends a
+  /// held one only when the extends stop reaching it: a main thread stalled for several seconds (the cell then shows
   /// pressed until released and pressed again). It also ends a preview whose release never arrived;
   /// while the host processes no audio nothing expires. Each tick also stands in for a release the view
   /// never reported (`PreviewKeepAlive`): a hold that began with a mouse button down is released once no
   /// button is down; one that began without (touch input is outside the button mask) is renewed for at
-  /// most `PreviewKeepAlive.maxTicksWithoutButton` ticks. Invalidated on release, panic and deinit,
-  /// always on the main thread.
+  /// most `PreviewKeepAlive.maxTicksWithoutButton` ticks; a roll hold is released by cancelling its gesture
+  /// (`releaseHeld`). Invalidated on release, panic and deinit, always on the main thread.
   static let keepAliveInterval: TimeInterval = 1.0
   private var keepAlive: Timer?
-  /// Whether a mouse button was down when the held cell was pressed, and the keep-alive ticks since.
+  /// Whether a mouse button was down when the held preview began, and the keep-alive ticks since.
   private var holdHasButton = false
   private var keepAliveTicks = 0
   /// The physical button state (`NSEvent.pressedMouseButtons`); a harness that synthesizes events
-  /// passes its own.
-  private let mouseButtonsDown: () -> Bool
+  /// passes its own. Read by the preview keep-alive and by the roll's input view (`RollInputHandlers.mouseButtonsDown`:
+  /// a gesture with no button down lost its mouse-up).
+  let mouseButtonsDown: () -> Bool
 
   let beginEdit: @MainActor (Int) -> Void
   let doEdit: @MainActor (Int, Double) -> Void
@@ -92,19 +124,24 @@ class ChordLabState: NSObject, ObservableObject {
     self.endEdit = { _ in }
     self.sendCommand = { _, _ in }
     self.mouseButtonsDown = { NSEvent.pressedMouseButtons != 0 }
+    self.resolvedClipboardToken = ClipboardToken.resolve(nil)
     super.init()
   }
 
+  /// `clipboardToken` is the plug-in instance's (`ClipboardToken`: the view controller passes the one the C++ shell
+  /// made); nil makes one for this state alone.
   public init(beginEdit: @MainActor @escaping (Int) -> Void = { _ in },
               doEdit: @MainActor @escaping (Int, Double) -> Void = { _, _ in },
               endEdit: @MainActor @escaping (Int) -> Void = { _ in },
               sendCommand: @MainActor @escaping (Int, Data?) -> Void = { _, _ in },
-              mouseButtonsDown: @escaping () -> Bool = { NSEvent.pressedMouseButtons != 0 }) {
+              mouseButtonsDown: @escaping () -> Bool = { NSEvent.pressedMouseButtons != 0 },
+              clipboardToken: String? = nil) {
     self.beginEdit = beginEdit
     self.doEdit = doEdit
     self.endEdit = endEdit
     self.sendCommand = sendCommand
     self.mouseButtonsDown = mouseButtonsDown
+    self.resolvedClipboardToken = ClipboardToken.resolve(clipboardToken)
     super.init()
   }
 
@@ -124,20 +161,14 @@ class ChordLabState: NSObject, ObservableObject {
 
   // MARK: - Preview (through the engine scheduler: kMsgTagPreview Start/Stop paired by id, Extend while held)
 
-  /// Sounds `cell`'s voicing. At most one cell is held: pressing another first releases the held one,
-  /// so every Start this object sends is matched by exactly one Stop with the same id (and the
-  /// scheduler's 4 s watchdog ends a preview whose Stop never arrived; `extend`s every second keep a
+  /// Sounds `cell`'s voicing. At most one preview is held (`PreviewBook`): pressing a cell first ends the held one
+  /// (a roll's with its gesture's cancel), so every Start this object sends is matched by exactly one Stop with the
+  /// same id (and the scheduler's 4 s watchdog ends a preview whose Stop never arrived; `extend`s every second keep a
   /// held one alive).
   @MainActor func pressCell(_ cell: CellJSON) {
-    releaseHeld()
-    previewCounter += 1
-    let id = previewCounter
-    heldPreviewId = id
-    heldCellId = cell.id
-    let pitches = Array(cell.voicing.filter { (0...127).contains($0) }.prefix(8))
-    send(["id": id, "on": true, "velocity": 100, "pitches": pitches], tag: kMsgTagPreview)
-    holdHasButton = mouseButtonsDown()
-    startKeepAlive(id: id)
+    targetChords()
+    route(previews.hold(.cell(cell.id), pitches: Array(cell.voicing.filter { (0...127).contains($0) }.prefix(8)),
+                        velocity: 100).outputs)
   }
 
   /// Releases `cell` if it is the held one; a cell that was already released (by a press elsewhere, a cancelled
@@ -164,21 +195,69 @@ class ChordLabState: NSObject, ObservableObject {
     send(command: RecordLength.command(root: cell.root, type: cell.type, beats: beats, index: index))
   }
 
-  /// Releases whatever is held (view disappearance, window close).
-  @MainActor func releaseHeld() {
-    stopKeepAlive()
-    guard let id = heldPreviewId else { return }
-    heldPreviewId = nil
-    heldCellId = nil
-    send(["id": id, "on": false], tag: kMsgTagPreview)
+  /// A press on the roll's keyboard column (tracks design D14: clicking a key previews it): holds `pitch` until
+  /// `releaseKey(id:)` with the id returned (or a lost release, which the keep-alive ends), ending any other hold
+  /// first. Nil for a pitch outside 0...127.
+  @MainActor func pressKey(pitch: Int) -> Int? {
+    guard (0...127).contains(pitch) else { return nil }
+    let held = previews.hold(.key(pitch: pitch), pitches: [pitch], velocity: PianoKeys.velocity)
+    route(held.outputs)
+    return held.id
   }
 
-  /// Silences everything the scheduler is sounding (next audio block).
+  /// The keyboard press `id` ended (its up, a cancel): stops that hold only; nothing when it no longer holds (another
+  /// press, the keep-alive or panic already ended it), so a key never stops twice or stops another press.
+  @MainActor func releaseKey(id: Int) {
+    route(previews.endHold(id: id))
+  }
+
+  /// Ends whatever is held (the editor closing, the keep-alive's lost release, panic): its Stop, and for a roll hold
+  /// that gesture's cancel (`PreviewBook.endHold`), so the gesture machine never believes it holds a stopped pitch.
+  @MainActor func releaseHeld() {
+    route(previews.endHold())
+  }
+
+  /// Ends every sounding preview with its own Stop (the held one as `releaseHeld` does; a one-shot keeps its pending
+  /// stop), then silences everything the scheduler is sounding (next audio block).
   @MainActor func panic() {
-    stopKeepAlive()
-    heldPreviewId = nil
-    heldCellId = nil
+    releaseHeld()
     sendCommand(kMsgTagPanic, Data())
+  }
+
+  /// Carries out the book's outputs (`PreviewOutput`), the only thing this object does for the previews: commands and
+  /// preview messages are sent, a one-shot's end is scheduled, a `.cancelRoll` cancels that track's gesture (its held
+  /// preview is already stopped, so the stop it hands back sends nothing); then the keep-alive follows the hold.
+  @MainActor private func route(_ outputs: [PreviewOutput]) {
+    for output in outputs {
+      switch output {
+      case .command(let command):
+        send(command: command.json)
+      case .preview(let message):
+        send(message.json, tag: kMsgTagPreview)
+      case .scheduleOneShotEnd(let id):
+        DispatchQueue.main.asyncAfter(deadline: .now() + PreviewBook.oneShotSeconds) { [weak self] in
+          guard let self else { return }
+          self.route(self.previews.oneShotEnded(id: id))
+        }
+      case .cancelRoll(let trackId):
+        cancelRollGesture(trackId: trackId)
+      }
+    }
+    syncHold()
+  }
+
+  /// After any change to the book: publishes the held cell, and runs the keep-alive for the held id (a new hold
+  /// samples the mouse button now) or stops it when nothing is held.
+  @MainActor private func syncHold() {
+    let cell = previews.heldCellId
+    if cell != heldCellId { heldCellId = cell }
+    guard let held = previews.held else {
+      stopKeepAlive()
+      return
+    }
+    guard keepAliveId != held.id else { return }
+    holdHasButton = mouseButtonsDown()
+    startKeepAlive(id: held.id)
   }
 
   /// The keep-alive timer's target. The timer retains it and it holds the state weakly, so a running
@@ -196,6 +275,9 @@ class ChordLabState: NSObject, ObservableObject {
     }
   }
 
+  /// The held id the keep-alive timer renews, nil while it is stopped.
+  private var keepAliveId: Int?
+
   @MainActor private func startKeepAlive(id: Int) {
     stopKeepAlive()
     keepAliveTicks = 0
@@ -203,20 +285,22 @@ class ChordLabState: NSObject, ObservableObject {
                       selector: #selector(KeepAliveTarget.tick(_:)), userInfo: nil, repeats: true)
     RunLoop.main.add(timer, forMode: .common)
     keepAlive = timer
+    keepAliveId = id
   }
 
   @MainActor private func stopKeepAlive() {
     keepAlive?.invalidate()
     keepAlive = nil
+    keepAliveId = nil
   }
 
   /// One tick: the timer is done when `id` is no longer held; otherwise `PreviewKeepAlive` decides
-  /// between an `extend` and a release.
+  /// between an `extend` and a release (`releaseHeld`: a roll hold through its gesture's cancel).
   @MainActor private func keepAliveTick(id: Int) {
-    guard heldPreviewId == id else { stopKeepAlive(); return }
+    guard previews.held?.id == id else { stopKeepAlive(); return }
     keepAliveTicks += 1
     switch PreviewKeepAlive.action(tick: keepAliveTicks, holdHasButton: holdHasButton, buttonDown: mouseButtonsDown()) {
-    case .extend: send(["id": id, "extend": true], tag: kMsgTagPreview)
+    case .extend: send(PreviewMessage.extend(id: id).json, tag: kMsgTagPreview)
     case .release: releaseHeld()
     }
   }
@@ -229,19 +313,36 @@ class ChordLabState: NSObject, ObservableObject {
     send(command, tag: kMsgTagCommand)
   }
 
-  /// Runs a keyboard command. Digits append the suggestion chip of that number (nothing when there is no such
-  /// chip); Delete removes every selected chord in one step; ⌘C copies the selection, ⌘X cuts it, ⌘V pastes
-  /// after the anchor (else at the end), ⌘D duplicates the selection after its last block, ⌘A selects every
-  /// block (strip editing design D5, D6); undo and redo are the key bar's commands; an arrow nudge (mapped only
-  /// with a track's notes targeted, tracks design D15) does nothing yet (plan Task 20); with notes targeted only
-  /// undo and redo run (`KeyCommand.runsBeforeNoteDispatch`). Each does nothing when it has nothing to act on,
-  /// and the router consumes every mapped key whether or not it did anything, so the host never acts on it (see
+  /// Runs a keyboard command, dispatched by the key target (`KeyCommand.route`, tracks design D15 "Keyboard"): undo and
+  /// redo are the key bar's commands (one history for chords and notes); with the chords targeted the rest acts on
+  /// them (`performOnChords`); with a track's notes targeted on those notes (`NoteKeys`: Delete, ⌘C ⌘X ⌘V ⌘D ⌘A and
+  /// the arrows, each at most one command, one undo step). Each does nothing when it has nothing to act on, and the
+  /// router consumes every mapped key whether or not it did anything, so the host never acts on it (see
   /// `KeyCommandMap`, `EditorKeyRouter`).
   @MainActor func perform(_ command: KeyCommand) {
-    // Everything below acts on the chords. With a track's notes targeted only the shared undo history runs, so
-    // a key meant for the notes never edits the chords the open track hides; plan Task 20 replaces this guard
-    // with the dispatch by target.
-    guard command.runsBeforeNoteDispatch(target: keyTarget) else { return }
+    switch command.route(target: keyTarget, openLane: openLane) {
+    case .shared:
+      send(command: ["cmd": command == .redo ? "redo" : "undo"])
+    case .chords:
+      performOnChords(command)
+    case .notes(let trackId):
+      guard let snapshot, let timing = rollTiming else { return }
+      let view = rolls.states[trackId]
+      for note in NoteKeys.commands(for: command, trackId: trackId, snapshot: snapshot, timing: timing, grid: view.grid,
+                                    insertMarker: view.editState.insertMarker, pasteboard: pasteboard) {
+        send(command: note.json)
+      }
+    case .ignored:
+      return   // the targeted track is not the open lane: nothing acts on a hidden track
+    }
+  }
+
+  /// A key with the chords targeted: digits append the suggestion chip of that number (nothing when there is no such
+  /// chip); Delete removes every selected chord in one step; ⌘C copies the selection, ⌘X cuts it, ⌘V pastes after the
+  /// anchor (else at the end), ⌘D duplicates the selection after its last block, ⌘A selects every block (strip editing
+  /// design D5, D6; the chords carry their notes, tracks design D21); an arrow is never mapped with the chords
+  /// targeted (the host keeps it).
+  @MainActor private func performOnChords(_ command: KeyCommand) {
     let selection = snapshot?.selection ?? []
     switch command {
     case .appendSuggestion(let n):
@@ -251,10 +352,6 @@ class ChordLabState: NSObject, ObservableObject {
     case .deleteSelection:
       guard !selection.isEmpty else { return }
       send(command: ClipboardChords.removeCommand(selection))
-    case .undo:
-      send(command: ["cmd": "undo"])
-    case .redo:
-      send(command: ["cmd": "redo"])
     case .copy:
       copyChords(selection)
     case .cut:
@@ -265,9 +362,15 @@ class ChordLabState: NSObject, ObservableObject {
       duplicateChords(selection)
     case .selectAll:
       select(SelectionLogic.all(eventIds))
-    case .nudge:
-      break   // mapped only with notes targeted, which needs the roll (M3); plan Task 20 sends the nudge
+    case .undo, .redo, .nudge:
+      break   // undo and redo are routed as shared; arrows are mapped only with notes targeted
     }
+  }
+
+  /// A press on the strip, a palette or home-row cell or a suggestion chip (tracks design D15 "Keyboard"): the keys
+  /// act on the chords from now on.
+  @MainActor func targetChords() {
+    if keyTarget != .chords { keyTarget = .chords }
   }
 
   // MARK: - Strip editing (the clipboard and the selection, strip editing design D5–D7)
@@ -275,6 +378,19 @@ class ChordLabState: NSObject, ObservableObject {
   /// Where the clipboard is written and read (`ChordPasteboard`): the general pasteboard; a harness may put a fake
   /// here.
   var pasteboard: any ChordPasteboard = NSPasteboard.general
+
+  /// The clipboard token of the plug-in instance's document lineage (tracks design D21, `ClipboardToken`): made by
+  /// the C++ shell and passed in by the view controller, so it outlives this state (an editor window closed and
+  /// reopened keeps it), and set again by the view controller when loaded state replaced the document (the shell
+  /// renews it then, before the loaded snapshot arrives). A chord copy carries it, and a paste whose payload carries
+  /// another (another instance, or this one before the load: track ids that mean nothing here) drops the notes'
+  /// track ids so the engine matches lanes by name and role or creates tracks. A blank value resolves to a fresh one
+  /// (`ClipboardToken.resolve`).
+  var clipboardToken: String {
+    get { resolvedClipboardToken }
+    set { resolvedClipboardToken = ClipboardToken.resolve(newValue) }
+  }
+  private var resolvedClipboardToken: String
 
   /// The ids of the strip's blocks in order; empty before the first snapshot.
   private var eventIds: [Int] { snapshot?.events.map(\.id) ?? [] }
@@ -284,13 +400,15 @@ class ChordLabState: NSObject, ObservableObject {
   /// pasteboard untouched, when none of them is on the strip.
   @MainActor @discardableResult func copyChords(_ ids: [Int]) -> Bool {
     guard let events = snapshot?.events else { return false }
-    return ClipboardChords.copy(ids, from: events, to: pasteboard)
+    return ClipboardChords.copy(ids, from: events, tracks: snapshot?.tracks, token: clipboardToken, to: pasteboard)
   }
 
   /// ⌘X and the block menu's Cut: the copy, then `removeChords` (one undo step), sent only once the copy is
   /// published (`ClipboardChords.cut`); a failed copy removes nothing.
   @MainActor func cutChords(_ ids: [Int]) {
-    guard let events = snapshot?.events, let removal = ClipboardChords.cut(ids, from: events, to: pasteboard) else { return }
+    guard let events = snapshot?.events,
+          let removal = ClipboardChords.cut(ids, from: events, tracks: snapshot?.tracks, token: clipboardToken,
+                                            to: pasteboard) else { return }
     send(command: removal)
   }
 
@@ -299,27 +417,285 @@ class ChordLabState: NSObject, ObservableObject {
     ClipboardChords.paste(from: pasteboard) != nil
   }
 
-  /// ⌘V and Paste after: inserts the pasteboard's chords at `index` (one undo step; they become the selection).
-  /// A pasteboard without ChordLab's chords (text only, or nothing) pastes nothing; a paste past 256 chords is
-  /// the engine's refusal, shown like any other (`lastError`), and the pasteboard keeps its content.
+  /// ⌘V and Paste after: inserts the pasteboard's chords with their notes at `index` (one undo step; they become the
+  /// selection). A payload another instance copied loses its notes' track ids (`ClipboardChords.paste(from:ownToken:)`,
+  /// D21). A pasteboard without ChordLab's chords (text only, or nothing) pastes nothing; a paste past 256 chords, an
+  /// ambiguous lane or no room for a new track is the engine's refusal, shown like any other (`lastError`), and the
+  /// pasteboard keeps its content.
   @MainActor func pasteChords(at index: Int) {
-    guard let chords = ClipboardChords.paste(from: pasteboard) else { return }
+    guard let chords = ClipboardChords.paste(from: pasteboard, ownToken: clipboardToken) else { return }
     send(command: ClipboardChords.insertCommand(chords, at: index))
   }
 
-  /// ⌘D and the block menu's Duplicate: the chords `ids` again, right after the last of them, without touching
-  /// the pasteboard.
+  /// ⌘D and the block menu's Duplicate: the chords `ids` again with their notes (each to its own track, D21), right
+  /// after the last of them, without touching the pasteboard.
   @MainActor func duplicateChords(_ ids: [Int]) {
-    guard let events = snapshot?.events else { return }
-    let chords = ClipboardChords.chords(of: events, ids: ids)
-    guard !chords.isEmpty else { return }
-    send(command: ClipboardChords.insertCommand(chords, at: SelectionLogic.index(after: ids, ids: eventIds)))
+    guard let events = snapshot?.events,
+          let command = ClipboardChords.duplicateCommand(ids, events: events, tracks: snapshot?.tracks) else { return }
+    send(command: command)
   }
 
   /// Makes `selection` the store's (one `selectEvent` or `selectEvents`), unless it already is.
   @MainActor func select(_ selection: StripSelection) {
     guard selection.ids != snapshot?.selection || selection.anchor != snapshot?.selectedEventId else { return }
     send(command: SelectionLogic.command(selection))
+  }
+
+  // MARK: - Lanes and tracks (the lane tab row, tracks design D13)
+
+  /// A tab click: shows `lane`, resolved against the snapshot's tracks (a lane the snapshot lacks opens Chords).
+  @MainActor func open(_ lane: Lane) {
+    let resolved = lane.resolved(in: snapshot?.tracks)
+    if resolved != openLane { openLane = resolved }
+  }
+
+  /// The + menu: `addTrack {role}` (the engine names the track, D2); its answering snapshot opens the new track.
+  /// Nothing at the track limit or for an engine without tracks.
+  @MainActor func addTrack(role: TrackRole) {
+    guard LaneTabs.canAddTrack(snapshot), let tracks = snapshot?.tracks else { return }
+    laneOpener.addSent(trackIds: tracks.map(\.id))
+    send(command: LaneTabs.addCommand(role: role))
+  }
+
+  /// The track menu's Remove: `removeTrack {id}`, no confirmation (undoable); an open track falls back to Chords
+  /// with the answering snapshot.
+  @MainActor func removeTrack(id: Int) {
+    send(command: LaneTabs.removeCommand(trackId: id))
+  }
+
+  /// The inline rename's commit: `patchTrack {id, name}` under the section rename's rule
+  /// (`LaneTabs.renameCommand`); a blank or unchanged draft sends nothing.
+  @MainActor func renameTrack(id: Int, draft: String) {
+    guard let current = snapshot?.track(id: id),
+          let command = LaneTabs.renameCommand(trackId: id, draft: draft, current: current.name) else { return }
+    send(command: command)
+  }
+
+  /// The Role submenu: `patchTrack {id, role}`; the checked role sends nothing.
+  @MainActor func setTrackRole(id: Int, role: TrackRole) {
+    guard let current = snapshot?.track(id: id),
+          let command = LaneTabs.roleCommand(trackId: id, role: role, current: current.role) else { return }
+    send(command: command)
+  }
+
+  /// Move left / Move right: `moveTrack {id, index}`, `index` the track's place after the move.
+  @MainActor func moveTrack(id: Int, to index: Int) {
+    send(command: LaneTabs.moveCommand(trackId: id, index: index))
+  }
+
+  /// A tab's M toggle: `setChordsMute {on}` or `setTrackMute {id, on}`; the answering snapshot flips it.
+  @MainActor func setMute(_ lane: Lane, on: Bool) {
+    send(command: LaneTabs.muteCommand(lane: lane, on: on))
+  }
+
+  /// A tab's S toggle: `setChordsSolo {on}` or `setTrackSolo {id, on}`; the answering snapshot flips it.
+  @MainActor func setSolo(_ lane: Lane, on: Bool) {
+    send(command: LaneTabs.soloCommand(lane: lane, on: on))
+  }
+
+  /// After a snapshot is decoded: the lane `LaneOpener` gives (the track a pending add created, else the open lane
+  /// while its track exists, else Chords); a change resets the key target in `openLane`'s observer.
+  private func updateOpenLane(for snapshot: Snapshot) {
+    let lane = laneOpener.lane(afterSnapshotWith: snapshot.tracks, open: openLane)
+    if lane != openLane { openLane = lane }
+  }
+
+  // MARK: - Piano roll view state (tracks design D14; UI-only, nothing is sent)
+
+  /// Track `trackId`'s roll view state; the defaults before its roll first appears.
+  func rollState(trackId: Int) -> RollViewState { rolls.states[trackId] }
+
+  /// The roll of track `trackId` measured its grid (`PianoRollView`'s `onGeometryChange`): stores the viewport and
+  /// fits the track's scroll to it; the first measurement with a real size is the track's first open, which
+  /// scrolls to its role's register at bar 1 (`RollViewState.fit`). Nothing for a track the snapshot lacks.
+  @MainActor func setRollViewport(trackId: Int, _ size: CGSize) {
+    guard let snapshot, let timing = rollTiming, let track = snapshot.track(id: trackId) else { return }
+    var states = rolls.states
+    states.setViewport(size, trackId: trackId, role: track.role, timing: timing)
+    publishRolls(states)
+  }
+
+  /// Changes track `trackId`'s roll view state with the current viewport and the snapshot's timing; the one path
+  /// every roll setter takes (and the input view's, plan Task 18). Nothing before the first snapshot, and nothing
+  /// for a track the snapshot lacks (no entry is made for it).
+  @MainActor func editRoll(trackId: Int, _ change: (inout RollViewState, CGSize, RollTiming) -> Void) {
+    guard let snapshot, let timing = rollTiming, snapshot.track(id: trackId) != nil else { return }
+    var states = rolls.states
+    states.edit(trackId: trackId, timing: timing, change)
+    publishRolls(states)
+  }
+
+  /// Scrolls track `trackId`'s roll to `scroll` (content coordinates of the grid's top-left), clamped.
+  @MainActor func setRollScroll(trackId: Int, _ scroll: CGPoint) {
+    editRoll(trackId: trackId) { $0.setScroll(scroll, viewport: $1, timing: $2) }
+  }
+
+  /// Scrolls track `trackId`'s roll by `delta` points, clamped (the scroll wheel, plan Task 18).
+  @MainActor func scrollRoll(trackId: Int, by delta: CGSize) {
+    editRoll(trackId: trackId) { $0.scroll(by: delta, viewport: $1, timing: $2) }
+  }
+
+  /// Time zoom by `factor` about the grid's view x `aboutViewX` (⇧⌥-scroll, pinch; plan Task 18).
+  @MainActor func zoomRoll(trackId: Int, horizontally factor: CGFloat, aboutViewX: CGFloat) {
+    editRoll(trackId: trackId) { $0.zoom(horizontally: factor, aboutViewX: aboutViewX, viewport: $1, timing: $2) }
+  }
+
+  /// Row zoom by `factor` about the grid's view y `aboutViewY` (⌥-scroll; plan Task 18).
+  @MainActor func zoomRoll(trackId: Int, vertically factor: CGFloat, aboutViewY: CGFloat) {
+    editRoll(trackId: trackId) { $0.zoom(vertically: factor, aboutViewY: aboutViewY, viewport: $1, timing: $2) }
+  }
+
+  /// The toolbar's zoom + and −: time ×2 or ÷2 about the grid's centre.
+  @MainActor func zoomRollIn(trackId: Int) {
+    editRoll(trackId: trackId) { $0.zoomIn(viewport: $1, timing: $2) }
+  }
+
+  @MainActor func zoomRollOut(trackId: Int) {
+    editRoll(trackId: trackId) { $0.zoomOut(viewport: $1, timing: $2) }
+  }
+
+  /// The toolbar's Grid, Snap pitch, Mode and Other tracks.
+  @MainActor func setRollGrid(trackId: Int, _ grid: RollGrid) {
+    editRoll(trackId: trackId) { state, _, _ in state.grid = grid }
+  }
+
+  @MainActor func setRollSnap(trackId: Int, _ snap: PitchSnap) {
+    editRoll(trackId: trackId) { state, _, _ in state.snap = snap }
+  }
+
+  @MainActor func setRollMode(trackId: Int, _ mode: RollMode) {
+    editRoll(trackId: trackId) { state, _, _ in state.mode = mode }
+  }
+
+  @MainActor func setRollShowsOtherTracks(trackId: Int, _ on: Bool) {
+    editRoll(trackId: trackId) { state, _, _ in state.showsOtherTracks = on }
+  }
+
+  /// Publishes `states` only when it changed, so an unchanged fit redraws nothing.
+  private func publishRolls(_ states: RollViewStates) {
+    if states != rolls.states { rolls.states = states }
+  }
+
+  // MARK: - Piano roll input (plan Task 18: RollInputView → the gesture machine → one effects seam)
+
+  /// Track `trackId`'s grid view point (the input view's coordinates, top-left origin) in content coordinates, at
+  /// the track's current zoom and scroll.
+  func rollContentPoint(trackId: Int, viewPoint: CGPoint) -> CGPoint {
+    rolls.states.contentPoint(viewPoint: viewPoint, trackId: trackId, ticksPerBeat: rollTiming?.ticksPerBeat ?? 960)
+  }
+
+  /// The cursor over track `trackId`'s grid view point (`RollCursor`: resize over a note's edge in Notes mode).
+  func rollCursor(trackId: Int, viewPoint: CGPoint) -> RollCursor {
+    guard let snapshot, let timing = rollTiming else { return .arrow }
+    return rolls.states.cursor(atView: viewPoint, trackId: trackId, snapshot: snapshot, timing: timing)
+  }
+
+  /// One pointer event of track `trackId`'s roll (`RollInputView`, location already in content coordinates): runs
+  /// the gesture machine with the current snapshot and the track's view state (`RollViewStates.handle`), stores the
+  /// next edit state through the roll store (so the drag preview, hidden notes, rubber band and insert marker draw)
+  /// and hands the effects to `performRollEffects`, the one place they go.
+  @MainActor func handleRollPointer(_ event: RollPointerEvent, trackId: Int) {
+    guard let snapshot, let timing = rollTiming else { return }
+    // Design D15 "Keyboard": the roll's mouse-down targets its notes.
+    if event.phase == .down, keyTarget != .notes(trackId: trackId) { keyTarget = .notes(trackId: trackId) }
+    // A press here ends a key's or a cell's held preview (and another track's roll hold) before the machine runs, so
+    // a press that starts no preview of its own never leaves one sounding (`PreviewBook.rollPressed`).
+    if event.phase == .down { route(previews.rollPressed(trackId: trackId)) }
+    var states = rolls.states
+    let effects = states.handle(event, trackId: trackId, snapshot: snapshot, timing: timing)
+    publishRolls(states)
+    performRollEffects(effects, trackId: trackId)
+  }
+
+  /// Cancels track `trackId`'s gesture: the open lane left it, or the preview book ended its hold (`.cancelRoll`:
+  /// another owner took the held preview, the keep-alive found no button down, the editor closed, panic; the book has
+  /// already stopped that hold, so the stop handed back sends nothing). Its drag preview drops and a held preview's
+  /// stop goes through `performRollEffects`, the one place that stops it. Nothing when it is idle.
+  @MainActor func cancelRollGesture(trackId: Int) {
+    var states = rolls.states
+    let effects = states.cancelGesture(trackId: trackId)
+    publishRolls(states)
+    performRollEffects(effects, trackId: trackId)
+  }
+
+  /// THE seam every effect of the roll's gesture machine goes through (`RollEffect`: from `handleRollPointer`, a
+  /// cancel and a snapshot's revision cancel), and the only one (tracks design D15 "Commit" and "Preview"): `send`
+  /// effects go out as `send(command:)` (each content command carries its `baseRevision`); `previewStart` holds the
+  /// note's pitch through the existing preview path (`kMsgTagPreview`, one pitch, paired Start and Stop, keep-alive)
+  /// after ending any other owner's hold; `previewStop` stops this track's hold, never a second time;
+  /// `previewOneShot` sounds for `PreviewBook.oneShotSeconds` under its own id. Every decision is `PreviewBook.perform`'s;
+  /// this only routes its outputs.
+  ///
+  /// The plug-in answers a command inline, inside `send` (the next snapshot is applied before `send` returns), so a
+  /// selection echo or a commit's new revision reaches the roll here, after the effects' state was published.
+  ///
+  /// `rollEffectsObserver` (nil in production) sees every call first, so a test or the harness can check what reaches
+  /// the seam.
+  @MainActor func performRollEffects(_ effects: [RollEffect], trackId: Int) {
+    rollEffectsObserver?(effects, trackId)
+    route(previews.perform(effects, trackId: trackId))
+  }
+
+  /// The toolbar's nudge ◀ ▶ ▲ ▼ for track `trackId` (`RollNudge.command`): one `updateNotes` of the selected notes
+  /// by one grid step or semitone with the snapshot's revision (one undo step); nothing without a selection on that
+  /// track or when the clamp leaves nothing to move (the button is disabled then).
+  @MainActor func nudgeRoll(trackId: Int, _ direction: ArrowDirection) {
+    guard let snapshot, let timing = rollTiming,
+          let command = RollNudge.command(direction, trackId: trackId, snapshot: snapshot, timing: timing,
+                                          grid: rolls.states[trackId].grid) else { return }
+    send(command: command.json)
+  }
+
+  /// Whether the pasteboard holds ChordLab notes (the roll menu's Paste here is disabled otherwise).
+  @MainActor var canPasteNotes: Bool {
+    NoteClipboard.paste(from: pasteboard) != nil
+  }
+
+  /// The roll's context menu for a right-click or ⌃-click at content `point` of track `trackId` (`RollContextMenu`):
+  /// targets that track's notes (like the roll's mouse-down), sends the right-clicked note's selection when it was
+  /// not selected (clearing the insert marker, as a note press does: `RollContextMenu.editState(afterOpening:)`), and
+  /// returns the model the view turns into an `NSMenu`; nil for a track the snapshot lacks.
+  @MainActor func rollContextMenu(trackId: Int, at point: CGPoint) -> RollContextMenu? {
+    guard let snapshot, let timing = rollTiming else { return nil }
+    let view = rolls.states[trackId]
+    guard let menu = RollContextMenu.make(at: point, trackId: trackId, snapshot: snapshot, timing: timing,
+                                          geometry: view.geometry(ticksPerBeat: timing.ticksPerBeat), grid: view.grid,
+                                          notesOnPasteboard: canPasteNotes) else { return nil }
+    if keyTarget != .notes(trackId: trackId) { keyTarget = .notes(trackId: trackId) }
+    editRoll(trackId: trackId) { state, _, _ in state.editState = menu.editState(afterOpening: state.editState) }
+    if let select = menu.select { send(command: select.json) }
+    return menu
+  }
+
+  /// A roll context-menu item chosen: what it sends against the snapshot current now (`RollContextMenu.commands`).
+  @MainActor func performRollMenu(_ item: RollContextMenu.Item, _ menu: RollContextMenu) {
+    guard let snapshot, let timing = rollTiming else { return }
+    for command in menu.commands(for: item, snapshot: snapshot, timing: timing, pasteboard: pasteboard) {
+      send(command: command.json)
+    }
+  }
+
+  /// Sees every call of `performRollEffects` (the effects, in order, and the track); nil in production. Tests and the
+  /// harness set it; it never sends anything itself.
+  var rollEffectsObserver: (@MainActor ([RollEffect], Int) -> Void)?
+
+  /// A snapshot arrived: every track's stored gesture checks its revision (`RollViewStates.snapshotChanged`: a
+  /// different revision cancels, a selection echo does not), the open roll's and every parked one's.
+  @MainActor private func cancelStaleRollGestures(revision: UInt64) {
+    var states = rolls.states
+    let cancelled = states.snapshotChanged(revision: revision)
+    publishRolls(states)
+    for (trackId, effects) in cancelled { performRollEffects(effects, trackId: trackId) }
+  }
+
+  /// After a snapshot: drops removed tracks' roll states and fits the open track's to the new content.
+  private func updateRolls(for snapshot: Snapshot) {
+    var openTrackId: Int?
+    if case .track(let id) = openLane { openTrackId = id }
+    var states = rolls.states
+    states.snapshotApplied(tracks: snapshot.tracks ?? [], timing: rollTiming ?? RollTiming(snapshot: snapshot),
+                           openTrackId: openTrackId)
+    publishRolls(states)
   }
 
   // MARK: - Project key (the Key pickers) and the transpose row
@@ -443,16 +819,18 @@ class ChordLabState: NSObject, ObservableObject {
     }
   }
 
-  /// JSON-encodes `fields` plus `"schema": 1` and sends it under `tag`.
-  @MainActor private func send(_ fields: [String: Any], tag: Int) {
+  /// JSON-encodes `fields` plus `"schema": 1` and sends it under `tag`; false (and an error shown) when it is not valid
+  /// JSON.
+  @MainActor @discardableResult private func send(_ fields: [String: Any], tag: Int) -> Bool {
     var message = fields
     message["schema"] = 1
     guard JSONSerialization.isValidJSONObject(message),
           let data = try? JSONSerialization.data(withJSONObject: message) else {
       reportError("message is not valid JSON: \(fields)")
-      return
+      return false
     }
     sendCommand(tag, data)
+    return true
   }
 
   /// Asks the plugin to push its current snapshot.
@@ -460,19 +838,30 @@ class ChordLabState: NSObject, ObservableObject {
     sendCommand(kMsgTagRequestSnapshot, Data())
   }
 
-  /// Asks the plugin to write the progression as a MIDI file. The round trip is synchronous on the main
-  /// thread (`OnMessage` runs inline and answers through the delegate at once), so `exportPath` holds the
-  /// new file, or nil after a failure, when this returns.
-  @MainActor func requestExport() {
-    exportPath = nil
-    sendCommand(kMsgTagExport, Data())
+  /// Asks the plugin to write a clip (`kMsgTagExportClip`, tracks design D12): `request`'s lanes over the whole
+  /// progression or its section, and returns what it came to (`ClipExportExchange`): the shell answers inline inside
+  /// the send (`OnMessage` runs synchronously on the main thread), so the outcome is `.ready` with the new file or
+  /// `.failed` after a `kMsgTagError`, and `.pending` only if no answer arrived. `exportPath` is cleared first and holds
+  /// the file once it arrives. The legacy `kMsgTagExport` / `kMsgTagExportSection` messages stay in the shell (D12) but
+  /// the UI no longer sends them: the chords lane through this path is byte-identical to them.
+  @MainActor @discardableResult func requestExportClip(_ request: ClipExportRequest) -> ExportOutcome {
+    exportDrag(request).outcome
   }
 
-  /// The same for one section (`kMsgTagExportSection {id}`): the section's chords alone, re-based to
-  /// beat 0; an unknown id comes back as `kMsgTagError`.
-  @MainActor func requestExportSection(id: Int) {
-    exportPath = nil
-    send(["id": id], tag: kMsgTagExportSection)
+  /// The body of every drag-out's `.onDrag` (the lane grips, All, the bottom drag-out, the section handles): the
+  /// request `grip` makes against the current snapshot and open lane (`ClipExport.request`), its outcome and the item
+  /// provider for the file this request produced (`ClipExportExchange.drag`). With nothing to export nothing is sent;
+  /// on a failure or with no answer the provider is empty. The round trip and its decisions are Core's, tested there
+  /// (ClipExportExchangeTests); this only wires the sender.
+  @MainActor func dragExport(_ grip: ExportGrip) -> ExportDrag {
+    exportDrag(ClipExport.request(for: grip, in: snapshot, open: openLane))
+  }
+
+  @MainActor private func exportDrag(_ request: ClipExportRequest?) -> ExportDrag {
+    exports.drag(request) { request in
+      exportPath = nil
+      return send(request.fields, tag: kMsgTagExportClip)
+    }
   }
 
   // MARK: - Messages from the plugin
@@ -483,8 +872,12 @@ class ChordLabState: NSObject, ObservableObject {
       let decoded = try JSONDecoder().decode(Snapshot.self, from: json)
       snapshot = decoded
       lastError = nil
+      // Snapshots are applied on the main thread (the controller's message handler, the harness).
+      MainActor.assumeIsolated { cancelStaleRollGestures(revision: decoded.revision ?? 0) }
       let target = keyTarget.resolved(in: decoded.tracks)
       if target != keyTarget { keyTarget = target }
+      updateOpenLane(for: decoded)
+      updateRolls(for: decoded)
       updateKeyRow(for: decoded)
     } catch {
       reportError("snapshot decode failed: \(error)")
@@ -516,26 +909,37 @@ class ChordLabState: NSObject, ObservableObject {
     }
   }
 
-  /// `kMsgTagExportReady` payload.
+  /// `kMsgTagExportReady` payload: the export request in flight gets it as its answer (`ClipExportExchange`).
   func applyExportReady(json: Data) {
     if let ready = try? JSONDecoder().decode(ExportReadyJSON.self, from: json) {
       exportPath = ready.path
+      exports.receivedPath(ready.path)
     }
   }
 
-  /// `kMsgTagError` payload. A key change still waiting for its snapshot was most likely the refused
-  /// command: it is dropped, so a later snapshot with that tonic (an undo, a redo) shows nothing.
+  /// `kMsgTagError` payload. An error answering the export request in flight is that export's failure
+  /// (`ClipExportExchange.receivedError`): only its text shows. Otherwise it is a refused command: a key change still
+  /// waiting for its snapshot was most likely it, so it is dropped (a later snapshot with that tonic, an undo or a
+  /// redo, shows nothing), and so is a pending track add (a refused add opens nothing).
   func applyError(json: Data) {
-    pendingKeyChange = nil
-    if let message = try? JSONDecoder().decode(ErrorJSON.self, from: json) {
-      reportError(message.error)
-    } else {
-      reportError(String(decoding: json, as: UTF8.self))
+    let message = (try? JSONDecoder().decode(ErrorJSON.self, from: json))?.error ?? String(decoding: json, as: UTF8.self)
+    if !exports.receivedError(message) {
+      pendingKeyChange = nil
+      laneOpener.refused()
     }
+    reportError(message)
   }
 
   private func reportError(_ message: String) {
     lastError = message
     errorSerial += 1
   }
+}
+
+/// The piano rolls' UI state (`ChordLabState.rolls`, tracks design D14): every track's `RollViewState` and the roll's
+/// viewport, published on their own so a scroll redraws the roll alone, plus the guide band layout cache the roll
+/// reads in its body (rebuilt per snapshot revision, zoom and track role; never published).
+final class RollViewStore: ObservableObject {
+  @Published var states = RollViewStates()
+  let bands = GuideBandsCache()
 }

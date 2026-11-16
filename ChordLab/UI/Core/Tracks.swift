@@ -102,18 +102,28 @@ struct RollTiming: Equatable {
   /// One bar in ticks, `num × 4 × ticksPerBeat / den` (the engine's `barTicks`): the grid counts from each bar
   /// start (`RollGrid`).
   let barTicks: Int
-  /// The progression's end, `round(endBeat × ticksPerBeat)` (a negative or non-finite `endBeat` is 0).
+  /// The progression's end, `round(endBeat × ticksPerBeat)` (a negative or non-finite `endBeat` is 0): where the
+  /// hatch starts and what the insert rule and the group clamps keep every start below.
   let endTick: Int
   /// The shortest note: `trackLimits.minNoteTicks`.
   let minNoteTicks: Int
+  /// The roll's content end: the later of `endTick` and the latest note end (`start + length`) of ALL tracks. The
+  /// engine keeps notes past the progression's end (an inactive note after the last chord was shortened, a long
+  /// note left by a deleted chord, a note resized past the end; design D3), and they stay reachable: the roll
+  /// scrolls to `contentEndTick` plus one bar (`RollViewState.contentSize`). Never below `endTick`.
+  let contentEndTick: Int
 
-  init(ticksPerBeat: Int, barTicks: Int, endTick: Int, minNoteTicks: Int) {
+  /// `contentEndTick` nil (or below `endTick`) is `endTick`.
+  init(ticksPerBeat: Int, barTicks: Int, endTick: Int, minNoteTicks: Int, contentEndTick: Int? = nil) {
     self.ticksPerBeat = ticksPerBeat
     self.barTicks = barTicks
     self.endTick = endTick
     self.minNoteTicks = minNoteTicks
+    self.contentEndTick = max(endTick, contentEndTick ?? endTick)
   }
 
+  /// The snapshot's timing; `contentEndTick` walks every track's notes once (O(notes)), so callers that need it
+  /// per frame keep the result per snapshot.
   init(snapshot: Snapshot) {
     let rate = max(1, snapshot.ticksPerBeatOrDefault)
     let end = snapshot.endBeat * Double(rate)
@@ -121,6 +131,21 @@ struct RollTiming: Equatable {
     barTicks = snapshot.barTicksOrDefault
     endTick = end.isFinite && end > 0 ? Int(min(end, 1e15).rounded()) : 0
     minNoteTicks = snapshot.minNoteTicksOrDefault
+    contentEndTick = max(endTick, Self.latestNoteEnd(snapshot.tracks ?? []))
+  }
+
+  /// The latest `start + length` over every note of `tracks`, at most the engine's `kMaxNoteTick`
+  /// (`RollLimits.engineMaxNoteTick`, so a malformed note cannot make the content overflow); 0 without notes.
+  static func latestNoteEnd(_ tracks: [TrackJSON]) -> Int {
+    var latest = 0
+    for track in tracks {
+      let notes = track.notes
+      for i in 0..<notes.count {
+        let (end, overflow) = notes.start[i].addingReportingOverflow(notes.length[i])
+        latest = max(latest, overflow ? Int.max : end)
+      }
+    }
+    return min(latest, RollLimits.engineMaxNoteTick)
   }
 }
 

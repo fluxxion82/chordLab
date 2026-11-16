@@ -4,15 +4,32 @@ public typealias MIDINoteNumber = UInt8
 public typealias MIDIVelocity = UInt8
 
 @objc class ChordLabViewController: IPlugCocoaViewController {
+  /// The clipboard token of the plug-in instance's document lineage (tracks design D21, `ClipboardToken`):
+  /// `ChordLab::OpenWindow` sets it right after creating this controller and before touching its view, so the lazy
+  /// `state` below is created with it. One per lineage, not per window: an editor closed and reopened pastes its own
+  /// chord copies with their track ids. The shell sets it again on the main thread when loaded state replaced the
+  /// document (`ChordLab::PushSnapshot`, before the loaded snapshot); a later value goes on to the state once it
+  /// exists.
+  @objc var clipboardToken: String? {
+    didSet { if stateCreated { state.clipboardToken = clipboardToken ?? "" } }
+  }
+
+  /// Whether the lazy `state` exists yet: a token set before it does is read by its initializer instead.
+  private var stateCreated = false
+
   // All callbacks capture `self` weakly: the controller owns the state, and the
   // state owns these closures, so strong captures would form a retain cycle.
-  lazy var state = ChordLabState(
-    beginEdit: { [weak self] idx in self?.beginInformHostOfParamChangeFromUI(paramIdx: idx) },
-    doEdit: { [weak self] idx, value in self?.sendParameterValueFromUI(paramIdx: idx, normalizedValue: value) },
-    endEdit: { [weak self] idx in self?.endInformHostOfParamChangeFromUI(paramIdx: idx) },
-    sendCommand: { [weak self] tag, data in
-      self?.sendArbitraryMsgFromUI(msgTag: tag, ctrlTag: kNoCtrlTag, msg: data)
-    })
+  lazy var state: ChordLabState = {
+    stateCreated = true
+    return ChordLabState(
+      beginEdit: { [weak self] idx in self?.beginInformHostOfParamChangeFromUI(paramIdx: idx) },
+      doEdit: { [weak self] idx, value in self?.sendParameterValueFromUI(paramIdx: idx, normalizedValue: value) },
+      endEdit: { [weak self] idx in self?.endInformHostOfParamChangeFromUI(paramIdx: idx) },
+      sendCommand: { [weak self] tag, data in
+        self?.sendArbitraryMsgFromUI(msgTag: tag, ctrlTag: kNoCtrlTag, msg: data)
+      },
+      clipboardToken: clipboardToken)
+  }()
 
   /// The keyboard routes (`EditorKeyRouter`): installed while the view is on screen.
   private lazy var keyRouter = EditorKeyRouter(view: view, state: state)

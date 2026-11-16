@@ -352,6 +352,31 @@ final class TracksTests: XCTestCase {
     XCTAssertEqual(timing, RollTiming(ticksPerBeat: 960, barTicks: 3840, endTick: 14400, minNoteTicks: 30))
   }
 
+  func testRollTimingsContentEndIsTheLatestNoteEndOfAnyTrack() throws {
+    var snapshot = try fixtureSnapshot("snapshot-tracks.json")
+    XCTAssertEqual(RollTiming(snapshot: snapshot).contentEndTick, 14400, "the fixture's notes all end before the end")
+    func track(_ id: Int, starts: [Int], lengths: [Int], active: [Bool]) -> TrackJSON {
+      let n = starts.count
+      return TrackJSON(id: id, name: "T\(id)", role: .bass, mute: false, solo: false, audible: true,
+                       notes: TrackNotesJSON(id: Array(1...n).map { $0 + id * 100 }, pitch: Array(repeating: 40, count: n),
+                                             start: starts, length: lengths, velocity: Array(repeating: 100, count: n),
+                                             anchor: Array(repeating: 1, count: n), offset: Array(repeating: 0, count: n),
+                                             active: active))
+    }
+    // Track 1: an inactive note two bars past the end; track 2 (not the first track): a long note ending later still.
+    snapshot.tracks = [track(1, starts: [0, 21120], lengths: [960, 960], active: [true, false]),
+                       track(2, starts: [13440], lengths: [10000], active: [true])]
+    let timing = RollTiming(snapshot: snapshot)
+    XCTAssertEqual(timing.contentEndTick, 23440, "13440 + 10000, over all tracks")
+    XCTAssertEqual(timing.endTick, 14400, "the progression's end is unchanged")
+    snapshot.tracks = [track(1, starts: [0], lengths: [960], active: [true])]
+    XCTAssertEqual(RollTiming(snapshot: snapshot).contentEndTick, 14400)
+    snapshot.tracks = nil
+    XCTAssertEqual(RollTiming(snapshot: snapshot).contentEndTick, 14400)
+    XCTAssertEqual(RollTiming.latestNoteEnd([track(1, starts: [Int.max - 5], lengths: [960], active: [false])]),
+                   RollLimits.engineMaxNoteTick, "a malformed note cannot overflow the content")
+  }
+
   func testRollTimingTakesTheMeterAndTheLimitsFromTheSnapshot() throws {
     var snapshot = try fixtureSnapshot("snapshot-tracks.json", meter: (7, 8))
     snapshot.trackLimits = TrackLimitsJSON(maxTracks: 4, maxNotesPerTrack: 1024, minNoteTicks: 60, maxPolyphony: 8,

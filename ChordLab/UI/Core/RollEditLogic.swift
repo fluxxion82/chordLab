@@ -39,12 +39,14 @@ struct RollContext {
     self.snap = snap
   }
 
-  /// The context of track `trackId` in `snapshot`; nil when the snapshot has no such track.
-  init?(snapshot: Snapshot, trackId: Int, geometry: RollGeometry, mode: RollMode = .notes, grid: RollGrid = .default,
-        snap: PitchSnap = .default) {
+  /// The context of track `trackId` in `snapshot`; nil when the snapshot has no such track. `timing` is the
+  /// snapshot's `RollTiming`, computed here when not given (a caller that keeps it per snapshot passes it, since its
+  /// content end walks every track's notes).
+  init?(snapshot: Snapshot, trackId: Int, timing: RollTiming? = nil, geometry: RollGeometry, mode: RollMode = .notes,
+        grid: RollGrid = .default, snap: PitchSnap = .default) {
     guard let track = snapshot.track(id: trackId) else { return nil }
     self.init(trackId: trackId, notes: track.notes, selectedIds: track.selectedIds(in: snapshot.noteSelection),
-              revision: snapshot.revision ?? 0, events: snapshot.events, timing: RollTiming(snapshot: snapshot),
+              revision: snapshot.revision ?? 0, events: snapshot.events, timing: timing ?? RollTiming(snapshot: snapshot),
               geometry: geometry, mode: mode, grid: grid, snap: snap)
   }
 
@@ -68,10 +70,12 @@ struct RollContext {
 /// - Only the open track's notes are hit-testable; inactive (dashed) notes exactly like active ones.
 /// - Draw order is note order and the TOPMOST note is the last in note order that contains the point, so the view
 ///   must draw the open track's notes in note order (later notes over earlier ones).
-/// - A note's rectangle is `RollGeometry.noteRect`, half-open on both axes: x in `[start, end)`, and the row per
-///   `RollGeometry` (a point on a row boundary belongs to the row below it on screen). Nothing is hit above pitch
-///   127's row or below pitch 0's.
-/// - Each edge zone is `min(4 pt, width / 4)` wide, so a narrow note always keeps a body (half its width).
+/// - A note's rectangle is the one the roll shows, `RollGeometry.displayedNoteRect` (the logical rect widened to
+///   `RollGeometry.minDisplayedNoteWidth`, so a short note is hit where it is drawn), half-open on both axes: x in
+///   `[start, start + displayed width)`, and the row per `RollGeometry` (a point on a row boundary belongs to the row
+///   below it on screen). Nothing is hit above pitch 127's row or below pitch 0's.
+/// - Each edge zone is `min(4 pt, width / 4)` of the displayed width, so a narrow note always keeps a body (half its
+///   width).
 struct RollHit: Equatable {
   enum Zone: Equatable {
     case body, startEdge, endEdge
@@ -91,7 +95,7 @@ struct RollHit: Equatable {
     }
     let pitch = geometry.pitch(atY: point.y)
     for index in notes.indices.reversed() where notes.pitch[index] == pitch {
-      let rect = geometry.noteRect(start: notes.start[index], length: notes.length[index], pitch: pitch)
+      let rect = geometry.displayedNoteRect(start: notes.start[index], length: notes.length[index], pitch: pitch)
       guard point.x >= rect.minX, point.x < rect.maxX else { continue }
       let edge = min(maxEdgeWidth, rect.width / 4)
       let zone: Zone = point.x < rect.minX + edge ? .startEdge : point.x >= rect.maxX - edge ? .endEdge : .body
@@ -105,14 +109,16 @@ struct RollHit: Equatable {
     hit(at: point, notes: context.notes, geometry: context.geometry)
   }
 
-  /// The ids of the notes a rubber band touches: every note whose half-open rectangle meets the CLOSED `band`, so a
-  /// band of zero height (a purely horizontal drag) still selects along its row, and a band edge exactly on a row
-  /// or note boundary takes the row or note that boundary belongs to.
+  /// The ids of the notes a rubber band touches: every note whose half-open displayed rectangle
+  /// (`RollGeometry.displayedNoteRect`) meets the CLOSED `band`, so a band of zero height (a purely horizontal drag)
+  /// still selects along its row, and a band edge exactly on a row or note boundary takes the row or note that
+  /// boundary belongs to.
   static func ids(inBand band: CGRect, context: RollContext) -> Set<Int> {
     var ids = Set<Int>()
     let notes = context.notes
     for index in notes.indices {
-      let rect = context.geometry.noteRect(start: notes.start[index], length: notes.length[index], pitch: notes.pitch[index])
+      let rect = context.geometry.displayedNoteRect(start: notes.start[index], length: notes.length[index],
+                                                    pitch: notes.pitch[index])
       if band.minX < rect.maxX, band.maxX >= rect.minX, band.minY < rect.maxY, band.maxY >= rect.minY {
         ids.insert(notes.id[index])
       }
@@ -212,8 +218,9 @@ struct RollEditState: Equatable {
   /// The insert marker (design D15 paste: a paste lands here, else after the selection's end, else at 0): the grid
   /// tick (`grid.snapDown`, bar-relative) of the last PLAIN click on empty space inside the progression (an up
   /// without a drag: the deselect click and the insert click, either mode). Nil before one; cleared by a press on a
-  /// note (any zone, either mode, at the down), by a committed rubber band and by a plain click at or after the
-  /// progression's end. A down alone, a drag in progress and a cancelled gesture leave it as it was.
+  /// note (any zone, either mode, at the down), by a committed rubber band, by a plain click at or after the
+  /// progression's end, and by a snapshot whose progression ends at or before it (`RollViewStates.snapshotApplied`).
+  /// A down alone, a drag in progress and a cancelled gesture leave it as it was.
   var insertMarker: Int?
   var gesture: Gesture = .idle
 
@@ -345,6 +352,13 @@ enum RollEditLogic {
     case .cancel: (next, effects) = cancelled(state)
     }
     return (next, parked + effects)
+  }
+
+  /// The `cancel` phase without a context (the open lane changed, the window resigned key, the view went away): the
+  /// gesture and its preview are dropped and a held preview stops; idle stays idle with no effects. The same as
+  /// `handle` with a `cancel` event, for callers that have no context of the track at hand.
+  static func cancel(_ state: RollEditState) -> (RollEditState, [RollEffect]) {
+    cancelled(state)
   }
 
   /// A new snapshot arrived with `revision` (0 when it has none): a revision other than the one the press started

@@ -1,7 +1,8 @@
 import SwiftUI
 
 /// The progression presets (plan P7), opened from the transport row's Presets button: a segmented
-/// *Add to end / Replace progression* choice (remembered per user), then the snapshot's `presets` grouped
+/// *Add to end / Replace progression* choice (remembered per user; Replace reads "Replace progression and notes"
+/// while any track has notes, plan Task 20), then the snapshot's `presets` grouped
 /// by genre in table order. Each row is a button: the name, the numerals (read against the project key
 /// once loaded; the engine's spelling, wrapping to two lines), a tonality badge, and, when the preset does
 /// not fit the project key's mode, half opacity and a footnote ("Written for a minor key"); a greyed preset
@@ -18,15 +19,18 @@ struct PresetsPopoverView: View {
   /// Set from a click until its answer arrives.
   @State private var watch: PresetLoadWatch<Snapshot>?
 
-  static let width: CGFloat = 360
   static let maxListHeight: CGFloat = 440
 
   private var groups: [PresetGroup] { PresetStyle.groups(state.snapshot?.presets ?? []) }
+  /// Whether any track has notes: Replace then reads "Replace progression and notes" and the popover widens to fit it.
+  private var tracksHaveNotes: Bool { PresetStyle.tracksHaveNotes(state.snapshot?.tracks) }
 
   var body: some View {
     VStack(alignment: .leading, spacing: 10) {
       Picker("Load as", selection: $mode) {
-        ForEach(PresetLoadMode.allCases) { Text($0.title).tag($0) }
+        ForEach(PresetLoadMode.allCases) {
+          Text($0.title(tracksHaveNotes: tracksHaveNotes)).tag($0)
+        }
       }
       .pickerStyle(.segmented)
       .labelsHidden()
@@ -54,7 +58,7 @@ struct PresetsPopoverView: View {
       .frame(maxHeight: Self.maxListHeight)
     }
     .padding(12)
-    .frame(width: Self.width)
+    .frame(width: PresetStyle.popoverWidth(tracksHaveNotes: tracksHaveNotes))
     .onChange(of: state.snapshot) { _, _ in checkAnswer() }
     .onChange(of: state.errorSerial) { _, _ in checkAnswer() }
     .onExitCommand(perform: dismiss)

@@ -110,6 +110,26 @@ struct RollGeometry: Equatable {
     CGRect(x: x(tick: start), y: y(pitch: pitch), width: max(0, x(tick: length)), height: rowHeight)
   }
 
+  /// The narrowest a note shows on screen, in points: a note shorter than this at the current zoom (30 ticks at 12 pt
+  /// per beat is 0.375 pt) is drawn and hit this wide.
+  static let minDisplayedNoteWidth: CGFloat = 2
+
+  /// A note's rectangle as the roll shows it, in content coordinates: `noteRect` widened to at least
+  /// `minDisplayedNoteWidth` from the same start (its left edge and row never move). Drawing, hit-testing (`RollHit`:
+  /// clicks, edge zones, the context menu and the cursor) and the rubber band all use it, so a short note is hit
+  /// where it is drawn; the canvas then insets it for its own look (a point's gap, the row inset), never wider.
+  func displayedNoteRect(start: Int, length: Int, pitch: Int) -> CGRect {
+    let rect = noteRect(start: start, length: length, pitch: pitch)
+    return CGRect(x: rect.minX, y: rect.minY, width: max(rect.width, Self.minDisplayedNoteWidth), height: rect.height)
+  }
+
+  /// `minDisplayedNoteWidth` in ticks at this zoom, rounded up (160 at 12 pt per beat): how far a shorter note's
+  /// displayed rectangle reaches past its start. `RollVisibleNotes` takes every note as at least this long, so a short
+  /// note whose widened tail crosses the viewport's left edge is still drawn where `RollHit` hits it.
+  var minDisplayedNoteTicks: Int {
+    Int((Double(Self.minDisplayedNoteWidth) / Double(pxPerBeat) * Double(ticksPerBeat)).rounded(.up))
+  }
+
   /// A pitch's full-width row (the keyboard column, the guide bands, the row stripes).
   func rowRect(pitch: Int, width: CGFloat) -> CGRect {
     CGRect(x: 0, y: y(pitch: pitch), width: width, height: rowHeight)

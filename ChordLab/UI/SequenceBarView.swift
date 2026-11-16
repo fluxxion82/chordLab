@@ -120,14 +120,10 @@ struct SequenceBarView: View {
   private var selection: [Int] { state.snapshot?.selection ?? [] }
   private var selectedEventId: Int? { state.snapshot?.selectedEventId }
 
-  /// The beat the playhead sits at, or nil when it is hidden.
+  /// The beat the playhead sits at, or nil when it is hidden (`Playhead.beat`, the rule the piano roll shares).
   private var playheadBeat: Double? {
-    guard let transport = state.transport, transport.playing, let snapshot = state.snapshot,
-          snapshot.endBeat > 0, transport.ppq >= 0 else { return nil }
-    if snapshot.progressionLoop {
-      return transport.ppq.truncatingRemainder(dividingBy: snapshot.endBeat)
-    }
-    return transport.ppq < snapshot.endBeat ? transport.ppq : nil
+    guard let snapshot = state.snapshot else { return nil }
+    return Playhead.beat(transport: state.transport, endBeat: snapshot.endBeat, loop: snapshot.progressionLoop)
   }
 
   var body: some View {
@@ -152,7 +148,10 @@ struct SequenceBarView: View {
               Color.clear
                 .frame(width: contentWidth, height: Self.blockHeight)
                 .contentShape(Rectangle())
-                .onTapGesture { state.select(.none) }          // click the empty strip: deselect
+                .onTapGesture {                                // click the empty strip: deselect
+                  state.targetChords()
+                  state.select(.none)
+                }
               HStack(spacing: 0) {
                 ForEach(Array(events.enumerated()), id: \.element.id) { index, event in
                   block(event, frame: layout.frames[index])
@@ -391,14 +390,18 @@ struct SequenceBarView: View {
   @ViewBuilder private func blockMenu(_ event: EventJSON) -> some View {
     let targets = SelectionLogic.targets(block: event.id, selection: selection)
     let count = targets.count > 1 ? " \(targets.count) chords" : ""
-    Button("Copy" + count) { state.copyChords(targets) }
-    Button("Cut" + count) { state.cutChords(targets) }
+    // Each action first targets the chords (a right-click on the strip is a press on it), so the keys that follow
+    // (a ⌘V after Cut) act on the chords, not on the notes a roll click targeted before.
+    Button("Copy" + count) { state.targetChords(); state.copyChords(targets) }
+    Button("Cut" + count) { state.targetChords(); state.cutChords(targets) }
     Button("Paste after") {
+      state.targetChords()
       state.pasteChords(at: (events.firstIndex { $0.id == event.id } ?? events.count - 1) + 1)
     }
     .disabled(!state.canPaste)
-    Button("Duplicate" + count) { state.duplicateChords(targets) }
+    Button("Duplicate" + count) { state.targetChords(); state.duplicateChords(targets) }
     Button(targets.count > 1 ? "Remove" + count : "Remove chord") {
+      state.targetChords()
       state.send(command: ClipboardChords.removeCommand(targets))
     }
     if event.inversion != nil {
@@ -410,10 +413,11 @@ struct SequenceBarView: View {
   /// The voicing choices: the voicing popover, the inversions and octaves directly, Auto, and Transpose all
   /// chords (the whole sequence by a semitone).
   @ViewBuilder private func voicingMenu(_ event: EventJSON) -> some View {
-    Button("Voicing…") { openVoicing(event) }
+    Button("Voicing…") { state.targetChords(); openVoicing(event) }
     Menu("Inversion") {
       ForEach(0..<max(1, event.voicing.count), id: \.self) { inversion in
         Button(VoicingPopoverView.inversionName(inversion) + ((event.inversion ?? 0) == inversion ? "  ✓" : "")) {
+          state.targetChords()
           state.send(command: ["cmd": "setInversion", "id": event.id, "inversion": inversion])
         }
       }
@@ -421,16 +425,17 @@ struct SequenceBarView: View {
     Menu("Octave") {
       ForEach([1, 0, -1], id: \.self) { octave in
         Button(HarmonyText.octaveLabel(octave) + ((event.octave ?? 0) == octave ? "  ✓" : "")) {
+          state.targetChords()
           state.send(command: ["cmd": "setOctave", "id": event.id, "octave": octave])
         }
       }
     }
-    Button("Auto voicing") { state.send(command: ["cmd": "resetVoicing", "id": event.id]) }
+    Button("Auto voicing") { state.targetChords(); state.send(command: ["cmd": "resetVoicing", "id": event.id]) }
       .disabled(!VoicingReset.isAvailable(manual: event.manualVoicing, inversion: event.inversion, octave: event.octave))
     // Every chord in the sequence, not just this one (one undo step each).
     Menu("Transpose all chords") {
-      Button("Up a semitone") { state.send(command: ["cmd": "transposeProgression", "semitones": 1]) }
-      Button("Down a semitone") { state.send(command: ["cmd": "transposeProgression", "semitones": -1]) }
+      Button("Up a semitone") { state.targetChords(); state.send(command: ["cmd": "transposeProgression", "semitones": 1]) }
+      Button("Down a semitone") { state.targetChords(); state.send(command: ["cmd": "transposeProgression", "semitones": -1]) }
     }
   }
 
@@ -475,6 +480,7 @@ struct SequenceBarView: View {
   /// result in one command, and the snapshot it answers with draws the rings. A chord removed or undone away is
   /// dropped from the selection by the store itself.
   private func click(_ event: EventJSON) {
+    state.targetChords()   // a press on the strip: the keys act on the chords (tracks design D15 "Keyboard")
     state.select(SelectionLogic.resolve(click: event.id, modifiers: Self.clickModifiers(), ids: events.map(\.id),
                                         current: selection, anchor: selectedEventId))
   }
@@ -487,6 +493,7 @@ struct SequenceBarView: View {
 
   /// `event` alone, as the anchor (a drag or the voicing popover starting on a block outside the selection).
   private func select(_ event: EventJSON) {
+    state.targetChords()
     state.select(StripSelection(ids: [event.id], anchor: event.id))
   }
 
@@ -499,7 +506,10 @@ struct SequenceBarView: View {
         state = Resize(id: event.id, lengthBeats: Self.resizedLength(event.lengthBeats, by: value.translation.width),
                        startEndX: startEndX)
       }
-      .onChanged { _ in if !selection.contains(event.id) { select(event) } }
+      .onChanged { _ in
+        state.targetChords()
+        if !selection.contains(event.id) { select(event) }
+      }
       .onEnded { value in
         let length = Self.resizedLength(event.lengthBeats, by: value.translation.width)
         if length != event.lengthBeats {
@@ -512,7 +522,10 @@ struct SequenceBarView: View {
   private func moveGesture(_ event: EventJSON) -> some Gesture {
     DragGesture(minimumDistance: Self.moveThreshold, coordinateSpace: .global)
       .updating($move) { value, state, _ in state = Move(id: event.id, offset: value.translation.width) }
-      .onChanged { _ in if !selection.contains(event.id) { select(event) } }
+      .onChanged { _ in
+        state.targetChords()
+        if !selection.contains(event.id) { select(event) }
+      }
       .onEnded { value in
         let events = self.events
         guard let from = events.firstIndex(where: { $0.id == event.id }) else { return }

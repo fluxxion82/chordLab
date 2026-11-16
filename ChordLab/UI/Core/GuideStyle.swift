@@ -6,8 +6,8 @@ import SwiftUI
 /// emphasises, the playing a role suits:
 ///
 /// - **Bass** emphasises the Root, then the chord tones: root > chord > tension > avoid.
-/// - **Lead** emphasises the chord tones and the tensions, equally; the Root, one of the chord's own notes, is a
-///   little quieter than those (a melody lives on the colour tones; a bass line on the root).
+/// - **Lead** shows the Root, the chord tones and the tensions equally, and differs from Other by strength
+///   (0.30 against 0.20): a melody lives on the colour tones, so its bands are stronger.
 /// - **Other** is even: Root, chord tones and tensions the same.
 /// - **Avoid** is a faint warm tint on every track role, below every other drawn role.
 /// - **Outside** is not drawn.
@@ -17,7 +17,7 @@ import SwiftUI
 /// | track role | root | chord | tension | avoid | outside |
 /// |------------|------|-------|---------|-------|---------|
 /// | bass       | 0.36 | 0.24  | 0.12    | 0.06  | 0       |
-/// | lead       | 0.18 | 0.30  | 0.30    | 0.06  | 0       |
+/// | lead       | 0.30 | 0.30  | 0.30    | 0.06  | 0       |
 /// | other      | 0.20 | 0.20  | 0.20    | 0.06  | 0       |
 ///
 /// They are alphas for a fill over the roll's dark grid, tuned so that notes in the track colour stay readable
@@ -34,8 +34,7 @@ enum GuideStyle {
     case (.bass, .root): return 0.36
     case (.bass, .chord): return 0.24
     case (.bass, .tension): return 0.12
-    case (.lead, .root): return 0.18
-    case (.lead, .chord), (.lead, .tension): return 0.30
+    case (.lead, .root), (.lead, .chord), (.lead, .tension): return 0.30
     case (.other, .root), (.other, .chord), (.other, .tension): return 0.20
     }
   }

@@ -198,25 +198,43 @@ final class KeyCommandTests: XCTestCase {
     XCTAssertEqual(KeyTarget.notes(trackId: 1).afterOpenLaneChange(from: .track(1), to: .track(1)), .notes(trackId: 1))
   }
 
-  // MARK: - What perform may run before notes get their own dispatch (plan Task 20)
+  // MARK: - Where perform sends a command (plan Task 20: the dispatch by target)
 
   private let everyCommand: [KeyCommand] = [
     .appendSuggestion(1), .deleteSelection, .undo, .redo, .copy, .cut, .paste, .duplicate, .selectAll,
     .nudge(.up, octave: false), .nudge(.left, octave: true),
   ]
 
-  func testEveryCommandRunsWithTheChordsTargeted() {
-    for command in everyCommand {
-      XCTAssertTrue(command.runsBeforeNoteDispatch(target: .chords), "\(command)")
+  func testUndoAndRedoAreTheSharedHistoryForBothTargets() {
+    for target in [KeyTarget.chords, .notes(trackId: 3)] {
+      XCTAssertEqual(KeyCommand.undo.route(target: target, openLane: .track(3)), .shared)
+      XCTAssertEqual(KeyCommand.redo.route(target: target, openLane: .track(3)), .shared)
     }
   }
 
-  func testOnlyUndoAndRedoRunWithNotesTargeted() {
-    for command in everyCommand {
-      let expected = command == .undo || command == .redo
-      XCTAssertEqual(command.runsBeforeNoteDispatch(target: .notes(trackId: 3)), expected,
-                     "\(command) must never act on the hidden chords")
+  func testEveryOtherCommandGoesToTheChordsWithTheChordsTargeted() {
+    for command in everyCommand where command != .undo && command != .redo {
+      XCTAssertEqual(command.route(target: .chords, openLane: .track(3)), .chords, "\(command)")
     }
+  }
+
+  func testEveryOtherCommandGoesToTheNotesWithNotesTargeted() {
+    for command in everyCommand where command != .undo && command != .redo {
+      XCTAssertEqual(command.route(target: .notes(trackId: 3), openLane: .track(3)), .notes(trackId: 3),
+                     "\(command) must never act on the chords the open track hides")
+    }
+  }
+
+  func testNotesOfATrackThatIsNotOpenAreNeverActedOn() {
+    // Defence in depth (Task 20 review): the target resets on every lane change, but a notes route also needs the
+    // targeted track's roll to be the open lane; otherwise the key does nothing (undo and redo stay shared).
+    for command in everyCommand where command != .undo && command != .redo {
+      XCTAssertEqual(command.route(target: .notes(trackId: 3), openLane: .track(4)), .ignored, "\(command)")
+      XCTAssertEqual(command.route(target: .notes(trackId: 3), openLane: .chords), .ignored, "\(command)")
+    }
+    XCTAssertEqual(KeyCommand.undo.route(target: .notes(trackId: 3), openLane: .chords), .shared)
+    XCTAssertEqual(KeyCommand.deleteSelection.route(target: .chords, openLane: .track(4)), .chords,
+                   "the chords stay editable with a track open (the strip is visible)")
   }
 
   // MARK: - The AppKit adapter's key (route A: macOS key code and charactersIgnoringModifiers)

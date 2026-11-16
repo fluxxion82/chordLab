@@ -84,14 +84,29 @@ enum KeyCommand: Equatable {
   case nudge(ArrowDirection, octave: Bool)
 }
 
+/// Where `ChordLabState.perform` sends a key command (tracks design D15 "Keyboard", plan Task 20).
+enum KeyRoute: Equatable {
+  /// Undo and redo: the one history the chords and the notes share, whatever is targeted.
+  case shared
+  /// The strip's chords (strip editing design D5, D6).
+  case chords
+  /// That track's notes (`NoteKeys`).
+  case notes(trackId: Int)
+  /// Nothing: the targeted track's roll is not the open lane (defence in depth; the target resets on every lane
+  /// change, so this should never happen).
+  case ignored
+}
+
 extension KeyCommand {
-  /// Whether `ChordLabState.perform` runs this command with `target` while it acts only on the chords (until plan
-  /// Task 20 dispatches by target): every command with `.chords`; with `.notes` only `.undo` and `.redo` (the
-  /// shared undo history), since anything else would act on the chords the open track hides.
-  func runsBeforeNoteDispatch(target: KeyTarget) -> Bool {
+  /// The route for this command with `target` while `openLane` is shown: undo and redo are `.shared`; everything else
+  /// follows the target, so a key with a track's notes targeted never acts on the chords the open track hides, and one
+  /// with the chords targeted never acts on notes. A notes target whose track is not the open lane is `.ignored`, so
+  /// nothing ever acts on a track that is not open.
+  func route(target: KeyTarget, openLane: Lane) -> KeyRoute {
+    if self == .undo || self == .redo { return .shared }
     switch target {
-    case .chords: return true
-    case .notes: return self == .undo || self == .redo
+    case .chords: return .chords
+    case .notes(let trackId): return openLane == .track(trackId) ? .notes(trackId: trackId) : .ignored
     }
   }
 }
@@ -123,8 +138,8 @@ enum KeyTarget: Equatable {
 /// suggestion chip; Delete and Forward Delete remove the selected chords; ⌘Z and ⇧⌘Z undo and redo; ⌘C, ⌘X, ⌘V,
 /// ⌘D and ⌘A copy, cut, paste, duplicate and select all, without Shift (⇧⌘C and the like stay the host's); every
 /// arrow, with any modifiers, is nil (the host keeps it: Live moves its own selection). With `.notes(trackId)`
-/// targeted: the same Delete, ⌘Z/⇧⌘Z and ⌘C ⌘X ⌘V ⌘D ⌘A entries (`ChordLabState.perform` will send Delete and
-/// ⌘C ⌘X ⌘V ⌘D ⌘A to the notes, plan Task 20; ⌘Z/⇧⌘Z stay the shared undo);
+/// targeted: the same Delete, ⌘Z/⇧⌘Z and ⌘C ⌘X ⌘V ⌘D ⌘A entries (`ChordLabState.perform` sends Delete and
+/// ⌘C ⌘X ⌘V ⌘D ⌘A to the notes, `KeyCommand.route`; ⌘Z/⇧⌘Z stay the shared undo);
 /// a bare arrow is `.nudge(direction, octave: false)` and a ⇧-arrow `.nudge(direction, octave: true)`; an arrow
 /// with ⌘, ⌥ or ⌃ (⇧ or not) is nil; bare digits are nil (the suggestion chips are hidden while a track is open,
 /// design D13). For both targets everything else (Space, letters, 9, 0, digits or deletes with a modifier, ⌥ or

@@ -16,6 +16,13 @@ enum PresetLoadMode: String, CaseIterable, Identifiable {
     case .replace: return "Replace progression"
     }
   }
+
+  /// The segmented control's title (plan Task 20): Replace reads "Replace progression and notes" while any track has
+  /// notes (`PresetStyle.tracksHaveNotes`), since replacing the progression also drops the notes anchored to it;
+  /// otherwise `title`.
+  func title(tracksHaveNotes: Bool) -> String {
+    self == .replace && tracksHaveNotes ? "Replace progression and notes" : title
+  }
 }
 
 /// One genre heading of the Presets popover and its presets, in the snapshot's (the engine table's) order.
@@ -65,6 +72,18 @@ enum PresetStyle {
     }
     if !preset.fits && preset.tonality != "Any" { parts.append("does not fit the project key") }
     return parts.joined(separator: ", ")
+  }
+
+  /// Whether any of the snapshot's `tracks` has a note (inactive ones count); false without tracks.
+  static func tracksHaveNotes(_ tracks: [TrackJSON]?) -> Bool {
+    tracks?.contains { !$0.notes.isEmpty } ?? false
+  }
+
+  /// The Presets popover's width (plan Task 20): 360 pt, or 450 while Replace reads "Replace progression and notes"
+  /// (`tracksHaveNotes`), because the segmented control gives both segments the longer title's width (two 211-pt
+  /// segments measured offscreen) and would overflow 360 pt with its 12-pt padding.
+  static func popoverWidth(tracksHaveNotes: Bool) -> CGFloat {
+    tracksHaveNotes ? 450 : 360
   }
 
   /// The command a click sends (`json_api.h`, plan P4).
