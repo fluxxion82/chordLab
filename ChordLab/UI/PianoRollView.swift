@@ -6,11 +6,13 @@ import SwiftUI
 ///
 /// - **Toolbar** (`toolbarHeight`, the small controls of the lane tab row's size): Grid (`RollGrid`, the current one
 ///   checked), Snap pitch (`PitchSnap`), Mode (Notes | Velocity), zoom − / + (time, ×2 / ÷2 about the grid's
-///   centre, each disabled at its limit), Other tracks (the faint outlines of the other tracks' notes, default on),
-///   and the nudge buttons ◀ ▶ ▲ ▼ (`RollNudge`: one `updateNotes` per press for the selected notes, each enabled
-///   only for a direction the selection can move in). Grid, Snap pitch, Mode, zoom and Other tracks change the
-///   track's view state (`ChordLabState.rolls`), never the document: nothing is sent. Generate ▸ (after Mode, D14)
-///   writes a bass line (`GenerateOptions`: one `generateBass` per choice, for the selected chords or every chord).
+///   centre, each disabled at its limit), View (which parts of the harmonic guides are drawn, `GuideDisplay`, an
+///   editor-wide preference; and Other tracks' notes, the faint outlines of the other tracks' notes, per track,
+///   default on), and the nudge buttons ◀ ▶ ▲ ▼ (`RollNudge`: one `updateNotes` per press for the selected notes,
+///   each enabled only for a direction the selection can move in). Grid, Snap pitch, Mode, zoom and View change the
+///   view state (`ChordLabState.rolls`, `guideDisplay`), never the document: nothing is sent. Generate ▸ (after
+///   Mode, D14) writes a bass line (`GenerateOptions`: one `generateBass` per choice, for the selected chords or
+///   every chord) and then scrolls the roll to the notes it wrote.
 /// - **Chord ribbon** (`ribbonHeight`) over the grid: the meter's bar numbers and pulse ticks (the sequence ruler's
 ///   look), then the chord symbols over their playback spans on their sections' tints (`SectionStyle`), the chord
 ///   boundaries, the dashed end line, and the playhead.
@@ -53,7 +55,7 @@ struct PianoRollView: View {
         let playhead = Playhead.beat(transport: state.transport, endBeat: snapshot.endBeat,
                                      loop: snapshot.progressionLoop)
         RollToolbar(trackId: track.id, grid: view.grid, snap: view.snap, mode: view.mode,
-                    showsOtherTracks: view.showsOtherTracks, canZoomIn: geometry.canZoomIn,
+                    showsOtherTracks: view.showsOtherTracks, guides: state.guideDisplay, canZoomIn: geometry.canZoomIn,
                     canZoomOut: geometry.canZoomOut,
                     nudges: RollNudge.availability(trackId: track.id, snapshot: snapshot, timing: timing, grid: view.grid),
                     generate: GenerateOptions.menu(snapshot, lineage: state.clipboardToken),
@@ -97,7 +99,8 @@ struct PianoRollView: View {
     drawn.editState.insertMarker = nil
     return ZStack(alignment: .topLeading) {
       PianoRollCanvas(snapshot: snapshot, track: track, view: drawn, timing: timing,
-                      bands: rolls.bands.bands(snapshot: snapshot, geometry: geometry, trackRole: track.role))
+                      bands: rolls.bands.bands(snapshot: snapshot, geometry: geometry, trackRole: track.role,
+                                               display: state.guideDisplay))
         .equatable()
       RollMarkersOverlay(geometry: geometry, scrollX: view.scroll.x, ticksPerBeat: timing.ticksPerBeat,
                          playheadBeat: playhead, insertMarker: view.editState.insertMarker)
@@ -116,13 +119,14 @@ struct PianoRollView: View {
   }
 }
 
-/// What the roll's toolbar does (`RollToolbar`): the `ChordLabState` roll setters of one track, its nudge and its
-/// Generate menu (the toolbar actions that send a command).
+/// What the roll's toolbar does (`RollToolbar`): the `ChordLabState` roll setters of one track, the editor-wide
+/// guide display, its nudge and its Generate menu (the toolbar actions that send a command).
 struct RollToolbarActions {
   let setGrid: @MainActor (RollGrid) -> Void
   let setSnap: @MainActor (PitchSnap) -> Void
   let setMode: @MainActor (RollMode) -> Void
   let setShowsOtherTracks: @MainActor (Bool) -> Void
+  let setGuides: @MainActor (GuideDisplay) -> Void
   let zoomIn: @MainActor () -> Void
   let zoomOut: @MainActor () -> Void
   let nudge: @MainActor (ArrowDirection) -> Void
@@ -134,6 +138,7 @@ struct RollToolbarActions {
                        setSnap: { state.setRollSnap(trackId: trackId, $0) },
                        setMode: { state.setRollMode(trackId: trackId, $0) },
                        setShowsOtherTracks: { state.setRollShowsOtherTracks(trackId: trackId, $0) },
+                       setGuides: { state.setGuideDisplay($0) },
                        zoomIn: { state.zoomRollIn(trackId: trackId) },
                        zoomOut: { state.zoomRollOut(trackId: trackId) },
                        nudge: { state.nudgeRoll(trackId: trackId, $0) },
@@ -144,7 +149,8 @@ struct RollToolbarActions {
 /// The roll's toolbar (tracks design D14; see `PianoRollView`): plain values and an actions struct, no observed
 /// object, and `Equatable` over the values (the actions are the same setters of the same track, `trackId`), so
 /// with `.equatable()` it re-renders only when a value changes: never on a scroll or a transport push. The Generate
-/// menu's model is one of the values, so a chord selection or Loop change updates the menu.
+/// menu's model is one of the values, so a chord selection or Loop change updates the menu; the View menu's values
+/// are the guide display and Other tracks, so a choice there updates its checkmarks.
 ///
 /// The row is laid out twice in a `ViewThatFits`: Generate reads "Generate" when the row has room for it, and shrinks
 /// to its icon (same menu, same accessibility label) when not, as at the 700-pt minimum width with the widest Grid
@@ -155,6 +161,8 @@ struct RollToolbar: View, Equatable {
   let snap: PitchSnap
   let mode: RollMode
   let showsOtherTracks: Bool
+  /// What the guides draw (`GuideDisplay`, the View menu's Guides section).
+  let guides: GuideDisplay
   let canZoomIn: Bool
   let canZoomOut: Bool
   /// Which nudge buttons are enabled (`RollNudge.availability`).
@@ -165,7 +173,7 @@ struct RollToolbar: View, Equatable {
 
   static func == (a: RollToolbar, b: RollToolbar) -> Bool {
     a.trackId == b.trackId && a.grid == b.grid && a.snap == b.snap && a.mode == b.mode
-      && a.showsOtherTracks == b.showsOtherTracks && a.canZoomIn == b.canZoomIn && a.canZoomOut == b.canZoomOut
+      && a.showsOtherTracks == b.showsOtherTracks && a.guides == b.guides && a.canZoomIn == b.canZoomIn && a.canZoomOut == b.canZoomOut
       && a.nudges == b.nudges && a.generate == b.generate
   }
 
@@ -231,14 +239,7 @@ struct RollToolbar: View, Equatable {
 
       Spacer(minLength: 0)
 
-      Toggle(isOn: Binding(get: { showsOtherTracks },
-                           set: { actions.setShowsOtherTracks($0) })) {
-        Text("Other tracks").foregroundStyle(.white)
-      }
-      .toggleStyle(.accentSwitch)
-      .fixedSize()
-      .help("Show the other tracks' notes as faint outlines")
-      .accessibilityLabel("Show other tracks")
+      viewMenu
 
       HStack(spacing: 0) {
         // The arrow keys' nudges as buttons, for hosts that keep the arrow keys (design D15 "Keyboard").
@@ -252,6 +253,30 @@ struct RollToolbar: View, Equatable {
                    enabled: nudges.down) { actions.nudge(.down) }
       }
     }
+  }
+
+  /// The View menu's last entry: the other tracks' notes as faint outlines (per track).
+  static let otherTracksTitle = "Other tracks' notes"
+
+  /// View ▸: a Guides section with `GuideDisplay`'s entries (Root, Chord tones, Tensions, Avoid notes, Degree labels),
+  /// then Other tracks' notes; each a checkable item showing its on state as the Grid and Snap menus show their
+  /// current choice (a trailing "  ✓"). Choosing one switches it over and leaves the menu's other entries alone.
+  private var viewMenu: some View {
+    Menu {
+      Section("Guides") {
+        ForEach(guides.entries) { entry in
+          Button(entry.title + (entry.isOn ? "  ✓" : "")) { actions.setGuides(guides.toggled(entry.part)) }
+        }
+      }
+      Divider()
+      Button(Self.otherTracksTitle + (showsOtherTracks ? "  ✓" : "")) { actions.setShowsOtherTracks(!showsOtherTracks) }
+    } label: {
+      Text("View")
+    }
+    .fixedSize()
+    .help("Choose which harmonic guides the roll draws and whether it shows the other tracks' notes")
+    .accessibilityLabel("View")
+    .accessibilityValue(guides.summary)
   }
 
   /// The SF Symbol of the compact Generate menu.

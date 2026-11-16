@@ -1,19 +1,20 @@
 import CoreGraphics
 import Foundation
 
-/// The harmonic guide bands behind the piano roll's notes, laid out once per snapshot revision, zoom and track
-/// role (tracks design D14, D9, D6). One `Band` per chord that has a playback span and a guide, in playback order:
+/// The harmonic guide bands behind the piano roll's notes, laid out once per snapshot revision, zoom, track role
+/// and guide display (tracks design D14, D9, D6). One `Band` per chord that has a playback span and a guide, in playback order:
 /// its span in ticks (`playStart`…`playEnd`, never the authored `startBeat`, so the shading matches what sounds)
 /// and in content x, and a 12-entry table by absolute pitch class of the guide role, the fill opacity
 /// (`GuideStyle.opacity(role:track:)`; Outside 0, so it draws nothing) and the degree label (the glyph degree on
 /// the Root, ChordTone and Tension rows when the rows are at least 12 pt tall, `GuideStyle.showsDegreeLabel`, else
-/// empty).
+/// empty). What the View menu hides (`GuideDisplay`) is filtered here: a role that is off gets opacity 0 and no
+/// label, labels off leaves every label empty; the roles table always keeps the guide's roles.
 /// No rectangle per row is materialised: the canvas walks the bands that intersect the visible ticks
 /// (`indices(intersecting:)`) and, for each visible row, looks its pitch class up in the band's table.
 ///
 /// The key (`Key`) is what the layout depends on: the snapshot's content revision (every chord timing, quality,
-/// feel or key change commits a new one), with the event count and `endBeat` as a guard, the zoom, the tick grid
-/// and the track role. `GuideBandsCache` holds the last layout and rebuilds it only when the key changes (always
+/// feel or key change commits a new one), with the event count and `endBeat` as a guard, the zoom, the tick grid,
+/// the track role and the guide display. `GuideBandsCache` holds the last layout and rebuilds it only when the key changes (always
 /// when the snapshot has no revision).
 ///
 /// Depends on nothing but CoreGraphics and Foundation; unit-tested by the `ChordLabUICore` package
@@ -28,6 +29,7 @@ struct GuideBands: Equatable {
     let rowHeight: CGFloat
     let ticksPerBeat: Int
     let trackRole: TrackRole
+    let display: GuideDisplay
   }
 
   /// One chord's band.
@@ -59,19 +61,21 @@ struct GuideBands: Equatable {
   let key: Key
   let bands: [Band]
 
-  /// Whether this layout's rows carry labels (rows at least 12 pt tall).
-  var showsLabels: Bool { key.rowHeight >= GuideStyle.minLabelRowHeight }
+  /// Whether this layout's rows carry labels: labels are shown (`GuideDisplay.labels`) and the rows are at least
+  /// 12 pt tall.
+  var showsLabels: Bool { key.display.labels && key.rowHeight >= GuideStyle.minLabelRowHeight }
 
-  /// The layout of `snapshot`'s chords for a track of role `trackRole` at `geometry`'s zoom.
-  init(snapshot: Snapshot, geometry: RollGeometry, trackRole: TrackRole) {
+  /// The layout of `snapshot`'s chords for a track of role `trackRole` at `geometry`'s zoom, drawing what `display`
+  /// shows.
+  init(snapshot: Snapshot, geometry: RollGeometry, trackRole: TrackRole, display: GuideDisplay) {
     self.init(events: snapshot.events, ticksPerBeat: snapshot.ticksPerBeatOrDefault, revision: snapshot.revision,
-              endBeat: snapshot.endBeat, geometry: geometry, trackRole: trackRole)
+              endBeat: snapshot.endBeat, geometry: geometry, trackRole: trackRole, display: display)
   }
 
   init(events: [EventJSON], ticksPerBeat: Int, revision: UInt64?, endBeat: Double, geometry: RollGeometry,
-       trackRole: TrackRole) {
+       trackRole: TrackRole, display: GuideDisplay) {
     key = Key(revision: revision, eventCount: events.count, endBeat: endBeat, pxPerBeat: geometry.pxPerBeat,
-              rowHeight: geometry.rowHeight, ticksPerBeat: ticksPerBeat, trackRole: trackRole)
+              rowHeight: geometry.rowHeight, ticksPerBeat: ticksPerBeat, trackRole: trackRole, display: display)
     var bands: [Band] = []
     bands.reserveCapacity(events.count)
     for (index, event) in events.enumerated() {
@@ -82,10 +86,12 @@ struct GuideBands: Equatable {
       var drawn: [Int] = []
       for pc in 0..<12 {
         let role = guide.role(pc: pc)
-        let opacity = GuideStyle.opacity(role: role, track: trackRole)
+        let shown = display.shows(role)
+        let opacity = shown ? GuideStyle.opacity(role: role, track: trackRole) : 0
         roles.append(role)
         opacities.append(opacity)
-        labels.append(GuideStyle.showsDegreeLabel(role: role, rowHeight: geometry.rowHeight) ? guide.displayDegree(pc: pc) : "")
+        let labelled = shown && display.labels && GuideStyle.showsDegreeLabel(role: role, rowHeight: geometry.rowHeight)
+        labels.append(labelled ? guide.displayDegree(pc: pc) : "")
         if opacity > 0 { drawn.append(pc) }
       }
       bands.append(Band(eventIndex: index, ticks: ticks, minX: geometry.x(tick: ticks.lowerBound),
@@ -96,10 +102,10 @@ struct GuideBands: Equatable {
   }
 
   /// The key a layout of these inputs would have.
-  static func key(snapshot: Snapshot, geometry: RollGeometry, trackRole: TrackRole) -> Key {
+  static func key(snapshot: Snapshot, geometry: RollGeometry, trackRole: TrackRole, display: GuideDisplay) -> Key {
     Key(revision: snapshot.revision, eventCount: snapshot.events.count, endBeat: snapshot.endBeat,
         pxPerBeat: geometry.pxPerBeat, rowHeight: geometry.rowHeight, ticksPerBeat: snapshot.ticksPerBeatOrDefault,
-        trackRole: trackRole)
+        trackRole: trackRole, display: display)
   }
 
   /// The bands whose span intersects the half-open tick `range`, as indices into `bands` (the same rule as
@@ -113,7 +119,7 @@ struct GuideBands: Equatable {
   }
 
   /// The degree labels of `band` on the rows of `pitches` (clamped to 0...127), ascending by pitch: every row whose
-  /// pitch class has a label. Empty under 12-pt rows.
+  /// pitch class has a label. Empty under 12-pt rows and with labels off.
   func labels(in band: Band, pitches: ClosedRange<Int>) -> [DegreeLabel] {
     let low = max(pitches.lowerBound, 0)
     let high = min(pitches.upperBound, RollGeometry.pitchCount - 1)
@@ -138,8 +144,8 @@ struct GuideBands: Equatable {
   }
 }
 
-/// The last guide band layout (tracks design D14: "cached per snapshot revision and zoom"): `bands` returns it while
-/// the key is unchanged and builds a new one otherwise; a snapshot without a revision (an older plug-in build)
+/// The last guide band layout (tracks design D14: "cached per snapshot revision and zoom"; also per track role and
+/// guide display, so a View menu choice lays it out again): `bands` returns it while the key is unchanged and builds a new one otherwise; a snapshot without a revision (an older plug-in build)
 /// always builds, since its key cannot tell a chord edit from no change. A reference type so the roll view can keep
 /// it across body evaluations without publishing anything; main-thread use only.
 final class GuideBandsCache {
@@ -149,12 +155,12 @@ final class GuideBandsCache {
 
   init() {}
 
-  func bands(snapshot: Snapshot, geometry: RollGeometry, trackRole: TrackRole) -> GuideBands {
-    let key = GuideBands.key(snapshot: snapshot, geometry: geometry, trackRole: trackRole)
+  func bands(snapshot: Snapshot, geometry: RollGeometry, trackRole: TrackRole, display: GuideDisplay) -> GuideBands {
+    let key = GuideBands.key(snapshot: snapshot, geometry: geometry, trackRole: trackRole, display: display)
     // Without a revision (an older plug-in build) a chord edit that keeps the count and the end would look like
     // the same key: never reuse such a layout.
     if key.revision != nil, let current, current.key == key { return current }
-    let layout = GuideBands(snapshot: snapshot, geometry: geometry, trackRole: trackRole)
+    let layout = GuideBands(snapshot: snapshot, geometry: geometry, trackRole: trackRole, display: display)
     current = layout
     builds += 1
     return layout
