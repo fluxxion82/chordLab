@@ -14,6 +14,9 @@ import Foundation
 ///   ⇧ mouse wheel's delta comes in x) taken in the DEVICE's direction (natural scrolling undone), so a wheel turned
 ///   away from the user, or two fingers pushed up, zooms in whatever the scrolling preference. One wheel notch is
 ///   `1.01^10` ≈ ×1.105; the whole time range (×16) is about 280 pt of trackpad travel.
+/// - **Momentum** (the events a flick keeps sending after the fingers lift, `NSEvent.momentumPhase` not empty) never
+///   zooms: ⌥ pressed while a flick coasts would otherwise zoom by a motion the user no longer makes. Plain scrolling
+///   keeps its momentum.
 ///
 /// Depends on nothing but CoreGraphics; unit-tested by the `ChordLabUICore` package
 /// (Tests/ChordLabUICoreTests/RollInputTests.swift).
@@ -34,14 +37,15 @@ enum RollWheel {
   static let zoomBase: CGFloat = 1.01
 
   /// The action of one event: its scrolling deltas, whether they are precise (points) or lines, whether AppKit
-  /// inverted them from the device (natural scrolling), and the modifiers held.
-  static func action(deltaX: CGFloat, deltaY: CGFloat, precise: Bool, invertedFromDevice: Bool,
+  /// inverted them from the device (natural scrolling), whether it is a momentum event, and the modifiers held.
+  static func action(deltaX: CGFloat, deltaY: CGFloat, precise: Bool, invertedFromDevice: Bool, momentum: Bool,
                      modifiers: RollModifiers) -> Action {
     let scale = precise ? 1 : lineStep
     let dx = deltaX * scale
     let dy = deltaY * scale
     guard dx != 0 || dy != 0, dx.isFinite, dy.isFinite else { return .none }
     guard modifiers.option else { return .scroll(CGSize(width: -dx, height: -dy)) }
+    guard !momentum else { return .none }
     let dominant = abs(dy) >= abs(dx) ? dy : dx
     let factor = pow(zoomBase, invertedFromDevice ? -dominant : dominant)
     return modifiers.shift ? .zoomTime(factor: factor) : .zoomRows(factor: factor)

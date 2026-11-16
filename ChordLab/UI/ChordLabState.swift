@@ -45,8 +45,9 @@ class ChordLabState: NSObject, ObservableObject {
   @Published var openLane: Lane = .chords {
     didSet {
       guard openLane != oldValue else { return }
-      // The roll being left drops its gesture now (its held preview stops), not at its next event.
-      if case .track(let left) = oldValue { cancelRollGesture(trackId: left) }
+      // The roll being left drops its gesture now (its held preview stops), not at its next event. Lane changes
+      // come from the main thread (the editor's views and the snapshot's fallback).
+      if case .track(let left) = oldValue { MainActor.assumeIsolated { cancelRollGesture(trackId: left) } }
       let target = keyTarget.afterOpenLaneChange(from: oldValue, to: openLane)
       if target != keyTarget { keyTarget = target }
     }
@@ -104,8 +105,9 @@ class ChordLabState: NSObject, ObservableObject {
   private var holdHasButton = false
   private var keepAliveTicks = 0
   /// The physical button state (`NSEvent.pressedMouseButtons`); a harness that synthesizes events
-  /// passes its own.
-  private let mouseButtonsDown: () -> Bool
+  /// passes its own. Read by the preview keep-alive and by the roll's input view (`RollInputHandlers.mouseButtonsDown`:
+  /// a gesture with no button down lost its mouse-up).
+  let mouseButtonsDown: () -> Bool
 
   let beginEdit: @MainActor (Int) -> Void
   let doEdit: @MainActor (Int, Double) -> Void
@@ -478,12 +480,6 @@ class ChordLabState: NSObject, ObservableObject {
     editRoll(trackId: trackId) { state, _, _ in state.showsOtherTracks = on }
   }
 
-  /// Replaces the gesture machine's state of track `trackId` (plan Task 18 runs `RollEditLogic.handle` and stores
-  /// the result here; the canvas draws its preview, hidden notes, rubber band and insert marker).
-  @MainActor func setRollEditState(trackId: Int, _ editState: RollEditState) {
-    editRoll(trackId: trackId) { state, _, _ in state.editState = editState }
-  }
-
   /// Publishes `states` only when it changed, so an unchanged fit redraws nothing.
   private func publishRolls(_ states: RollViewStates) {
     if states != rolls.states { rolls.states = states }
@@ -518,8 +514,10 @@ class ChordLabState: NSObject, ObservableObject {
   }
 
   /// Cancels track `trackId`'s gesture (the open lane left it): its preview drops, a held preview's stop goes to
-  /// `performRollEffects`. Nothing when it is idle.
-  func cancelRollGesture(trackId: Int) {
+  /// `performRollEffects`. Nothing when it is idle. Plan Task 19: the preview keep-alive's "no button down" release
+  /// of a roll preview comes here too, never through `releaseHeld`, so the machine's state and the seam's Start/Stop
+  /// stay paired (`releaseHeld` would stop the sound behind the machine's back and its later stop would be a second one).
+  @MainActor func cancelRollGesture(trackId: Int) {
     var states = rolls.states
     let effects = states.cancelGesture(trackId: trackId)
     publishRolls(states)
@@ -532,14 +530,20 @@ class ChordLabState: NSObject, ObservableObject {
   /// `send(command: command.json)` (each content command already carries its `baseRevision`), and `previewStart` /
   /// `previewStop` / `previewOneShot` through the existing preview path (`kMsgTagPreview`, one pitch, paired Start
   /// and Stop with keep-alive).
-  func performRollEffects(_ effects: [RollEffect], trackId: Int) {
-    _ = effects
-    _ = trackId
+  ///
+  /// `rollEffectsObserver` (nil in production) sees every call, so a test or the harness can check what reaches the
+  /// seam before Task 19 sends anything.
+  @MainActor func performRollEffects(_ effects: [RollEffect], trackId: Int) {
+    rollEffectsObserver?(effects, trackId)
   }
+
+  /// Sees every call of `performRollEffects` (the effects, in order, and the track); nil in production. Tests and the
+  /// harness set it; it never sends anything itself.
+  var rollEffectsObserver: (@MainActor ([RollEffect], Int) -> Void)?
 
   /// A snapshot arrived: every track's stored gesture checks its revision (`RollViewStates.snapshotChanged`: a
   /// different revision cancels, a selection echo does not), the open roll's and every parked one's.
-  private func cancelStaleRollGestures(revision: UInt64) {
+  @MainActor private func cancelStaleRollGestures(revision: UInt64) {
     var states = rolls.states
     let cancelled = states.snapshotChanged(revision: revision)
     publishRolls(states)
@@ -717,7 +721,8 @@ class ChordLabState: NSObject, ObservableObject {
       let decoded = try JSONDecoder().decode(Snapshot.self, from: json)
       snapshot = decoded
       lastError = nil
-      cancelStaleRollGestures(revision: decoded.revision ?? 0)
+      // Snapshots are applied on the main thread (the controller's message handler, the harness).
+      MainActor.assumeIsolated { cancelStaleRollGestures(revision: decoded.revision ?? 0) }
       let target = keyTarget.resolved(in: decoded.tracks)
       if target != keyTarget { keyTarget = target }
       updateOpenLane(for: decoded)

@@ -2,23 +2,27 @@ import AppKit
 import SwiftUI
 
 /// What the roll's input view calls (`RollInputNSView`): every closure takes the grid's own view coordinates
-/// (top-left origin) or content coordinates as named, and the view holds no edit logic of its own.
+/// (top-left origin) or content coordinates as named, and the view holds no edit logic of its own. All of them run on
+/// the main actor (the view's event methods).
 struct RollInputHandlers {
   /// A grid view point in content coordinates at the track's CURRENT zoom and scroll (read at each event).
-  var contentPoint: (CGPoint) -> CGPoint = { $0 }
+  var contentPoint: @MainActor (CGPoint) -> CGPoint = { $0 }
   /// One pointer event, its location in content coordinates (`ChordLabState.handleRollPointer`).
-  var pointer: (RollPointerEvent) -> Void = { _ in }
+  var pointer: @MainActor (RollPointerEvent) -> Void = { _ in }
   /// The cursor over a grid view point.
-  var cursor: (CGPoint) -> RollCursor = { _ in .arrow }
+  var cursor: @MainActor (CGPoint) -> RollCursor = { _ in .arrow }
   /// Scroll by a content delta in points (clamped by the state).
-  var scroll: (CGSize) -> Void = { _ in }
+  var scroll: @MainActor (CGSize) -> Void = { _ in }
   /// Row zoom by a factor about a view y.
-  var zoomRows: (CGFloat, CGFloat) -> Void = { _, _ in }
+  var zoomRows: @MainActor (CGFloat, CGFloat) -> Void = { _, _ in }
   /// Time zoom by a factor about a view x.
-  var zoomTime: (CGFloat, CGFloat) -> Void = { _, _ in }
+  var zoomTime: @MainActor (CGFloat, CGFloat) -> Void = { _, _ in }
   /// The context menu for a right-click or ⌃-click at a content point; nil shows none. Plan Task 20 builds it (Copy,
   /// Cut, Paste here, Duplicate, Delete); until then it is nil.
-  var contextMenu: (CGPoint) -> NSMenu? = { _ in nil }
+  var contextMenu: @MainActor (CGPoint) -> NSMenu? = { _ in nil }
+  /// Whether any mouse button is down now (`ChordLabState.mouseButtonsDown`, which a harness replaces): a gesture
+  /// with no button down lost its mouse-up.
+  var mouseButtonsDown: @MainActor () -> Bool = { NSEvent.pressedMouseButtons != 0 }
 }
 
 /// The piano roll's input view (tracks design D15 "Input adapter", plan Task 18): an AppKit view over the grid region
@@ -54,16 +58,13 @@ struct RollInputView: NSViewRepresentable {
     let state = state
     return RollInputHandlers(
       contentPoint: { [weak state] in state?.rollContentPoint(trackId: trackId, viewPoint: $0) ?? $0 },
-      pointer: { [weak state] event in MainActor.assumeIsolated { state?.handleRollPointer(event, trackId: trackId) } },
+      pointer: { [weak state] event in state?.handleRollPointer(event, trackId: trackId) },
       cursor: { [weak state] in state?.rollCursor(trackId: trackId, viewPoint: $0) ?? .arrow },
-      scroll: { [weak state] delta in MainActor.assumeIsolated { state?.scrollRoll(trackId: trackId, by: delta) } },
-      zoomRows: { [weak state] factor, y in
-        MainActor.assumeIsolated { state?.zoomRoll(trackId: trackId, vertically: factor, aboutViewY: y) }
-      },
-      zoomTime: { [weak state] factor, x in
-        MainActor.assumeIsolated { state?.zoomRoll(trackId: trackId, horizontally: factor, aboutViewX: x) }
-      },
-      contextMenu: { _ in nil })
+      scroll: { [weak state] delta in state?.scrollRoll(trackId: trackId, by: delta) },
+      zoomRows: { [weak state] factor, y in state?.zoomRoll(trackId: trackId, vertically: factor, aboutViewY: y) },
+      zoomTime: { [weak state] factor, x in state?.zoomRoll(trackId: trackId, horizontally: factor, aboutViewX: x) },
+      contextMenu: { _ in nil },
+      mouseButtonsDown: { [weak state] in state?.mouseButtonsDown() ?? false })
   }
 }
 
@@ -72,23 +73,34 @@ struct RollInputView: NSViewRepresentable {
 /// - **Flipped**, so a view point is the grid's own top-left coordinates, like SwiftUI's; every location goes
 ///   view → content through `handlers.contentPoint` at the moment of the event.
 /// - **First mouse accepted:** Live's plug-in window is often not key when the user clicks it, and the editor's
-///   SwiftUI controls take that first click too; a roll that ignored it would need a second click.
+///   SwiftUI controls take that first click too; a roll that ignored it would need a second click. A press never
+///   moves the window (`mouseDownCanMoveWindow` false).
 /// - **Never first responder:** the keyboard stays with `EditorKeyRouter`'s routes (a click here does not take focus
 ///   from anything; the router's mouse-down monitor ends a section rename on the same click).
-/// - **⌃-click** is a context-menu click, like a right-click, never a `down`; the button's later drags and up are
-///   then ignored. A right-click while a left drag is in progress shows nothing.
+/// - **⌃-click** is a context-menu click, like a right-click, never a `down`; a gesture still marked in progress
+///   (its up was lost) is cancelled first, and the button's later drags and up are ignored. A right-click while a
+///   left drag is in progress shows nothing.
 /// - **Cancel:** on its window resigning key, the application resigning active and the view leaving its window, a
 ///   `cancel` event is sent whether or not a gesture is in progress (the machine leaves an idle state as it is, with
-///   no effects), and the rest of the interrupted button's drags and up are ignored. A mouse-up that never arrives
-///   is covered by the machine: the next `down` cancels the stale gesture first.
+///   no effects), and the rest of the interrupted button's drags and up are ignored.
+/// - **A lost mouse-up** (the up went to another window, a host's modal loop swallowed it): a `mouseMoved` during a
+///   gesture proves it (AppKit sends drags, not moves, while a button is down), so it cancels the gesture whatever
+///   the buttons say; `mouseEntered`, `cursorUpdate`, `scrollWheel`, `magnify` and a context-menu click cancel it when
+///   `handlers.mouseButtonsDown()` says no button is down, before doing their own work. The next `down` would cancel
+///   the stale gesture too (the machine does), but a held preview must not sound until then. Plan Task 19: the
+///   preview keep-alive's own "no button down" release of a roll preview goes through
+///   `ChordLabState.cancelRollGesture(trackId:)`, never `releaseHeld`, so the machine and the seam's Start/Stop stay
+///   paired.
 /// - **A drag outside the window** keeps arriving here (AppKit sends a press's drags and up to the view that took
-///   the down, wherever the pointer is), so a release outside the window still ends the gesture.
+///   the down, wherever the pointer is), so a release outside the window still ends the gesture; a release outside
+///   the view sets the arrow (a resize cursor would otherwise stay until something else sets one).
 /// - **Scroll wheel and pinch** (`RollWheel`): ⌥ zooms rows about the pointer, ⇧⌥ time about the pointer, else both
 ///   axes scroll; a pinch zooms time by `1 + magnification` about the pointer. During a drag, a scroll or zoom is
 ///   followed by a drag at the pointer's last location, so the preview follows the content under the pointer.
-/// - **Cursor:** a tracking area (`.cursorUpdate`, `.mouseMoved`, `.activeInActiveApp`, `.inVisibleRect`): active
-///   whenever the host application is, because a plug-in window is usually not the key window; the resize cursor over
-///   a note's edge in Notes mode, the arrow elsewhere (`RollCursor`); unchanged during a drag.
+/// - **Cursor:** a tracking area (`.cursorUpdate`, `.mouseMoved`, `.mouseEnteredAndExited`, `.activeInActiveApp`,
+///   `.inVisibleRect`): active whenever the host application is, because a plug-in window is usually not the key
+///   window; the resize cursor over a note's edge in Notes mode, the arrow elsewhere (`RollCursor`); unchanged during
+///   a drag.
 final class RollInputNSView: NSView {
   var handlers = RollInputHandlers()
   /// Between this view's own `down` and its `up` (or a cancel).
@@ -102,6 +114,7 @@ final class RollInputNSView: NSView {
 
   override var isFlipped: Bool { true }
   override var acceptsFirstResponder: Bool { false }
+  override var mouseDownCanMoveWindow: Bool { false }
   override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
   static func modifiers(_ flags: NSEvent.ModifierFlags) -> RollModifiers {
@@ -113,9 +126,9 @@ final class RollInputNSView: NSView {
   // MARK: - Buttons
 
   override func mouseDown(with event: NSEvent) {
-    let modifiers = Self.modifiers(event.modifierFlags)
-    if modifiers.control {
-      gestureActive = false
+    if Self.modifiers(event.modifierFlags).control {
+      // This button is down, so a gesture still marked in progress lost its up: it ends here, whatever the buttons say.
+      if gestureActive { cancelGesture() }
       showContextMenu(for: event)
       return
     }
@@ -133,12 +146,24 @@ final class RollInputNSView: NSView {
     gestureActive = false
     send(.up, event)
     lastLocationInWindow = nil
-    updateCursor(at: event.locationInWindow)
+    if bounds.contains(convert(event.locationInWindow, from: nil)) {
+      updateCursor(at: event.locationInWindow)
+    } else {
+      NSCursor.arrow.set()
+    }
   }
 
   override func rightMouseDown(with event: NSEvent) {
+    // The right button itself counts as down here, so this rarely finds a lost left up; the move that brought the
+    // pointer here usually has (`mouseMoved`).
+    cancelIfButtonLost()
     guard !gestureActive else { return }
     showContextMenu(for: event)
+  }
+
+  /// A gesture in progress with no mouse button down lost its up: cancel it (see the type's "A lost mouse-up").
+  private func cancelIfButtonLost() {
+    if gestureActive && !handlers.mouseButtonsDown() { cancelGesture() }
   }
 
   private func send(_ phase: RollPointerEvent.Phase, _ event: NSEvent) {
@@ -161,9 +186,11 @@ final class RollInputNSView: NSView {
   // MARK: - Wheel and pinch
 
   override func scrollWheel(with event: NSEvent) {
+    cancelIfButtonLost()
     let action = RollWheel.action(deltaX: event.scrollingDeltaX, deltaY: event.scrollingDeltaY,
                                   precise: event.hasPreciseScrollingDeltas,
                                   invertedFromDevice: event.isDirectionInvertedFromDevice,
+                                  momentum: event.momentumPhase != [],
                                   modifiers: Self.modifiers(event.modifierFlags))
     let point = convert(event.locationInWindow, from: nil)
     switch action {
@@ -176,6 +203,7 @@ final class RollInputNSView: NSView {
   }
 
   override func magnify(with event: NSEvent) {
+    cancelIfButtonLost()
     let factor = max(0.1, 1 + event.magnification)
     guard factor != 1, factor.isFinite else { return }
     handlers.zoomTime(factor, convert(event.locationInWindow, from: nil).x)
@@ -203,8 +231,21 @@ final class RollInputNSView: NSView {
     trackingArea = area
   }
 
-  override func cursorUpdate(with event: NSEvent) { updateCursor(at: event.locationInWindow) }
-  override func mouseMoved(with event: NSEvent) { updateCursor(at: event.locationInWindow) }
+  override func cursorUpdate(with event: NSEvent) {
+    cancelIfButtonLost()
+    updateCursor(at: event.locationInWindow)
+  }
+
+  override func mouseEntered(with event: NSEvent) {
+    cancelIfButtonLost()
+    updateCursor(at: event.locationInWindow)
+  }
+
+  /// No button is down when AppKit sends a move (a press sends drags), so a gesture still in progress lost its up.
+  override func mouseMoved(with event: NSEvent) {
+    if gestureActive { cancelGesture() }
+    updateCursor(at: event.locationInWindow)
+  }
   override func mouseExited(with event: NSEvent) {
     if !gestureActive { NSCursor.arrow.set() }
   }
@@ -230,6 +271,7 @@ final class RollInputNSView: NSView {
       return
     }
     let center = NotificationCenter.default
+    // Notifications delivered on the main queue, but the closure type is not main-actor isolated.
     let cancel: (Notification) -> Void = { [weak self] _ in MainActor.assumeIsolated { self?.cancelGesture() } }
     observers = [
       center.addObserver(forName: NSWindow.didResignKeyNotification, object: window, queue: .main, using: cancel),

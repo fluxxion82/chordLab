@@ -8,9 +8,9 @@ import XCTest
 final class RollInputTests: XCTestCase {
   // MARK: - Wheel
 
-  private func wheel(_ dx: CGFloat, _ dy: CGFloat, precise: Bool = true, inverted: Bool = false,
+  private func wheel(_ dx: CGFloat, _ dy: CGFloat, precise: Bool = true, inverted: Bool = false, momentum: Bool = false,
                      shift: Bool = false, option: Bool = false, command: Bool = false) -> RollWheel.Action {
-    RollWheel.action(deltaX: dx, deltaY: dy, precise: precise, invertedFromDevice: inverted,
+    RollWheel.action(deltaX: dx, deltaY: dy, precise: precise, invertedFromDevice: inverted, momentum: momentum,
                      modifiers: RollModifiers(shift: shift, option: option, command: command))
   }
 
@@ -53,6 +53,15 @@ final class RollInputTests: XCTestCase {
     guard case .zoomTime(let fromY) = wheel(1, -8, shift: true, option: true) else { return XCTFail("time") }
     XCTAssertEqual(fromY, pow(RollWheel.zoomBase, -8), accuracy: 1e-9)
     guard case .zoomRows = wheel(9, 1, option: true) else { return XCTFail("⌥ alone stays rows, whatever the axis") }
+  }
+
+  func testMomentumNeverZoomsButStillScrolls() {
+    // A flick's momentum events keep coming after the fingers lift; ⌥ pressed meanwhile must not turn them into a zoom.
+    XCTAssertEqual(wheel(0, 10, momentum: true, option: true), .none)
+    XCTAssertEqual(wheel(6, 0, momentum: true, shift: true, option: true), .none)
+    XCTAssertEqual(wheel(3, -5, momentum: true), .scroll(CGSize(width: -3, height: 5)), "plain scrolling keeps momentum")
+    XCTAssertEqual(wheel(2, 0, momentum: true, shift: true), .scroll(CGSize(width: -2, height: 0)))
+    guard case .zoomRows = wheel(0, 10, option: true) else { return XCTFail("the fingers' own events still zoom") }
   }
 
   // MARK: - Cursor
@@ -143,6 +152,47 @@ final class RollInputTests: XCTestCase {
                                timing: RollTiming(snapshot: without))
     XCTAssertEqual(effects, [.previewStop])
     XCTAssertTrue(store[1].editState.isIdle)
+  }
+
+  func testHandleWithACancelPhaseStopsAHeldPreviewAndLeavesIdleAlone() throws {
+    let snapshot = try fixture()
+    var store = measured(snapshot)
+    let timing = RollTiming(snapshot: snapshot)
+    let cancel = RollPointerEvent(phase: .cancel, location: .zero)
+    XCTAssertEqual(store.handle(cancel, trackId: 1, snapshot: snapshot, timing: timing), [], "idle: nothing")
+    let empty = CGPoint(x: RollGeometry().x(tick: 1920), y: RollGeometry().y(pitch: 50) + 1)
+    _ = store.handle(RollPointerEvent(phase: .down, location: empty), trackId: 1, snapshot: snapshot, timing: timing)
+    _ = store.handle(RollPointerEvent(phase: .up, location: empty), trackId: 1, snapshot: snapshot, timing: timing)
+    let idle = store
+    XCTAssertEqual(store.handle(cancel, trackId: 1, snapshot: snapshot, timing: timing), [])
+    XCTAssertEqual(store, idle, "an idle cancel changes nothing (the marker stays)")
+
+    // A press on an empty space holds no preview: its cancel drops the gesture with no stop.
+    _ = store.handle(RollPointerEvent(phase: .down, location: empty), trackId: 1, snapshot: snapshot, timing: timing)
+    XCTAssertFalse(store[1].editState.isIdle)
+    XCTAssertEqual(store.handle(cancel, trackId: 1, snapshot: snapshot, timing: timing), [])
+    XCTAssertTrue(store[1].editState.isIdle)
+
+    // A press on a note holds its preview: the cancel stops it once, and a second cancel gives nothing.
+    _ = store.handle(RollPointerEvent(phase: .down, location: bassNoteBody()), trackId: 1, snapshot: snapshot,
+                     timing: timing)
+    XCTAssertEqual(store[1].editState.press?.heldPitch, 36)
+    XCTAssertEqual(store.handle(cancel, trackId: 1, snapshot: snapshot, timing: timing), [.previewStop])
+    XCTAssertTrue(store[1].editState.isIdle)
+    XCTAssertEqual(store[1].editState.insertMarker, nil, "the note press had cleared the marker")
+    XCTAssertEqual(store.handle(cancel, trackId: 1, snapshot: snapshot, timing: timing), [])
+
+    // Mid-drag the same: one stop, the preview and hidden notes gone.
+    _ = store.handle(RollPointerEvent(phase: .down, location: bassNoteBody()), trackId: 1, snapshot: snapshot,
+                     timing: timing)
+    var moved = bassNoteBody()
+    moved.x += 96
+    moved.y -= RollGeometry().rowHeight
+    _ = store.handle(RollPointerEvent(phase: .drag, location: moved), trackId: 1, snapshot: snapshot, timing: timing)
+    XCTAssertFalse(store[1].editState.previewNotes.isEmpty)
+    XCTAssertEqual(store.handle(cancel, trackId: 1, snapshot: snapshot, timing: timing), [.previewStop])
+    XCTAssertTrue(store[1].editState.previewNotes.isEmpty && store[1].editState.hiddenIds.isEmpty)
+    XCTAssertTrue(store[2].editState.isIdle, "only the track the event names")
   }
 
   func testCancelGestureStopsTheHeldPreviewOnceAndKeepsTheMarker() throws {
