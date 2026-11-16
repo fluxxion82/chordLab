@@ -212,6 +212,21 @@ TEST_CASE("parseClipExportRequest: extra members are ignored") {
     CHECK(*r->sectionId == 4);
 }
 
+TEST_CASE("parseClipExportRequest: the editor's lineage member is ignored here, whatever its type (the shell checks it)") {
+    for (const char* text : {R"({"schema":1,"lanes":"all","sectionId":null,"lineage":"6F1C2A9E"})",
+                             R"({"schema":1,"lanes":"all","sectionId":null,"lineage":5})",
+                             R"({"schema":1,"lanes":"all","sectionId":null,"lineage":null})"}) {
+        const auto r = parseClipExportRequest(text);
+        REQUIRE(r.has_value());
+        CHECK(r->allLanes);
+        CHECK_FALSE(r->sectionId.has_value());
+    }
+    const auto lanes = parseClipExportRequest(R"({"lineage":"A","schema":1,"lanes":["chords",1],"sectionId":2})");
+    REQUIRE(lanes.has_value());
+    CHECK(lanes->lanes.size() == 2);
+    CHECK(*lanes->sectionId == 2);
+}
+
 TEST_CASE("parseClipExportRequest: malformed or non-object payloads are nullopt, never a throw") {
     CHECK_FALSE(parseClipExportRequest(R"({"schema":1,"lanes":"all")").has_value());
     CHECK_FALSE(parseClipExportRequest(R"({"schema":1,"lanes":"all"}trailing)").has_value());

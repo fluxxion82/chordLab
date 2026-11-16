@@ -72,7 +72,8 @@ struct ClipExportRequest {
 ///    refused: exportClip would write it twice. Request order is kept;
 ///  - `sectionId` is absent or JSON null (the whole progression), or a JSON integer in 1..INT_MAX (boundedInt, as
 ///    `id` in the section request); any other type or value, a float such as 1.0 included, is refused.
-/// Other members are ignored. Anything else (malformed JSON, an empty payload, a non-object top level) is
+/// Other members are ignored, the editor's `lineage` among them (the shell checks it separately, command_lineage.h).
+/// Anything else (malformed JSON, an empty payload, a non-object top level) is
 /// nullopt; the caller answers it with kMsgTagError "clip export message needs schema 1, lanes and a section id
 /// or null". The parse never throws on malformed input (allow_exceptions=false). Whether a track id or the
 /// section id names something in the document is the caller's question (it answers "no such track" / "no such

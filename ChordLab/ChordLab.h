@@ -137,7 +137,8 @@ private:
   // (parseClipExportRequest): exports those lanes (chordlab::exportClip under mModelMutex: format 0 for one lane,
   // format 1 for several), over the whole progression or one section, named after the key, the lane and the section
   // (clipExportLabel). A malformed message, an unknown track id or an unknown section id is a kMsgTagError, with
-  // nothing written.
+  // nothing written. Its "lineage" is checked as a command's: a stale request writes nothing and is answered with
+  // PushSnapshot, then kMsgTagError (chordlab::bridge::kStaleExportError).
   void HandleExportClip(std::string_view json);
   // The host's last seen bpm, 120 before the first block or when unusable: the export's tempo and the
   // listener's (any thread).

@@ -23,7 +23,7 @@ static const NSInteger kMsgTagPanic = 13;            // no payload: silence ever
 static const NSInteger kMsgTagExport = 14;           // no payload: write the progression as a .mid file; answered by kMsgTagExportReady or kMsgTagError
 static const NSInteger kMsgTagExportSection = 15;    // payload: {"schema":1,"id":<sectionId>}: write that section alone as a .mid file; same answers
 static const NSInteger kMsgTagClearHeard = 16;       // no payload: forget what the listener heard (the chip's x); answered by kMsgTagHeard
-static const NSInteger kMsgTagExportClip = 17;       // payload: {"schema":1,"lanes":["chords"|<trackId>,...]|"all","sectionId":<id>|null}: write those lanes (the whole progression, or one section) as a .mid file, format 0 for one lane, format 1 for several; answered by kMsgTagExportReady or kMsgTagError
+static const NSInteger kMsgTagExportClip = 17;       // payload: {"schema":1,"lanes":["chords"|<trackId>,...]|"all","sectionId":<id>|null}: write those lanes (the whole progression, or one section) as a .mid file, format 0 for one lane, format 1 for several; answered by kMsgTagExportReady or kMsgTagError; carries "lineage" like a command: a stale one writes nothing and is answered with the current snapshot, then kMsgTagError "The project was reloaded; drag again"
 // plugin -> UI
 static const NSInteger kMsgTagSnapshot = 20;         // payload: snapshotJson (document + palette)
 static const NSInteger kMsgTagError = 21;            // payload: {"schema":1,"error":"..."} for a rejected command or preview, or a failed export

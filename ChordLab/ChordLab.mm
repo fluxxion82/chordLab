@@ -24,8 +24,8 @@
 // renewed by UnserializeState in the same section that replaces the document, and read with the document by
 // OpenWindow and by PushSnapshot's hop, which hands a changed token to the open view controller before it sends
 // the snapshot read in that same section, so the editor never shows a loaded document under the old token.
-// The token is also the lineage guard on edits (tracks plan Task 24a): the editor stamps every kMsgTagCommand with
-// the token it held when the user's action began ("lineage", ChordLabState.send(command:), one token per action so a
+// The token is also the lineage guard on edits (tracks plan Task 24a): the editor stamps every kMsgTagCommand (and
+// every kMsgTagExportClip, checked the same way by HandleExportClip) with the token it held when the user's action began ("lineage", ChordLabState.send(command:), one token per action so a
 // stale answer to an action's first command cannot let its later ones through). OnMessage reads that member BEFORE taking mModelMutex (chordlab::bridge::readLineage: a pure
 // parse that never throws, so a 1 MB command's parse never holds the lock against a host's Serialize/Unserialize) and
 // compares it with mClipboardToken under the lock, in the section that would apply the command (compareLineage, a
@@ -955,20 +955,43 @@ void ChordLab::HandleExportClip(std::string_view text)
     PushError("clip export message needs schema 1, lanes and a section id or null");
     return;
   }
+  // The document the request's lanes and section id were picked in (Task 24a): read before the lock, compared under it
+  // before the export reads the document, as for a command (see "Ownership and threads").
+  const chordlab::bridge::LineageField field = chordlab::bridge::readLineage(text);
+  chordlab::bridge::CommandLineage lineage = chordlab::bridge::CommandLineage::Absent;
   const double bpm = HostBpm();
   chordlab::bridge::ResolvedClipExport resolved;
   std::vector<uint8_t> bytes;
   std::string label;
   {
     std::lock_guard<std::mutex> lock(mModelMutex);
-    const chordlab::Document& doc = mStore.doc();
-    resolved = chordlab::bridge::resolveClipExport(doc, *request);
-    if (!resolved.problem)
+    lineage = chordlab::bridge::compareLineage(field, mClipboardToken);
+    if (chordlab::bridge::lineageApplies(lineage))
     {
-      bytes = chordlab::exportClip(doc, resolved.spec, bpm);
-      label = chordlab::bridge::clipExportLabel(chordlab::keyName(doc.projectKey), resolved.laneNames, request->allLanes,
-                                                resolved.sectionName);
+      const chordlab::Document& doc = mStore.doc();
+      resolved = chordlab::bridge::resolveClipExport(doc, *request);
+      if (!resolved.problem)
+      {
+        bytes = chordlab::exportClip(doc, resolved.spec, bpm);
+        label = chordlab::bridge::clipExportLabel(chordlab::keyName(doc.projectKey), resolved.laneNames, request->allLanes,
+                                                  resolved.sectionName);
+      }
     }
+  }
+  if (lineage == chordlab::bridge::CommandLineage::Stale)
+  {
+    // Picked in a document a state load has since replaced: no file. The current token and snapshot first (a snapshot
+    // clears the editor's error line), then the error, which answers the drag's exchange so the drag offers nothing.
+    DBGMSG("ChordLab: export of a replaced document not written (stale lineage)\n");
+    PushSnapshot();
+    PushError(chordlab::bridge::kStaleExportError);
+    return;
+  }
+  if (!chordlab::bridge::lineageApplies(lineage))              // malformed or unreadable: nothing exported
+  {
+    PushError(lineage == chordlab::bridge::CommandLineage::Malformed ? chordlab::bridge::kMalformedLineageError
+                                                                    : chordlab::bridge::kLineageFailedError);
+    return;
   }
   if (resolved.problem)
   {

@@ -6,8 +6,9 @@ import Foundation
 /// loaded document before the editor has seen it. So `ChordLabState.send(command:)` stamps each `kMsgTagCommand` with
 /// the state's clipboard token (`ClipboardToken`, the shell's `mClipboardToken`, renewed by every state load), and the
 /// shell applies a command only when that is its current document's token (ChordLab/bridge/command_lineage.h); a stale
-/// one applies nothing and brings the current snapshot, with its token first. Previews, export requests, snapshot
-/// requests and the heard group's clear carry no lineage: none of them edits the document.
+/// one applies nothing and brings the current snapshot, with its token first. Export requests (`kMsgTagExportClip`)
+/// carry it too: they read the document, and a stale one writes no file. Previews, panic, snapshot requests and the
+/// heard group's clear carry none: none of them edits or reads the document by id.
 ///
 /// Depends on nothing but Foundation; unit-tested by the `ChordLabUICore` package
 /// (Tests/ChordLabUICoreTests/CommandLineageTests.swift).

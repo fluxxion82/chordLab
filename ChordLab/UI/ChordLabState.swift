@@ -320,7 +320,8 @@ class ChordLabState: NSObject, ObservableObject {
   /// here, and `"lineage"`: the document lineage it was computed for (`clipboardToken`, `CommandLineage`, plan Task
   /// 24a). The plugin answers with a snapshot (`kMsgTagSnapshot`) or an error (`kMsgTagError`); a command whose
   /// lineage a state load has since replaced applies nothing and is answered with the loaded document's snapshot.
-  /// Every `kMsgTagCommand` goes through here; previews, export and snapshot requests carry no lineage.
+  /// Every `kMsgTagCommand` goes through here; export requests carry the lineage too (`exportDrag`); previews, panic,
+  /// snapshot requests and the heard group's clear carry none.
   @MainActor func send(command: [String: Any]) {
     send(command: command, lineage: actionLineage.lineage(current: clipboardToken))
   }
@@ -931,7 +932,10 @@ class ChordLabState: NSObject, ObservableObject {
   @MainActor private func exportDrag(_ request: ClipExportRequest?) -> ExportDrag {
     exports.drag(request) { request in
       exportPath = nil
-      return send(request.fields, tag: kMsgTagExportClip)
+      // The export reads the document: it carries the lineage too, and the shell writes nothing for a stale one (it
+      // answers with the current snapshot and then an error, which fails this exchange: no file is offered).
+      return send(CommandLineage.stamp(request.fields, token: actionLineage.lineage(current: clipboardToken)),
+                  tag: kMsgTagExportClip)
     }
   }
 
