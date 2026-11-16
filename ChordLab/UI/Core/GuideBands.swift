@@ -6,7 +6,8 @@ import Foundation
 /// its span in ticks (`playStart`…`playEnd`, never the authored `startBeat`, so the shading matches what sounds)
 /// and in content x, and a 12-entry table by absolute pitch class of the guide role, the fill opacity
 /// (`GuideStyle.opacity(role:track:)`; Outside 0, so it draws nothing) and the degree label (the glyph degree on
-/// the Root and ChordTone rows when the rows are at least 12 pt tall, `GuideStyle.showsDegreeLabel`, else empty).
+/// the Root, ChordTone and Tension rows when the rows are at least 12 pt tall, `GuideStyle.showsDegreeLabel`, else
+/// empty).
 /// No rectangle per row is materialised: the canvas walks the bands that intersect the visible ticks
 /// (`indices(intersecting:)`) and, for each visible row, looks its pitch class up in the band's table.
 ///

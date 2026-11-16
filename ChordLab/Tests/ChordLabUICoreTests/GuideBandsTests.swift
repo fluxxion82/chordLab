@@ -77,12 +77,14 @@ final class GuideBandsTests: XCTestCase {
         }
       }
     }
-    // C over C major for a bass track: the root strongest, then the chord tones, the tensions, the avoid F.
-    let c = bands(snapshot, role: .bass).bands[0]
-    XCTAssertEqual(c.opacities[0], 0.36)
-    XCTAssertEqual(c.opacities[4], 0.24)
-    XCTAssertEqual(c.opacities[2], 0.12)
-    XCTAssertEqual(c.opacities[5], 0.06)
+    // C over C major: the root strongest, then the chord tones, the tensions, the avoid F; the same on every track.
+    for role in TrackRole.allCases {
+      let c = bands(snapshot, role: role).bands[0]
+      XCTAssertEqual(c.opacities[0], 0.60, "\(role)")
+      XCTAssertEqual(c.opacities[4], 0.48, "\(role)")
+      XCTAssertEqual(c.opacities[2], 0.32, "\(role)")
+      XCTAssertEqual(c.opacities[5], 0.16, "\(role)")
+    }
   }
 
   func testOutsideDrawsNothing() throws {
@@ -98,24 +100,24 @@ final class GuideBandsTests: XCTestCase {
 
   // MARK: - Degree labels
 
-  func testLabelsOnlyOnRootAndChordToneRowsFromTwelvePoints() throws {
+  func testLabelsOnRootChordToneAndTensionRowsFromTwelvePoints() throws {
     let snapshot = try fixture()
     let layout = bands(snapshot, role: .lead, geometry: RollGeometry(rowHeight: 14))
     XCTAssertTrue(layout.showsLabels)
     let g7 = layout.bands[3]
-    // G7: G root, B and D and F chord tones; C (avoid), A and E (tensions) unlabelled.
+    // G7: G root, B and D and F chord tones, A and E tensions (9 and 13); C (avoid) unlabelled.
     let labels = layout.labels(in: g7, pitches: 60...72)
-    XCTAssertEqual(labels.map(\.pitch), [62, 65, 67, 71])
-    XCTAssertEqual(labels.map(\.text), ["5", "♭7", "R", "3"])
-    XCTAssertEqual(labels.map(\.role), [.chord, .chord, .root, .chord])
-    XCTAssertEqual(labels.map(\.x), [432, 432, 432, 432], "at the left of the span")
+    XCTAssertEqual(labels.map(\.pitch), [62, 64, 65, 67, 69, 71])
+    XCTAssertEqual(labels.map(\.text), ["5", "13", "♭7", "R", "9", "3"])
+    XCTAssertEqual(labels.map(\.role), [.chord, .tension, .chord, .root, .tension, .chord])
+    XCTAssertEqual(labels.map(\.x), [432, 432, 432, 432, 432, 432], "at the left of the span")
     for label in labels {
       XCTAssertEqual(label.text, snapshot.events[3].guide?.displayDegree(pc: label.pitch))
     }
     XCTAssertEqual(layout.labels(in: g7, pitches: 66...66).count, 0)
 
     let twelve = bands(snapshot, role: .lead, geometry: RollGeometry(rowHeight: 12))
-    XCTAssertEqual(twelve.labels(in: twelve.bands[3], pitches: 60...72).count, 4)
+    XCTAssertEqual(twelve.labels(in: twelve.bands[3], pitches: 60...72).count, 6)
     let small = bands(snapshot, role: .lead, geometry: RollGeometry(rowHeight: 11.5))
     XCTAssertFalse(small.showsLabels)
     XCTAssertEqual(small.labels(in: small.bands[3], pitches: 0...127).count, 0, "under 12 pt: no labels")
@@ -127,8 +129,9 @@ final class GuideBandsTests: XCTestCase {
     let snapshot = try fixture()
     let layout = bands(snapshot)
     let c = layout.bands[0]
-    XCTAssertEqual(layout.labels(in: c, pitches: 0...127).count, 33, "C, E and G in 11 octaves each (127 is G9)")
-    XCTAssertEqual(layout.labels(in: c, pitches: -5...2).map(\.pitch), [0])
+    XCTAssertEqual(layout.labels(in: c, pitches: 0...127).count, 64,
+                   "C, D, E and G in 11 octaves each (127 is G9), A and B in 10; the avoid F has none")
+    XCTAssertEqual(layout.labels(in: c, pitches: -5...2).map(\.pitch), [0, 2])
   }
 
   // MARK: - Cache
@@ -159,7 +162,8 @@ final class GuideBandsTests: XCTestCase {
     XCTAssertEqual(cache.builds, 3)
     let lead = cache.bands(snapshot: later, geometry: RollGeometry(pxPerBeat: 24), trackRole: .lead)
     XCTAssertEqual(cache.builds, 4)
-    XCTAssertNotEqual(lead.bands[0].opacities, first.bands[0].opacities)
+    XCTAssertEqual(lead.bands[0].opacities, first.bands[0].opacities,
+                   "a rebuild per role (the role is in the key), the same guide: one hue per role on every track")
   }
 
   func testWithoutARevisionTheCacheAlwaysRebuilds() throws {

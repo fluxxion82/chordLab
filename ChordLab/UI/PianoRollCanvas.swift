@@ -6,13 +6,13 @@ import SwiftUI
 ///
 /// 1. the grid's dark ground and the black-key rows, a subtle darker stripe (`RollColors.blackKeyRow`), under
 /// 2. the guide bands from the per-revision-and-zoom layout (`GuideBands`): per visible chord span and visible row,
-///    the role's fill (`GuideStyle.color`) at the track role's opacity (`GuideStyle.opacity`), Outside nothing;
+///    the role's hue (`GuideStyle.color`) at the role's opacity (`GuideStyle.opacity`), Outside nothing;
 ///    the rects of one role are filled as one path;
 /// 3. row lines (a faint line between rows from 10-pt rows, a stronger one under each C), then the time lines (`RollLines`: bar,
 ///    the meter's pulse and the grid, bar-relative, none denser than 4 pt) and the chord boundaries at the
 ///    playback span starts;
-/// 4. the degree labels at the left of each span (kept at the viewport's left edge while the span runs on) on Root
-///    and ChordTone rows from 12-pt rows (`GuideBands.labels`), small and low contrast;
+/// 4. the degree labels at the left of each span (kept at the viewport's left edge while the span runs on) on Root,
+///    ChordTone and Tension rows from 12-pt rows (`GuideBands.labels`), in `GuideStyle`'s font and colour per role;
 /// 5. the hatch after the progression's end (`RollTiming.endTick`): a darker area with faint diagonals anchored to
 ///    the content, and the dashed end line of the sequence ruler;
 /// 6. with Other tracks on, the other tracks' notes as faint outlines in their own colours;
@@ -171,13 +171,13 @@ struct PianoRollCanvas: View, Equatable {
   private func drawLabels(_ context: inout GraphicsContext, geometry: RollGeometry, scroll: CGPoint,
                           pitches: ClosedRange<Int>, visible: Range<Int>) {
     guard bands.showsLabels else { return }
-    // A frame's labels use a handful of strings ("R", "3", "♭7"): each is resolved once.
+    // A frame's labels use a handful of strings ("R", "3", "♭7", "9"): each is resolved once per role.
     var resolved: [String: GraphicsContext.ResolvedText] = [:]
-    func text(_ string: String, root: Bool) -> GraphicsContext.ResolvedText {
-      let key = (root ? "r" : "c") + string
+    func text(_ string: String, role: GuideRole) -> GraphicsContext.ResolvedText {
+      let key = "\(role)/" + string
       if let done = resolved[key] { return done }
-      let made = context.resolve(Text(string).font(RollColors.labelFont)
-        .foregroundColor(root ? RollColors.rootLabel : RollColors.chordLabel))
+      let made = context.resolve(Text(string).font(GuideStyle.labelFont(role: role))
+        .foregroundColor(GuideStyle.labelColor(role: role)))
       resolved[key] = made
       return made
     }
@@ -187,7 +187,7 @@ struct PianoRollCanvas: View, Equatable {
       guard band.maxX - scroll.x - left >= RollColors.minLabelSpan else { continue }
       for label in bands.labels(in: band, pitches: pitches) {
         let y = geometry.y(pitch: label.pitch) - scroll.y + geometry.rowHeight / 2
-        context.draw(text(label.text, root: label.role == .root), at: CGPoint(x: left, y: y), anchor: .leading)
+        context.draw(text(label.text, role: label.role), at: CGPoint(x: left, y: y), anchor: .leading)
       }
     }
   }

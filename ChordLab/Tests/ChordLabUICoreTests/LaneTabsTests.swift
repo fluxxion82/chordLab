@@ -384,7 +384,8 @@ final class LaneTabsTests: XCTestCase {
   func testTrackColoursAreDistinctFromEachOtherAndTheGuidesAndThePalettes() {
     let tracks = TrackRole.allCases.compactMap { hex(TrackStyle.color(role: $0)) }
     XCTAssertEqual(Set(tracks).count, 3)
-    let taken = Set(([GuideStyle.cool, GuideStyle.warm] + SectionStyle.colors).compactMap(hex))
+    let guides = [GuideStyle.gold, GuideStyle.ice, GuideStyle.aqua, GuideStyle.taupe]
+    let taken = Set((guides + SectionStyle.colors).compactMap(hex))
     XCTAssertTrue(taken.isDisjoint(with: tracks))
   }
 }

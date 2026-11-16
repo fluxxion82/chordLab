@@ -1,56 +1,51 @@
 import SwiftUI
 
-/// How a harmonic-guide band is drawn behind the piano roll's notes (tracks design D14): an opacity per guide role
-/// and track role, one fill colour per role, and when a row carries its degree label. The guide roles come from
-/// the engine (design D9: Root, ChordTone, Tension, Avoid, Outside); the track role decides what the roll
-/// emphasises, the playing a role suits:
+/// How a harmonic-guide band is drawn behind the piano roll's notes (tracks design D14): one hue per guide role, so
+/// a colour means the same thing on every track, an opacity per role, and the degree labels. The guide roles come
+/// from the engine (design D9: Root, ChordTone, Tension, Avoid, Outside).
 ///
-/// - **Bass** emphasises the Root, then the chord tones: root > chord > tension > avoid.
-/// - **Lead** shows the Root, the chord tones and the tensions equally, and differs from Other by strength
-///   (0.30 against 0.20): a melody lives on the colour tones, so its bands are stronger.
-/// - **Other** is even: Root, chord tones and tensions the same.
-/// - **Avoid** is a faint warm tint on every track role, below every other drawn role.
-/// - **Outside** is not drawn.
+/// | role    | fill             | opacity | label                    |
+/// |---------|------------------|---------|--------------------------|
+/// | root    | gold `#F7C65A`   | 0.60    | "R", heavy, pale gold    |
+/// | chord   | ice `#C9DEFF`    | 0.48    | "3", "♭7", bold, white   |
+/// | tension | aqua `#4FD1BF`   | 0.32    | "9", "13", medium, dimmer|
+/// | avoid   | taupe `#A39B8C`  | 0.16    | none                     |
+/// | outside | not drawn        | 0       | none                     |
 ///
-/// The opacities (the design gives the ordering, these are the values):
+/// Decisions (Sterling, 2026-11-16, after trying the roll in Live): the first style, one blue at different
+/// strengths per track role, could not be read ("all shades of blue"), so each role has its own hue, light enough
+/// to stand off the roll's dark blue ground; the opacities step down root > chord tone > tension > avoid, the same
+/// on a Bass, a Lead and an Other track. Avoid is a neutral taupe, never red: red already means something on the
+/// chords (the dominant's dot) and would read as an error. The hues stay away from the track colours the notes are
+/// drawn in (green, pink, lavender), and the notes sit on top with their dark edge.
 ///
-/// | track role | root | chord | tension | avoid | outside |
-/// |------------|------|-------|---------|-------|---------|
-/// | bass       | 0.36 | 0.24  | 0.12    | 0.06  | 0       |
-/// | lead       | 0.30 | 0.30  | 0.30    | 0.06  | 0       |
-/// | other      | 0.20 | 0.20  | 0.20    | 0.06  | 0       |
-///
-/// They are alphas for a fill over the roll's dark grid, tuned so that notes in the track colour stay readable
-/// over the strongest band (0.36) and the weakest (0.06) is still visible as a tint.
-///
-/// Depends on nothing but SwiftUI's `Color` value type; unit-tested by the `ChordLabUICore` package
+/// Depends on nothing but SwiftUI's `Color` and `Font` value types; unit-tested by the `ChordLabUICore` package
 /// (Tests/ChordLabUICoreTests/GuideStyleTests.swift).
 enum GuideStyle {
-  /// The fill alpha of a band of `role` in a track of role `track`: the table above; 0 for Outside.
+  /// The fill alpha of a band of `role`: the table above, 0 for Outside. The same for every `track` role; the
+  /// parameter stays so that a role can be given its own emphasis again without touching the callers.
   static func opacity(role: GuideRole, track: TrackRole) -> Double {
-    switch (track, role) {
-    case (_, .outside): return 0
-    case (_, .avoid): return avoidOpacity
-    case (.bass, .root): return 0.36
-    case (.bass, .chord): return 0.24
-    case (.bass, .tension): return 0.12
-    case (.lead, .root), (.lead, .chord), (.lead, .tension): return 0.30
-    case (.other, .root), (.other, .chord), (.other, .tension): return 0.20
+    switch role {
+    case .root: return 0.60
+    case .chord: return 0.48
+    case .tension: return 0.32
+    case .avoid: return 0.16
+    case .outside: return 0
     }
   }
 
-  /// The faint warm tint every track role gives an Avoid note.
-  private static let avoidOpacity = 0.06
+  static let gold = Color(red: 0xF7 / 255.0, green: 0xC6 / 255.0, blue: 0x5A / 255.0)    // #F7C65A
+  static let ice = Color(red: 0xC9 / 255.0, green: 0xDE / 255.0, blue: 0xFF / 255.0)     // #C9DEFF
+  static let aqua = Color(red: 0x4F / 255.0, green: 0xD1 / 255.0, blue: 0xBF / 255.0)    // #4FD1BF
+  static let taupe = Color(red: 0xA3 / 255.0, green: 0x9B / 255.0, blue: 0x8C / 255.0)   // #A39B8C
 
-  /// The cool fill of the stable roles (Root, ChordTone, Tension; their opacity tells them apart), the warm fill
-  /// of Avoid, and clear for Outside.
-  static let cool = Color(red: 0.431, green: 0.561, blue: 0.847)   // #6E8FD8
-  static let warm = Color(red: 0.851, green: 0.565, blue: 0.290)   // #D9904A
-
+  /// The fill hue of `role`: gold, ice, aqua, taupe; clear for Outside.
   static func color(role: GuideRole) -> Color {
     switch role {
-    case .root, .chord, .tension: return cool
-    case .avoid: return warm
+    case .root: return gold
+    case .chord: return ice
+    case .tension: return aqua
+    case .avoid: return taupe
     case .outside: return .clear
     }
   }
@@ -58,9 +53,28 @@ enum GuideStyle {
   /// The row height from which a degree label is drawn (design D14: at least 12 pt).
   static let minLabelRowHeight: CGFloat = 12
 
-  /// Whether a row of `role` carries its degree label ("R", "3", "♭7") at the left of the chord's span: only the
-  /// Root and ChordTone rows, and only when the rows are at least `minLabelRowHeight` tall (design D14).
+  /// Whether a row of `role` carries its degree label ("R", "3", "♭7", "9") at the left of the chord's span: the
+  /// Root, ChordTone and Tension rows, and only when the rows are at least `minLabelRowHeight` tall.
   static func showsDegreeLabel(role: GuideRole, rowHeight: CGFloat) -> Bool {
-    (role == .root || role == .chord) && rowHeight >= minLabelRowHeight
+    (role == .root || role == .chord || role == .tension) && rowHeight >= minLabelRowHeight
+  }
+
+  /// A degree label's colour: pale gold on the root's band, near-white on a chord tone's, a step dimmer on a
+  /// tension's (opaque, so the label reads at full strength over its band).
+  static func labelColor(role: GuideRole) -> Color {
+    switch role {
+    case .root: return Color(red: 0xFF / 255.0, green: 0xE9 / 255.0, blue: 0xB0 / 255.0)      // #FFE9B0
+    case .chord: return Color(red: 0xF4 / 255.0, green: 0xF7 / 255.0, blue: 0xFF / 255.0)     // #F4F7FF
+    default: return Color(red: 0xC3 / 255.0, green: 0xCD / 255.0, blue: 0xE8 / 255.0)         // #C3CDE8
+    }
+  }
+
+  /// A degree label's font: the root's heaviest, a chord tone's bold, a tension's lighter and a little smaller.
+  static func labelFont(role: GuideRole) -> Font {
+    switch role {
+    case .root: return .system(size: 10.5, weight: .heavy, design: .rounded)
+    case .chord: return .system(size: 10.5, weight: .bold, design: .rounded)
+    default: return .system(size: 9.5, weight: .medium, design: .rounded)
+    }
   }
 }

@@ -473,10 +473,8 @@ enum RollColors {
   static let inactiveFill = 0.10
   static let velocityBar = Color.white.opacity(0.75)
   static let otherTrackOpacity = 0.45
-  /// Degree labels: 9-pt monospaced, the root's a little brighter; none on a span narrower than `minLabelSpan`.
-  static let labelFont = Font.system(size: 9, weight: .medium, design: .monospaced)
-  static let rootLabel = Color.white.opacity(0.62)
-  static let chordLabel = Color.white.opacity(0.42)
+  /// Degree labels (font and colour per guide role: `GuideStyle.labelFont`, `labelColor`): none on a span narrower
+  /// than `minLabelSpan`.
   static let minLabelSpan: CGFloat = 14
   /// The ribbon: its ground (the sequence bar's 4 % white), section tints, boundaries, chord symbols.
   static let ribbonGround = Color.white.opacity(0.04)
