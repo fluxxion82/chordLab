@@ -13,7 +13,7 @@ import SwiftUI
 /// - drag the "♫" at a span's right end onto a MIDI track → that section of the OPEN lane as a .mid clip
 ///   (tracks design D13: the chords with Chords open, the track's own notes with a track open;
 ///   `kMsgTagExportClip` → `kMsgTagExportReady`, as `ExportDragView` does for the whole progression); dimmed and
-///   inert when the open track has no notes there.
+///   inert when the open track has no sounding notes there.
 /// The sequence bar draws the matching boundary lines through the block row.
 struct SectionsHeaderView: View {
   @EnvironmentObject var state: ChordLabState
@@ -134,10 +134,9 @@ struct SectionsHeaderView: View {
   }
 
   /// "♫": drag it onto a MIDI track and the open lane's part of the section lands there as a .mid clip
-  /// (`ChordLabState.dragExport(.openLaneSection)`). The plug-in writes the file when the mouse arrives over the
-  /// handle and again when the drag starts (synchronous round trip, like `ExportDragView`), so the clip is the
-  /// section as it is at that moment. With nothing to export there (an open track without notes in the section) the
-  /// handle is dimmed and inert, and its help says why.
+  /// (`ChordLabState.dragExport(.openLaneSection)`). The plug-in writes the file when the drag starts (synchronous
+  /// round trip, like `ExportDragView`), so the clip is the section as it is at that moment. With nothing to export
+  /// there (an open track without sounding notes in the section) the handle is dimmed and inert, and its help says why.
   private func exportHandle(_ section: SectionJSON) -> some View {
     let grip = ExportGrip.openLaneSection(section.id)
     let text = ClipExport.text(for: grip, in: state.snapshot, open: state.openLane)
@@ -146,10 +145,7 @@ struct SectionsHeaderView: View {
       .foregroundStyle(.white.opacity(text.enabled ? 0.8 : 0.3))
       .padding(.horizontal, 3)
       .contentShape(Rectangle())
-      .onHover { over in
-        if over { state.prepareExport(grip) }
-      }
-      .exportDragSource(enabled: text.enabled) { state.dragExport(grip) }
+      .exportDragSource(enabled: text.enabled) { state.dragExport(grip).provider }
       .help(text.help)
       .accessibilityLabel(text.label)
   }

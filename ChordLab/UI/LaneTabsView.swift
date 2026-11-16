@@ -20,8 +20,8 @@ import SwiftUI
 /// - The ♫ grip at a tab's trailing end → drag that lane to Live as a MIDI clip (D12; `ChordLabState.dragExport
 ///   (.lane)`: `kMsgTagExportClip` with that lane over the whole progression, whichever lane is open). The "♫ All"
 ///   grip at the row's trailing end → the chords plus every track with notes, muted ones included (Q4), one clip
-///   per lane in Live (S0 item 2). A grip with nothing to export (no chords; a track without notes) is dimmed and
-///   inert: it starts no drag and its help says why (`ClipExport.text`).
+///   per lane in Live (S0 item 2). A grip with nothing to export (no chords; a track without sounding notes) is
+///   dimmed and inert: it starts no drag and its help says why (`ClipExport.text`).
 /// A track tab carries a small mark in its role's colour (`TrackStyle`). Names truncate at the tail before any
 /// control shrinks, so Chords, four tracks, their grips, + and All stay in one line at the 700-pt minimum width. An
 /// engine without tracks shows the Chords tab alone (no M/S, no +, no All; its grip stays), so the row keeps its
@@ -174,7 +174,7 @@ struct LaneTabsView: View {
       .foregroundStyle(Color.white.opacity(text.enabled ? 0.8 : 0.25))
       .frame(width: Self.gripWidth, height: Self.tabHeight)
       .contentShape(Rectangle())
-      .exportDragSource(enabled: text.enabled) { state.dragExport(grip) }
+      .exportDragSource(enabled: text.enabled) { state.dragExport(grip).provider }
       .help(text.help)
       .accessibilityLabel(text.label)
   }
@@ -192,7 +192,7 @@ struct LaneTabsView: View {
     .overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(Color.white.opacity(0.12), lineWidth: 1))
     .fixedSize()
     .contentShape(Rectangle())
-    .exportDragSource(enabled: text.enabled) { state.dragExport(.all) }
+    .exportDragSource(enabled: text.enabled) { state.dragExport(.all).provider }
     .help(text.help)
     .accessibilityLabel(text.label)
   }

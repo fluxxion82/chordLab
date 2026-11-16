@@ -27,6 +27,8 @@ class ChordLabState: NSObject, ObservableObject {
   var bpm: Double { transport?.tempo ?? 120 }
   /// The MIDI file of the last export request (`kMsgTagExportReady`), or nil while none is ready.
   @Published var exportPath: String?
+  /// The drag-outs' round trip (`ClipExportExchange`): each request's outcome, and which errors answer an export.
+  private let exports = ClipExportExchange()
   /// What the plug-in hears on its MIDI input (`kMsgTagHeard`, design D14); nil until the first push. The
   /// Heard group (`HeardView`) shows only while `active` is true.
   @Published var heard: HeardJSON?
@@ -810,16 +812,18 @@ class ChordLabState: NSObject, ObservableObject {
     }
   }
 
-  /// JSON-encodes `fields` plus `"schema": 1` and sends it under `tag`.
-  @MainActor private func send(_ fields: [String: Any], tag: Int) {
+  /// JSON-encodes `fields` plus `"schema": 1` and sends it under `tag`; false (and an error shown) when it is not valid
+  /// JSON.
+  @MainActor @discardableResult private func send(_ fields: [String: Any], tag: Int) -> Bool {
     var message = fields
     message["schema"] = 1
     guard JSONSerialization.isValidJSONObject(message),
           let data = try? JSONSerialization.data(withJSONObject: message) else {
       reportError("message is not valid JSON: \(fields)")
-      return
+      return false
     }
     sendCommand(tag, data)
+    return true
   }
 
   /// Asks the plugin to push its current snapshot.
@@ -828,32 +832,29 @@ class ChordLabState: NSObject, ObservableObject {
   }
 
   /// Asks the plugin to write a clip (`kMsgTagExportClip`, tracks design D12): `request`'s lanes over the whole
-  /// progression or its section. The round trip is synchronous on the main thread (`OnMessage` runs inline and
-  /// answers through the delegate at once), so `exportPath` holds the new file, or nil after a failure
-  /// (`kMsgTagError`), when this returns. The legacy `kMsgTagExport` / `kMsgTagExportSection` messages stay in the
-  /// shell (D12) but the UI no longer sends them: the chords lane through this path is byte-identical to them.
-  @MainActor func requestExportClip(_ request: ClipExportRequest) {
-    exportPath = nil
-    send(request.fields, tag: kMsgTagExportClip)
-  }
-
-  /// Writes `grip`'s clip ahead of a drag (the drag-out's hover) when it has anything to export
-  /// (`ClipExport.request` against the current snapshot and open lane); sends nothing otherwise. Returns whether it
-  /// asked.
-  @MainActor @discardableResult func prepareExport(_ grip: ExportGrip) -> Bool {
-    guard let request = ClipExport.request(for: grip, in: snapshot, open: openLane) else { return false }
-    requestExportClip(request)
-    return true
+  /// progression or its section, and returns what it came to (`ClipExportExchange`): the shell answers inline inside
+  /// the send (`OnMessage` runs synchronously on the main thread), so the outcome is `.ready` with the new file or
+  /// `.failed` after a `kMsgTagError`, and `.pending` only if no answer arrived. `exportPath` is cleared first and holds
+  /// the file once it arrives. The legacy `kMsgTagExport` / `kMsgTagExportSection` messages stay in the shell (D12) but
+  /// the UI no longer sends them: the chords lane through this path is byte-identical to them.
+  @MainActor @discardableResult func requestExportClip(_ request: ClipExportRequest) -> ExportOutcome {
+    exportDrag(request).outcome
   }
 
   /// The body of every drag-out's `.onDrag` (the lane grips, All, the bottom drag-out, the section handles): the
-  /// request `grip` makes against the current snapshot and open lane (`ClipExport.request`), sent through
-  /// `requestExportClip`, and an item provider for the file that comes back. With nothing to export, or when the
-  /// shell answers with an error, nothing is written and the provider is empty. One function, so the harness checks
-  /// exactly what a drag sends without dragging.
-  @MainActor func dragExport(_ grip: ExportGrip) -> NSItemProvider {
-    guard prepareExport(grip), let path = exportPath else { return NSItemProvider() }
-    return NSItemProvider(contentsOf: URL(fileURLWithPath: path)) ?? NSItemProvider()
+  /// request `grip` makes against the current snapshot and open lane (`ClipExport.request`), its outcome and the item
+  /// provider for the file this request produced (`ClipExportExchange.drag`). With nothing to export nothing is sent;
+  /// on a failure or with no answer the provider is empty. The round trip and its decisions are Core's, tested there
+  /// (ClipExportExchangeTests); this only wires the sender.
+  @MainActor func dragExport(_ grip: ExportGrip) -> ExportDrag {
+    exportDrag(ClipExport.request(for: grip, in: snapshot, open: openLane))
+  }
+
+  @MainActor private func exportDrag(_ request: ClipExportRequest?) -> ExportDrag {
+    exports.drag(request) { request in
+      exportPath = nil
+      return send(request.fields, tag: kMsgTagExportClip)
+    }
   }
 
   // MARK: - Messages from the plugin
@@ -901,24 +902,25 @@ class ChordLabState: NSObject, ObservableObject {
     }
   }
 
-  /// `kMsgTagExportReady` payload.
+  /// `kMsgTagExportReady` payload: the export request in flight gets it as its answer (`ClipExportExchange`).
   func applyExportReady(json: Data) {
     if let ready = try? JSONDecoder().decode(ExportReadyJSON.self, from: json) {
       exportPath = ready.path
+      exports.receivedPath(ready.path)
     }
   }
 
-  /// `kMsgTagError` payload. A key change still waiting for its snapshot was most likely the refused
-  /// command: it is dropped, so a later snapshot with that tonic (an undo, a redo) shows nothing. So is a pending
-  /// track add (a refused add opens nothing).
+  /// `kMsgTagError` payload. An error answering the export request in flight is that export's failure
+  /// (`ClipExportExchange.receivedError`): only its text shows. Otherwise it is a refused command: a key change still
+  /// waiting for its snapshot was most likely it, so it is dropped (a later snapshot with that tonic, an undo or a
+  /// redo, shows nothing), and so is a pending track add (a refused add opens nothing).
   func applyError(json: Data) {
-    pendingKeyChange = nil
-    laneOpener.refused()
-    if let message = try? JSONDecoder().decode(ErrorJSON.self, from: json) {
-      reportError(message.error)
-    } else {
-      reportError(String(decoding: json, as: UTF8.self))
+    let message = (try? JSONDecoder().decode(ErrorJSON.self, from: json))?.error ?? String(decoding: json, as: UTF8.self)
+    if !exports.receivedError(message) {
+      pendingKeyChange = nil
+      laneOpener.refused()
     }
+    reportError(message)
   }
 
   private func reportError(_ message: String) {

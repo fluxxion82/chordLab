@@ -184,12 +184,27 @@ final class ClipExportTests: XCTestCase {
     XCTAssertFalse(ClipExport.canExport(lane: .track(2), sectionId: 2, in: edge))
   }
 
-  func testACutRemainderUnderFiveTicksDoesNotCount() throws {
-    // exportClip drops a cut note shorter than kMinNoteTicks (5 ticks at 960): 4 ticks into the Chorus is nothing.
+  func testAnyOverlapCountsHoweverShortTheCut() throws {
+    // Enablement over-approximates exportClip: no cut threshold. A note reaching 4 ticks into the Chorus counts there
+    // (the engine may drop that sliver; then the shell answers "nothing to export" and the drag carries nothing).
     let sliver = try fixture(trackIndex: 1, notes: [(start: 6720, length: 964, active: true)])
-    XCTAssertFalse(ClipExport.canExport(lane: .track(2), sectionId: 2, in: sliver))
-    let five = try fixture(trackIndex: 1, notes: [(start: 6720, length: 965, active: true)])
-    XCTAssertTrue(ClipExport.canExport(lane: .track(2), sectionId: 2, in: five))
+    XCTAssertTrue(ClipExport.canExport(lane: .track(2), sectionId: 2, in: sliver))
+    let tick = try fixture(trackIndex: 1, notes: [(start: 6720, length: 961, active: true)])
+    XCTAssertTrue(ClipExport.canExport(lane: .track(2), sectionId: 2, in: tick))
+    XCTAssertNotNil(ClipExport.request(for: .openLaneSection(2), in: tick, open: .track(2)))
+  }
+
+  func testANoteCrossingTheProgressionsEndCounts() throws {
+    // Beat 14.5 to 16 crosses the end at beat 15: exportClip clips it to [14.5, 15), so it counts for the whole
+    // progression and for the last section (Chorus), not for the Verse.
+    let crossing = try fixture(trackIndex: 1, notes: [(start: 13920, length: 1440, active: true)])
+    XCTAssertTrue(ClipExport.canExport(lane: .track(2), sectionId: nil, in: crossing))
+    XCTAssertTrue(ClipExport.canExport(lane: .track(2), sectionId: 2, in: crossing))
+    XCTAssertFalse(ClipExport.canExport(lane: .track(2), sectionId: 1, in: crossing))
+    XCTAssertNotNil(ClipExport.request(for: .lane(.track(2)), in: crossing, open: .chords))
+    // One starting a tick before the end still counts.
+    let last = try fixture(trackIndex: 1, notes: [(start: 14399, length: 960, active: true)])
+    XCTAssertTrue(ClipExport.canExport(lane: .track(2), sectionId: nil, in: last))
   }
 
   func testANoteStartingAtTheEndIsPastIt() throws {
@@ -247,9 +262,68 @@ final class ClipExportTests: XCTestCase {
     XCTAssertEqual(ClipExport.text(for: .openLaneSection(1), in: s, open: .track(1)),
                    ExportGripText(enabled: true, label: "Drag Bass in the section Verse to Live as a MIDI clip",
                                   help: "Drag Bass in this section onto a MIDI track in Live"))
+    // Bass's only note in the Chorus is inactive (testATrackWithOnlyInactiveNotesSaysItHasNoSoundingNotes).
+    XCTAssertFalse(ClipExport.text(for: .openLaneSection(2), in: s, open: .track(1)).enabled)
+  }
+
+  func testATrackWithOnlyInactiveNotesSaysItHasNoSoundingNotes() throws {
+    // The fixture's Bass has, in the Chorus, only its inactive (dashed) note: the user sees a note there.
+    let s = try fixture()
     XCTAssertEqual(ClipExport.text(for: .openLaneSection(2), in: s, open: .track(1)),
-                   ExportGripText(enabled: false, label: "Bass has no notes in the section Chorus",
-                                  help: "Bass has no notes in this section"))
+                   ExportGripText(enabled: false, label: "Bass has no sounding notes in the section Chorus",
+                                  help: "Bass has no sounding notes in this section"))
+    // A Lead whose only note is inactive: every inert text says "no sounding notes", none asks to add notes.
+    let inactiveOnly = try fixture(trackIndex: 1, notes: [(start: 960, length: 480, active: false)])
+    XCTAssertEqual(ClipExport.text(for: .lane(.track(2)), in: inactiveOnly, open: .chords),
+                   ExportGripText(enabled: false, label: "Lead: nothing to export",
+                                  help: "Lead has no sounding notes to export"))
+    XCTAssertEqual(ClipExport.text(for: .openLane, in: inactiveOnly, open: .track(2)),
+                   ExportGripText(enabled: false, label: "Nothing to export from Lead",
+                                  help: "Lead has no sounding notes to export"))
+    XCTAssertEqual(ClipExport.text(for: .openLaneSection(1), in: inactiveOnly, open: .track(2)),
+                   ExportGripText(enabled: false, label: "Lead has no sounding notes in the section Verse",
+                                  help: "Lead has no sounding notes in this section"))
+    // The Chorus has none of Lead's notes at all: "no notes" there.
+    XCTAssertEqual(ClipExport.text(for: .openLaneSection(2), in: inactiveOnly, open: .track(2)),
+                   ExportGripText(enabled: false, label: "Lead has no notes in the section Chorus",
+                                  help: "Lead has no notes in this section"))
+    XCTAssertEqual(ClipExport.dragOutTitle(in: inactiveOnly, open: .track(2), preparing: false), "♫ Lead · no notes")
+  }
+
+  func testATrackWhoseOnlyNoteIsPastTheEndHasNoSoundingNotes() throws {
+    // A note at beat 15 (the end) is drawn past the end in the roll and never exported.
+    let past = try fixture(trackIndex: 1, notes: [(start: 14400, length: 960, active: true)])
+    XCTAssertEqual(ClipExport.text(for: .openLane, in: past, open: .track(2)).help, "Lead has no sounding notes to export")
+  }
+
+  func testATrackWithoutAnyNotesIsAskedForNotes() throws {
+    let none = try fixture(trackIndex: 1, notes: [])
+    XCTAssertEqual(ClipExport.text(for: .openLane, in: none, open: .track(2)),
+                   ExportGripText(enabled: false, label: "Nothing to export from Lead", help: "Add notes to Lead to export"))
+    XCTAssertEqual(ClipExport.text(for: .lane(.track(2)), in: none, open: .chords).help, "Add notes to Lead to export")
+    XCTAssertEqual(ClipExport.text(for: .openLaneSection(1), in: none, open: .track(2)),
+                   ExportGripText(enabled: false, label: "Lead has no notes in the section Verse",
+                                  help: "Lead has no notes in this section"))
+  }
+
+  func testTheChordsSectionStaysExportableWhileAnOpenTrackHasNothingThere() throws {
+    // Bass open, Chorus: the handle exports Bass's part (nothing: inert), never a fallback to the chords; the chords
+    // lane over that section is still exportable on its own.
+    let s = try fixture()
+    XCTAssertNil(ClipExport.request(for: .openLaneSection(2), in: s, open: .track(1)))
+    XCTAssertTrue(ClipExport.canExport(lane: .chords, sectionId: 2, in: s))
+    XCTAssertTrue(ClipExport.canExport(lane: .chords, sectionId: 1, in: s))
+    XCTAssertFalse(ClipExport.canExport(lane: .chords, sectionId: 7, in: s), "a section the snapshot lacks")
+  }
+
+  func testASectionHandleWithARemovedOpenTrackExportsTheChords() throws {
+    // The open track (9) is gone from the snapshot: the handle resolves to the chords, request and texts alike.
+    let s = try fixture()
+    assertFields(ClipExport.request(for: .openLaneSection(2), in: s, open: .track(9)), ["lanes": ["chords"], "sectionId": 2])
+    XCTAssertEqual(ClipExport.text(for: .openLaneSection(2), in: s, open: .track(9)),
+                   ExportGripText(enabled: true, label: "Drag the section Chorus to Live as a MIDI clip",
+                                  help: "Drag this section onto a MIDI track in Live"))
+    XCTAssertEqual(ClipExport.dragOutTitle(in: s, open: .track(9), preparing: false), "♫ 15 beats · drag to Live")
   }
 
   func testAnUnnamedSectionIsCalledThatInTheTexts() throws {
@@ -265,8 +339,11 @@ final class ClipExportTests: XCTestCase {
   func testTheDragOutTitle() throws {
     let s = try fixture()
     XCTAssertEqual(ClipExport.dragOutTitle(in: s, open: .chords, preparing: false), "♫ 15 beats · drag to Live")
-    XCTAssertEqual(ClipExport.dragOutTitle(in: s, open: .track(1), preparing: false), "♫ Bass · 15 beats · drag to Live")
+    XCTAssertEqual(ClipExport.dragOutTitle(in: s, open: .track(1), preparing: false), "♫ Bass · 15 beats",
+                   "with a track open the name takes the place of \"drag to Live\" (the 700-pt bottom row)")
     XCTAssertEqual(ClipExport.dragOutTitle(in: s, open: .chords, preparing: true), "♫ preparing…")
+    XCTAssertEqual(ClipExport.dragOutTitle(in: s, open: .track(1), preparing: true), "♫ Bass · preparing…",
+                   "a pending export keeps the track's prefix")
     XCTAssertEqual(ClipExport.dragOutTitle(in: try emptyFixture(), open: .chords, preparing: false), "♫ nothing to export")
     XCTAssertEqual(ClipExport.dragOutTitle(in: try fixture(trackIndex: 1, notes: []), open: .track(2), preparing: false),
                    "♫ Lead · no notes")
@@ -282,7 +359,7 @@ final class ClipExportTests: XCTestCase {
     let s = try decode(o)
     XCTAssertEqual(ClipExport.dragOutTitle(in: s, open: .chords, preparing: false), "♫ 14.50 beats · drag to Live")
     XCTAssertEqual(ClipExport.dragOutTitle(in: s, open: .track(1), preparing: false),
-                   "♫ Walking bass… · 14.50 beats · drag to Live")
+                   "♫ Walking bass… · 14.50 beats")
     XCTAssertEqual(ClipExport.shortName("Walking bass line for the verse"), "Walking bass…")
     XCTAssertEqual(ClipExport.shortName("Bass 2"), "Bass 2")
     XCTAssertEqual(ClipExport.shortName("123456789012"), "123456789012", "twelve characters fit")
