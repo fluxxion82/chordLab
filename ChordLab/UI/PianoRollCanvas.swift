@@ -242,7 +242,8 @@ struct PianoRollCanvas: View, Equatable {
     for other in snapshot.tracks ?? [] where other.id != track.id {
       var path = Path()
       let notes = other.notes
-      for i in RollVisibleNotes.indices(notes, ticks: ticks, pitches: pitches) {
+      for i in RollVisibleNotes.indices(notes, ticks: ticks, pitches: pitches,
+                                        minLength: geometry.minDisplayedNoteTicks) {
         let rect = noteRect(start: notes.start[i], length: notes.length[i], pitch: notes.pitch[i], geometry: geometry,
                             scroll: scroll)
         path.addPath(roundedNote(rect.insetBy(dx: 0.5, dy: 0.5)))
@@ -287,7 +288,8 @@ struct PianoRollCanvas: View, Equatable {
       rows.removeAll(keepingCapacity: true)
       runKind = nil
     }
-    for i in RollVisibleNotes.indices(notes, ticks: ticks, pitches: pitches) where !hidden.contains(notes.id[i]) {
+    for i in RollVisibleNotes.indices(notes, ticks: ticks, pitches: pitches, minLength: geometry.minDisplayedNoteTicks)
+    where !hidden.contains(notes.id[i]) {
       let rect = noteRect(start: notes.start[i], length: notes.length[i], pitch: notes.pitch[i], geometry: geometry,
                           scroll: scroll)
       let active = notes.active[i]

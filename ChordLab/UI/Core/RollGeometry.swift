@@ -123,6 +123,13 @@ struct RollGeometry: Equatable {
     return CGRect(x: rect.minX, y: rect.minY, width: max(rect.width, Self.minDisplayedNoteWidth), height: rect.height)
   }
 
+  /// `minDisplayedNoteWidth` in ticks at this zoom, rounded up (160 at 12 pt per beat): how far a shorter note's
+  /// displayed rectangle reaches past its start. `RollVisibleNotes` takes every note as at least this long, so a short
+  /// note whose widened tail crosses the viewport's left edge is still drawn where `RollHit` hits it.
+  var minDisplayedNoteTicks: Int {
+    Int((Double(Self.minDisplayedNoteWidth) / Double(pxPerBeat) * Double(ticksPerBeat)).rounded(.up))
+  }
+
   /// A pitch's full-width row (the keyboard column, the guide bands, the row stripes).
   func rowRect(pitch: Int, width: CGFloat) -> CGRect {
     CGRect(x: 0, y: y(pitch: pitch), width: width, height: rowHeight)

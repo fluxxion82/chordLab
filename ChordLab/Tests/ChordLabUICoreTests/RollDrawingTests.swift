@@ -80,6 +80,33 @@ final class RollDrawingTests: XCTestCase {
     XCTAssertEqual(RollVisibleNotes.indices(notes, ticks: 0..<0, pitches: 0...127), [])
   }
 
+  func testAShortNoteIsVisibleAsFarAsItsDisplayedWidthReaches() {
+    // At 12 pt per beat a 30-tick note is drawn and hit 2 pt wide: 160 ticks. Scrolled so that only its widened
+    // tail is inside the viewport, it must still be drawn, or a click there selects a note nobody can see.
+    let geometry = RollGeometry(pxPerBeat: 12)
+    XCTAssertEqual(geometry.minDisplayedNoteTicks, 160)
+    XCTAssertEqual(RollGeometry(pxPerBeat: 48).minDisplayedNoteTicks, 40)
+    XCTAssertEqual(RollGeometry(pxPerBeat: 192).minDisplayedNoteTicks, 10)
+    XCTAssertEqual(RollGeometry(pxPerBeat: 36).minDisplayedNoteTicks, 54, "53.3 ticks, rounded up: never short of the rect")
+
+    let short = TrackNotesJSON(id: [1], pitch: [60], start: [960], length: [30], velocity: [100], anchor: [1],
+                               offset: [960], active: [true])
+    let leftEdge = geometry.tick(atX: 13)                        // the viewport starts inside the widened tail
+    XCTAssertEqual(leftEdge, 1040)
+    XCTAssertNotNil(RollHit.hit(at: CGPoint(x: 13.5, y: geometry.y(pitch: 60) + 1), notes: short, geometry: geometry),
+                    "the click half a point into the viewport hits the note")
+    XCTAssertEqual(RollVisibleNotes.indices(short, ticks: leftEdge..<4000, pitches: 0...127,
+                                            minLength: geometry.minDisplayedNoteTicks), [0],
+                   "so the canvas draws it too")
+    XCTAssertEqual(RollVisibleNotes.indices(short, ticks: leftEdge..<4000, pitches: 0...127), [],
+                   "by its real length alone it ended before the viewport")
+    XCTAssertEqual(RollVisibleNotes.indices(short, ticks: 1120..<4000, pitches: 0...127,
+                                            minLength: geometry.minDisplayedNoteTicks), [],
+                   "half-open: a viewport starting where the displayed rect ends does not show it")
+    XCTAssertEqual(RollVisibleNotes.indices(notes, ticks: 500..<2000, pitches: 0...127, minLength: 160), [0, 2, 3],
+                   "a note longer than the minimum is unchanged: the one that ended at 480 is still gone")
+  }
+
   // MARK: - Ribbon
 
   func testSectionSpansRunFromTheirFirstChordToTheNextSection() throws {

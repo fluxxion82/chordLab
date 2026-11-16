@@ -69,14 +69,16 @@ enum RollLines {
 /// The notes of a track that a viewport shows (tracks design D14: the canvas draws the visible region only). The
 /// engine keeps notes sorted by start (`TrackNotesJSON`), so the scan stops at the first note starting at or after
 /// the range's end (binary search); a note is visible when it overlaps the half-open tick range and its pitch is
-/// one of the visible rows.
+/// one of the visible rows. A note counts as at least `minLength` ticks long: the canvas passes
+/// `RollGeometry.minDisplayedNoteTicks`, the reach of the narrowest displayed note, so what is hit is also drawn.
 ///
 /// Depends on nothing but Foundation; unit-tested by the `ChordLabUICore` package
 /// (Tests/ChordLabUICoreTests/RollDrawingTests.swift).
 enum RollVisibleNotes {
   /// The indices of the visible notes, in note order (the order the canvas draws them in, so the last drawn is the
   /// topmost and the one `RollEditLogic` hits).
-  static func indices(_ notes: TrackNotesJSON, ticks: Range<Int>, pitches: ClosedRange<Int>) -> [Int] {
+  static func indices(_ notes: TrackNotesJSON, ticks: Range<Int>, pitches: ClosedRange<Int>,
+                      minLength: Int = 0) -> [Int] {
     guard !ticks.isEmpty else { return [] }
     let count = notes.count
     var low = 0
@@ -86,7 +88,8 @@ enum RollVisibleNotes {
       if notes.start[middle] < ticks.upperBound { low = middle + 1 } else { high = middle }
     }
     var result: [Int] = []
-    for i in 0..<low where notes.start[i] + notes.length[i] > ticks.lowerBound && pitches.contains(notes.pitch[i]) {
+    for i in 0..<low where notes.start[i] + max(notes.length[i], minLength) > ticks.lowerBound
+        && pitches.contains(notes.pitch[i]) {
       result.append(i)
     }
     return result
