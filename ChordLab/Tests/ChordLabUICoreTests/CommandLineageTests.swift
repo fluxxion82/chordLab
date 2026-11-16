@@ -41,4 +41,39 @@ final class CommandLineageTests: XCTestCase {
     let data = try JSONSerialization.data(withJSONObject: stamped, options: [.sortedKeys])
     XCTAssertEqual(String(decoding: data, as: UTF8.self), #"{"cmd":"setChordsMute","lineage":"A-1","on":true,"schema":1}"#)
   }
+
+  // MARK: - One action, one lineage (Task 24a review)
+
+  func testAnActionKeepsTheLineageItBeganWith() {
+    var action = ActionLineage()
+    XCTAssertEqual(action.lineage(current: "A"), "A", "outside an action a command carries the token current now")
+    XCTAssertTrue(action.begin(token: "A"), "the outermost call opens the action")
+    // The shell's stale reply renewed the state's token inline, inside the first send.
+    XCTAssertEqual(action.lineage(current: "B"), "A", "the action's later commands keep the lineage it began with")
+    action.end()
+    XCTAssertEqual(action.lineage(current: "B"), "B", "the next action takes the new token")
+  }
+
+  func testANestedActionDoesNotReplaceTheOuterLineage() {
+    var action = ActionLineage()
+    XCTAssertTrue(action.begin(token: "A"))
+    XCTAssertFalse(action.begin(token: "B"), "a helper's own action inside another opens nothing")
+    XCTAssertEqual(action.lineage(current: "B"), "A")
+    action.end()
+    XCTAssertNil(action.captured)
+  }
+
+  // MARK: - A lineage change (Task 24a review: pending replies do not survive a load)
+
+  func testATokenChangeIsReportedOnlyWhenTheResolvedValueDiffers() {
+    XCTAssertEqual(ClipboardToken.change(from: "A", to: "A").token, "A")
+    XCTAssertFalse(ClipboardToken.change(from: "A", to: "A").changed, "the shell re-setting the same token is no load")
+    XCTAssertTrue(ClipboardToken.change(from: "A", to: "B").changed)
+    XCTAssertEqual(ClipboardToken.change(from: "A", to: "B").token, "B")
+    let blank = ClipboardToken.change(from: "A", to: "  ")
+    XCTAssertTrue(blank.changed, "a blank token resolves to a fresh one: another lineage")
+    XCTAssertNotEqual(blank.token, "A")
+    XCTAssertFalse(blank.token.trimmingCharacters(in: .whitespaces).isEmpty)
+    XCTAssertTrue(ClipboardToken.change(from: "A", to: nil).changed)
+  }
 }

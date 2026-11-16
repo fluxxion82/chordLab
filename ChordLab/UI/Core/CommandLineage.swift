@@ -24,3 +24,39 @@ enum CommandLineage {
     return stamped
   }
 }
+
+/// One user action, one lineage (Task 24a review). The shell answers a command inline, inside the send, and a stale
+/// command's answer is the loaded document's token and snapshot: by the time an action's first `send(command:)`
+/// returns, the state's token may already be the new document's. An action that sends more than one command (a key
+/// change's `setKey` and `browseKey`, Move and always transpose, a loop over note commands, a roll gesture's effects)
+/// computed all of them from the document it began in, so all of them carry the token read once at its start, and
+/// the shell drops the later ones as stale too. `ChordLabState` opens one around every such action; a nested one
+/// (a helper that is also an entry point) keeps the outer lineage. Deferred work carries the lineage captured when it
+/// was queued, through `ChordLabState.send(command:lineage:)`.
+struct ActionLineage {
+  /// The open action's lineage; nil between actions.
+  private(set) var captured: String?
+
+  /// Opens an action with `token` unless one is open; true when this call opened it (and must call `end`).
+  mutating func begin(token: String) -> Bool {
+    guard captured == nil else { return false }
+    captured = token
+    return true
+  }
+
+  /// Closes the action the matching `begin` opened.
+  mutating func end() { captured = nil }
+
+  /// What a command or export request sent now carries: the open action's lineage, else `current` (the state's token).
+  func lineage(current: String) -> String { captured ?? current }
+}
+
+extension ClipboardToken {
+  /// The token `given` resolves to (`resolve`) and whether it is another lineage than `old`. Only a real change (a
+  /// state load) may clear what was waiting for a reply; setting the same token again (a harness, an older shell)
+  /// changes nothing.
+  static func change(from old: String, to given: String?) -> (token: String, changed: Bool) {
+    let token = resolve(given)
+    return (token, token != old)
+  }
+}
