@@ -87,9 +87,9 @@ struct RollInputView: NSViewRepresentable {
 ///   gesture proves it (AppKit sends drags, not moves, while a button is down), so it cancels the gesture whatever
 ///   the buttons say; `mouseEntered`, `cursorUpdate`, `scrollWheel`, `magnify` and a context-menu click cancel it when
 ///   `handlers.mouseButtonsDown()` says no button is down, before doing their own work. The next `down` would cancel
-///   the stale gesture too (the machine does), but a held preview must not sound until then. Plan Task 19: the
-///   preview keep-alive's own "no button down" release of a roll preview goes through
-///   `ChordLabState.cancelRollGesture(trackId:)`, never `releaseHeld`, so the machine and the seam's Start/Stop stay
+///   the stale gesture too (the machine does), but a held preview must not sound until then. The preview
+///   keep-alive's own "no button down" release of a roll preview cancels the gesture too
+///   (`ChordLabState.releaseHeld` → `cancelRollGesture(trackId:)`), so the machine and the seam's Start/Stop stay
 ///   paired.
 /// - **A drag outside the window** keeps arriving here (AppKit sends a press's drags and up to the view that took
 ///   the down, wherever the pointer is), so a release outside the window still ends the gesture; a release outside

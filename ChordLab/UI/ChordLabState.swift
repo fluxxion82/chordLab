@@ -80,28 +80,29 @@ class ChordLabState: NSObject, ObservableObject {
   /// Counts moved notes, so a note's timer clears that note only, never a later one.
   private var movedNoteSerial = 0
 
-  /// Id of the palette cell whose voicing is sounding (pressed), or nil.
+  /// Id of the palette cell whose voicing is sounding (pressed), or nil (`PreviewBook.heldCellId`, published here so
+  /// the cell draws pressed).
   @Published private(set) var heldCellId: String?
-  /// Preview id of the held cell: a per-press counter, so that Start and Stop pair up in the scheduler.
-  private var heldPreviewId: Int?
+  /// The note previews' bookkeeping (`PreviewBook`): the one held preview (a palette cell, the roll's note press, a
+  /// keyboard key), the roll's one-shots, the id counter. Start and Stop pair up by id in the scheduler.
+  private var previews = PreviewBook()
   /// The transport row's Record switch (strip editing design D9): while on, releasing a palette or home-row cell
   /// inserts its chord after the anchor (else at the end), as long as the cell was held. UI state: off whenever
   /// the window opens, never saved.
   @Published var recording = false
-  private var previewCounter = 0
-  /// While a cell is held, an `extend` for its preview every `keepAliveInterval` from a main-run-loop
-  /// timer in the common modes (so it fires during mouse tracking). The scheduler ends a preview four
-  /// seconds of processed audio after its Start or its last applied Extend, so it ends a held one only
-  /// when the extends stop reaching it: a main thread stalled for several seconds (the cell then shows
+  /// While a preview is held (a cell, the roll's note press, a keyboard key), an `extend` for it every
+  /// `keepAliveInterval` from a main-run-loop timer in the common modes (so it fires during mouse tracking). The
+  /// scheduler ends a preview four seconds of processed audio after its Start or its last applied Extend, so it ends a
+  /// held one only when the extends stop reaching it: a main thread stalled for several seconds (the cell then shows
   /// pressed until released and pressed again). It also ends a preview whose release never arrived;
   /// while the host processes no audio nothing expires. Each tick also stands in for a release the view
   /// never reported (`PreviewKeepAlive`): a hold that began with a mouse button down is released once no
   /// button is down; one that began without (touch input is outside the button mask) is renewed for at
-  /// most `PreviewKeepAlive.maxTicksWithoutButton` ticks. Invalidated on release, panic and deinit,
-  /// always on the main thread.
+  /// most `PreviewKeepAlive.maxTicksWithoutButton` ticks; a roll hold is released by cancelling its gesture
+  /// (`releaseHeld`). Invalidated on release, panic and deinit, always on the main thread.
   static let keepAliveInterval: TimeInterval = 1.0
   private var keepAlive: Timer?
-  /// Whether a mouse button was down when the held cell was pressed, and the keep-alive ticks since.
+  /// Whether a mouse button was down when the held preview began, and the keep-alive ticks since.
   private var holdHasButton = false
   private var keepAliveTicks = 0
   /// The physical button state (`NSEvent.pressedMouseButtons`); a harness that synthesizes events
@@ -152,20 +153,12 @@ class ChordLabState: NSObject, ObservableObject {
 
   // MARK: - Preview (through the engine scheduler: kMsgTagPreview Start/Stop paired by id, Extend while held)
 
-  /// Sounds `cell`'s voicing. At most one cell is held: pressing another first releases the held one,
-  /// so every Start this object sends is matched by exactly one Stop with the same id (and the
-  /// scheduler's 4 s watchdog ends a preview whose Stop never arrived; `extend`s every second keep a
-  /// held one alive).
+  /// Sounds `cell`'s voicing. At most one preview is held (`PreviewBook`): pressing a cell first ends the held one
+  /// (another cell's or a key's stops; the roll's ends by cancelling its gesture), so every Start this object sends
+  /// is matched by exactly one Stop with the same id (and the scheduler's 4 s watchdog ends a preview whose Stop
+  /// never arrived; `extend`s every second keep a held one alive).
   @MainActor func pressCell(_ cell: CellJSON) {
-    releaseHeld()
-    previewCounter += 1
-    let id = previewCounter
-    heldPreviewId = id
-    heldCellId = cell.id
-    let pitches = Array(cell.voicing.filter { (0...127).contains($0) }.prefix(8))
-    send(["id": id, "on": true, "velocity": 100, "pitches": pitches], tag: kMsgTagPreview)
-    holdHasButton = mouseButtonsDown()
-    startKeepAlive(id: id)
+    startHold(.cell(cell.id), pitches: Array(cell.voicing.filter { (0...127).contains($0) }.prefix(8)), velocity: 100)
   }
 
   /// Releases `cell` if it is the held one; a cell that was already released (by a press elsewhere, a cancelled
@@ -192,21 +185,78 @@ class ChordLabState: NSObject, ObservableObject {
     send(command: RecordLength.command(root: cell.root, type: cell.type, beats: beats, index: index))
   }
 
-  /// Releases whatever is held (view disappearance, window close).
-  @MainActor func releaseHeld() {
-    stopKeepAlive()
-    guard let id = heldPreviewId else { return }
-    heldPreviewId = nil
-    heldCellId = nil
-    send(["id": id, "on": false], tag: kMsgTagPreview)
+  /// A press on the roll's keyboard column (tracks design D14: clicking a key previews it): holds `pitch` until
+  /// `releaseKey` (or a lost release, which the keep-alive ends), ending any other hold first.
+  @MainActor func pressKey(pitch: Int) {
+    guard (0...127).contains(pitch) else { return }
+    startHold(.key(pitch: pitch), pitches: [pitch], velocity: PianoKeys.velocity)
   }
 
-  /// Silences everything the scheduler is sounding (next audio block).
+  /// The keyboard column's press ended (its up, a cancel): stops the key's hold; nothing when a key no longer holds
+  /// (another press, the keep-alive or panic already ended it), so a key never stops twice.
+  @MainActor func releaseKey() {
+    sendPreviews(previews.endHold(if: { if case .key = $0 { return true } else { return false } }))
+    syncHold()
+  }
+
+  /// Ends whatever is held (the editor closing, the keep-alive's lost release, panic): a cell's or a key's hold stops
+  /// here; the roll's ends by cancelling its gesture (`cancelRollGesture`), whose stop comes back through the seam, so
+  /// the gesture machine never believes it holds a pitch that was stopped behind its back.
+  @MainActor func releaseHeld() {
+    endHold(before: nil)
+  }
+
+  /// Ends every sounding preview with its own Stop (the held one as `releaseHeld` does; a one-shot keeps its pending
+  /// stop), then silences everything the scheduler is sounding (next audio block).
   @MainActor func panic() {
-    stopKeepAlive()
-    heldPreviewId = nil
-    heldCellId = nil
+    releaseHeld()
     sendCommand(kMsgTagPanic, Data())
+  }
+
+  /// Ends the held preview the way `PreviewBook.release(before:)` says before `owner` holds (nil: it just ends).
+  @MainActor private func endHold(before owner: PreviewOwner?) {
+    switch previews.release(before: owner) {
+    case .none:
+      break
+    case .stop:
+      sendPreviews(previews.endHold())
+    case .cancelRoll(let trackId):
+      cancelRollGesture(trackId: trackId)
+      // A gesture that held nothing (never expected: the machine pairs its own previews) leaves the hold in the book;
+      // it still ends once, here.
+      if previews.held?.owner == .roll(trackId: trackId) { sendPreviews(previews.endHold()) }
+    }
+    syncHold()
+  }
+
+  /// `owner` holds `pitches`, after the held preview ended (`endHold(before:)`).
+  @MainActor private func startHold(_ owner: PreviewOwner, pitches: [Int], velocity: Int) {
+    endHold(before: owner)
+    sendPreviews(previews.startHold(owner, pitches: pitches, velocity: velocity))
+    syncHold()
+  }
+
+  /// After any change to the book: publishes the held cell, and runs the keep-alive for the held id (a new hold
+  /// samples the mouse button now) or stops it when nothing is held.
+  @MainActor private func syncHold() {
+    let cell = previews.heldCellId
+    if cell != heldCellId { heldCellId = cell }
+    guard let held = previews.held else {
+      stopKeepAlive()
+      return
+    }
+    guard keepAliveId != held.id else { return }
+    holdHasButton = mouseButtonsDown()
+    startKeepAlive(id: held.id)
+  }
+
+  @MainActor private func sendPreviews(_ messages: [PreviewMessage]) {
+    for message in messages { send(message.json, tag: kMsgTagPreview) }
+  }
+
+  /// A roll one-shot's timer fired: its stop, once.
+  @MainActor private func endOneShot(id: Int) {
+    sendPreviews(previews.oneShotEnded(id: id))
   }
 
   /// The keep-alive timer's target. The timer retains it and it holds the state weakly, so a running
@@ -224,6 +274,9 @@ class ChordLabState: NSObject, ObservableObject {
     }
   }
 
+  /// The held id the keep-alive timer renews, nil while it is stopped.
+  private var keepAliveId: Int?
+
   @MainActor private func startKeepAlive(id: Int) {
     stopKeepAlive()
     keepAliveTicks = 0
@@ -231,20 +284,22 @@ class ChordLabState: NSObject, ObservableObject {
                       selector: #selector(KeepAliveTarget.tick(_:)), userInfo: nil, repeats: true)
     RunLoop.main.add(timer, forMode: .common)
     keepAlive = timer
+    keepAliveId = id
   }
 
   @MainActor private func stopKeepAlive() {
     keepAlive?.invalidate()
     keepAlive = nil
+    keepAliveId = nil
   }
 
   /// One tick: the timer is done when `id` is no longer held; otherwise `PreviewKeepAlive` decides
-  /// between an `extend` and a release.
+  /// between an `extend` and a release (`releaseHeld`: a roll hold through its gesture's cancel).
   @MainActor private func keepAliveTick(id: Int) {
-    guard heldPreviewId == id else { stopKeepAlive(); return }
+    guard previews.held?.id == id else { stopKeepAlive(); return }
     keepAliveTicks += 1
     switch PreviewKeepAlive.action(tick: keepAliveTicks, holdHasButton: holdHasButton, buttonDown: mouseButtonsDown()) {
-    case .extend: send(["id": id, "extend": true], tag: kMsgTagPreview)
+    case .extend: sendPreviews([.extend(id: id)])
     case .release: releaseHeld()
     }
   }
@@ -513,10 +568,9 @@ class ChordLabState: NSObject, ObservableObject {
     performRollEffects(effects, trackId: trackId)
   }
 
-  /// Cancels track `trackId`'s gesture (the open lane left it): its preview drops, a held preview's stop goes to
-  /// `performRollEffects`. Nothing when it is idle. Plan Task 19: the preview keep-alive's "no button down" release
-  /// of a roll preview comes here too, never through `releaseHeld`, so the machine's state and the seam's Start/Stop
-  /// stay paired (`releaseHeld` would stop the sound behind the machine's back and its later stop would be a second one).
+  /// Cancels track `trackId`'s gesture (the open lane left it, the editor closed, the keep-alive found no button
+  /// down, another owner takes the held preview, panic): its preview drops and a held preview's stop goes through
+  /// `performRollEffects`, the one place that stops it. Nothing when it is idle.
   @MainActor func cancelRollGesture(trackId: Int) {
     var states = rolls.states
     let effects = states.cancelGesture(trackId: trackId)
@@ -525,16 +579,45 @@ class ChordLabState: NSObject, ObservableObject {
   }
 
   /// THE seam every effect of the roll's gesture machine goes through (`RollEffect`: from `handleRollPointer`, a
-  /// lane switch's cancel and a snapshot's revision cancel), and the only one. In plan Task 18 it does nothing: no
-  /// command reaches the engine and no preview sounds. Plan Task 19 fills it: `send` effects go through
-  /// `send(command: command.json)` (each content command already carries its `baseRevision`), and `previewStart` /
-  /// `previewStop` / `previewOneShot` through the existing preview path (`kMsgTagPreview`, one pitch, paired Start
-  /// and Stop with keep-alive).
+  /// cancel and a snapshot's revision cancel), and the only one (tracks design D15 "Commit" and "Preview"): `send`
+  /// effects go out as `send(command:)` (each content command carries its `baseRevision`); `previewStart` holds the
+  /// note's pitch through the existing preview path (`kMsgTagPreview`, one pitch, paired Start and Stop, keep-alive)
+  /// after ending any other owner's hold; `previewStop` stops this track's hold, never a second time;
+  /// `previewOneShot` sounds for `PreviewBook.oneShotSeconds` under its own id (`PreviewBook.perform`).
   ///
-  /// `rollEffectsObserver` (nil in production) sees every call, so a test or the harness can check what reaches the
-  /// seam before Task 19 sends anything.
+  /// The plug-in answers a command inline, inside `send` (the next snapshot is applied before `send` returns), so a
+  /// selection echo or a commit's new revision reaches the roll here, after the effects' state was published.
+  ///
+  /// `rollEffectsObserver` (nil in production) sees every call first, so a test or the harness can check what reaches
+  /// the seam.
   @MainActor func performRollEffects(_ effects: [RollEffect], trackId: Int) {
     rollEffectsObserver?(effects, trackId)
+    for effect in effects {
+      if case .previewStart = effect { endHold(before: .roll(trackId: trackId)) }
+      for output in previews.perform([effect], trackId: trackId) {
+        switch output {
+        case .command(let command):
+          send(command: command.json)
+        case .preview(let message):
+          send(message.json, tag: kMsgTagPreview)
+        case .scheduleOneShotEnd(let id):
+          DispatchQueue.main.asyncAfter(deadline: .now() + PreviewBook.oneShotSeconds) { [weak self] in
+            self?.endOneShot(id: id)
+          }
+        }
+      }
+      syncHold()
+    }
+  }
+
+  /// The toolbar's nudge ◀ ▶ ▲ ▼ for track `trackId` (`RollNudge.command`): one `updateNotes` of the selected notes
+  /// by one grid step or semitone with the snapshot's revision (one undo step); nothing without a selection on that
+  /// track or when the clamp leaves nothing to move (the button is disabled then).
+  @MainActor func nudgeRoll(trackId: Int, _ direction: ArrowDirection) {
+    guard let snapshot, let timing = rollTiming,
+          let command = RollNudge.command(direction, trackId: trackId, snapshot: snapshot, timing: timing,
+                                          grid: rolls.states[trackId].grid) else { return }
+    send(command: command.json)
   }
 
   /// Sees every call of `performRollEffects` (the effects, in order, and the track); nil in production. Tests and the

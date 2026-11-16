@@ -6,14 +6,15 @@ import SwiftUI
 /// - **Toolbar** (`toolbarHeight`, the small controls of the lane tab row's size): Grid (`RollGrid`, the current one
 ///   checked), Snap pitch (`PitchSnap`), Mode (Notes | Velocity), zoom − / + (time, ×2 / ÷2 about the grid's
 ///   centre, each disabled at its limit), Other tracks (the faint outlines of the other tracks' notes, default on),
-///   and the nudge buttons ◀ ▶ ▲ ▼, drawn but disabled until note editing (plan Tasks 19, 20). Grid, Snap pitch,
-///   Mode, zoom and Other tracks change the track's view state (`ChordLabState.rolls`), never the document: nothing
-///   is sent. Generate ▸ comes with the bass generator (M4).
+///   and the nudge buttons ◀ ▶ ▲ ▼ (`RollNudge`: one `updateNotes` per press for the selected notes, each enabled
+///   only for a direction the selection can move in). Grid, Snap pitch, Mode, zoom and Other tracks change the
+///   track's view state (`ChordLabState.rolls`), never the document: nothing is sent. Generate ▸ comes with the bass
+///   generator (M4).
 /// - **Chord ribbon** (`ribbonHeight`) over the grid: the meter's bar numbers and pulse ticks (the sequence ruler's
 ///   look), then the chord symbols over their playback spans on their sections' tints (`SectionStyle`), the chord
 ///   boundaries, the dashed end line, and the playhead.
-/// - **Keyboard column** (`PianoKeyboardView`, `keyboardWidth`) left of the grid, and the **grid**
-///   (`PianoRollCanvas`).
+/// - **Keyboard column** (`PianoKeyboardView`, `keyboardWidth`) left of the grid, a key press previewing its pitch
+///   (`PianoKeyInputView`), and the **grid** (`PianoRollCanvas`).
 ///
 /// The playhead (and over the grid the insert marker) is a light overlay (`RollMarkersOverlay`) above the ribbon's
 /// and the grid's canvases, never an input of them: a transport push (display rate while playing) moves two thin
@@ -52,7 +53,9 @@ struct PianoRollView: View {
                                      loop: snapshot.progressionLoop)
         RollToolbar(trackId: track.id, grid: view.grid, snap: view.snap, mode: view.mode,
                     showsOtherTracks: view.showsOtherTracks, canZoomIn: geometry.canZoomIn,
-                    canZoomOut: geometry.canZoomOut, actions: .roll(of: state, trackId: track.id))
+                    canZoomOut: geometry.canZoomOut,
+                    nudges: RollNudge.availability(trackId: track.id, snapshot: snapshot, timing: timing, grid: view.grid),
+                    actions: .roll(of: state, trackId: track.id))
           .equatable()
         VStack(spacing: 0) {
           HStack(spacing: 0) {
@@ -66,6 +69,7 @@ struct PianoRollView: View {
           .background(RollColors.ribbonGround)
           HStack(spacing: 0) {
             PianoKeyboardView(geometry: geometry, scrollY: view.scroll.y)
+              .overlay(PianoKeyInputView(trackId: track.id, state: state))
               .frame(width: Self.keyboardWidth)
             grid(snapshot: snapshot, view: view, timing: timing, geometry: geometry, playhead: playhead, name: name)
           }
@@ -110,7 +114,8 @@ struct PianoRollView: View {
   }
 }
 
-/// What the roll's toolbar does (`RollToolbar`): the `ChordLabState` roll setters of one track.
+/// What the roll's toolbar does (`RollToolbar`): the `ChordLabState` roll setters of one track, and its nudge (the only
+/// toolbar action that sends a command).
 struct RollToolbarActions {
   let setGrid: @MainActor (RollGrid) -> Void
   let setSnap: @MainActor (PitchSnap) -> Void
@@ -118,6 +123,7 @@ struct RollToolbarActions {
   let setShowsOtherTracks: @MainActor (Bool) -> Void
   let zoomIn: @MainActor () -> Void
   let zoomOut: @MainActor () -> Void
+  let nudge: @MainActor (ArrowDirection) -> Void
 
   /// Track `trackId`'s setters on `state`.
   static func roll(of state: ChordLabState, trackId: Int) -> RollToolbarActions {
@@ -126,7 +132,8 @@ struct RollToolbarActions {
                        setMode: { state.setRollMode(trackId: trackId, $0) },
                        setShowsOtherTracks: { state.setRollShowsOtherTracks(trackId: trackId, $0) },
                        zoomIn: { state.zoomRollIn(trackId: trackId) },
-                       zoomOut: { state.zoomRollOut(trackId: trackId) })
+                       zoomOut: { state.zoomRollOut(trackId: trackId) },
+                       nudge: { state.nudgeRoll(trackId: trackId, $0) })
   }
 }
 
@@ -141,11 +148,14 @@ struct RollToolbar: View, Equatable {
   let showsOtherTracks: Bool
   let canZoomIn: Bool
   let canZoomOut: Bool
+  /// Which nudge buttons are enabled (`RollNudge.availability`).
+  let nudges: RollNudgeAvailability
   let actions: RollToolbarActions
 
   static func == (a: RollToolbar, b: RollToolbar) -> Bool {
     a.trackId == b.trackId && a.grid == b.grid && a.snap == b.snap && a.mode == b.mode
       && a.showsOtherTracks == b.showsOtherTracks && a.canZoomIn == b.canZoomIn && a.canZoomOut == b.canZoomOut
+      && a.nudges == b.nudges
   }
 
   /// An icon button's square (zoom, nudges): borderless, like the lane tab row's +, so the widest toolbar (Grid
@@ -206,15 +216,15 @@ struct RollToolbar: View, Equatable {
       .accessibilityLabel("Show other tracks")
 
       HStack(spacing: 0) {
-        // Drawn, not wired: the arrow keys' nudges (plan Tasks 19, 20) for hosts that keep the arrow keys.
+        // The arrow keys' nudges as buttons, for hosts that keep the arrow keys (design D15 "Keyboard").
         iconButton("arrowtriangle.left.fill", label: "Nudge left", help: "Move the selected notes one grid step earlier",
-                   enabled: false) {}
+                   enabled: nudges.left) { actions.nudge(.left) }
         iconButton("arrowtriangle.right.fill", label: "Nudge right", help: "Move the selected notes one grid step later",
-                   enabled: false) {}
+                   enabled: nudges.right) { actions.nudge(.right) }
         iconButton("arrowtriangle.up.fill", label: "Nudge up", help: "Move the selected notes up a semitone",
-                   enabled: false) {}
+                   enabled: nudges.up) { actions.nudge(.up) }
         iconButton("arrowtriangle.down.fill", label: "Nudge down", help: "Move the selected notes down a semitone",
-                   enabled: false) {}
+                   enabled: nudges.down) { actions.nudge(.down) }
       }
     }
     .font(.system(size: 12))
