@@ -262,7 +262,8 @@ binaries.
   (`scripts/check.sh --ubsan --asan --tsan`, each step under a hard timeout).
 - Tracks (the engine model and playback, the editor's logic, the lane tabs and piano roll, and the bass
   generator, milestones M1–M4) are merged on `main` but not released: the 1.0.0 pkg does not have them. They pass
-  the engine, Swift and bridge suites; nothing of them has been checked in Live yet (Test 15) or in Logic.
+  the engine, Swift and bridge suites, and Live Test 15 (2026-11-16, Live 12: lanes, note editing, the generator,
+  playback with mute and solo, the drag-outs, saving); modifier clicks, pinch and Logic are not checked yet.
 - Not yet: an instrument per track while composing (every lane plays on channel 1), a lead generator, feel on
   tracks; chords are contiguous; one suggestion style (pop); macOS only (VST3, Audio Unit, app). The Xcode project still carries
   iPlug2's AUv3, AAX, VST2 and iOS targets and Windows project files from the template; they are not
