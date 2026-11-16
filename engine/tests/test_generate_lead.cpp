@@ -26,8 +26,10 @@ using namespace chordlab;
 //
 // Two rules replace D22's text (decided 2026-11-16 after a probe on ordinary loops): every Motif fragment's base is
 // nearest(T, 72), not nearest the previous note (D22's rule ratcheted the line to an edge of the register); Follow feel
-// places the top note's pitch class in 72..83, not nearest the previous note (D22's rule followed fifths low). Every
-// Motif and Follow feel pin below is recomputed by these rules; D22's original numbers are kept beside each in a comment.
+// plays the voicing's top note an octave up, not its pitch class nearest the previous note (D22's rule followed fifths
+// low, and a later 72..83 placement doubled the top note in unison, which playback merges into the chord note).
+// Every Motif and Follow feel pin below is recomputed by these rules; D22's original numbers are kept beside each in
+// a comment.
 
 namespace {
 
@@ -127,9 +129,18 @@ Pins lead(const Document& doc, LeadPattern pattern, const std::vector<int>& scop
         withNotes.tracks.push_back(track);
         CHECK_MESSAGE(rawPins(withNotes, pattern, scope, variation) == pins, "track notes changed the line");
     }
-    for (const Pin& p : pins) {
-        CHECK(p.pitch >= kLeadLowest);
-        CHECK(p.pitch <= kLeadHighest);
+    // The register holds for every pattern but Follow feel, whose notes are each the chord's voicing top + 12 (unless
+    // the feel is over budget and it falls back to Held tone, inside the register).
+    const bool octaveUp = pattern == LeadPattern::FollowFeel && !(feelPerforms(doc.feel) && compile(doc).feelLimited);
+    const ChordTimeline timeline = chordTimeline(doc);
+    const std::vector<std::vector<int>> voiced = voicings(doc);
+    for (const GeneratedNote& n : generateLead(doc, pattern, scope, variation)) {
+        if (octaveUp) {
+            CHECK(n.pitch == voiced[static_cast<std::size_t>(timeline.indexOf(n.anchorEventId))].back() + 12);
+        } else {
+            CHECK(n.pitch >= kLeadLowest);
+            CHECK(n.pitch <= kLeadHighest);
+        }
     }
     return pins;
 }
@@ -195,7 +206,7 @@ TEST_CASE("lead register and seed constants") {
     CHECK(kLeadHighest == 84);
     CHECK(kLeadSeed == 72);
     CHECK(kMotifVariationCount == 64);
-    CHECK(kFollowFeelLowest == 72);
+    CHECK(kFollowFeelOctave == 12);
 }
 
 TEST_CASE("gridAccent is bassAccent: chord or bar start 100, other pulse 90, other subdivision 80") {
@@ -363,9 +374,9 @@ TEST_CASE("C -> G: Motif, variation 0, every fragment based on the chord tone ne
                {3840, 864, 71, 100}, {4800, 864, 74, 90}, {5760, 864, 79, 90}, {6720, 864, 74, 90}});
 }
 
-TEST_CASE("C -> G: Follow feel, Block plays the top note's pitch class in 72..83") {
-    // G4 and D5 (D22's rule: 67 and 62, nearest the previous pitch).
-    CHECK(lead(cThenG(), LeadPattern::FollowFeel) == Pins{{0, 3840, 79, 100}, {3840, 3840, 74, 100}});
+TEST_CASE("C -> G: Follow feel, Block plays the voicing's top note an octave up") {
+    // C's top G4 (67) and G's top D5 (74), an octave up (D22's rule: 67 and 62, nearest the previous pitch).
+    CHECK(lead(cThenG(), LeadPattern::FollowFeel) == Pins{{0, 3840, 79, 100}, {3840, 3840, 86, 100}});
 }
 
 TEST_CASE("C -> G: Motif, variation 9 (rhythm 1, contour 1); 73 equals 9") {
@@ -463,6 +474,19 @@ TEST_CASE("7/8 C: Guide tones split at 1920 (the midpoint tie), Stepwise, Motif"
           Pins{{0, 432, 72, 100}, {720, 432, 76, 80}, {1680, 432, 79, 80}, {2400, 432, 76, 90}});
 }
 
+TEST_CASE("Motif in 3/4, 2/2 and 5/4") {
+    // 3/4, M = 6: variation 28 is rhythm 4 (slots 0, 1, 4, 6) and contour 3 (0, +2, +1, 0). Slots 0 and 1 both fall on
+    // tick 0 and count once, so the hit at 1440 is the fragment's second and takes +2, the one at 1920 takes +1.
+    CHECK(lead(docOf({ev(1, kC, 3.0)}, {3, 4}), LeadPattern::Motif, {}, 28) ==
+          Pins{{0, 864, 72, 100}, {1440, 432, 79, 80}, {1920, 864, 76, 90}});
+    // 2/2, M = 4, subdivision 960, pulse 1920: slots 0, 2, 4, 6 at 0, 960, 1920, 2880.
+    CHECK(lead(docOf({ev(1, kC, 4.0)}, {2, 2}), LeadPattern::Motif) ==
+          Pins{{0, 864, 72, 100}, {960, 864, 76, 80}, {1920, 864, 79, 90}, {2880, 864, 76, 80}});
+    // 5/4, M = 10: slots 0, 2, 4, 6 at 0, 960, 2400, 3360; gaps of 1440 capped at the 960 pulse.
+    CHECK(lead(docOf({ev(1, kC, 5.0)}, {5, 4}), LeadPattern::Motif) ==
+          Pins{{0, 864, 72, 100}, {960, 864, 76, 90}, {2400, 864, 79, 80}, {3360, 864, 76, 80}});
+}
+
 TEST_CASE("3/4 C: Guide tones") {
     CHECK(lead(docOf({ev(1, kC, 3.0)}, {3, 4}), LeadPattern::GuideTones) ==
           Pins{{0, 1920, 76, 100}, {1920, 960, 79, 90}});
@@ -525,26 +549,27 @@ TEST_CASE("Follow feel: Up / Half / One arpeggio, and Block at chord velocity 73
     const Document up = docOf({ev(1, kC, 4.0), ev(2, kG, 4.0)}, {4, 4}, arp(ArpPattern::Up, ArpRate::Half));
     CHECK(lead(up, LeadPattern::FollowFeel) ==
           Pins{{480, 216, 79, 80},  {1200, 216, 79, 80}, {1920, 216, 79, 90}, {2640, 216, 79, 80}, {3360, 216, 79, 80},
-               {4320, 216, 74, 80}, {5040, 216, 74, 80}, {5760, 216, 74, 90}, {6480, 216, 74, 80}, {7200, 216, 74, 80}});
+               {4320, 216, 86, 80}, {5040, 216, 86, 80}, {5760, 216, 86, 90}, {6480, 216, 86, 80}, {7200, 216, 86, 80}});
     const Document soft = docOf({ev(1, kC, 4.0, 73), ev(2, kG, 4.0, 73)});
-    CHECK(lead(soft, LeadPattern::FollowFeel) == Pins{{0, 3840, 79, 73}, {3840, 3840, 74, 73}});
+    CHECK(lead(soft, LeadPattern::FollowFeel) == Pins{{0, 3840, 79, 73}, {3840, 3840, 86, 73}});
 }
 
 TEST_CASE("Follow feel: the voicing decides the top pitch class") {
     // C/E, manual first inversion: [64, 67, 72], top C.
     const Document inverted = docOf({ev(1, kC, 4.0, 100, 1)});
     REQUIRE(voicings(inverted).front() == Ints{64, 67, 72});
-    CHECK(lead(inverted, LeadPattern::FollowFeel) == Pins{{0, 3840, 72, 100}});
+    CHECK(lead(inverted, LeadPattern::FollowFeel) == Pins{{0, 3840, 84, 100}});
     // C -> F with auto voice-leading: F is voiced [60, 65, 69], top A.
     Document led = docOf({ev(1, kC, 4.0), ev(2, chordOf(5, "maj"), 4.0)});
     led.autoVoiceLead = true;
     REQUIRE(voicings(led)[1] == Ints{60, 65, 69});
-    CHECK(lead(led, LeadPattern::FollowFeel) == Pins{{0, 3840, 79, 100}, {3840, 3840, 81, 100}});
+    CHECK(lead(led, LeadPattern::FollowFeel) == Pins{{0, 3840, 79, 100}, {3840, 3840, 81, 100}});  // A4 + 12
     led.autoVoiceLead = false;  // F voiced [65, 69, 72], top C: the line changes with the top note
     REQUIRE(voicings(led)[1] == Ints{65, 69, 72});
-    CHECK(lead(led, LeadPattern::FollowFeel) == Pins{{0, 3840, 79, 100}, {3840, 3840, 72, 100}});
+    CHECK(lead(led, LeadPattern::FollowFeel) == Pins{{0, 3840, 79, 100}, {3840, 3840, 84, 100}});
     // C root position against its inversions: the top note's class moves from G to C to E.
-    CHECK(lead(docOf({ev(1, kC, 4.0, 100, 2)}), LeadPattern::FollowFeel) == Pins{{0, 3840, 76, 100}});
+    REQUIRE(voicings(docOf({ev(1, kC, 4.0, 100, 2)})).front() == Ints{67, 72, 76});
+    CHECK(lead(docOf({ev(1, kC, 4.0, 100, 2)}), LeadPattern::FollowFeel) == Pins{{0, 3840, 88, 100}});
     // Only Follow feel reads the voicing: the other five patterns ignore inversion and auto voice-leading.
     Document plain = docOf({ev(1, kC, 4.0), ev(2, chordOf(5, "maj"), 4.0)});
     Document voiced = docOf({ev(1, kC, 4.0, 100, 2), ev(2, chordOf(5, "maj"), 4.0, 100, 1)});
@@ -587,6 +612,34 @@ TEST_CASE("Follow feel: the capacity pin, 32 C power chords of 64 beats under Lo
     CHECK(notes.front().pitch == 79);
 }
 
+TEST_CASE("Follow feel: strum and humanise do not change the line") {
+    const std::vector<ChordEvent> events{ev(1, kC, 4.0), ev(2, kG, 4.0, 73)};
+    const Feel feels[] = {arp(ArpPattern::Up, ArpRate::Half), arp(ArpPattern::Chord), Feel{Rhythm::Pulse},
+                          Feel{Rhythm::Subdivided}, Feel{Rhythm::LowThenUpper}};
+    for (const Feel& plain : feels) {
+        Feel moved = plain;
+        moved.strum = Strum::DownUp;
+        moved.speed = StrumSpeed::Loose;
+        moved.humanise = Humanise::Heavy;
+        const Document plainDoc = docOf(events, {4, 4}, plain);
+        const Document movedDoc = docOf(events, {4, 4}, moved);
+        REQUIRE_FALSE(compile(movedDoc).events == compile(plainDoc).events);
+        const Pins expected = lead(plainDoc, LeadPattern::FollowFeel);
+        CHECK_FALSE(expected.empty());
+        CHECK(lead(movedDoc, LeadPattern::FollowFeel) == expected);
+    }
+}
+
+TEST_CASE("Follow feel: a Random arpeggio follows the chord's id; a two-octave arpeggio keeps both octaves' hits") {
+    // Random, id 1, three notes: 1 0 2 0 2 0 1 2, so G (index 2) sounds on hits 2, 4 and 7.
+    const Document random = docOf({ev(1, kC, 4.0)}, {4, 4}, arp(ArpPattern::Random));
+    CHECK(lead(random, LeadPattern::FollowFeel) == Pins{{960, 432, 79, 90}, {1920, 432, 79, 90}, {3360, 432, 79, 80}});
+    // Up, half rate, two octaves over [60, 64, 67]: G4 (index 2) and G5 (index 5) both qualify; each note is G4 + 12.
+    const Document two = docOf({ev(1, kC, 4.0)}, {4, 4}, arp(ArpPattern::Up, ArpRate::Half, ArpRange::Two));
+    CHECK(lead(two, LeadPattern::FollowFeel) ==
+          Pins{{480, 216, 79, 80}, {1200, 216, 79, 80}, {1920, 216, 79, 90}, {2640, 216, 79, 80}, {3360, 216, 79, 80}});
+}
+
 // --- one-hit chords ------------------------------------------------------------------------------
 
 TEST_CASE("One-hit chords: a C of a quarter beat, [0, 240)") {
@@ -613,7 +666,7 @@ TEST_CASE("Scope {2} of C -> G: exactly G's notes of the whole line, for every p
     }
     CHECK(lead(cThenG(), LeadPattern::Arpeggio, {2}).front().pitch == 67);
     CHECK(lead(cThenG(), LeadPattern::Stepwise, {2}).front().pitch == 83);
-    CHECK(lead(cThenG(), LeadPattern::FollowFeel, {2}).front().pitch == 74);
+    CHECK(lead(cThenG(), LeadPattern::FollowFeel, {2}).front().pitch == 86);
     CHECK(lead(cThenG(), LeadPattern::Motif, {2}).front().pitch == 71);
 }
 
@@ -666,4 +719,9 @@ TEST_CASE("Stepwise: Avoid rejection - too long, and a repeated F ornament") {
     // a repeated pitch), so both become E.
     CHECK(pitchesOf(lead(docOf({ev(1, kC, 6.0)}, {6, 8}), LeadPattern::Stepwise)) ==
           Ints{72, 74, 74, 76, 76, 76, 79, 81, 83, 84, 84, 84});
+    // A step larger than two semitones: Am over two bars of 6/8 in A harmonic minor. Between E5 and A5 the two
+    // subdivisions take F5 (Avoid) and G#5 (Tension); F's step on to G# is three semitones, so F becomes E.
+    Document minor = docOf({ev(1, chordOf(9, "min"), 6.0)}, {6, 8});
+    minor.projectKey = Key{{'A', 0}, Mode::HarmonicMinor};
+    CHECK(pitchesOf(lead(minor, LeadPattern::Stepwise)) == Ints{72, 74, 74, 76, 76, 80, 81, 83, 83, 84, 84, 84});
 }

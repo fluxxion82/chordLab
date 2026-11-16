@@ -1,6 +1,7 @@
 #include "doctest.h"
 
 #include "chordlab/chord.h"
+#include "chordlab/compiler.h"
 #include "chordlab/document.h"
 #include "chordlab/feel.h"
 #include "chordlab/generate.h"
@@ -3054,6 +3055,33 @@ TEST_CASE("generateLead: nothing owned and nothing generated is a no-op; silence
     CHECK(store.generateLead(1, LeadPattern::FollowFeel, {1}, 0, &refusal));
     CHECK(refusal.empty());
     CHECK(notesOf(store).empty());
+}
+
+TEST_CASE("generateLead: every Follow feel note is audible in compilePlayback, none merged into a chord note") {
+    // Am, F, C, G under Block feel: Follow feel plays each voicing's top note an octave up. In the same instrument a
+    // lead note in unison with the top note, starting with it, would be merged into the chord's note by playback.
+    DocumentStore store;
+    for (const Chord& c : {chord(9, "min"), kF, kC, chord(7, "maj")}) {
+        store.appendChord(c, 4.0, 100);
+    }
+    REQUIRE(store.addTrack(TrackRole::Lead) == 1);
+    const std::size_t chordEvents = compilePlayback(store.doc()).events.size();
+    REQUIRE(chordEvents == compile(store.doc()).events.size());
+    REQUIRE(store.generateLead(1, LeadPattern::FollowFeel, {}, 0));
+    REQUIRE(notesOf(store).size() == 4);
+    const Compiled played = compilePlayback(store.doc());
+    CHECK(played.events.size() == chordEvents + 2 * notesOf(store).size());
+    const std::vector<std::vector<int>> voiced = voicings(store.doc());
+    for (std::size_t i = 0; i < notesOf(store).size(); ++i) {
+        const TrackNote& n = notesOf(store)[i];
+        CAPTURE(n.pitch);
+        CHECK(n.pitch == voiced[i].back() + 12);
+        const double beat = static_cast<double>(noteStart(store.doc(), n)) / kFeelTicksPerBeat;
+        const auto ons = std::count_if(played.events.begin(), played.events.end(), [&](const NoteEvent& e) {
+            return e.on && e.pitch == n.pitch && e.beat == beat;
+        });
+        CHECK(ons == 1);
+    }
 }
 
 TEST_CASE("generateLead: a role never limits the track it writes to") {

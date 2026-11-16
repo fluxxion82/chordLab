@@ -19,11 +19,10 @@ namespace chordlab {
 static_assert(kMinBassHitTicks == kMinTrackNoteTicks, "every generated note fits the track domain's shortest note");
 static_assert(kBassHighest - kBassLowest == 11, "the bass register holds each pitch class exactly once");
 static_assert(static_cast<int>(BassPattern::Walking) == kBassPatternCount - 1, "the name table covers the enum");
-static_assert(static_cast<int>(LeadPattern::FollowFeel) == kLeadPatternCount - 1, "the lead name table covers the enum");
+static_assert(static_cast<int>(LeadPattern::FollowFeel) == kLeadPatternCount - 1,
+              "the lead name table covers the enum");
 static_assert(kLeadLowest <= kLeadSeed && kLeadSeed <= kLeadHighest, "the seed lies in the lead register");
 static_assert(kLeadHighest - kLeadLowest >= 11, "the lead register holds every pitch class");
-static_assert(kLeadLowest <= kFollowFeelLowest && kFollowFeelLowest + 11 <= kLeadHighest,
-              "Follow feel's octave lies in the lead register");
 
 namespace {
 
@@ -421,7 +420,8 @@ void guideTonesOf(const Chord& chord, Meter meter, int s, int e, int previous, s
             pairs.push_back(Pair{y, x});
         }
     }
-    const bool anyClose = std::any_of(pairs.begin(), pairs.end(), [](const Pair& p) { return std::abs(p.b - p.a) <= 7; });
+    const bool anyClose =
+        std::any_of(pairs.begin(), pairs.end(), [](const Pair& p) { return std::abs(p.b - p.a) <= 7; });
     if (anyClose) {
         pairs.erase(std::remove_if(pairs.begin(), pairs.end(), [](const Pair& p) { return std::abs(p.b - p.a) > 7; }),
                     pairs.end());
@@ -750,7 +750,8 @@ std::vector<GeneratedNote> generateLead(const Document& doc, LeadPattern pattern
                     }
                     const int index =
                         motifReflectIndex(static_cast<int>(sets.tones.size()), baseIndex, contour[k % contour.size()]);
-                    notes.push_back(LeadNote{h.start, h.length, sets.tones[static_cast<std::size_t>(index)], h.velocity});
+                    const int pitch = sets.tones[static_cast<std::size_t>(index)];
+                    notes.push_back(LeadNote{h.start, h.length, pitch, h.velocity});
                     ++k;
                 }
                 break;
@@ -761,9 +762,13 @@ std::vector<GeneratedNote> generateLead(const Document& doc, LeadPattern pattern
                 const std::vector<int> list =
                     arpeggio ? arpeggioNotes(event.chord, voicing, doc.feel.pattern, doc.feel.range) : voicing;
                 const int topClass = mod12(voicing.back());
-                // The top note's class in the lead octave, for every kept hit (replaces D22's nearest-previous rule,
-                // which followed fifths low in the register): no state between notes.
-                const int top = kFollowFeelLowest + mod12(topClass - kFollowFeelLowest);
+                // The voicing's top note an octave up, for every kept hit (replaces D22's nearest-previous rule): a
+                // unison would start with the chord's own top note and playback would merge the two. Dictionary
+                // voicings top out at 112, so this stays a MIDI pitch (asserted); past 127 a release build plays the
+                // top note itself rather than an invalid pitch.
+                assert(voicing.back() + kFollowFeelOctave <= 127);
+                const int top = voicing.back() + kFollowFeelOctave <= 127 ? voicing.back() + kFollowFeelOctave
+                                                                           : voicing.back();
                 for (const Hit& h : rhythmHits(doc.feel, meter, s, e, static_cast<int>(voicing.size()), event.velocity,
                                                event.id)) {
                     const bool plays = std::any_of(h.notes.begin(), h.notes.end(), [&](int index) {
@@ -780,7 +785,8 @@ std::vector<GeneratedNote> generateLead(const Document& doc, LeadPattern pattern
                 break;
             }
         }
-        // Held tone, Guide tones, Arpeggio and Stepwise read it; Motif and Follow feel ignore it.
+        // Held tone, Guide tones, Arpeggio and Stepwise read it; Motif and Follow feel ignore it (Follow feel's
+        // over-budget fallback is Held tone, which reads it).
         if (!notes.empty()) {
             previous = notes.back().pitch;
         }

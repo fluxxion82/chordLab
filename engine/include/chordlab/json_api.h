@@ -491,7 +491,8 @@ std::string heardJson(const Listener& listener, const Key& projectKey);
 ///     a bass pattern's name, a wrong case or type included, `"pattern" must be "heldTone", "guideTones", "arpeggio",
 ///     "stepwise", "motif" or "followFeel"`). `scope` exactly as `generateBass`'s. `variation` is absent (0) or a JSON
 ///     integer in 0..2147483647, read at 64 bits before narrowing: a negative, boolean, null, string, fractional
-///     representation (`1.0` included) or larger value is `"variation" must be an integer in 0..2147483647`. Motif
+///     representation (`1.0` and `-0.0` included) or larger value is `"variation" must be an integer in
+///     0..2147483647`; `-0`, written without a fraction or exponent, is the JSON integer 0 and accepted as 0. Motif
 ///     reduces it modulo 64 (64 takes: 73 plays as 9); any other pattern with a non-zero variation is the store's
 ///     refusal `"generateLead" refused: variation is only supported for motif`. No `baseRevision` (ignored, as for
 ///     `generateBass`). The generated notes are not selected. Store refusals, as `"generateLead" refused: <reason>`, are

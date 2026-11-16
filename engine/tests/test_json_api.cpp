@@ -5178,6 +5178,39 @@ TEST_CASE("generateLead: Motif's variation, reduced modulo 64") {
     }
 }
 
+TEST_CASE("generateLead: \"variation\": -0 is the JSON integer 0, accepted for every pattern") {
+    DocumentStore store = chordsAndNotes();
+    for (const char* pattern : {"heldTone", "motif", "followFeel"}) {
+        CAPTURE(pattern);
+        const std::string text = std::string(R"({"schema":1,"cmd":"generateLead","trackId":1,"pattern":")") + pattern +
+                                 R"(","variation":-0})";
+        std::string error;
+        bool changed = false;
+        CHECK(applyCommandJson(store, text, error, &changed));
+        CHECK(error.empty());
+        CHECK(changed);
+    }
+    // The Motif notes -0 writes are variation 0's.
+    std::vector<int> pitches;
+    for (const TrackNote& n : notesOfTrack(store)) {
+        pitches.push_back(n.pitch);
+    }
+    CHECK(changes(store, {{"cmd", "generateLead"}, {"trackId", 1}, {"pattern", "followFeel"}, {"variation", 0}}));
+    CHECK(changes(store, {{"cmd", "generateLead"}, {"trackId", 1}, {"pattern", "motif"}}));
+    std::vector<int> zero;
+    for (const TrackNote& n : notesOfTrack(store)) {
+        zero.push_back(n.pitch);
+    }
+    std::string error;
+    REQUIRE(applyCommandJson(store, R"({"schema":1,"cmd":"generateLead","trackId":1,"pattern":"motif","variation":-0})",
+                             error));
+    std::vector<int> minusZero;
+    for (const TrackNote& n : notesOfTrack(store)) {
+        minusZero.push_back(n.pitch);
+    }
+    CHECK(minusZero == zero);
+}
+
 TEST_CASE("generateLead: nothing owned and nothing generated is an accepted no-op") {
     DocumentStore store;
     REQUIRE(store.appendChord(kC, 0.5) == 1);
