@@ -82,6 +82,11 @@ final class RollEditLogicTests: XCTestCase {
     RollPointerEvent(phase: .up, location: p, modifiers: RollModifiers(), clickCount: clicks, timestamp: 1.2)
   }
 
+  /// A double-click at `p` as AppKit delivers it: a click with clickCount 1, then one with clickCount 2.
+  private func doubleClick(_ p: CGPoint) -> [RollPointerEvent] {
+    [down(p), up(p), down(p, clicks: 2), up(p, clicks: 2)]
+  }
+
   private var cancel: RollPointerEvent {
     RollPointerEvent(phase: .cancel, location: .zero, modifiers: RollModifiers(), clickCount: 0, timestamp: 1.3)
   }
@@ -212,44 +217,70 @@ final class RollEditLogicTests: XCTestCase {
 
   // MARK: - Empty space: insert and deselect
 
-  func testAnEmptyClickWithoutASelectionInsertsOneNoteAtTheGridCell() {
+  func testASingleEmptyClickWithoutASelectionOnlySetsTheMarker() {
     let p = point(7700, 50)
     let (state, effects) = run([down(p), up(p)], context())
-    XCTAssertEqual(effects, [
+    XCTAssertEqual(effects, [], "a single click never inserts")
+    XCTAssertNil(state.lastLength)
+    XCTAssertEqual(state.insertMarker, 7680)
+    XCTAssertTrue(state.isIdle)
+  }
+
+  func testADoubleClickOnEmptySpaceInsertsOneNoteAtTheDownsCellOnTheSecondUp() {
+    // The second press goes down at tick 8150 just above pitch 50's lower row boundary and comes up 2 pt right and
+    // 2 pt down (still a click: 2.8 pt), in the next grid cell (8190) and on pitch 49's row: the down's cell counts.
+    let first = point(8150, 50)
+    let second = CGPoint(x: geometry.x(tick: 8150), y: geometry.y(pitch: 50) + 13)
+    let away = offset(second, x: 2, y: 2)
+    XCTAssertEqual(geometry.pitch(atY: away.y), 49)
+    let roll = context()
+    let (clicked, firstClick) = run([down(first), up(first)], roll)
+    XCTAssertEqual(firstClick, [], "the first click inserts nothing")
+    let (pressed, secondDown) = run([down(second, clicks: 2)], roll, from: clicked)
+    XCTAssertEqual(secondDown, [], "nor does the second down")
+    let (state, secondUp) = run([up(away, clicks: 2)], roll, from: pressed)
+    XCTAssertEqual(secondUp, [
       .send(.insertNotes(trackId: 7, notes: [RollNoteSpec(pitch: 50, start: 7680, length: 480, velocity: 100)], baseRevision: 5)),
       .previewOneShot(pitch: 50, velocity: 100),
     ])
     XCTAssertEqual(state.lastLength, 480)
     XCTAssertEqual(state.insertMarker, 7680)
-    XCTAssertEqual(state.lastInsert, RollEditState.Insert(pitch: 50, start: 7680))
     XCTAssertTrue(state.isIdle)
+  }
+
+  func testADoubleClickInsertsWithTheSecondDownsRevision() {
+    let p = point(7700, 50)
+    let (clicked, _) = run([down(p), up(p)], context())
+    let (_, effects) = run([down(p, clicks: 2), up(p, clicks: 2)], context(revision: 6), from: clicked)
+    XCTAssertEqual(sends(effects), [.insertNotes(trackId: 7, notes: [RollNoteSpec(pitch: 50, start: 7680, length: 480,
+                                                                                  velocity: 100)], baseRevision: 6)])
   }
 
   func testTheInsertLengthIsTheLastLengthElseOneGridStepAtLeastTheMinimum() {
     let p = point(7700, 50)
-    XCTAssertEqual(sends(run([down(p), up(p)], context(grid: .off)).effects),
+    XCTAssertEqual(sends(run(doubleClick(p), context(grid: .off)).effects),
                    [.insertNotes(trackId: 7, notes: [RollNoteSpec(pitch: 50, start: 7700, length: 30, velocity: 100)],
                                  baseRevision: 5)], "Off: a 10-tick grid, the 30-tick minimum")
-    XCTAssertEqual(sends(run([down(p), up(p)], context(grid: .quarter)).effects),
+    XCTAssertEqual(sends(run(doubleClick(p), context(grid: .quarter)).effects),
                    [.insertNotes(trackId: 7, notes: [RollNoteSpec(pitch: 50, start: 7680, length: 960, velocity: 100)],
                                  baseRevision: 5)])
     var used = RollEditState()
     used.lastLength = 720
-    XCTAssertEqual(sends(run([down(p), up(p)], context(grid: .quarter), from: used).effects),
+    XCTAssertEqual(sends(run(doubleClick(p), context(grid: .quarter), from: used).effects),
                    [.insertNotes(trackId: 7, notes: [RollNoteSpec(pitch: 50, start: 7680, length: 720, velocity: 100)],
                                  baseRevision: 5)])
   }
 
   func testAnInsertSnapsItsPitchByTheGuideOfTheChordAtItsStart() {
     let p = point(4000, 67)   // E7's bar; G is not in its scale
-    XCTAssertEqual(sends(run([down(p), up(p)], context(snap: .scale)).effects),
+    XCTAssertEqual(sends(run(doubleClick(p), context(snap: .scale)).effects),
                    [.insertNotes(trackId: 7, notes: [RollNoteSpec(pitch: 68, start: 3840, length: 480, velocity: 100)],
                                  baseRevision: 5)])
-    XCTAssertEqual(sends(run([down(p), up(p)], context(snap: .off)).effects),
+    XCTAssertEqual(sends(run(doubleClick(p), context(snap: .off)).effects),
                    [.insertNotes(trackId: 7, notes: [RollNoteSpec(pitch: 67, start: 3840, length: 480, velocity: 100)],
                                  baseRevision: 5)])
     let c = point(2900, 67)   // C's bar: G is a chord tone
-    XCTAssertEqual(sends(run([down(c), up(c)], context(snap: .chordTones)).effects),
+    XCTAssertEqual(sends(run(doubleClick(c), context(snap: .chordTones)).effects),
                    [.insertNotes(trackId: 7, notes: [RollNoteSpec(pitch: 67, start: 2880, length: 480, velocity: 100)],
                                  baseRevision: 5)])
   }
@@ -262,15 +293,32 @@ final class RollEditLogicTests: XCTestCase {
     XCTAssertNil(state.lastLength)
   }
 
+  func testADoubleClickWithTheSelectionStillThereAtTheSecondDownInsertsOnly() {
+    // The first click deselects; its echo has not arrived when the second press goes down.
+    let p = point(7700, 50)
+    let (state, effects) = run(doubleClick(p), context(selected: [11]))
+    XCTAssertEqual(effects, [
+      .send(.selectNotes(trackId: 7, ids: [])),
+      .send(.insertNotes(trackId: 7, notes: [RollNoteSpec(pitch: 50, start: 7680, length: 480, velocity: 100)], baseRevision: 5)),
+      .previewOneShot(pitch: 50, velocity: 100),
+    ])
+    XCTAssertEqual(state.insertMarker, 7680)
+    XCTAssertEqual(state.lastLength, 480)
+  }
+
   func testNoInsertAtOrAfterTheProgressionsEnd() {
     for tick in [15_360, 15_400, 40_000] {
       let p = point(tick, 50)
-      let (state, effects) = run([down(p), up(p)], context())
+      let (state, effects) = run(doubleClick(p), context())
       XCTAssertEqual(effects, [], "tick \(tick)")
       XCTAssertNil(state.insertMarker, "the hatched area holds no marker")
+      let (selected, deselect) = run(doubleClick(p), context(selected: [11]))
+      XCTAssertEqual(sends(deselect), [.selectNotes(trackId: 7, ids: []), .selectNotes(trackId: 7, ids: [])],
+                     "each click there only deselects")
+      XCTAssertNil(selected.insertMarker)
     }
     let last = point(15_359, 50)
-    XCTAssertEqual(sends(run([down(last), up(last)], context()).effects),
+    XCTAssertEqual(sends(run(doubleClick(last), context()).effects),
                    [.insertNotes(trackId: 7, notes: [RollNoteSpec(pitch: 50, start: 14_880, length: 480, velocity: 100)],
                                  baseRevision: 5)])
   }
@@ -282,8 +330,10 @@ final class RollEditLogicTests: XCTestCase {
     XCTAssertEqual(marked.insertMarker, 7680, "the deselect click sets it to its grid tick")
     XCTAssertEqual(NoteClipboard.pastePosition(marker: marked.insertMarker, notes: columns(standardNotes), selectedIds: [11]),
                    7680, "a paste lands at the marker")
-    let (inserted, _) = run([down(point(9700, 50)), up(point(9700, 50))], context())
-    XCTAssertEqual(inserted.insertMarker, 9600, "so does the insert click")
+    let (single, _) = run([down(point(9700, 50)), up(point(9700, 50))], context())
+    XCTAssertEqual(single.insertMarker, 9600, "so does a click with nothing selected")
+    let (inserted, _) = run(doubleClick(point(11_600, 50)), context())
+    XCTAssertEqual(inserted.insertMarker, 11_520, "and the double-click that inserts")
     let (velocityClick, _) = run([down(point(9700, 50)), up(point(9700, 50))], context(mode: .velocity))
     XCTAssertEqual(velocityClick.insertMarker, 9600, "in either mode")
   }
@@ -321,24 +371,44 @@ final class RollEditLogicTests: XCTestCase {
 
   // MARK: - Double-clicks
 
-  func testADoubleClickOnEmptySpaceInsertsOnceBeforeTheSnapshotArrives() {
+  func testTripleAndQuadrupleClicksOnEmptySpaceInsertOnce() {
+    // The snapshot with the new note has not arrived: clicks 3 and 4 still land on empty space.
     let p = point(7700, 50)
-    let (_, effects) = run([down(p), up(p), down(p, clicks: 2), up(p, clicks: 2)], context())
+    let roll = context()
+    let (inserted, effects) = run(doubleClick(p), roll)
     XCTAssertEqual(sends(effects).count, 1)
-    XCTAssertEqual(effects, [
-      .send(.insertNotes(trackId: 7, notes: [RollNoteSpec(pitch: 50, start: 7680, length: 480, velocity: 100)], baseRevision: 5)),
-      .previewOneShot(pitch: 50, velocity: 100),
-    ])
+    let (_, more) = run([down(p, clicks: 3), up(p, clicks: 3), down(p, clicks: 4), up(p, clicks: 4)], roll, from: inserted)
+    XCTAssertEqual(more, [], "only clickCount exactly 2 inserts")
+    let (_, withSelection) = run([down(p, clicks: 3), up(p, clicks: 3)], context(selected: [11]), from: inserted)
+    XCTAssertEqual(withSelection, [.send(.selectNotes(trackId: 7, ids: []))], "a third click deselects like a single one")
   }
 
-  func testADoubleClickOnEmptySpaceDoesNotDeleteTheNoteItsFirstClickInserted() {
+  func testClicksThreeAndFourOnTheNewNoteNeitherDeleteNorInsertAndANewDoubleClickDeletesIt() {
     let p = point(7700, 50)
-    let (first, _) = run([down(p), up(p)], context())
-    let (echoed, echo) = RollEditLogic.snapshotChanged(revision: 6, state: first)
+    let (inserted, effects) = run(doubleClick(p), context())
+    XCTAssertEqual(sends(effects), [.insertNotes(trackId: 7, notes: [RollNoteSpec(pitch: 50, start: 7680, length: 480,
+                                                                                  velocity: 100)], baseRevision: 5)])
+    let (echoed, echo) = RollEditLogic.snapshotChanged(revision: 6, state: inserted)
     XCTAssertEqual(echo, [], "idle: a new revision cancels nothing")
     let arrived = context(standardNotes + [(20, 50, 7680, 480, 100, true)], selected: [20], revision: 6)
-    let (_, effects) = run([down(p, clicks: 2), up(p, clicks: 2)], arrived, from: echoed)
-    XCTAssertEqual(effects, [.previewStart(pitch: 50, velocity: 100), .previewStop], "no removeNotes")
+    let (after, more) = run([down(p, clicks: 3), up(p, clicks: 3), down(p, clicks: 4), up(p, clicks: 4)], arrived,
+                            from: echoed)
+    XCTAssertEqual(sends(more), [], "the note under the pointer is neither deleted nor inserted again")
+    XCTAssertEqual(more, [.previewStart(pitch: 50, velocity: 100), .previewStop, .previewStart(pitch: 50, velocity: 100),
+                          .previewStop])
+    let (_, again) = run(doubleClick(p), arrived, from: after)
+    XCTAssertEqual(sends(again), [.removeNotes(trackId: 7, ids: [20], baseRevision: 6)], "a new double-click deletes it")
+    assertPaired(more + again)
+  }
+
+  func testADoubleClickInVelocityModeInsertsNothing() {
+    let p = point(7700, 50)
+    let (state, effects) = run(doubleClick(p), context(mode: .velocity))
+    XCTAssertEqual(effects, [])
+    XCTAssertEqual(state.insertMarker, 7680, "the marker is still set")
+    XCTAssertNil(state.lastLength)
+    XCTAssertEqual(sends(run(doubleClick(p), context(selected: [11], mode: .velocity)).effects),
+                   [.selectNotes(trackId: 7, ids: []), .selectNotes(trackId: 7, ids: [])], "each click only deselects")
   }
 
   func testADoubleClickOnAnExistingNoteDeletesIt() {
@@ -348,16 +418,11 @@ final class RollEditLogicTests: XCTestCase {
     let (_, secondClick) = run([down(p, clicks: 2), up(p, clicks: 2)], context(selected: [11]), from: pressed)
     XCTAssertEqual(secondClick, [.previewStart(pitch: 64, velocity: 90), .previewStop,
                                  .send(.removeNotes(trackId: 7, ids: [11], baseRevision: 5))])
-  }
-
-  func testAnOlderInsertDoesNotProtectItsNoteFromALaterDoubleClick() {
-    let p = point(7700, 50)
-    let (inserted, _) = run([down(p), up(p)], context())
-    let arrived = context(standardNotes + [(20, 50, 7680, 480, 100, true)], selected: [20], revision: 6)
-    let (_, effects) = run([down(p), up(p), down(p, clicks: 2), up(p, clicks: 2)], arrived, from: inserted)
-    XCTAssertEqual(sends(effects), [.removeNotes(trackId: 7, ids: [20], baseRevision: 6)],
-                   "a new click sequence forgets the insert")
-    assertPaired(effects)
+    let edge = CGPoint(x: 143, y: point(0, 67).y)
+    XCTAssertEqual(sends(run(doubleClick(edge), context(selected: [12])).effects),
+                   [.removeNotes(trackId: 7, ids: [12], baseRevision: 5)], "any zone")
+    XCTAssertEqual(sends(run(doubleClick(p), context(selected: [11], mode: .velocity)).effects),
+                   [.removeNotes(trackId: 7, ids: [11], baseRevision: 5)], "either mode")
   }
 
   func testInactiveNotesAreSelectableAndDeletable() {
@@ -687,7 +752,7 @@ final class RollEditLogicTests: XCTestCase {
                                                               baseRevision: 5))])
     XCTAssertEqual(state.lastLength, 1440, "the next insert takes the resized length")
     let empty = point(7700, 50)
-    XCTAssertEqual(sends(run([down(empty), up(empty)], context(), from: state).effects),
+    XCTAssertEqual(sends(run(doubleClick(empty), context(), from: state).effects),
                    [.insertNotes(trackId: 7, notes: [RollNoteSpec(pitch: 50, start: 7680, length: 1440, velocity: 100)],
                                  baseRevision: 5)])
   }
@@ -751,6 +816,7 @@ final class RollEditLogicTests: XCTestCase {
                    [], "a horizontal drag is no velocity drag")
     let empty = point(7700, 50)
     XCTAssertEqual(run([down(empty), up(empty)], context(mode: .velocity)).effects, [])
+    XCTAssertEqual(run(doubleClick(empty), context(mode: .velocity)).effects, [])
     XCTAssertEqual(run([down(empty), up(empty)], context(selected: [11], mode: .velocity)).effects,
                    [.send(.selectNotes(trackId: 7, ids: []))])
     XCTAssertEqual(run([down(point(3000, 70)), drag(point(100, 63)), up(point(100, 63))], context(mode: .velocity)).effects,
@@ -780,10 +846,11 @@ final class RollEditLogicTests: XCTestCase {
     XCTAssertEqual(run([up(p, clicks: 2)], context(), from: cancelled).effects, [])
     assertPaired(started + effects)
     let empty = point(7700, 50)
-    let (emptyPress, _) = run([down(empty)], context())
+    let (emptyPress, _) = run([down(empty), up(empty), down(empty, clicks: 2)], context())
     let (dropped, none) = RollEditLogic.snapshotChanged(revision: 9, state: emptyPress)
     XCTAssertEqual(none, [], "nothing was held")
-    XCTAssertEqual(run([up(empty)], context(revision: 9), from: dropped).effects, [], "the click inserts nothing")
+    XCTAssertEqual(run([up(empty, clicks: 2)], context(revision: 9), from: dropped).effects, [],
+                   "the double-click inserts nothing")
   }
 
   func testTheCancelPhaseStopsThePreviewAndSendsNothing() {
@@ -816,9 +883,9 @@ final class RollEditLogicTests: XCTestCase {
     let (fresh, downEffects) = run([down(point(1200, 64))], other, from: dragging)
     XCTAssertEqual(downEffects, [.previewStop, .send(.selectNotes(trackId: 8, ids: [11])), .previewStart(pitch: 64, velocity: 90)])
     XCTAssertEqual(fresh.press?.trackId, 8)
-    let (emptyPress, _) = run([down(point(7700, 50))], context())
-    let (idle, none) = run([up(point(7700, 50))], other, from: emptyPress)
-    XCTAssertEqual(none, [], "a parked empty click inserts nothing on the new track")
+    let (emptyPress, _) = run([down(point(7700, 50)), up(point(7700, 50)), down(point(7700, 50), clicks: 2)], context())
+    let (idle, none) = run([up(point(7700, 50), clicks: 2)], other, from: emptyPress)
+    XCTAssertEqual(none, [], "a parked empty double-click inserts nothing on the new track")
     XCTAssertTrue(idle.isIdle)
     assertPaired(started + effects)
   }

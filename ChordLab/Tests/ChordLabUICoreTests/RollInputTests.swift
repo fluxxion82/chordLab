@@ -129,12 +129,15 @@ final class RollInputTests: XCTestCase {
     XCTAssertEqual(up, [.previewStop])
     XCTAssertTrue(store[1].editState.isIdle)
 
-    // The track's mode reaches the machine: in velocity mode an empty click inserts nothing.
+    // The track's mode reaches the machine: in velocity mode an empty double-click inserts nothing.
     store.edit(trackId: 1, timing: timing) { state, _, _ in state.mode = .velocity }
     let empty = CGPoint(x: RollGeometry().x(tick: 1920), y: RollGeometry().y(pitch: 50) + 1)
-    _ = store.handle(RollPointerEvent(phase: .down, location: empty), trackId: 1, snapshot: snapshot, timing: timing)
-    XCTAssertEqual(store.handle(RollPointerEvent(phase: .up, location: empty), trackId: 1, snapshot: snapshot,
-                                timing: timing), [])
+    var clicks: [RollEffect] = []
+    for (phase, count) in [(RollPointerEvent.Phase.down, 1), (.up, 1), (.down, 2), (.up, 2)] {
+      clicks += store.handle(RollPointerEvent(phase: phase, location: empty, clickCount: count), trackId: 1,
+                             snapshot: snapshot, timing: timing)
+    }
+    XCTAssertEqual(clicks, [])
     XCTAssertEqual(store[1].editState.insertMarker, 1920, "the plain click still sets the marker")
   }
 

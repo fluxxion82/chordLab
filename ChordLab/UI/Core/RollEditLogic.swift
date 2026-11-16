@@ -1,8 +1,8 @@
 import CoreGraphics
 import Foundation
 
-/// The roll's edit mode (design D14 toolbar): `notes` draws, moves, duplicates and resizes; `velocity` turns a
-/// vertical drag on a note into a velocity change.
+/// The roll's edit mode (design D14 toolbar): `notes` draws (a double-click on empty space), moves, duplicates and
+/// resizes; `velocity` turns a vertical drag on a note into a velocity change.
 enum RollMode: Equatable {
   case notes, velocity
 }
@@ -140,18 +140,10 @@ enum RollEffect: Equatable {
 }
 
 /// The gesture machine's state (tracks design D15): a persistent part that outlives gestures (`lastLength`,
-/// `lastInsert`, `insertMarker`) and the gesture in progress. The view keeps one per open track, passes it to every
+/// `insertMarker`) and the gesture in progress. The view keeps one per open track, passes it to every
 /// `RollEditLogic` call and draws from it: `previewNotes` (minus the snapshot's `hiddenIds`) during a drag, and
 /// `rubberBand` and `insertMarker`.
 struct RollEditState: Equatable {
-  /// The last insert a click made (pitch, start tick): the double-click rules compare against it. Forgotten at the
-  /// next single-click down (clickCount ≤ 1), so only the first click of the SAME double-click counts; AppKit's
-  /// clickCount already encodes the double-click interval, so no timestamp is kept.
-  struct Insert: Equatable {
-    var pitch: Int
-    var start: Int
-  }
-
   /// What the down landed on, fixed for the gesture.
   enum Target: Equatable {
     case note(RollHit)
@@ -176,7 +168,8 @@ struct RollEditState: Equatable {
     var trackId: Int
     /// The snapshot revision at the down: every content command of the gesture carries it as `baseRevision`.
     var baseRevision: UInt64
-    /// The selection before the down (an empty-space click deselects when it is not empty; ⇧-rubber band adds to it).
+    /// The selection before the down (an empty-space click that does not insert deselects when it is not empty;
+    /// ⇧-rubber band adds to it).
     var selection: Set<Int>
     /// The pressed note as it was at the down; nil on empty space.
     var anchor: RollNote?
@@ -214,19 +207,18 @@ struct RollEditState: Equatable {
 
   /// The length the last insert or resize left (design D15: an insert takes the last used length); nil until one.
   var lastLength: Int?
-  var lastInsert: Insert?
   /// The insert marker (design D15 paste: a paste lands here, else after the selection's end, else at 0): the grid
   /// tick (`grid.snapDown`, bar-relative) of the last PLAIN click on empty space inside the progression (an up
-  /// without a drag: the deselect click and the insert click, either mode). Nil before one; cleared by a press on a
+  /// without a drag, any click count, either mode: a deselect, a click with nothing selected, a double-click's
+  /// insert). Nil before one; cleared by a press on a
   /// note (any zone, either mode, at the down), by a committed rubber band, by a plain click at or after the
   /// progression's end, and by a snapshot whose progression ends at or before it (`RollViewStates.snapshotApplied`).
   /// A down alone, a drag in progress and a cancelled gesture leave it as it was.
   var insertMarker: Int?
   var gesture: Gesture = .idle
 
-  init(lastLength: Int? = nil, lastInsert: Insert? = nil, insertMarker: Int? = nil, gesture: Gesture = .idle) {
+  init(lastLength: Int? = nil, insertMarker: Int? = nil, gesture: Gesture = .idle) {
     self.lastLength = lastLength
-    self.lastInsert = lastInsert
     self.insertMarker = insertMarker
     self.gesture = gesture
   }
@@ -303,16 +295,20 @@ struct RollEditState: Equatable {
 ///   sets `lastLength` to the anchor's new length; a velocity commit also previews the anchor at its new velocity
 ///   (`previewOneShot`). The up's location is applied as a last drag first, so an up away from the last drag event
 ///   still counts.
-/// - **Up without a drag:** on a note, clickCount 2 sends `removeNotes [that note]`, unless that note is the one the
-///   first click of the same double-click inserted (its pitch and start equal `lastInsert`'s); decisions: exactly 2
-///   (a third click would send a stale removal), in any zone and either mode. On empty space: with a selection
-///   before the down, `selectNotes []` (deselect); with none, in notes mode, ONE note is inserted (any click count)
-///   at the cell: start = `grid.snapDown` of the down's tick (bar-relative), never at or after `timing.endTick`
-///   (the hatched area), pitch = the row (snapped by the guide at the start when Snap pitch is on), length =
-///   `grid.insertLength(lastLength:...)` clamped into the domain, velocity 100, then `previewOneShot`; decisions: in
-///   velocity mode an empty click never inserts; a second click of a double-click (clickCount ≥ 2) on empty space at
-///   the same cell as the insert its first click made inserts nothing (the snapshot with the new note may not have
-///   arrived).
+/// - **Up without a drag** (Ableton Live's convention: a double-click draws, a single click never does): on a note,
+///   clickCount 2 sends `removeNotes [that note]`; decisions: exactly 2 (a third click would send a stale removal),
+///   in any zone and either mode. On empty space, a single click never inserts: with a selection before the down it
+///   sends `selectNotes []` (deselect), with none it only sets the insert marker. The up of a double-click's second
+///   click (clickCount exactly 2) on empty space in notes mode inserts ONE note at the cell under that click's DOWN:
+///   start = `grid.snapDown` of the down's tick (bar-relative), never at or after `timing.endTick` (the hatched
+///   area), pitch = the row (snapped by the guide at the start when Snap pitch is on), length =
+///   `grid.insertLength(lastLength:...)` clamped into the domain, velocity 100, `baseRevision` = that down's
+///   revision, then `previewOneShot`. It inserts whether or not a selection was there at that down (the first click
+///   normally deselected, its echo may not have arrived; the engine selects the new note) and sends nothing else.
+///   Decisions: exactly 2, so clicks 3 and 4 of the same multi-click insert nothing (and, landing on the new note
+///   once its snapshot arrived, delete nothing either: only a NEW double-click on it deletes it); in velocity mode
+///   a double-click never inserts; a click that does not insert (velocity mode, clickCount 3 or more, at or after
+///   the end) is a single click: it deselects when there was a selection.
 /// - **The insert marker** (decision, D15 says only where a paste lands): set by a plain empty-space click inside
 ///   the progression to its grid tick, cleared by a note press, a committed rubber band and a plain click at or
 ///   after the end (see `RollEditState.insertMarker`), so after a band ⌘C ⌘V pastes after the selection.
@@ -381,7 +377,6 @@ enum RollEditLogic {
   private static func down(_ event: RollPointerEvent, state: RollEditState, context: RollContext)
     -> (RollEditState, [RollEffect]) {
     var (next, effects) = cancelled(state)
-    if event.clickCount <= 1 { next.lastInsert = nil }
     let point = event.location
     var press = Press(target: .empty, at: point, geometry: context.geometry, modifiers: event.modifiers,
                       clickCount: event.clickCount, mode: context.mode, trackId: context.trackId, baseRevision: context.revision,
@@ -595,33 +590,30 @@ enum RollEditLogic {
     }
   }
 
-  /// What an up without a drag does: a double-click delete, a deselect, or an insert.
+  /// What an up without a drag does: on a note, a double-click delete; on empty space, the insert marker and then a
+  /// double-click insert, else a deselect.
   private static func click(_ press: Press, state: inout RollEditState, context: RollContext) -> [RollEffect] {
     switch press.target {
     case .note:
       guard press.clickCount == 2, let anchor = press.anchor else { return [] }
-      if let insert = state.lastInsert, insert.pitch == anchor.pitch, insert.start == anchor.start { return [] }
       return [.send(.removeNotes(trackId: press.trackId, ids: [anchor.id], baseRevision: press.baseRevision))]
     case .empty:
       let timing = context.timing
-      let tick = context.geometry.tick(atX: press.origin(in: context.geometry).x)
+      let origin = press.origin(in: context.geometry)
+      let tick = context.geometry.tick(atX: origin.x)
       state.insertMarker = tick < timing.endTick
         ? context.grid.snapDown(tick, barTicks: timing.barTicks, ticksPerBeat: timing.ticksPerBeat) : nil
-      if !press.selection.isEmpty { return [.send(.selectNotes(trackId: press.trackId, ids: []))] }
-      guard press.mode == .notes, let spec = insertion(at: press.origin(in: context.geometry), lastLength: state.lastLength, context: context) else {
-        return []
+      if press.clickCount == 2, press.mode == .notes,
+         let spec = insertion(at: origin, lastLength: state.lastLength, context: context) {
+        state.lastLength = spec.length
+        return [.send(.insertNotes(trackId: press.trackId, notes: [spec], baseRevision: press.baseRevision)),
+                .previewOneShot(pitch: spec.pitch, velocity: spec.velocity)]
       }
-      if press.clickCount >= 2, let insert = state.lastInsert, insert.pitch == spec.pitch, insert.start == spec.start {
-        return []
-      }
-      state.lastLength = spec.length
-      state.lastInsert = RollEditState.Insert(pitch: spec.pitch, start: spec.start)
-      return [.send(.insertNotes(trackId: press.trackId, notes: [spec], baseRevision: press.baseRevision)),
-              .previewOneShot(pitch: spec.pitch, velocity: spec.velocity)]
+      return press.selection.isEmpty ? [] : [.send(.selectNotes(trackId: press.trackId, ids: []))]
     }
   }
 
-  /// The note an empty-space click at content `point` inserts, nil at or after the progression's end (or where no
+  /// The note an empty-space double-click at content `point` inserts, nil at or after the progression's end (or where no
   /// note fits before `kMaxNoteTick`).
   static func insertion(at point: CGPoint, lastLength: Int?, context: RollContext) -> RollNoteSpec? {
     let timing = context.timing

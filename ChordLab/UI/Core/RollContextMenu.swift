@@ -13,7 +13,7 @@ import Foundation
 /// - **The targets are fixed when the menu opens** (`targetIds`), and each item reads the snapshot current when it is
 ///   chosen (its revision, which of the targets still exist), so a selection echo that has not arrived yet, or a
 ///   commit in between, never makes an item act on other notes.
-/// - **Paste here** lands at the clicked tick floored to the track's grid (bar-relative, as an insert click), and is
+/// - **Paste here** lands at the clicked tick floored to the track's grid (bar-relative, as an insert), and is
 ///   enabled only with ChordLab notes on the pasteboard and the click inside the progression (before its end; the
 ///   hatched area after it owns no tick). It carries no `baseRevision`, like ⌘V, and moves no insert marker.
 /// - Copy, Cut, Duplicate and Delete are enabled with at least one target; they act as ⌘C, ⌘X (the removal only after
