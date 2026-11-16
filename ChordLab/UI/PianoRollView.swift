@@ -58,7 +58,8 @@ struct PianoRollView: View {
                     showsOtherTracks: view.showsOtherTracks, guides: state.guideDisplay, canZoomIn: geometry.canZoomIn,
                     canZoomOut: geometry.canZoomOut,
                     nudges: RollNudge.availability(trackId: track.id, snapshot: snapshot, timing: timing, grid: view.grid),
-                    generate: GenerateOptions.menu(snapshot, lineage: state.clipboardToken),
+                    generate: GenerateOptions.menu(snapshot, trackId: track.id, role: track.role, take: view.motifTake,
+                                                   lineage: state.clipboardToken),
                     actions: .roll(of: state, trackId: track.id))
           .equatable()
         VStack(spacing: 0) {
@@ -142,7 +143,7 @@ struct RollToolbarActions {
                        zoomIn: { state.zoomRollIn(trackId: trackId) },
                        zoomOut: { state.zoomRollOut(trackId: trackId) },
                        nudge: { state.nudgeRoll(trackId: trackId, $0) },
-                       generate: { state.generateBass(trackId: trackId, $0) })
+                       generate: { state.generate($0) })
   }
 }
 
