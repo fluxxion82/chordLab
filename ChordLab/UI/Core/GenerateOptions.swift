@@ -30,10 +30,20 @@ enum GenerateScope: Equatable {
   case chords([Int])
 }
 
-/// One entry of the Generate menu: a pattern for a scope, and the command choosing it sends.
+/// One entry of the Generate menu: a pattern for a scope, and the command choosing it sends. `lineage` names the
+/// document the entry was offered for (the state's clipboard token, which a state load renews): an entry of another
+/// document is never sent (`GenerateOptions.command(for:trackId:in:lineage:)`), since "every chord" and reused chord
+/// ids look the same in any document.
 struct GenerateEntry: Equatable, Identifiable {
   let pattern: BassPattern
   let scope: GenerateScope
+  let lineage: String
+
+  init(pattern: BassPattern, scope: GenerateScope, lineage: String = "") {
+    self.pattern = pattern
+    self.scope = scope
+    self.lineage = lineage
+  }
 
   /// Unique across the menu's groups (the same pattern appears for the selection and for the whole progression).
   var id: String {
@@ -141,14 +151,16 @@ enum GenerateOptions {
   /// The menu for `snapshot`: disabled with `unavailableReason` on an empty progression; otherwise the scope's group
   /// of the six patterns, plus every chord's when the scope is a selection (a click on the strip usually leaves a
   /// chord selected, so the whole progression stays one choice away without deselecting first), and the Walking note.
-  static func menu(_ snapshot: Snapshot) -> GenerateMenu {
+  /// Every entry carries `lineage`, the document it is offered for (`ChordLabState.clipboardToken`; the default is
+  /// for tests that load no second document).
+  static func menu(_ snapshot: Snapshot, lineage: String = "") -> GenerateMenu {
     guard isAvailable(snapshot) else {
       return GenerateMenu(isEnabled: false, groups: [], walkingNote: nil, value: unavailableReason,
                           help: unavailableReason)
     }
     let scope = scope(snapshot)
     func entries(_ scope: GenerateScope) -> [GenerateEntry] {
-      patterns.map { GenerateEntry(pattern: $0, scope: scope) }
+      patterns.map { GenerateEntry(pattern: $0, scope: scope, lineage: lineage) }
     }
     func group(_ scope: GenerateScope) -> GenerateMenu.Group {
       GenerateMenu.Group(title: scopeTitle(scope, chordCount: snapshot.events.count), entries: entries(scope))
@@ -159,12 +171,16 @@ enum GenerateOptions {
                         value: groups[0].title, help: help)
   }
 
-  /// The command choosing `entry` sends for track `trackId`, or nil when the menu of `snapshot`, the current one, no
-  /// longer offers it. An open menu keeps the entries it was drawn with; a host state load can replace the document
-  /// meanwhile, and the old chord ids may then name other chords, so a stale entry sends nothing (the reopened menu
-  /// shows the new scope). The scope is not resolved again at the click: that would write a scope the header the user
-  /// just read did not describe.
-  static func command(for entry: GenerateEntry, trackId: Int, in snapshot: Snapshot) -> [String: Any]? {
-    menu(snapshot).groups.contains { $0.entries.contains(entry) } ? entry.command(trackId: trackId) : nil
+  /// The command choosing `entry` sends for track `trackId`, or nil when the menu of the current `snapshot` and
+  /// `lineage` no longer offers it. An open menu keeps the entries it was drawn with; a host state load can replace
+  /// the document meanwhile. The loaded document has another lineage, so no entry of the old one is sent, not even
+  /// "every chord" (which any progression offers) or chord ids the new document happens to reuse; a changed selection
+  /// in the same document drops the old selection's entries. A dropped click does nothing: the reopened menu shows the
+  /// new scope. The scope is not resolved again at the click: that would write a scope the header the user just read
+  /// did not describe.
+  static func command(for entry: GenerateEntry, trackId: Int, in snapshot: Snapshot,
+                      lineage: String) -> [String: Any]? {
+    menu(snapshot, lineage: lineage).groups.contains { $0.entries.contains(entry) }
+      ? entry.command(trackId: trackId) : nil
   }
 }

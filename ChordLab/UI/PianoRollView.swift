@@ -56,7 +56,7 @@ struct PianoRollView: View {
                     showsOtherTracks: view.showsOtherTracks, canZoomIn: geometry.canZoomIn,
                     canZoomOut: geometry.canZoomOut,
                     nudges: RollNudge.availability(trackId: track.id, snapshot: snapshot, timing: timing, grid: view.grid),
-                    generate: GenerateOptions.menu(snapshot),
+                    generate: GenerateOptions.menu(snapshot, lineage: state.clipboardToken),
                     actions: .roll(of: state, trackId: track.id))
           .equatable()
         VStack(spacing: 0) {

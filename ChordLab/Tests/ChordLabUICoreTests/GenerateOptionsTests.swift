@@ -216,33 +216,54 @@ final class GenerateOptionsTests: XCTestCase {
   func testAnEntryTheCurrentMenuOffersGivesItsCommand() throws {
     let snapshot = try fixture()
     let menu = GenerateOptions.menu(snapshot)
-    assertCommand(try XCTUnwrap(GenerateOptions.command(for: menu.groups[0].entries[5], trackId: 2, in: snapshot)),
+    assertCommand(try XCTUnwrap(GenerateOptions.command(for: menu.groups[0].entries[5], trackId: 2, in: snapshot, lineage: "")),
                   ["cmd": "generateBass", "trackId": 2, "pattern": "walking", "scope": [2, 3]])
-    assertCommand(try XCTUnwrap(GenerateOptions.command(for: menu.groups[1].entries[0], trackId: 2, in: snapshot)),
+    assertCommand(try XCTUnwrap(GenerateOptions.command(for: menu.groups[1].entries[0], trackId: 2, in: snapshot, lineage: "")),
                   ["cmd": "generateBass", "trackId": 2, "pattern": "roots"])
+  }
+
+  func testAnEntryFromAnotherDocumentSendsNothing() throws {
+    // Document A's menu is open with nothing selected; the host loads document B, which reuses the track and chord ids.
+    // Every progression offers "every chord", so only the document lineage (the state's clipboard token, renewed by a
+    // load) tells the two apart.
+    let snapshot = try fixture(selecting([]))
+    let offeredForA = GenerateOptions.menu(snapshot, lineage: "A").groups[0].entries[0]
+    XCTAssertEqual(offeredForA.scope, .everyChord)
+    XCTAssertEqual(offeredForA.lineage, "A")
+    XCTAssertNotNil(GenerateOptions.command(for: offeredForA, trackId: 1, in: snapshot, lineage: "A"))
+    XCTAssertNil(GenerateOptions.command(for: offeredForA, trackId: 1, in: snapshot, lineage: "B"),
+                 "the same ids in another document: nothing is replaced there")
+    let selected = try fixture()
+    let walking = GenerateOptions.menu(selected, lineage: "A").groups[0].entries[5]
+    XCTAssertEqual(walking.scope, .chords([2, 3]))
+    XCTAssertNil(GenerateOptions.command(for: walking, trackId: 1, in: selected, lineage: "B"))
+    XCTAssertNotEqual(GenerateOptions.menu(snapshot, lineage: "A"), GenerateOptions.menu(snapshot, lineage: "B"),
+                      "a loaded document redraws the toolbar's menu")
+    assertCommand(try XCTUnwrap(GenerateOptions.command(for: offeredForA, trackId: 1, in: snapshot, lineage: "A")),
+                  ["cmd": "generateBass", "trackId": 1, "pattern": "roots"])
   }
 
   func testAnEntryFromAnOlderMenuSendsNothing() throws {
     // The menu was drawn for chords [2, 3]; a host state load then replaced the document while it was open. The
     // entry's ids may name other chords now, so it is dropped: the reopened menu shows the new scope.
     let stale = GenerateEntry(pattern: .walking, scope: .chords([2, 3]))
-    XCTAssertNotNil(GenerateOptions.command(for: stale, trackId: 1, in: try fixture()))
-    XCTAssertNil(GenerateOptions.command(for: stale, trackId: 1, in: try fixture(selecting([]))),
+    XCTAssertNotNil(GenerateOptions.command(for: stale, trackId: 1, in: try fixture(), lineage: ""))
+    XCTAssertNil(GenerateOptions.command(for: stale, trackId: 1, in: try fixture(selecting([])), lineage: ""),
                  "nothing selected any more")
-    XCTAssertNil(GenerateOptions.command(for: stale, trackId: 1, in: try fixture(selecting([2]))),
+    XCTAssertNil(GenerateOptions.command(for: stale, trackId: 1, in: try fixture(selecting([2])), lineage: ""),
                  "another selection")
     XCTAssertNil(GenerateOptions.command(for: stale, trackId: 1, in: try fixture { object in
       object["events"] = [Any]()
-    }), "no chords left")
+    }, lineage: ""), "no chords left")
     let everyChord = GenerateEntry(pattern: .roots, scope: .everyChord)
-    XCTAssertNotNil(GenerateOptions.command(for: everyChord, trackId: 1, in: try fixture(selecting([]))))
-    XCTAssertNotNil(GenerateOptions.command(for: everyChord, trackId: 1, in: try fixture(selecting([1]))),
+    XCTAssertNotNil(GenerateOptions.command(for: everyChord, trackId: 1, in: try fixture(selecting([])), lineage: ""))
+    XCTAssertNotNil(GenerateOptions.command(for: everyChord, trackId: 1, in: try fixture(selecting([1])), lineage: ""),
                     "every chord is offered under any selection")
     XCTAssertNil(GenerateOptions.command(for: everyChord, trackId: 1, in: try fixture { object in
       object["events"] = [Any]()
       object["selectedEventIds"] = [Int]()
       object["selectedEventId"] = NSNull()
-    }), "an empty progression offers nothing")
+    }, lineage: ""), "an empty progression offers nothing")
   }
 
   func testTheHelpSaysWhatGeneratingDoes() throws {

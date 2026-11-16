@@ -648,12 +648,14 @@ class ChordLabState: NSObject, ObservableObject {
 
   /// The toolbar's Generate menu for track `trackId` (`GenerateOptions`): the chosen entry's one `generateBass` (its
   /// pattern, and the chord ids it was offered for, or none for every chord): one undo step, no confirmation. Nothing
-  /// when the snapshot current now no longer offers the entry (`GenerateOptions.command(for:trackId:in:)`: the menu
-  /// was drawn from an older document). A refusal ("Add chords first", the track limits) comes back as any refused
-  /// command does (`applyError`, `lastError`).
+  /// when the snapshot and document lineage (`clipboardToken`) current now no longer offer the entry
+  /// (`GenerateOptions.command(for:trackId:in:lineage:)`: the menu was drawn for another selection, or for the
+  /// document a state load has since replaced). A refusal ("Add chords first", the track limits) comes back as any
+  /// refused command does (`applyError`, `lastError`).
   @MainActor func generateBass(trackId: Int, _ entry: GenerateEntry) {
     guard let snapshot,
-          let command = GenerateOptions.command(for: entry, trackId: trackId, in: snapshot) else { return }
+          let command = GenerateOptions.command(for: entry, trackId: trackId, in: snapshot,
+                                                lineage: clipboardToken) else { return }
     send(command: command)
   }
 
