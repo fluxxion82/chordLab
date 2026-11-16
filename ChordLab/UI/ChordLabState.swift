@@ -453,10 +453,15 @@ class ChordLabState: NSObject, ObservableObject {
   /// tracks are not its answer), the pending key change (a stale `setKey`; a loaded document already in the target key
   /// would otherwise show a hint built from the old tonic and write `setKeyHintSeen` into it) and the row under the key
   /// bar (the hint and the moved note belong to the old document) go now, before the loaded snapshot is applied.
+  /// Every track's Motif take starts at 0 again (`RollViewStates.resetMotifTakes`): the loaded document's lead lines
+  /// were not written from this editor's takes.
   private func lineageChanged() {
     laneOpener.refused()
     pendingKeyChange = nil
     if keyRow != nil { keyRow = nil }
+    var states = rolls.states
+    states.resetMotifTakes()
+    publishRolls(states)
   }
 
   /// The ids of the strip's blocks in order; empty before the first snapshot.
@@ -736,18 +741,18 @@ class ChordLabState: NSObject, ObservableObject {
   /// The toolbar's Generate menu (`GenerateOptions`): the chosen entry's one command for its track, `generateBass`
   /// or `generateLead` (its pattern, the chord ids it was offered for or none for every chord, and for Motif the take
   /// as `variation`): one undo step, no confirmation. Nothing when the menu current now no longer offers the entry
-  /// (`GenerateOptions.command(for:in:take:lineage:)`, rebuilt from the snapshot, the track's role and Motif take
-  /// and the document lineage `clipboardToken` current now: the menu was drawn for another selection, role or take,
-  /// or for the document a state load has since replaced). A refusal ("Add chords first", the track limits) comes back
-  /// as any refused command does (`applyError`, `lastError`).
+  /// (`GenerateOptions.command(for:in:take:lineage:)`, rebuilt from the snapshot, the track's role and Motif take and
+  /// the document lineage `clipboardToken` current now): the menu was drawn for another selection or take, for a role
+  /// that no longer offers the entry's family (a Lead track made Bass; Lead to Other keeps the lead entries), or for
+  /// the document a state load has since replaced. A refusal ("Add chords first", the track limits) comes back as any
+  /// refused command does (`applyError`, `lastError`).
   ///
-  /// The engine answers inline, inside the send (its new snapshot, or an error). When the answer applied (no error,
-  /// a new snapshot, the same document lineage): "Motif, another take" makes the take it wrote the track's take
-  /// (`GenerateEntry.takeAfterSending`; a refused or dropped one leaves the take alone), and the roll shows what was
-  /// written: the track's active notes in the entry's chords (every chord's for a whole-progression entry), from the
-  /// snapshot current now, are revealed (`RollViewState.reveal`). Nothing scrolls when nothing was sent, when the
-  /// answer was an error or no snapshot, when the document lineage changed meanwhile (a stale command is answered with
-  /// another document's snapshot), or when those chords hold no active note.
+  /// The engine answers inline, inside the send (its new snapshot, or an error); what happened is
+  /// `GenerateOutcome`'s reading of the error serial, the snapshot serial and the lineage around the send. The track's
+  /// take becomes what `GenerateOutcome.takeToStore(for:)` says (a "Motif, next take" answered by the same document,
+  /// applied or refused). Only an applied generate reveals what was written: the track's active notes in the entry's
+  /// chords (every chord's for a whole-progression entry), from the snapshot current now (`RollViewState.reveal`);
+  /// nothing scrolls when those chords hold no active note.
   @MainActor func generate(_ entry: GenerateEntry) {
     let trackId = entry.trackId
     guard let snapshot,
@@ -757,11 +762,12 @@ class ChordLabState: NSObject, ObservableObject {
     let snapshots = snapshotSerial
     let lineage = clipboardToken
     send(command: command)
-    guard errorSerial == errors, snapshotSerial != snapshots, clipboardToken == lineage else { return }
-    if let take = entry.takeAfterSending {
+    let outcome = GenerateOutcome(errorsBefore: errors, errorsAfter: errorSerial, snapshotsBefore: snapshots,
+                                  snapshotsAfter: snapshotSerial, lineageBefore: lineage, lineageAfter: clipboardToken)
+    if let take = outcome.takeToStore(for: entry) {
       editRoll(trackId: trackId) { state, _, _ in state.motifTake = take }
     }
-    guard let written = self.snapshot?.track(id: trackId),
+    guard outcome.reveals, let written = self.snapshot?.track(id: trackId),
           let span = RollNoteSpan(notes: written.notes, anchors: entry.scope.chordIds) else { return }
     editRoll(trackId: trackId) { $0.reveal(span, viewport: $1, timing: $2) }
   }

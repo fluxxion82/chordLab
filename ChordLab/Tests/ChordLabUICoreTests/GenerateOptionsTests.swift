@@ -66,7 +66,7 @@ final class GenerateOptionsTests: XCTestCase {
 
   private let bassTitles = ["Roots", "Root pulse", "Root–fifth", "Octaves", "Follow feel", "Walking"]
   private func leadTitles(take: Int) -> [String] {
-    ["Motif (take \(take + 1) of 64)", "Motif, another take", "Held tone", "Guide tones", "Arpeggio", "Stepwise",
+    ["Motif, take \(take + 1) of 64", "Motif, next take (\(GenerateOptions.nextTake(after: take) + 1) of 64)", "Held tone", "Guide tones", "Arpeggio", "Stepwise",
      "Follow feel"]
   }
 
@@ -139,14 +139,15 @@ final class GenerateOptionsTests: XCTestCase {
 
   func testTheMotifEntriesShowTheTakeTheyWrite() throws {
     let snapshot = try fixture(selecting([]))
-    for (take, title, next) in [(0, "Motif (take 1 of 64)", 1), (5, "Motif (take 6 of 64)", 6),
-                                (63, "Motif (take 64 of 64)", 0)] {
+    for (take, title, nextTitle, next) in [(0, "Motif, take 1 of 64", "Motif, next take (2 of 64)", 1),
+                                           (5, "Motif, take 6 of 64", "Motif, next take (7 of 64)", 6),
+                                           (63, "Motif, take 64 of 64", "Motif, next take (1 of 64)", 0)] {
       let entries = try menu(snapshot, trackId: 2, take: take).groups[0].entries
       XCTAssertEqual(entries[0].title, title)
       XCTAssertEqual(entries[0].take, take, "plain Motif rewrites the current take")
       XCTAssertFalse(entries[0].isAnotherTake)
       XCTAssertNil(entries[0].takeAfterSending, "plain Motif leaves the track's take alone")
-      XCTAssertEqual(entries[1].title, "Motif, another take")
+      XCTAssertEqual(entries[1].title, nextTitle, "named by the take it writes; after 64 comes 1")
       XCTAssertEqual(entries[1].take, next, "another take writes take + 1, wrapping 63 to 0")
       XCTAssertTrue(entries[1].isAnotherTake)
       XCTAssertEqual(entries[1].takeAfterSending, next, "and makes it the track's take")
@@ -303,8 +304,17 @@ final class GenerateOptionsTests: XCTestCase {
   func testTheWalkingNoteAppearsOnlyWithBassPatterns() throws {
     XCTAssertNotNil(try menu(try fixture(), trackId: 1).walkingNote, "Bass")
     XCTAssertNil(try menu(try fixture(), trackId: 2).walkingNote, "Lead offers no Walking")
-    XCTAssertEqual(try menu(try fixture(role("other", of: 2)), trackId: 2).walkingNote,
-                   GenerateOptions.walkingNote(loop: true), "Other offers bass patterns too")
+    let other = try menu(try fixture(role("other", of: 2)), trackId: 2)
+    XCTAssertNil(other.walkingNote, "nested: not at the top level")
+    for group in other.groups {
+      XCTAssertEqual(group.sections.map(\.note), [nil, GenerateOptions.walkingNote(loop: true)],
+                     "Other: the note is the last item inside each Bass line submenu")
+    }
+    let bass = try menu(try fixture(), trackId: 1)
+    XCTAssertTrue(bass.groups.allSatisfy { $0.sections.allSatisfy { $0.note == nil } },
+                  "flat Bass: the note stays at the end of the menu, in no section")
+    XCTAssertNotEqual(try menu(try fixture(both({ $0["progressionLoop"] = false }, role("other", of: 2))), trackId: 2), other,
+                      "Loop still changes an Other menu (its Bass line note)")
   }
 
   // MARK: - The menu by role
@@ -367,7 +377,8 @@ final class GenerateOptionsTests: XCTestCase {
         XCTAssertEqual(group.sections[1].entries.map(\.title), bassTitles)
         XCTAssertEqual(group.entries.count, 13)
       }
-      XCTAssertEqual(menu.walkingNote, GenerateOptions.walkingNote(loop: true))
+      XCTAssertNil(menu.walkingNote, "nested: the note sits inside each Bass line submenu")
+      XCTAssertTrue(menu.groups.allSatisfy { $0.sections[1].note == GenerateOptions.walkingNote(loop: true) })
       XCTAssertEqual(menu.help,
                      "Generate a bass or lead line on this track, replacing its notes in the chosen chords (one undo step)")
     }
@@ -466,9 +477,15 @@ final class GenerateOptionsTests: XCTestCase {
     let otherBass = other.groups[0].sections[1].entries, otherLead = other.groups[0].sections[0].entries
     XCTAssertTrue(otherBass.allSatisfy { GenerateOptions.command(for: $0, in: asLead, take: 0, lineage: "") == nil })
     XCTAssertTrue(otherLead.allSatisfy { GenerateOptions.command(for: $0, in: asBass, take: 0, lineage: "") == nil })
-    // Lead to Other keeps the lead family offered: the same entry, the same command.
+    // Other to Lead keeps the lead family offered: an Other menu's lead entry still sends exactly what it said.
     XCTAssertTrue(otherLead.allSatisfy { GenerateOptions.command(for: $0, in: asLead, take: 0, lineage: "") != nil },
-                  "the family is still offered: the click writes exactly what the entry said")
+                  "Other to Lead: the lead family is still offered, the lead entry sends")
+    // Lead to Other likewise: a Lead menu's entry clicked after the role became Other is still sent.
+    let asOther = try fixture(role("other", of: 2))
+    for entry in lead.groups.flatMap(\.entries) {
+      XCTAssertNotNil(GenerateOptions.command(for: entry, in: asOther, take: 0, lineage: ""),
+                      "Lead to Other: \(entry.title) is still offered")
+    }
   }
 
   func testATakeChangeWhileTheMenuIsOpenDropsTheMotifEntries() throws {
@@ -477,7 +494,7 @@ final class GenerateOptionsTests: XCTestCase {
     XCTAssertNotNil(GenerateOptions.command(for: entries[0], in: snapshot, take: 3, lineage: ""))
     XCTAssertNotNil(GenerateOptions.command(for: entries[1], in: snapshot, take: 3, lineage: ""))
     XCTAssertNil(GenerateOptions.command(for: entries[0], in: snapshot, take: 4, lineage: ""),
-                 "Motif (take 4) after the take became 5 elsewhere: the header no longer describes it")
+                 "Motif, take 4 after the take became 5 elsewhere: the entry no longer describes it")
     XCTAssertNil(GenerateOptions.command(for: entries[1], in: snapshot, take: 4, lineage: ""),
                  "another take would write take 5 again")
     for entry in entries.dropFirst(2) {
@@ -587,6 +604,65 @@ final class GenerateOptionsTests: XCTestCase {
     }
     XCTAssertEqual(GenerateOptions.menu(snapshot, trackId: 2, role: .lead, take: states[2].motifTake), before)
     XCTAssertEqual(states[2].motifTake, 7)
+  }
+
+  // MARK: - What happened to a sent generate, and which take the track keeps
+
+  private func outcome(errors: (Int, Int) = (3, 3), snapshots: (Int, Int) = (7, 7),
+                       lineage: (String, String) = ("A", "A")) -> GenerateOutcome {
+    GenerateOutcome(errorsBefore: errors.0, errorsAfter: errors.1, snapshotsBefore: snapshots.0,
+                    snapshotsAfter: snapshots.1, lineageBefore: lineage.0, lineageAfter: lineage.1)
+  }
+
+  func testTheOutcomeOfASentGenerate() {
+    XCTAssertEqual(outcome(snapshots: (7, 8)), .applied, "a new snapshot, no error, the same document")
+    XCTAssertEqual(outcome(errors: (3, 4)), .refused, "an error, the same document")
+    XCTAssertEqual(outcome(errors: (3, 4), snapshots: (7, 8)), .refused,
+                   "an error with a snapshot (the current one re-sent before it) is still a refusal")
+    XCTAssertEqual(outcome(snapshots: (7, 8), lineage: ("A", "B")), .otherDocument,
+                   "a stale command answered with the loaded document's snapshot and a new token")
+    XCTAssertEqual(outcome(errors: (3, 4), snapshots: (7, 8), lineage: ("A", "B")), .otherDocument)
+    XCTAssertEqual(outcome(lineage: ("A", "B")), .otherDocument)
+    XCTAssertEqual(outcome(), .noReply, "nothing arrived (no plug-in answering)")
+  }
+
+  func testOnlyAnAppliedGenerateReveals() {
+    XCTAssertTrue(GenerateOutcome.applied.reveals)
+    XCTAssertFalse(GenerateOutcome.refused.reveals)
+    XCTAssertFalse(GenerateOutcome.otherDocument.reveals)
+    XCTAssertFalse(GenerateOutcome.noReply.reveals)
+  }
+
+  func testTheTakeTheTrackKeepsAfterAGenerate() throws {
+    let entries = try menu(try fixture(selecting([])), trackId: 2, take: 5).groups[0].entries
+    let plain = entries[0], next = entries[1], heldTone = entries[2]
+    let bass = try menu(try fixture(selecting([])), trackId: 1).groups[0].entries[0]
+    // "Motif, next take": the take it carried, applied or refused (a refused take must not trap the track on it:
+    // Motif's note count depends on the take, so take 6 can hit a limit while take 7 fits).
+    XCTAssertEqual(GenerateOutcome.applied.takeToStore(for: next), 6)
+    XCTAssertEqual(GenerateOutcome.refused.takeToStore(for: next), 6, "refused: the next click offers take 7")
+    XCTAssertNil(GenerateOutcome.otherDocument.takeToStore(for: next), "another document's answer: the take stays")
+    XCTAssertNil(GenerateOutcome.noReply.takeToStore(for: next), "no answer: the take stays")
+    for entry in [plain, heldTone, bass] {
+      for result in [GenerateOutcome.applied, .refused, .otherDocument, .noReply] {
+        XCTAssertNil(result.takeToStore(for: entry), "\(entry.title), \(result): the take stays")
+      }
+    }
+  }
+
+  func testALoadedDocumentStartsEveryTrackAtTake1() {
+    let timing = RollTiming(ticksPerBeat: 960, barTicks: 3840, endTick: 15360, minNoteTicks: 30)
+    var states = RollViewStates()
+    states.edit(trackId: 1, timing: timing) { state, _, _ in state.motifTake = 9; state.grid = .sixteenthTriplet }
+    states.edit(trackId: 2, timing: timing) { state, _, _ in state.motifTake = 63 }
+    states.resetMotifTakes()
+    XCTAssertEqual(states[1].motifTake, 0)
+    XCTAssertEqual(states[2].motifTake, 0)
+    XCTAssertEqual(states[1].grid, .sixteenthTriplet, "only the takes are reset")
+    XCTAssertEqual(states.trackIds, [1, 2])
+    var untouched = RollViewStates()
+    untouched.resetMotifTakes()
+    XCTAssertEqual(untouched, RollViewStates(), "no entry is made")
   }
 
   // MARK: - Which chords' notes the roll reveals afterwards

@@ -119,7 +119,8 @@ struct GenerateEntry: Equatable, Identifiable {
   let trackId: Int
   /// The Motif take this entry writes (the command's `variation`), 0…63; nil for every other pattern.
   let take: Int?
-  /// "Motif, another take": writes the take after the track's current one and makes it the track's take.
+  /// "Motif, next take": writes the take after the track's current one and makes it the track's take
+  /// (`GenerateOutcome.takeToStore(for:)`).
   let isAnotherTake: Bool
   let lineage: String
 
@@ -146,16 +147,20 @@ struct GenerateEntry: Equatable, Identifiable {
     return "\(chords)/\(family.rawValue)/\(pattern.wireName)" + (isAnotherTake ? "/another" : "")
   }
 
-  /// What the menu shows: the pattern's title; for plain Motif the take it writes ("Motif (take 3 of 64)", counting
-  /// from 1), for the other Motif entry "Motif, another take".
+  /// What the menu shows: exactly what the entry writes, so it cannot be misread as "you are on take N" (after an
+  /// undo, say): the pattern's title; for plain Motif "Motif, take 3 of 64" (counting from 1), for the other Motif
+  /// entry "Motif, next take (4 of 64)" (after 64 comes 1).
   var title: String {
-    if isAnotherTake { return "Motif, another take" }
-    if let take { return "\(pattern.title) (take \(take + 1) of \(GenerateOptions.takeCount))" }
-    return pattern.title
+    guard let take else { return pattern.title }
+    let count = GenerateOptions.takeCount
+    return isAnotherTake ? "\(pattern.title), next take (\(take + 1) of \(count))"
+      : "\(pattern.title), take \(take + 1) of \(count)"
   }
 
-  /// The track's take once this entry was sent and applied: the take it wrote for "Motif, another take", nil (the
-  /// take stays) for every other entry, plain Motif included.
+  /// The take this entry makes the track's take once its command was SENT and answered by the same document, applied
+  /// or refused (`GenerateOutcome.takeToStore(for:)`): the take "Motif, next take" wrote. A refused take is stored too:
+  /// Motif's note count depends on the take, so one take can hit a track limit while the next fits, and keeping the
+  /// old take would re-send the refused one forever. Nil (the take stays) for every other entry, plain Motif included.
   var takeAfterSending: Int? { isAnotherTake ? take : nil }
 
   /// The command: `generateBass` for a bass pattern, `generateLead` (with `variation` only for Motif) for a lead one.
@@ -177,6 +182,9 @@ struct GenerateMenu: Equatable {
   struct Section: Equatable, Identifiable {
     let family: GenerateFamily
     let entries: [GenerateEntry]
+    /// The last item inside the section's submenu: the Walking note in a nested Bass line submenu; nil otherwise
+    /// (a flat menu shows the note at its end, `GenerateMenu.walkingNote`).
+    let note: String?
     var title: String { family.title }
     var id: String { family.rawValue }
   }
@@ -198,8 +206,9 @@ struct GenerateMenu: Equatable {
   /// The selection's (or every chord's) group, then every chord's only when some, not all, chords are selected;
   /// empty when the menu is disabled.
   let groups: [Group]
-  /// The one-line note on Walking and Loop (`GenerateOptions.walkingNote`); nil when the menu offers no bass pattern
-  /// or is disabled.
+  /// The one-line note on Walking and Loop (`GenerateOptions.walkingNote`) at the end of the menu, for a flat menu of
+  /// bass patterns; nil when the menu offers no bass pattern, nests its families (the note is then the last item of
+  /// each Bass line submenu, `Section.note`) or is disabled.
   let walkingNote: String?
   /// The accessibility value: the first group's header, or the reason the menu is disabled.
   let value: String
@@ -218,8 +227,9 @@ struct GenerateMenu: Equatable {
 /// engine does all the music. The role limits only what the menu offers: every command still takes any track (D2, D22).
 ///
 /// **Motif takes:** each track has a take number 0…63 (`RollViewState.motifTake`, UI-only, default 0). The lead
-/// family offers "Motif (take N of 64)", which rewrites the current take, and "Motif, another take", which writes the
-/// next one (63 wraps to 0) and, once sent and applied, makes it the track's take.
+/// family offers "Motif, take N of 64", which rewrites the current take, and "Motif, next take (N+1 of 64)", which
+/// writes the next one (63 wraps to 0) and, once sent and answered by the same document (applied or refused), makes
+/// it the track's take (`GenerateOutcome`). A loaded document starts every track at take 0 (`RollViewStates.resetMotifTakes`).
 ///
 /// One command per choice, ONE undo step, no confirmation: the engine replaces the notes the scope's chords own in
 /// the track and leaves every other note alone; a refusal ("Add chords first", the track limits) comes back as any
@@ -322,8 +332,8 @@ enum GenerateOptions {
   }
 
   /// The entries of `family` for `scope` on track `trackId` whose Motif take is `take`: the six bass patterns; or the
-  /// lead patterns with Motif as two entries, "Motif (take N of 64)" (the current take) and "Motif, another take"
-  /// (the next).
+  /// lead patterns with Motif as two entries, "Motif, take N of 64" (the current take) and "Motif, next take (N+1 of
+  /// 64)".
   static func entries(_ family: GenerateFamily, scope: GenerateScope, trackId: Int, take: Int,
                       lineage: String) -> [GenerateEntry] {
     switch family {
@@ -346,7 +356,8 @@ enum GenerateOptions {
   /// `unavailableReason` on an empty progression; otherwise the scope's group, plus every chord's when the scope is a
   /// selection (a click on the strip usually leaves a chord selected, so the whole progression stays one choice away
   /// without deselecting first), each with a section per family the role offers; the Walking note when bass patterns
-  /// are offered; the tooltip naming the kind of line. Every entry carries the track and `lineage`, the document it is
+  /// are offered (at the end of a flat menu, as the last item of each Bass line submenu of a nested one); the tooltip
+  /// naming the kind of line. Every entry carries the track and `lineage`, the document it is
   /// offered for (`ChordLabState.clipboardToken`; the default is for tests that load no second document).
   static func menu(_ snapshot: Snapshot, trackId: Int, role: TrackRole, take: Int,
                    lineage: String = "") -> GenerateMenu {
@@ -356,16 +367,19 @@ enum GenerateOptions {
                           help: unavailableReason)
     }
     let scope = scope(snapshot)
+    let note = walkingNote(loop: snapshot.progressionLoop)
+    let nests = families.count > 1
     func group(_ scope: GenerateScope) -> GenerateMenu.Group {
       GenerateMenu.Group(title: scopeTitle(scope, chordCount: snapshot.events.count), sections: families.map {
         GenerateMenu.Section(family: $0, entries: entries($0, scope: scope, trackId: trackId, take: take,
-                                                          lineage: lineage))
+                                                          lineage: lineage),
+                             note: nests && $0 == .bass ? note : nil)
       })
     }
     var groups = [group(scope)]
     if scope != .everyChord { groups.append(group(.everyChord)) }
     return GenerateMenu(isEnabled: true, families: families, groups: groups,
-                        walkingNote: families.contains(.bass) ? walkingNote(loop: snapshot.progressionLoop) : nil,
+                        walkingNote: families.contains(.bass) && !nests ? note : nil,
                         value: groups[0].title, help: help(for: families))
   }
 
@@ -382,5 +396,48 @@ enum GenerateOptions {
     guard let track = snapshot.track(id: entry.trackId) else { return nil }
     let current = menu(snapshot, trackId: track.id, role: track.role, take: take, lineage: lineage)
     return current.groups.contains { $0.entries.contains(entry) } ? entry.command : nil
+  }
+}
+
+/// What happened to a generate command the state sent (`ChordLabState.generate`), read from the state's counters
+/// around the send (the engine answers inline, inside it), in the style of `PresetLoadOutcome`. Pure; unit-tested by
+/// the `ChordLabUICore` package (Tests/ChordLabUICoreTests/GenerateOptionsTests.swift).
+enum GenerateOutcome: Equatable {
+  /// A new snapshot and no error, in the same document.
+  case applied
+  /// An error arrived (`errorSerial` bumped) in the same document, whether or not a snapshot came with it.
+  case refused
+  /// The document lineage changed during the send: a stale command answered with the loaded document's snapshot (and
+  /// perhaps an error). Nothing that belonged to the old document applies.
+  case otherDocument
+  /// Nothing arrived (no plug-in answering).
+  case noReply
+
+  /// The outcome from the error serial, the snapshot serial and the document lineage before and after the send. A
+  /// changed lineage wins, then an error, then a snapshot.
+  init(errorsBefore: Int, errorsAfter: Int, snapshotsBefore: Int, snapshotsAfter: Int, lineageBefore: String,
+       lineageAfter: String) {
+    if lineageAfter != lineageBefore {
+      self = .otherDocument
+    } else if errorsAfter != errorsBefore {
+      self = .refused
+    } else if snapshotsAfter != snapshotsBefore {
+      self = .applied
+    } else {
+      self = .noReply
+    }
+  }
+
+  /// Whether the roll reveals what was written: only an applied generate.
+  var reveals: Bool { self == .applied }
+
+  /// The take the track keeps after `entry` had this outcome: `entry.takeAfterSending` ("Motif, next take": the take it
+  /// carried) when the same document answered, applied or refused; nil (the take stays) for another document's answer,
+  /// no answer, and every other entry.
+  func takeToStore(for entry: GenerateEntry) -> Int? {
+    switch self {
+    case .applied, .refused: return entry.takeAfterSending
+    case .otherDocument, .noReply: return nil
+    }
   }
 }

@@ -299,7 +299,8 @@ struct RollToolbar: View, Equatable {
 
   /// Generate ▸ (`GenerateOptions.menu`): a header per group naming what it replaces; under it the patterns of the
   /// track's one family listed flat, or, when the track offers two (`nestsFamilies`, an Other track), a submenu per
-  /// family ("Lead line", "Bass line"); the Walking note last when bass patterns are offered. Choosing an entry sends
+  /// family ("Lead line", "Bass line"); the Walking note when bass patterns are offered, last in a flat menu, last
+  /// inside each Bass line submenu of a nested one (`GenerateMenu.Section.note`). Choosing an entry sends
   /// its one `generateLead` or `generateBass`. Disabled on an empty progression, its tooltip then saying why.
   /// `compact` draws only the icon, borderless and without the menu arrow, in an icon button's square.
   @ViewBuilder private func generateMenu(compact: Bool) -> some View {
@@ -308,7 +309,12 @@ struct RollToolbar: View, Equatable {
         Section(group.title) {
           ForEach(group.sections) { section in
             if generate.nestsFamilies {
-              Menu(section.title) { generateButtons(section.entries) }
+              Menu(section.title) {
+                generateButtons(section.entries)
+                if let note = section.note {
+                  Section { Text(note) }
+                }
+              }
             } else {
               generateButtons(section.entries)
             }
