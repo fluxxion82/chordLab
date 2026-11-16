@@ -218,7 +218,7 @@ struct RollToolbar: View, Equatable {
       .pickerStyle(.segmented)
       .labelsHidden()
       .fixedSize()
-      .help("Notes: draw, move and resize; Velocity: drag a note up or down to change how hard it plays")
+      .help("Notes: double-click to draw, drag to move and resize; Velocity: drag a note up or down to change how hard it plays")
 
       generateMenu(compact: compactGenerate)
 
