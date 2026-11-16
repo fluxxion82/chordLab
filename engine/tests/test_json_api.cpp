@@ -5119,6 +5119,147 @@ TEST_CASE("generateBass: every field's type and range error names the field, sco
     }
 }
 
+TEST_CASE("generateLead: replaces the scope's notes in one undo step, every chord without a scope, nothing selected") {
+    DocumentStore store = chordsAndNotes();
+    store.setNoteSelection(1, {1, 2});
+    const std::uint64_t revision = store.revision();
+    const std::pair<int, int> depth = historyDepth(store);
+    // Held tone over C and G7: C5 and B4 (F, outside the scope, still moves the line, to C5).
+    CHECK(changes(store, {{"cmd", "generateLead"}, {"trackId", 1}, {"pattern", "heldTone"}, {"scope", {3, 1}}}));
+    CHECK(notesOfTrack(store) == std::vector<TrackNote>{TrackNote{4, 72, 1, 0, kBarTicks, 100},
+                                                        TrackNote{2, 38, 2, 200, 480, 100},
+                                                        TrackNote{5, 71, 3, 0, kBarTicks, 100}});
+    CHECK(store.revision() == revision + 1);
+    CHECK(historyDepth(store).first == depth.first + 1);
+    CHECK(store.noteSelection() == NoteSelection{1, {2}});  // the generated notes are not selected
+    // No scope, and an empty one: every chord. Motif without a variation is variation 0: four notes a bar.
+    CHECK(changes(store, {{"cmd", "generateLead"}, {"trackId", 1}, {"pattern", "motif"}}));
+    CHECK(notesOfTrack(store).size() == 12);
+    CHECK(changes(store, {{"cmd", "generateLead"}, {"trackId", 1}, {"pattern", "arpeggio"}, {"scope", json::array()}}));
+    CHECK(notesOfTrack(store).size() == 24);
+    // Every pattern name is accepted, with variation 0 spelled out or not; a baseRevision is not read.
+    for (const char* pattern : {"heldTone", "guideTones", "arpeggio", "stepwise", "motif", "followFeel"}) {
+        CAPTURE(pattern);
+        CHECK(changes(store, {{"cmd", "generateLead"}, {"trackId", 1}, {"pattern", pattern}, {"scope", {2}},
+                              {"baseRevision", 1}}));
+        CHECK(changes(store, {{"cmd", "generateLead"}, {"trackId", 1}, {"pattern", pattern}, {"scope", {2}},
+                              {"variation", 0}}));
+    }
+}
+
+TEST_CASE("generateLead: Motif's variation, reduced modulo 64") {
+    DocumentStore store = chordsAndNotes();
+    const auto pitchesAndOffsets = [](const DocumentStore& s) {
+        std::vector<std::pair<int, int>> out;
+        for (const TrackNote& n : notesOfTrack(s)) {
+            out.emplace_back(n.offsetTick, n.pitch);
+        }
+        return out;
+    };
+    CHECK(changes(store, {{"cmd", "generateLead"}, {"trackId", 1}, {"pattern", "motif"}, {"variation", 9}}));
+    const auto nine = pitchesAndOffsets(store);
+    std::vector<std::pair<int, int>> expected;
+    for (const GeneratedNote& g : generateLead(store.doc(), LeadPattern::Motif, {}, 9)) {
+        expected.emplace_back(g.offsetTick, g.pitch);
+    }
+    CHECK(nine == expected);
+    CHECK(changes(store, {{"cmd", "generateLead"}, {"trackId", 1}, {"pattern", "motif"}, {"variation", 73}}));
+    CHECK(pitchesAndOffsets(store) == nine);
+    CHECK(changes(store, {{"cmd", "generateLead"}, {"trackId", 1}, {"pattern", "motif"}, {"variation", 2147483647}}));
+    CHECK(changes(store, {{"cmd", "generateLead"}, {"trackId", 1}, {"pattern", "motif"}, {"variation", 0}}));
+    CHECK_FALSE(pitchesAndOffsets(store) == nine);
+    // Non-zero for another pattern: the store's refusal.
+    for (const char* pattern : {"heldTone", "guideTones", "arpeggio", "stepwise", "followFeel"}) {
+        CAPTURE(pattern);
+        for (const json& v : {json(1), json(64), json(2147483647)}) {
+            checkRefusedWith(store, {{"cmd", "generateLead"}, {"trackId", 1}, {"pattern", pattern}, {"variation", v}},
+                             "generateLead", "variation is only supported for motif");
+        }
+    }
+}
+
+TEST_CASE("generateLead: nothing owned and nothing generated is an accepted no-op") {
+    DocumentStore store;
+    REQUIRE(store.appendChord(kC, 0.5) == 1);
+    REQUIRE(store.addTrack(TrackRole::Lead) == 1);
+    applyOk(store, {{"cmd", "setFeel"}, {"rhythm", "arpeggio"}, {"arpPattern", "up"}, {"arpRate", "half"},
+                    {"strum", "off"}, {"strumSpeed", "medium"}, {"humanise", "off"}});
+    const std::uint64_t revision = store.revision();
+    CHECK_FALSE(changes(store, {{"cmd", "generateLead"}, {"trackId", 1}, {"pattern", "followFeel"}}));
+    CHECK(store.revision() == revision);
+}
+
+TEST_CASE("generateLead: refusals by the store name the command and its reason") {
+    DocumentStore store = chordsAndNotes();
+    checkRefusedWith(store, {{"cmd", "generateLead"}, {"trackId", 9}, {"pattern", "motif"}}, "generateLead",
+                     "No track with id 9");
+    checkRefusedWith(store, {{"cmd", "generateLead"}, {"trackId", 1}, {"pattern", "motif"}, {"scope", {1, 42}}},
+                     "generateLead", "No chord with id 42");
+    DocumentStore empty;
+    REQUIRE(empty.addTrack(TrackRole::Lead) == 1);
+    checkRefusedWith(empty, {{"cmd", "generateLead"}, {"trackId", 1}, {"pattern", "stepwise"}}, "generateLead",
+                     "Add chords first");
+    // Eight notes sounding over the second half of G7 on another track: Held tone over G7 would be a ninth.
+    REQUIRE(store.addTrack(TrackRole::Other) == 2);
+    std::vector<NoteSpec> pad;
+    for (int i = 0; i < kMaxTrackPolyphony; ++i) {
+        pad.push_back(NoteSpec{60 + i, 2 * kBarTicks + 2 * kFeelTicksPerBeat, 2 * kFeelTicksPerBeat});
+    }
+    REQUIRE(store.insertNotes(2, pad).size() == static_cast<std::size_t>(kMaxTrackPolyphony));
+    checkRefusedWith(store, {{"cmd", "generateLead"}, {"trackId", 1}, {"pattern", "heldTone"}, {"scope", {3}}},
+                     "generateLead", "At most " + std::to_string(kMaxTrackPolyphony) + " track notes can sound at once");
+}
+
+TEST_CASE("generateLead: every field's type and range error names the field") {
+    DocumentStore store = chordsAndNotes();
+    const std::string patterns =
+        "must be \"heldTone\", \"guideTones\", \"arpeggio\", \"stepwise\", \"motif\" or \"followFeel\"";
+    const std::string variationRange = "\"variation\" must be an integer in 0..2147483647";
+    checkError(store, {{"cmd", "generateLead"}, {"pattern", "motif"}}, "missing \"trackId\"");
+    for (const json& v : {json("1"), json(1.5), json(nullptr), json(true), json(2147483648ll), json(-2147483649ll)}) {
+        checkError(store, {{"cmd", "generateLead"}, {"trackId", v}, {"pattern", "motif"}}, "\"trackId\" must be an integer");
+    }
+    checkError(store, {{"cmd", "generateLead"}, {"trackId", 1}}, "missing \"pattern\"");
+    for (const json& v : {json("Motif"), json("roots"), json("walking"), json(""), json(4), json(nullptr),
+                          json::array({"motif"})}) {
+        checkError(store, {{"cmd", "generateLead"}, {"trackId", 1}, {"pattern", v}}, "\"pattern\" " + patterns);
+    }
+    for (const json& v : {json("1"), json(1), json(nullptr), json::object()}) {
+        checkError(store, {{"cmd", "generateLead"}, {"trackId", 1}, {"pattern", "motif"}, {"scope", v}},
+                   "\"scope\" must be an array");
+    }
+    for (const json& v : {json("2"), json(1.5), json(nullptr), json(true), json(2147483648ll)}) {
+        checkError(store, {{"cmd", "generateLead"}, {"trackId", 1}, {"pattern", "motif"}, {"scope", {1, 2, v}}},
+                   "scope[2] must be an integer");
+    }
+    json many = json::array();
+    for (int i = 0; i <= kMaxChords; ++i) {
+        many.push_back(1);
+    }
+    checkError(store, {{"cmd", "generateLead"}, {"trackId", 1}, {"pattern", "motif"}, {"scope", many}},
+               "\"scope\" must hold at most " + std::to_string(kMaxChords) + " ids");
+    // variation: a JSON integer in 0..2147483647, checked at 64 bits before narrowing, for every pattern.
+    for (const char* pattern : {"motif", "heldTone"}) {
+        for (const json& v : {json(-1), json(-2147483648ll), json(2147483648ll), json(4294967296ll),
+                              json(9223372036854775807ll), json(-9223372036854775807ll - 1), json(true), json(false),
+                              json(nullptr), json("1"), json("0"), json(1.0), json(0.0), json(1.5), json::array(),
+                              json::object()}) {
+            CAPTURE(v.dump());
+            checkError(store, {{"cmd", "generateLead"}, {"trackId", 1}, {"pattern", pattern}, {"variation", v}},
+                       variationRange);
+        }
+    }
+    const std::string head = R"({"schema":1,"cmd":"generateLead","trackId":1,"pattern":"motif","variation":)";
+    for (const char* raw : {"9223372036854775808", "-9223372036854775809", "18446744073709551615", "18446744073709551616",
+                            "1e19", "1e2", "1.0", "-0.0", "2147483648"}) {
+        CAPTURE(raw);
+        checkErrorRaw(store, head + raw + "}", variationRange);
+    }
+    // A field error comes before the store's checks: a bad variation on an unknown track is the field's error.
+    checkError(store, {{"cmd", "generateLead"}, {"trackId", 9}, {"pattern", "heldTone"}, {"variation", -1}},
+               variationRange);
+}
+
 TEST_CASE("updateNotes: absolute values, a moved start re-anchors, an absent field keeps the note's, no-ops accepted") {
     DocumentStore store = chordsAndNotes();
     const std::vector<TrackNote> before = notesOfTrack(store);
