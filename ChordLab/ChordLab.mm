@@ -25,17 +25,21 @@
 // OpenWindow and by PushSnapshot's hop, which hands a changed token to the open view controller before it sends
 // the snapshot read in that same section, so the editor never shows a loaded document under the old token.
 // The token is also the lineage guard on edits (tracks plan Task 24a): the editor stamps every kMsgTagCommand with
-// the token it holds ("lineage", ChordLabState.send(command:)), and OnMessage compares it with mClipboardToken in
-// the section that would apply the command (chordlab::bridge::commandLineage, a pure parse that calls nothing
-// else). Without that, an AUv2/AUv3 load on the host's state thread could take the lock first and replace the
-// document while a command computed for the old one (a chord id, a paste with its track ids, a Generate entry)
-// waited for the lock on the main thread, ahead of the hop bringing the new token and snapshot. A stale command
-// applies nothing (no palette rebuild, publish, host dirty or error); after the lock OnMessage calls PushSnapshot,
-// which runs inline on the main thread and so hands the editor the current token and snapshot before the editor can
-// send again. Because every snapshot the editor receives is preceded by its document's token (OpenWindow sets it
-// before the view, and so the editor state, exists; PushSnapshot's hop sets a changed one before sending), a command
-// is stale only when a load really replaced the document it was computed for. A command without lineage (tests,
-// tools) is applied unchecked; one whose lineage is not a string is answered with an error and applies nothing.
+// the token it held when the user's action began ("lineage", ChordLabState.send(command:), one token per action so a
+// stale answer to an action's first command cannot let its later ones through). OnMessage reads that member BEFORE taking mModelMutex (chordlab::bridge::readLineage: a pure
+// parse that never throws, so a 1 MB command's parse never holds the lock against a host's Serialize/Unserialize) and
+// compares it with mClipboardToken under the lock, in the section that would apply the command (compareLineage, a
+// string comparison that neither allocates nor throws). Without that, an AUv2/AUv3 load on the host's state thread
+// could take the lock first and replace the document while a command computed for the old one (a chord id, a paste
+// with its track ids, a Generate entry) waited for the lock on the main thread, ahead of the hop bringing the new
+// token and snapshot. A stale command applies nothing (no palette rebuild, publish, host dirty or error); after the
+// lock OnMessage calls PushSnapshot, which runs inline on the main thread and so hands the editor the current token
+// and snapshot before the editor can send again. Because every snapshot the editor receives is preceded by its
+// document's token (OpenWindow sets it before the view, and so the editor state, exists; PushSnapshot's hop sets a
+// changed one before sending), a command is stale only when a load really replaced the document it was computed for.
+// A command without lineage (tests, tools) is applied unchecked; one whose lineage is not a string, or whose lineage
+// could not be read at all (an allocation failure: never "apply", the engine's own parse might then succeed), applies
+// nothing and is answered with an error.
 //
 // Chord preview goes through the engine's Scheduler, not iPlug2's MIDI-from-UI queue (which holds 32
 // messages and drops silently, so a note-off could be lost while the host had processing suspended).
@@ -730,15 +734,15 @@ bool ChordLab::OnMessage(int msgTag, int ctrlTag, int dataSize, const void* pDat
     std::string error;
     bool accepted = false;
     bool documentChanged = false;
+    // The document the editor computed this command for (tracks plan Task 24a). Read before the lock (a large command's
+    // parse must not hold mModelMutex against a host's Serialize/Unserialize); compared under it, in the same section
+    // that would apply the command, so a state load cannot slip in between. Never throws (readLineage catches).
+    const chordlab::bridge::LineageField field = chordlab::bridge::readLineage(json);
     chordlab::bridge::CommandLineage lineage = chordlab::bridge::CommandLineage::Absent;
     {
       std::lock_guard<std::mutex> lock(mModelMutex);
-      // The document the editor computed this command for (tracks plan Task 24a): checked in the same section that
-      // would apply it, so a state load cannot slip in between. A stale or malformed lineage applies nothing.
-      lineage = chordlab::bridge::commandLineage(json, mClipboardToken);
-      if (lineage == chordlab::bridge::CommandLineage::Malformed)
-        error = chordlab::bridge::kMalformedLineageError;
-      else if (lineage != chordlab::bridge::CommandLineage::Stale)
+      lineage = chordlab::bridge::compareLineage(field, mClipboardToken);
+      if (chordlab::bridge::lineageApplies(lineage))             // absent or current; stale, malformed, failed: nothing
         accepted = chordlab::applyCommandJson(mStore, json, error, &documentChanged);
       // Always rebuild: besides setKey/browseKey, undo/redo can change the project key, and the
       // palette is cheap (35 cells). Likewise always recompile: PublishSnapshotLocked publishes only
@@ -754,9 +758,14 @@ bool ChordLab::OnMessage(int msgTag, int ctrlTag, int dataSize, const void* pDat
       // Computed for a document a state load has since replaced (an AU host may load off the main thread while the
       // editor still shows the old one). The editor gets the current token and snapshot now, inline on this main
       // thread, ahead of the load's queued push. Not an error: a click that raced a load is not the user's mistake.
+      DBGMSG("ChordLab: command of a replaced document not applied (stale lineage)\n");
       PushSnapshot();
       return true;
     }
+    if (lineage == chordlab::bridge::CommandLineage::Malformed)
+      error = chordlab::bridge::kMalformedLineageError;
+    else if (lineage == chordlab::bridge::CommandLineage::Failed)
+      error = chordlab::bridge::kLineageFailedError;
     if (accepted)
     {
       if (documentChanged)                                       // not for a selection or an accepted no-op

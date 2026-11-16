@@ -48,9 +48,10 @@ public:
   // wrapper resets on both bypass edges and never calls ProcessBlock in between). Replaces iPlug2's
   // default, which forwards every message to the output unmanaged; the base is never called.
   void ProcessMidiMsg(const IMidiMsg& msg) override;
-  // Main thread: the editor's messages (ChordLab-Shared.h). A kMsgTagCommand is applied under mModelMutex only when
-  // its "lineage" is mClipboardToken or absent; a stale one applies nothing and is answered with PushSnapshot, one
-  // whose lineage is not a string with PushError (chordlab::bridge::commandLineage).
+  // Main thread: the editor's messages (ChordLab-Shared.h). A kMsgTagCommand's "lineage" is read before mModelMutex
+  // and compared with mClipboardToken under it; the command is applied only when the lineage is current or absent. A
+  // stale one applies nothing and is answered with PushSnapshot; one whose lineage is not a string, or could not be
+  // read, with PushError (chordlab::bridge::readLineage / compareLineage).
   bool OnMessage(int msgTag, int ctrlTag, int dataSize, const void* pData) override;
   // Keys the host delivers through the plug-in API (VST3 onKeyDown): forwarded to the Swift editor's
   // key router (ChordLabViewController.handleKey); true when the editor consumed the key.

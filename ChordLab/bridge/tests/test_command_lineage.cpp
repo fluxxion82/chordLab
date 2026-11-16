@@ -7,7 +7,13 @@
 
 using chordlab::bridge::CommandLineage;
 using chordlab::bridge::commandLineage;
+using chordlab::bridge::compareLineage;
+using chordlab::bridge::kLineageFailedError;
 using chordlab::bridge::kMalformedLineageError;
+using chordlab::bridge::kStaleExportError;
+using chordlab::bridge::LineageField;
+using chordlab::bridge::lineageApplies;
+using chordlab::bridge::readLineage;
 
 namespace {
 const char* const kToken = "6F1C2A9E-0B7D-4E52-9C1A-3D8E5F7A1B20";
@@ -32,8 +38,17 @@ TEST_CASE("commandLineage: any other token is stale, compared exactly") {
     CHECK(commandLineage(R"({"lineage":"AB"})", "A") == CommandLineage::Stale);
     // An empty lineage is a lineage like any other: never the shell's token, which is a UUID.
     CHECK(commandLineage(R"({"lineage":""})", kToken) == CommandLineage::Stale);
-    // An escaped character is compared decoded, as the engine reads every string.
-    CHECK(commandLineage(R"({"lineage":"A"})", "A") == CommandLineage::Current);
+}
+
+TEST_CASE("commandLineage: escapes are read decoded, in the value and in the key, as the engine reads every string") {
+    // Plain literals, so the JSON text really holds the backslash escapes (checked first).
+    CHECK(std::string("{\"lineage\":\"\\u0041\"}").find('\\') != std::string::npos);
+    CHECK(std::string("{\"\\u006cineage\":\"A\"}").find('\\') != std::string::npos);
+    CHECK(commandLineage("{\"lineage\":\"\\u0041\"}", "A") == CommandLineage::Current);
+    CHECK(commandLineage("{\"lineage\":\"\\u0041\"}", "B") == CommandLineage::Stale);
+    CHECK(commandLineage("{\"\\u006cineage\":\"A\"}", "A") == CommandLineage::Current);
+    CHECK(commandLineage("{\"\\u006cineage\":\"A\"}", "B") == CommandLineage::Stale);
+    CHECK(commandLineage("{\"\\u006cineage\":5}", "A") == CommandLineage::Malformed);
 }
 
 TEST_CASE("commandLineage: a lineage that is not a string is malformed") {
@@ -85,4 +100,54 @@ TEST_CASE("commandLineage: nesting deeper than the engine reads is left to the e
         atLimit += ']';
     atLimit += '}';
     CHECK(commandLineage(atLimit, "A") == CommandLineage::Stale);
+}
+
+// ---- Read outside the model lock, compared under it (review fix 4), and never a throw into the shell (fix 3) ----
+
+TEST_CASE("readLineage: what the member holds, read without the shell's token") {
+    CHECK(readLineage(R"({"schema":1,"cmd":"undo"})").kind == LineageField::Kind::Absent);
+    CHECK(readLineage("not json").kind == LineageField::Kind::Absent);
+    CHECK(readLineage(R"({"lineage":5})").kind == LineageField::Kind::Malformed);
+    const LineageField field = readLineage(R"({"schema":1,"cmd":"undo","lineage":"6F1C"})");
+    CHECK(field.kind == LineageField::Kind::String);
+    CHECK(field.value == "6F1C");
+    CHECK(readLineage(R"({"lineage":""})").kind == LineageField::Kind::String);
+}
+
+TEST_CASE("compareLineage: the mapping under the lock") {
+    LineageField field;
+    CHECK(compareLineage(field, kToken) == CommandLineage::Absent);
+    field.kind = LineageField::Kind::String;
+    field.value = kToken;
+    CHECK(compareLineage(field, kToken) == CommandLineage::Current);
+    CHECK(compareLineage(field, "other") == CommandLineage::Stale);
+    field.value.clear();
+    CHECK(compareLineage(field, kToken) == CommandLineage::Stale);
+    field.kind = LineageField::Kind::Malformed;
+    CHECK(compareLineage(field, kToken) == CommandLineage::Malformed);
+    // A read that failed (an allocation failure in the parse: readLineage catches everything) is never "apply": the
+    // engine's own parse might succeed afterwards and apply a stale command. The failure itself cannot be injected
+    // into nlohmann's parse here, so only the mapping is pinned.
+    field.kind = LineageField::Kind::Failed;
+    CHECK(compareLineage(field, kToken) == CommandLineage::Failed);
+    CHECK(compareLineage(field, "") == CommandLineage::Failed);
+}
+
+TEST_CASE("lineageApplies: only an absent or current lineage lets the command or export through") {
+    CHECK(lineageApplies(CommandLineage::Absent));
+    CHECK(lineageApplies(CommandLineage::Current));
+    CHECK_FALSE(lineageApplies(CommandLineage::Stale));
+    CHECK_FALSE(lineageApplies(CommandLineage::Malformed));
+    CHECK_FALSE(lineageApplies(CommandLineage::Failed));
+}
+
+TEST_CASE("lineage errors: a failed read uses the engine's internal-error wording; a stale export says what to do") {
+    CHECK(std::string(kLineageFailedError) == "internal error");
+    CHECK(std::string(kStaleExportError) == "The project was reloaded; drag again");
+}
+
+TEST_CASE("readLineage, compareLineage and commandLineage never throw") {
+    CHECK(noexcept(readLineage(std::string_view())));
+    CHECK(noexcept(compareLineage(LineageField{}, std::string_view())));
+    CHECK(noexcept(commandLineage(std::string_view(), std::string_view())));
 }
