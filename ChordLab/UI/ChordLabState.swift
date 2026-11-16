@@ -37,7 +37,7 @@ class ChordLabState: NSObject, ObservableObject {
   /// routes ask the map with it (`EditorKeyRouter`). Every applied snapshot resolves it (`KeyTarget.resolved`: a
   /// removed track's notes fall back to the chords), and every open-lane change resets it
   /// (`KeyTarget.afterOpenLaneChange`, in `openLane`'s observer). The roll's mouse-down will set `.notes` (plan
-  /// Tasks 18, 20); until then it stays `.chords`.
+  /// Task 20, in `handleRollPointer`); until then it stays `.chords`.
   @Published var keyTarget: KeyTarget = .chords
   /// The lane the editor shows (tracks design D13): Chords (suggestions, palette, home row) or one track's roll.
   /// UI state, never saved; every applied snapshot resolves it (`Lane.resolved`: a removed track falls back to
@@ -45,6 +45,8 @@ class ChordLabState: NSObject, ObservableObject {
   @Published var openLane: Lane = .chords {
     didSet {
       guard openLane != oldValue else { return }
+      // The roll being left drops its gesture now (its held preview stops), not at its next event.
+      if case .track(let left) = oldValue { cancelRollGesture(trackId: left) }
       let target = keyTarget.afterOpenLaneChange(from: oldValue, to: openLane)
       if target != keyTarget { keyTarget = target }
     }
@@ -487,6 +489,63 @@ class ChordLabState: NSObject, ObservableObject {
     if states != rolls.states { rolls.states = states }
   }
 
+  // MARK: - Piano roll input (plan Task 18: RollInputView → the gesture machine → one effects seam)
+
+  /// Track `trackId`'s grid view point (the input view's coordinates, top-left origin) in content coordinates, at
+  /// the track's current zoom and scroll.
+  func rollContentPoint(trackId: Int, viewPoint: CGPoint) -> CGPoint {
+    rolls.states.contentPoint(viewPoint: viewPoint, trackId: trackId, ticksPerBeat: rollTiming?.ticksPerBeat ?? 960)
+  }
+
+  /// The cursor over track `trackId`'s grid view point (`RollCursor`: resize over a note's edge in Notes mode).
+  func rollCursor(trackId: Int, viewPoint: CGPoint) -> RollCursor {
+    guard let snapshot, let timing = rollTiming else { return .arrow }
+    return rolls.states.cursor(atView: viewPoint, trackId: trackId, snapshot: snapshot, timing: timing)
+  }
+
+  /// One pointer event of track `trackId`'s roll (`RollInputView`, location already in content coordinates): runs
+  /// the gesture machine with the current snapshot and the track's view state (`RollViewStates.handle`), stores the
+  /// next edit state through the roll store (so the drag preview, hidden notes, rubber band and insert marker draw)
+  /// and hands the effects to `performRollEffects`, the one place they go.
+  @MainActor func handleRollPointer(_ event: RollPointerEvent, trackId: Int) {
+    guard let snapshot, let timing = rollTiming else { return }
+    // Plan Task 20: a `.down` sets `keyTarget = .notes(trackId)` here (design D15 "Keyboard": the roll's mouse-down
+    // targets its notes). Until then the roll leaves the key target alone.
+    var states = rolls.states
+    let effects = states.handle(event, trackId: trackId, snapshot: snapshot, timing: timing)
+    publishRolls(states)
+    performRollEffects(effects, trackId: trackId)
+  }
+
+  /// Cancels track `trackId`'s gesture (the open lane left it): its preview drops, a held preview's stop goes to
+  /// `performRollEffects`. Nothing when it is idle.
+  func cancelRollGesture(trackId: Int) {
+    var states = rolls.states
+    let effects = states.cancelGesture(trackId: trackId)
+    publishRolls(states)
+    performRollEffects(effects, trackId: trackId)
+  }
+
+  /// THE seam every effect of the roll's gesture machine goes through (`RollEffect`: from `handleRollPointer`, a
+  /// lane switch's cancel and a snapshot's revision cancel), and the only one. In plan Task 18 it does nothing: no
+  /// command reaches the engine and no preview sounds. Plan Task 19 fills it: `send` effects go through
+  /// `send(command: command.json)` (each content command already carries its `baseRevision`), and `previewStart` /
+  /// `previewStop` / `previewOneShot` through the existing preview path (`kMsgTagPreview`, one pitch, paired Start
+  /// and Stop with keep-alive).
+  func performRollEffects(_ effects: [RollEffect], trackId: Int) {
+    _ = effects
+    _ = trackId
+  }
+
+  /// A snapshot arrived: every track's stored gesture checks its revision (`RollViewStates.snapshotChanged`: a
+  /// different revision cancels, a selection echo does not), the open roll's and every parked one's.
+  private func cancelStaleRollGestures(revision: UInt64) {
+    var states = rolls.states
+    let cancelled = states.snapshotChanged(revision: revision)
+    publishRolls(states)
+    for (trackId, effects) in cancelled { performRollEffects(effects, trackId: trackId) }
+  }
+
   /// After a snapshot: drops removed tracks' roll states and fits the open track's to the new content.
   private func updateRolls(for snapshot: Snapshot) {
     var openTrackId: Int?
@@ -658,6 +717,7 @@ class ChordLabState: NSObject, ObservableObject {
       let decoded = try JSONDecoder().decode(Snapshot.self, from: json)
       snapshot = decoded
       lastError = nil
+      cancelStaleRollGestures(revision: decoded.revision ?? 0)
       let target = keyTarget.resolved(in: decoded.tracks)
       if target != keyTarget { keyTarget = target }
       updateOpenLane(for: decoded)

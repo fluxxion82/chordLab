@@ -156,3 +156,69 @@ struct RollViewStates: Equatable {
     }
   }
 }
+
+// MARK: - The input view's seam (plan Task 18)
+
+extension RollViewStates {
+  /// Track `trackId`'s view point (the grid's own coordinates, top-left origin) in content coordinates, through the
+  /// track's CURRENT zoom and scroll (`RollGeometry.contentPoint`): what `RollInputView` turns every event's location
+  /// into at the moment of the event.
+  func contentPoint(viewPoint: CGPoint, trackId: Int, ticksPerBeat: Int) -> CGPoint {
+    let state = self[trackId]
+    return state.geometry(ticksPerBeat: ticksPerBeat).contentPoint(viewPoint: viewPoint, scroll: state.scroll)
+  }
+
+  /// Runs one pointer event of track `trackId`'s roll through the gesture machine (`RollEditLogic.handle`) with the
+  /// context built from `snapshot` (its notes, selection and revision) and the track's own geometry, mode, grid and
+  /// Snap pitch, stores the next edit state (the drag preview, hidden notes, rubber band and insert marker the roll
+  /// draws) and returns the effects, in order, for the one effects seam (`ChordLabState.performRollEffects`). A
+  /// track the snapshot no longer has gets a cancel (its held preview stops) whatever the event.
+  mutating func handle(_ event: RollPointerEvent, trackId: Int, snapshot: Snapshot, timing: RollTiming) -> [RollEffect] {
+    let state = self[trackId]
+    guard event.phase != .cancel,
+          let context = RollContext(snapshot: snapshot, trackId: trackId, timing: timing,
+                                    geometry: state.geometry(ticksPerBeat: timing.ticksPerBeat),
+                                    mode: state.mode, grid: state.grid, snap: state.snap) else {
+      return cancelGesture(trackId: trackId)
+    }
+    let (next, effects) = RollEditLogic.handle(event, state: state.editState, context: context)
+    byTrack[trackId, default: state].editState = next
+    return effects
+  }
+
+  /// Cancels track `trackId`'s gesture (`RollEditLogic.cancel`): the open lane left it, its window resigned key,
+  /// its roll went away. Returns the effects (a held preview's stop); nothing, and no entry made, when the track has
+  /// no state or its state is idle.
+  mutating func cancelGesture(trackId: Int) -> [RollEffect] {
+    guard let state = byTrack[trackId], !state.editState.isIdle else { return [] }
+    let (next, effects) = RollEditLogic.cancel(state.editState)
+    byTrack[trackId]?.editState = next
+    return effects
+  }
+
+  /// A snapshot with `revision` arrived: every track's stored gesture, not only the open one's, goes through
+  /// `RollEditLogic.snapshotChanged`, so a different revision cancels a stale gesture everywhere (a press parked on
+  /// a lane that is no longer open included) and the same revision (a selection echo) changes nothing. Returns the
+  /// tracks whose state produced effects (held previews' stops), by ascending id.
+  mutating func snapshotChanged(revision: UInt64) -> [(trackId: Int, effects: [RollEffect])] {
+    var result: [(trackId: Int, effects: [RollEffect])] = []
+    for trackId in trackIds {
+      guard let state = byTrack[trackId], !state.editState.isIdle else { continue }
+      let (next, effects) = RollEditLogic.snapshotChanged(revision: revision, state: state.editState)
+      if next != state.editState { byTrack[trackId]?.editState = next }
+      if !effects.isEmpty { result.append((trackId: trackId, effects: effects)) }
+    }
+    return result
+  }
+
+  /// The cursor over track `trackId`'s view point (`RollCursor`): the resize cursor over a note's edge in Notes mode
+  /// (`RollHit.hit` on the track's notes at its zoom and scroll), the arrow elsewhere and for a track the snapshot
+  /// lacks.
+  func cursor(atView viewPoint: CGPoint, trackId: Int, snapshot: Snapshot, timing: RollTiming) -> RollCursor {
+    let state = self[trackId]
+    guard state.mode == .notes, let track = snapshot.track(id: trackId) else { return .arrow }
+    let geometry = state.geometry(ticksPerBeat: timing.ticksPerBeat)
+    let point = geometry.contentPoint(viewPoint: viewPoint, scroll: state.scroll)
+    return RollCursor.cursor(zone: RollHit.hit(at: point, notes: track.notes, geometry: geometry)?.zone, mode: state.mode)
+  }
+}

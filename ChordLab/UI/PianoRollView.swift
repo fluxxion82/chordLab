@@ -23,10 +23,11 @@ import SwiftUI
 ///
 /// Scrolling has no `ScrollView`: the grid is a viewport that draws its content at the track's `scroll`, the ribbon
 /// follows it horizontally and the keyboard vertically, all from the same value. The grid region is one view (a
-/// `ZStack` holding the canvas and the markers overlay, where plan Task 18's `RollInputView` goes over them, covering
-/// the grid only); its measured size is the viewport (`onGeometryChange` → `ChordLabState.setRollViewport`), which
+/// `ZStack` holding the canvas, the markers overlay and `RollInputView` over them, covering the grid only, which
+/// turns the grid's mouse, wheel and pinch into the gesture machine's events and the scroll and zoom setters); its
+/// measured size is the viewport (`onGeometryChange` → `ChordLabState.setRollViewport`), which
 /// also performs the track's first open (bar 1, the role's register). Scroll and zoom are set from outside through
-/// `ChordLabState` (`setRollScroll`, `scrollRoll`, `zoomRoll`, `zoomRollIn/Out`). Each track gets a fresh view
+/// `ChordLabState` (`setRollScroll`, `scrollRoll`, `zoomRoll`, `zoomRollIn/Out`; the input view and the toolbar). Each track gets a fresh view
 /// (`.id(track.id)` in `ContentView`), so its grid measures itself when it opens.
 struct PianoRollView: View {
   @EnvironmentObject var state: ChordLabState
@@ -81,8 +82,8 @@ struct PianoRollView: View {
 
   // MARK: - Grid
 
-  /// The grid region: the canvas, the markers overlay (playhead, insert marker; never hit-tested) and (plan Task 18)
-  /// the input view over them, in one frame that is the viewport. The canvas gets the view state without the
+  /// The grid region: the canvas, the markers overlay (playhead, insert marker; never hit-tested) and the input view
+  /// (`RollInputView`) over them, in one frame that is the viewport. The canvas gets the view state without the
   /// insert marker, so a hover that only moves the marker redraws the overlay alone.
   private func grid(snapshot: Snapshot, view: RollViewState, timing: RollTiming, geometry: RollGeometry,
                     playhead: Double?, name: String) -> some View {
@@ -94,7 +95,9 @@ struct PianoRollView: View {
         .equatable()
       RollMarkersOverlay(geometry: geometry, scrollX: view.scroll.x, ticksPerBeat: timing.ticksPerBeat,
                          playheadBeat: playhead, insertMarker: view.editState.insertMarker)
-      // Plan Task 18: RollInputView here, covering the grid region (the overlay above takes no events).
+      // The input view covers the grid region only (the overlay beneath takes no events): mouse, wheel, pinch and
+      // cursor for this track, into ChordLabState.handleRollPointer and the roll setters.
+      RollInputView(trackId: track.id, state: state)
     }
     .clipped()
     .contentShape(Rectangle())
@@ -329,8 +332,8 @@ struct RollRibbonView: View, Equatable {
 
 /// The playhead (2 pt white, the sequence bar's) and, over the grid, the insert marker (1 pt in the accent colour)
 /// at the roll's horizontal scroll: two positioned rectangles over the ribbon's or the grid's canvas, so that a
-/// transport push or a hover moves them without redrawing a canvas. Never hit-tested (plan Task 18's input view
-/// owns the grid's events) and hidden from accessibility; the canvas beneath clips them to its frame.
+/// transport push or a hover moves them without redrawing a canvas. Never hit-tested (`RollInputView` owns the
+/// grid's events) and hidden from accessibility; the canvas beneath clips them to its frame.
 struct RollMarkersOverlay: View {
   let geometry: RollGeometry
   let scrollX: CGFloat

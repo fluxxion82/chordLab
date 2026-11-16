@@ -39,12 +39,14 @@ struct RollContext {
     self.snap = snap
   }
 
-  /// The context of track `trackId` in `snapshot`; nil when the snapshot has no such track.
-  init?(snapshot: Snapshot, trackId: Int, geometry: RollGeometry, mode: RollMode = .notes, grid: RollGrid = .default,
-        snap: PitchSnap = .default) {
+  /// The context of track `trackId` in `snapshot`; nil when the snapshot has no such track. `timing` is the
+  /// snapshot's `RollTiming`, computed here when not given (a caller that keeps it per snapshot passes it, since its
+  /// content end walks every track's notes).
+  init?(snapshot: Snapshot, trackId: Int, timing: RollTiming? = nil, geometry: RollGeometry, mode: RollMode = .notes,
+        grid: RollGrid = .default, snap: PitchSnap = .default) {
     guard let track = snapshot.track(id: trackId) else { return nil }
     self.init(trackId: trackId, notes: track.notes, selectedIds: track.selectedIds(in: snapshot.noteSelection),
-              revision: snapshot.revision ?? 0, events: snapshot.events, timing: RollTiming(snapshot: snapshot),
+              revision: snapshot.revision ?? 0, events: snapshot.events, timing: timing ?? RollTiming(snapshot: snapshot),
               geometry: geometry, mode: mode, grid: grid, snap: snap)
   }
 
@@ -345,6 +347,13 @@ enum RollEditLogic {
     case .cancel: (next, effects) = cancelled(state)
     }
     return (next, parked + effects)
+  }
+
+  /// The `cancel` phase without a context (the open lane changed, the window resigned key, the view went away): the
+  /// gesture and its preview are dropped and a held preview stops; idle stays idle with no effects. The same as
+  /// `handle` with a `cancel` event, for callers that have no context of the track at hand.
+  static func cancel(_ state: RollEditState) -> (RollEditState, [RollEffect]) {
+    cancelled(state)
   }
 
   /// A new snapshot arrived with `revision` (0 when it has none): a revision other than the one the press started
