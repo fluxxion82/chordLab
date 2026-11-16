@@ -514,7 +514,9 @@ std::string heardJson(const Listener& listener, const Key& projectKey);
 /// Every field is validated before anything is touched: an unknown `cmd`, a missing or mistyped field, a
 /// root outside 0..11, an unknown chord type, mode or preset, a bad letter or alter, a non-finite number or a
 /// section name over the bound makes the call return false with a description in `error`, leaving the
-/// document, its history and the selection exactly as they were. Fields the command does not use are ignored. Numbers are not
+/// document, its history and the selection exactly as they were. Fields the command does not use are ignored. A
+/// top-level `lineage` belongs to the plug-in shell (the document lineage it checks before calling this, tracks plan
+/// Task 24a) and is ignored here like any unused field, whatever its type. Numbers are not
 /// range-checked beyond that: lengths, velocities, inversions, octaves, colours and move targets are
 /// clamped by the store, exactly as the direct calls do.
 ///

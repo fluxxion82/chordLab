@@ -819,6 +819,62 @@ TEST_CASE("json robustness: every track and note command is accepted on a prepar
     CHECK(accepted < kTrackIterations);
 }
 
+// ---- the shell's lineage member ----
+
+TEST_CASE("json robustness: a top-level lineage member changes nothing for any command") {
+    // The editor stamps every command with "lineage" (the document lineage, tracks plan Task 24a); the shell checks it
+    // and the engine ignores it like any field a command does not use. Every command of both corpora (every command
+    // name of json_api.h) on fresh stores, with and without a redo step (with one, every baseRevision is stale, so the
+    // refusals are compared too): the same verdict, error, documentChanged, store and history as without the member.
+    struct Case {
+        std::string text;
+        bool tracks;
+    };
+    std::vector<Case> cases;
+    for (const std::string& m : commandCorpus()) {
+        cases.push_back({m, false});
+    }
+    for (const std::string& m : trackCommandCorpus(prefilledTrackStore(false).revision())) {
+        cases.push_back({m, true});
+    }
+    std::set<std::string> names;
+    int refused = 0;
+    int compared = 0;
+    for (const Case& c : cases) {
+        names.insert(json::parse(c.text).at("cmd").get<std::string>());
+        for (const json& lineage : {json("x"), json("6F1C2A9E-0B7D-4E52-9C1A-3D8E5F7A1B20"), json(nullptr), json(5)}) {
+            json stamped = json::parse(c.text);
+            stamped["lineage"] = lineage;
+            const std::string withLineage = stamped.dump();
+            for (const bool withRedo : {false, true}) {
+                DocumentStore plain = c.tracks ? prefilledTrackStore(withRedo) : prefilledStore(withRedo);
+                DocumentStore marked = plain;
+                std::string plainError;
+                std::string markedError;
+                bool plainChanged = false;
+                bool markedChanged = true;
+                const bool plainOk = applyCommandJson(plain, c.text, plainError, &plainChanged);
+                const bool markedOk = applyCommandJson(marked, withLineage, markedError, &markedChanged);
+                const std::string where = " input=" + escaped(withLineage) + (withRedo ? " (redo step)" : "");
+                CHECK_MESSAGE(markedOk == plainOk, "verdict" << where);
+                CHECK_MESSAGE(markedError == plainError, "error \"" << markedError << "\" vs \"" << plainError << "\"" << where);
+                CHECK_MESSAGE(markedChanged == plainChanged, "documentChanged" << where);
+                CHECK_MESSAGE(Observable(marked) == Observable(plain), "store" << where);
+                const std::string history = historyDifference(marked, plain);
+                CHECK_MESSAGE(history.empty(), history << where);
+                refused += plainOk ? 0 : 1;
+                ++compared;
+            }
+        }
+    }
+    MESSAGE("lineage member: " << compared << " comparisons, " << refused << " of them refusals");
+    CHECK(refused > 0);  // the stale baseRevision refusals, at least
+    for (const char* name : {"removeChords", "setLength", "insertNotes", "updateNotes", "generateBass", "undo", "redo",
+                             "selectEvents", "selectNotes", "setTrackMute", "setChordsMute"}) {
+        CHECK_MESSAGE(names.count(name) == 1, name << " is not in the corpora");
+    }
+}
+
 TEST_CASE("json robustness: integers at the edges of 64 and 32 bits are refused or clamped in every track field, never wrapped") {
     const char* const edges[] = {"9223372036854775807", "-9223372036854775808", "9223372036854775808", "-9223372036854775809",
                                  "18446744073709551615", "18446744073709551616", "2147483647", "2147483648", "-2147483648",
