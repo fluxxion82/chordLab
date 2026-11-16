@@ -20,6 +20,10 @@
 // run the destructor on the thread that already holds the non-recursive Lifeline mutex and deadlock.
 // mViewController is written only on the main thread (OpenWindow / CloseWindow); other threads learn
 // whether an editor is attached from the atomic mEditorOpen.
+// The clipboard token (mClipboardToken, tracks design D21) belongs with the document: guarded by mModelMutex,
+// renewed by UnserializeState in the same section that replaces the document, and read with the document by
+// OpenWindow and by PushSnapshot's hop, which hands a changed token to the open view controller before it sends
+// the snapshot read in that same section, so the editor never shows a loaded document under the old token.
 //
 // Chord preview goes through the engine's Scheduler, not iPlug2's MIDI-from-UI queue (which holds 32
 // messages and drops silently, so a note-off could be lost while the host had processing suspended).
@@ -270,16 +274,18 @@ void* ChordLab::OpenWindow(void* pParent)
 #endif
   PLATFORM_VIEW* platformParent = (PLATFORM_VIEW*) pParent;
   auto* vc = [[ChordLabViewController alloc] initWithEditorDelegateAndBundleID: this : GetBundleID()];
-  // Before anything touches vc.view: the view's load creates the editor state, which reads the token (D21).
-  vc.clipboardToken = [NSString stringWithUTF8String: mClipboardToken.c_str()];   // autoreleased; the property copies it
   mViewController = vc;
   int width = PLUG_WIDTH;
   int height = PLUG_HEIGHT;
+  std::string token;
   {
     std::lock_guard<std::mutex> lock(mModelMutex);
     width = GetEditorWidth();      // PLUG_WIDTH x PLUG_HEIGHT until a host resize or a state load changes it
     height = GetEditorHeight();
+    token = mClipboardToken;
   }
+  // Before anything touches vc.view: the view's load creates the editor state, which reads the token (D21).
+  vc.clipboardToken = [NSString stringWithUTF8String: token.c_str()];   // autoreleased; the property copies it
   vc.view.frame = MAKERECT(0.f, 0.f, (float) width, (float) height);
   [platformParent addSubview:vc.view];
   
@@ -1029,13 +1035,21 @@ void ChordLab::PushSnapshot()
     if (!mEditorOpen.load())                                     // no listener: nothing to serialize
       return;
     std::string json;
+    std::string token;
     {
       std::lock_guard<std::mutex> lock(mModelMutex);
       // The note selection and the revision live in the store, not the document: read them in this same section.
       const chordlab::SnapshotExtras extras{mStore.noteSelection(), mStore.revision()};
       json = chordlab::snapshotJson(mStore.doc(), mPalette, mStore.selectedEventId(), mStore.selectedEventIds(),
                                     extras);  // the live selection: the anchor drives suggestions
+      token = mClipboardToken;                                   // the lineage of exactly this document (D21)
     }
+    // A state load renewed the token: the editor takes it before the loaded document's snapshot, so a paste of a
+    // copy made before the load already pastes as foreign (track ids dropped).
+    auto* vc = (ChordLabViewController*) mViewController;
+    NSString* fresh = [NSString stringWithUTF8String: token.c_str()];   // autoreleased; the property copies it
+    if (vc && ![vc.clipboardToken isEqualToString: fresh])
+      vc.clipboardToken = fresh;
     SendArbitraryMsgFromDelegate((int) kMsgTagSnapshot, (int) json.size(), json.data());
   });
 }
@@ -1190,11 +1204,19 @@ int ChordLab::UnserializeState(const IByteChunk& chunk, int startPos)
     int width = 0;
     int height = 0;
     bool editorOpen = false;
+    std::string renewedToken;                                    // made outside the lock; used only if the load succeeds
+    @autoreleasepool                                             // ARC is off, and this may run off the main thread
+    {
+      renewedToken = [[[NSUUID UUID] UUIDString] UTF8String];
+    }
     {
       std::lock_guard<std::mutex> lock(mModelMutex);
       loaded = chordlab::loadStateJson(mStore, json, error, &width, &height);   // atomic: a failure changes nothing
       if (loaded)
       {
+        // A new document lineage (D21): its track ids are not the old document's, so a chord copy made before
+        // this load must paste as foreign. PushSnapshot below hands the token to an open editor with the snapshot.
+        mClipboardToken = std::move(renewedToken);
         ConstrainEditorResize(width, height);                    // the state stores the size verbatim: a set saved under
                                                                  // an older, smaller minimum (700x480) opens at today's
         RebuildPaletteLocked();

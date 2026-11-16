@@ -124,7 +124,7 @@ class ChordLabState: NSObject, ObservableObject {
     self.endEdit = { _ in }
     self.sendCommand = { _, _ in }
     self.mouseButtonsDown = { NSEvent.pressedMouseButtons != 0 }
-    self.clipboardToken = ClipboardToken.resolve(nil)
+    self.resolvedClipboardToken = ClipboardToken.resolve(nil)
     super.init()
   }
 
@@ -141,7 +141,7 @@ class ChordLabState: NSObject, ObservableObject {
     self.endEdit = endEdit
     self.sendCommand = sendCommand
     self.mouseButtonsDown = mouseButtonsDown
-    self.clipboardToken = ClipboardToken.resolve(clipboardToken)
+    self.resolvedClipboardToken = ClipboardToken.resolve(clipboardToken)
     super.init()
   }
 
@@ -379,11 +379,18 @@ class ChordLabState: NSObject, ObservableObject {
   /// here.
   var pasteboard: any ChordPasteboard = NSPasteboard.general
 
-  /// The plug-in instance's clipboard token (tracks design D21, `ClipboardToken`): made once per instance by the C++
-  /// shell and passed in by the view controller, so it outlives this state (an editor window closed and reopened keeps
-  /// it). A chord copy carries it, and a paste whose payload carries another (another instance, whose track ids mean
-  /// nothing here) drops the notes' track ids so the engine matches lanes by name and role or creates tracks.
-  let clipboardToken: String
+  /// The clipboard token of the plug-in instance's document lineage (tracks design D21, `ClipboardToken`): made by
+  /// the C++ shell and passed in by the view controller, so it outlives this state (an editor window closed and
+  /// reopened keeps it), and set again by the view controller when loaded state replaced the document (the shell
+  /// renews it then, before the loaded snapshot arrives). A chord copy carries it, and a paste whose payload carries
+  /// another (another instance, or this one before the load: track ids that mean nothing here) drops the notes'
+  /// track ids so the engine matches lanes by name and role or creates tracks. A blank value resolves to a fresh one
+  /// (`ClipboardToken.resolve`).
+  var clipboardToken: String {
+    get { resolvedClipboardToken }
+    set { resolvedClipboardToken = ClipboardToken.resolve(newValue) }
+  }
+  private var resolvedClipboardToken: String
 
   /// The ids of the strip's blocks in order; empty before the first snapshot.
   private var eventIds: [Int] { snapshot?.events.map(\.id) ?? [] }

@@ -183,20 +183,25 @@ enum ClipboardChords {
     pasteboard.data(forType: pasteboardType).flatMap(decode)
   }
 
-  /// ⌘V and Paste after in the instance whose token is `ownToken` (D21): the chords, with every note's track id
-  /// dropped unless the payload's token is `ownToken` (another instance numbers its tracks from 1 too, so its ids
-  /// would land notes in unrelated tracks here; a payload without a token is treated as foreign); nil as `paste`.
+  /// ⌘V and Paste after under `ownToken`, the token of the pasting instance's current document lineage (D21,
+  /// `ClipboardToken`): the chords, with every note's track id dropped unless the payload's token is `ownToken`
+  /// (another instance numbers its tracks from 1 too, and so does other state loaded into this one since the copy,
+  /// so their ids would land notes in unrelated tracks here; a payload without a token is treated as foreign); nil
+  /// as `paste`.
   static func paste(from pasteboard: ChordPasteboard, ownToken: String) -> [ClipChord]? {
     guard let contents = pasteboard.data(forType: pasteboardType).flatMap(decodeContents) else { return nil }
     return contents.token == ownToken ? contents.chords : contents.chords.map { $0.droppingTrackIds() }
   }
 }
 
-/// The clipboard token of one plug-in instance (tracks design D21, Task 20 review): the C++ shell makes it once per
-/// instance (`ChordLab::mClipboardToken`, a UUID made in the constructor) and `ChordLab::OpenWindow` hands it to the
-/// view controller before the editor's state exists, so every editor window of the same instance (Live closes and
-/// reopens them routinely) carries the same token and pastes its own copies with their track ids. Without one (a
-/// harness, a test, an older shell) each state makes its own.
+/// The clipboard token of one plug-in instance's document lineage (tracks design D21, Task 20 reviews): track ids
+/// mean something only within the document they were copied from and its edits, so the token names that lineage. The
+/// C++ shell makes it in the constructor (`ChordLab::mClipboardToken`, a UUID) and makes a new one whenever loaded
+/// state replaces the document (`ChordLab::UnserializeState`: a host preset, a restored set), where track 1 may be
+/// another lane. `ChordLab::OpenWindow` hands it to the view controller before the editor's state exists, so every
+/// editor window of the same lineage (Live closes and reopens them routinely) carries the same token and pastes its
+/// own copies with their track ids; a renewal reaches an open editor before the loaded state's snapshot, so a copy
+/// made before the load pastes as foreign. Without one (a harness, a test, an older shell) each state makes its own.
 enum ClipboardToken {
   /// `given` when it holds anything but whitespace, else a fresh UUID string.
   static func resolve(_ given: String?) -> String {

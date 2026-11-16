@@ -158,6 +158,23 @@ final class ClipboardChordNotesTests: XCTestCase {
     XCTAssertEqual(try XCTUnwrap(ClipboardChords.paste(from: board, ownToken: reopened)).first?.notes?.map(\.lane), [bass, lead])
   }
 
+  // MARK: - The token names a document lineage (Task 20 review 2, finding 1)
+
+  func testACopyMadeBeforeTheDocumentWasReplacedPastesAsForeign() throws {
+    // Copied under A: track ids kept while the instance's token is A.
+    let board = FakeChordBoard()
+    XCTAssertTrue(ClipboardChords.copy([1], from: events, tracks: tracks, token: "A", to: board))
+    XCTAssertEqual(try XCTUnwrap(ClipboardChords.paste(from: board, ownToken: "A")).first?.notes?.map(\.lane), [bass, lead])
+    // The host loaded other state into the same instance: the shell renewed the token to B. Track 1 may now be
+    // another lane, so the old copy's ids are dropped and the engine maps the lanes by name and role.
+    let renewed = ClipboardToken.resolve("B")
+    XCTAssertEqual(try XCTUnwrap(ClipboardChords.paste(from: board, ownToken: renewed)).first?.notes?.map(\.lane),
+                   [ClipLane(trackId: nil, name: "Bass", role: .bass), ClipLane(trackId: nil, name: "Lead", role: .lead)])
+    // A copy made after the load carries B and pastes with its ids again.
+    XCTAssertTrue(ClipboardChords.copy([1], from: events, tracks: tracks, token: renewed, to: board))
+    XCTAssertEqual(try XCTUnwrap(ClipboardChords.paste(from: board, ownToken: renewed)).first?.notes?.map(\.lane), [bass, lead])
+  }
+
   // MARK: - The insertChords entries (paste and ⌘D)
 
   func testTheInsertCommandCarriesTheNotesAsTheEngineTakesThem() throws {
