@@ -389,6 +389,26 @@ TEST_CASE("Follow feel: low-then-upper, a pulse with a short first hit, block") 
     }
 }
 
+TEST_CASE("Follow feel: strum and humanise are ignored") {
+    // D16: the bass follows the rhythm's raw hits. The strum's stagger and humanise's timing and velocity variation
+    // change what the chords play (the REQUIRE), never the generated line.
+    const std::vector<ChordEvent> events{ev(1, kC, 4.0), ev(2, kG, 4.0, 73)};
+    const Feel feels[] = {arp(ArpPattern::Up, ArpRate::Half), arp(ArpPattern::Chord), Feel{Rhythm::Pulse},
+                          Feel{Rhythm::Subdivided}, Feel{Rhythm::LowThenUpper}};
+    for (const Feel& plain : feels) {
+        Feel moved = plain;
+        moved.strum = Strum::DownUp;
+        moved.speed = StrumSpeed::Loose;
+        moved.humanise = Humanise::Heavy;
+        const Document plainDoc = docOf(events, {4, 4}, plain);
+        const Document movedDoc = docOf(events, {4, 4}, moved);
+        REQUIRE_FALSE(compile(movedDoc).events == compile(plainDoc).events);
+        const Pins expected = generated(plainDoc, BassPattern::FollowFeel);
+        CHECK_FALSE(expected.empty());
+        CHECK(generated(movedDoc, BassPattern::FollowFeel) == expected);
+    }
+}
+
 TEST_CASE("Follow feel: the over-budget 33-bar Cmaj7 document falls back to Roots") {
     // test_feel.cpp's budget boundary (4/4, half rate, Chord, two octaves, one-bar sevenths: 128 events a bar, so
     // 32 bars are exactly the chord budget and 33 over it), with every bar Cmaj7 as D16 pins it.

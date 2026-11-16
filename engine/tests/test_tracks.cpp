@@ -2738,6 +2738,18 @@ TEST_CASE("generateBass: refused for an unknown track, no chords, an unknown sco
     CHECK(refusal.empty());
     CHECK(noteIdsOf(late) == std::vector<int>{INT_MAX - 2});
     CHECK(late.nextNoteId() == INT_MAX - 1);
+    // The boundary: the last four ids below INT_MAX can be handed out, leaving the counter at INT_MAX, where the
+    // next generation is refused.
+    DocumentStore last;
+    last.replace(doc, 2, 0, 0, INT_MAX - 4);
+    CHECK(last.generateBass(1, BassPattern::RootPulse, {}, &refusal));
+    CHECK(refusal.empty());
+    CHECK(noteIdsOf(last) == std::vector<int>{INT_MAX - 4, INT_MAX - 3, INT_MAX - 2, INT_MAX - 1});
+    CHECK(last.nextNoteId() == INT_MAX);
+    const DocumentStore lastReference = last;
+    CHECK_FALSE(last.generateBass(1, BassPattern::Roots, {}, &refusal));
+    CHECK(refusal == "No note ids are left");
+    checkRefused(last, lastReference);
 }
 
 TEST_CASE("generateBass: refused whole by validateTracks, in its words; the replaced notes do not count") {
@@ -2770,6 +2782,27 @@ TEST_CASE("generateBass: refused whole by validateTracks, in its words; the repl
         CHECK_FALSE(store.generateBass(1, BassPattern::Roots, {2}, &refusal));
         CHECK(refusal == kPolyphonyMessage);
         checkRefused(store, reference);
+    }
+    SUBCASE("onsets across tracks") {
+        // Fifteen starts of another track inside the first beat of C: the cap. Root pulse over C would start a
+        // sixteenth note in that window; over F, a bar later, it fits.
+        DocumentStore store = threeChordsAndBass();
+        REQUIRE(store.addTrack(TrackRole::Lead) == 2);
+        std::vector<NoteSpec> busy;
+        for (int i = 0; i < kMaxTrackOnsetsPerBeat; ++i) {
+            busy.push_back(ns(60 + i % 12, i * 60, kMinTrackNoteTicks));
+        }
+        REQUIRE(store.insertNotes(2, busy).size() == busy.size());
+        REQUIRE(densestOnsetWindow(store.doc()) == kMaxTrackOnsetsPerBeat);
+        store.setNoteSelection(kNoTrackId, {});
+        const DocumentStore reference = store;
+        std::string refusal;
+        CHECK_FALSE(store.generateBass(1, BassPattern::RootPulse, {1}, &refusal));
+        CHECK(refusal == kOnsetMessage);
+        checkRefused(store, reference);
+        CHECK(store.generateBass(1, BassPattern::RootPulse, {2}, &refusal));
+        CHECK(refusal.empty());
+        CHECK(densestOnsetWindow(store.doc()) == kMaxTrackOnsetsPerBeat);
     }
     SUBCASE("more than kMaxNotesPerTrack notes") {
         // Five 64-beat chords in 7/8: 256 subdivisions each, 1280 Octaves notes; two to the beat over all tracks.

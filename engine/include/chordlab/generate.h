@@ -79,7 +79,9 @@ constexpr bool operator!=(const BassHit& a, const BassHit& b) noexcept {
 /// hit (integer division), the last gap ending at `e`; with `fullGap` the whole gap (each note ends where the next
 /// starts, or at `e`). **Short hits:** while some hit would last under `kMinBassHitTicks`, the earliest such hit is
 /// removed, except that when it is the first hit the hit after it is removed instead (the chord-start attack always
-/// stays); the lengths are recomputed after every removal. Velocities are `bassAccent`. Empty when `e <= s`.
+/// stays); the lengths are recomputed after every removal, so every hit lasts at least `kMinBassHitTicks` unless
+/// the span itself is too short for its one hit (under 34 ticks, 30 with `fullGap`: that hit is returned short; a
+/// store's chords are never that short). Velocities are `bassAccent`. Empty when `e <= s`.
 /// `[959, 1920)` on the 4/4 pulse is one hit (959, 864, 100); `[0, 961)` is (0, 864, 100). `meter` must satisfy
 /// `validMeter` and `step` be at least 1.
 std::vector<BassHit> bassGridHits(Meter meter, int s, int e, int step, bool fullGap);

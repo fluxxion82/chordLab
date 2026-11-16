@@ -1375,7 +1375,8 @@ bool parseInsertChords(Fields& fields, Command& out, std::vector<ChordSpec>& cho
 }
 
 /// `ids` (or the array field `name`): an array of integers, non-empty unless `allowEmpty` (`selectEvents`, where an
-/// empty list clears), of at most `maxCount`. Repeats and ids no event has are kept here; the store skips them. Each
+/// empty list clears), of at most `maxCount`. Repeats and ids no event has are kept here: the store call decides what
+/// they mean (most skip an unknown id, `generateBass` refuses one in its `scope`). Each
 /// element is read through `toInt` (a JSON integer that fits an `int`, checked at 64 bits, never wrapped) and a bad
 /// one is named by its index ("ids[1] must be an integer", "scope[2] must be an integer").
 bool parseIds(Fields& fields, bool allowEmpty, std::vector<int>& ids, std::string& error,

@@ -484,11 +484,12 @@ std::string heardJson(const Listener& listener, const Key& projectKey);
 ///     owned and nothing generated (Follow feel finding no bass-class hit) is a valid no-op, `documentChanged` false;
 ///     generating the same pattern again is a new step (fresh note ids). Walking reads the document's Loop when it
 ///     runs: the line is baked.
-///   - `baseRevision` (optional, on those three): a non-negative JSON integer (read as `uint64_t`; negative, fractional
-///     or beyond 2^64 - 1 is an error). When present and not equal to `DocumentStore::revision()` the command is
-///     refused before anything else, store untouched, no history, `documentChanged` false: `"insertNotes" refused: The
-///     notes changed while you were dragging` (the wire name of the command). Absent: no check. The check lives
-///     in this layer: the store is not called for a stale command (it has no notion of a base revision).
+///   - `baseRevision` (optional, on `insertNotes`, `removeNotes` and `updateNotes`): a non-negative JSON integer
+///     (read as `uint64_t`; negative, fractional or beyond 2^64 - 1 is an error). When present and not equal to
+///     `DocumentStore::revision()` the command is refused before anything else, store untouched, no history,
+///     `documentChanged` false: `"insertNotes" refused: The notes changed while you were dragging` (the wire name of
+///     the command). Absent: no check. The check lives in this layer: the store is not called for a stale command (it
+///     has no notion of a base revision).
 ///   - `selectNotes {trackId, ids}`: `setNoteSelection`, live state (never history, never the revision, never
 ///     `documentChanged`); `ids` at most `kMaxNotesPerTrack` integers, unknown ones dropped, repeats collapsed, the rest
 ///     in the track's note order; an empty result clears. `trackId` is an integer or null: null clears the selection
