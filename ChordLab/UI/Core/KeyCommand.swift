@@ -93,7 +93,8 @@ enum KeyRoute: Equatable {
   /// That track's notes (`NoteKeys`).
   case notes(trackId: Int)
   /// Nothing: the targeted track's roll is not the open lane (defence in depth; the target resets on every lane
-  /// change, so this should never happen).
+  /// change, so this should never happen), or a digit with the chords targeted while a track is open (the
+  /// suggestion chips it would append are not on screen).
   case ignored
 }
 
@@ -101,11 +102,15 @@ extension KeyCommand {
   /// The route for this command with `target` while `openLane` is shown: undo and redo are `.shared`; everything else
   /// follows the target, so a key with a track's notes targeted never acts on the chords the open track hides, and one
   /// with the chords targeted never acts on notes. A notes target whose track is not the open lane is `.ignored`, so
-  /// nothing ever acts on a track that is not open.
+  /// nothing ever acts on a track that is not open. With the chords targeted and a track open (the state right after
+  /// a tab click, before any click in the roll) the strip is still on screen, so its keys still act on it; the
+  /// suggestion chips are not (the roll takes their place, design D13), so a digit is `.ignored` then.
   func route(target: KeyTarget, openLane: Lane) -> KeyRoute {
     if self == .undo || self == .redo { return .shared }
     switch target {
-    case .chords: return .chords
+    case .chords:
+      if case .appendSuggestion = self, openLane != .chords { return .ignored }
+      return .chords
     case .notes(let trackId): return openLane == .track(trackId) ? .notes(trackId: trackId) : .ignored
     }
   }

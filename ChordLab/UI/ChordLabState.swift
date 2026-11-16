@@ -333,7 +333,7 @@ class ChordLabState: NSObject, ObservableObject {
         send(command: note.json)
       }
     case .ignored:
-      return   // the targeted track is not the open lane: nothing acts on a hidden track
+      return   // nothing acts on a hidden track, or on the suggestion chips a track's roll hides
     }
   }
 

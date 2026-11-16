@@ -214,7 +214,20 @@ final class KeyCommandTests: XCTestCase {
 
   func testEveryOtherCommandGoesToTheChordsWithTheChordsTargeted() {
     for command in everyCommand where command != .undo && command != .redo {
+      XCTAssertEqual(command.route(target: .chords, openLane: .chords), .chords, "\(command)")
+    }
+    // With a track open the strip is still on screen, so its keys still act on it; the suggestion chips are not.
+    for command in everyCommand where command != .undo && command != .redo && command != .appendSuggestion(1) {
       XCTAssertEqual(command.route(target: .chords, openLane: .track(3)), .chords, "\(command)")
+    }
+  }
+
+  func testADigitAppendsNoSuggestionWhileATrackIsOpen() {
+    // The suggestions row is replaced by the roll while a track is open (design D13): a digit must not append a
+    // chip nobody can see. The target is still the chords right after a tab click, before any click in the roll.
+    for n in 1...8 {
+      XCTAssertEqual(KeyCommand.appendSuggestion(n).route(target: .chords, openLane: .track(3)), .ignored, "\(n)")
+      XCTAssertEqual(KeyCommand.appendSuggestion(n).route(target: .chords, openLane: .chords), .chords, "\(n)")
     }
   }
 
