@@ -2,6 +2,7 @@
 
 #include "chordlab/chord.h"
 #include "chordlab/feel.h"
+#include "chordlab/generate.h"
 #include "chordlab/limits.h"
 #include "chordlab/meter.h"
 #include "chordlab/pitch.h"
@@ -690,6 +691,27 @@ public:
     /// anchors no chord (the sort reads every note's derived start), with `validateTracks`' message ("Note 3
     /// belongs to no chord"); an empty `edits` stays a no-op even then.
     bool updateNotes(int trackId, const std::vector<NoteEdit>& edits, std::string* refusal = nullptr);
+
+    /// Writes the bass line `pattern` gives the chords of `scopeEventIds` (every chord when empty; a repeat counts
+    /// once) into track `trackId`, as ONE candidate document and ONE undoable step (tracks design D16): the notes the
+    /// scope's chords own in that track (`anchorEventId` one of them, inactive notes included, D3) are removed, and
+    /// `generateBass(doc, pattern, scopeEventIds)`'s notes (generate.h) are inserted, anchored to their chords, with
+    /// fresh increasing ids in the generator's order; the track's notes are then re-sorted by (derived start, pitch,
+    /// id). Notes anchored to chords outside the scope stay, also when they sound over a scope chord, and so does
+    /// every other track. Works on a track of any role (a role never limits what may be written, D2). The candidate
+    /// is validated whole (`validateTracks`, with the note counter it would publish), so a result past
+    /// `kMaxNotesPerTrack` notes in the track or past the playback limits (D10) is refused with the validator's
+    /// wording ("At most 1024 notes per track", "At most 8 track notes can sound at once"); nothing is ever partly
+    /// inserted. Refused too (false, a reason, no history, no id consumed, no revision) for an unknown track ("No
+    /// track with id 9"), an empty progression ("Add chords first"), a scope id no chord has ("No chord with id 42",
+    /// the first such id in the list), a note id counter that cannot hand out the generated notes' ids below INT_MAX
+    /// ("No note ids are left"), and, before anything is derived, a note of the track that anchors no chord (as
+    /// `insertNotes`). A no-op (false, no reason) when the candidate equals the current document: nothing owned to
+    /// remove and nothing generated (Follow feel finding no bass-class hit over an empty stretch). Regenerating the
+    /// same pattern is a new step all the same (the notes get fresh ids). The generated notes are not selected: the
+    /// note selection only drops the ids that went, as after any commit.
+    bool generateBass(int trackId, BassPattern pattern, const std::vector<int>& scopeEventIds,
+                      std::string* refusal = nullptr);
 
     /// Live state (tracks design D4, D8): mutes or soloes track `id`. Never recorded in the history and leaves the
     /// revision alone; undo and redo keep each track's current flags by track id (a restored track that the

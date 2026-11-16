@@ -441,8 +441,8 @@ std::string heardJson(const Listener& listener, const Key& projectKey);
 ///   counter cannot hand out the ids the load needs; and by the track invariant (above). "append" keeps every
 ///   note, "replace" removes every note of every track (the tracks stay).
 /// - **Tracks and notes** (tracks design D4, D5, D21; tracks.h, document.h). Integers: `trackId`, `id`, `index`,
-///   `pitch`, `velocity` and the entries of `ids` are JSON integers that must fit an `int` (2147483648 is an error,
-///   not a wrapped value); the tick fields `start`, `length` and `offset` are read at 64 bits and may be any JSON
+///   `pitch`, `velocity` and the entries of `ids` and `scope` are JSON integers that must fit an `int` (2147483648 is
+///   an error, not a wrapped value); the tick fields `start`, `length` and `offset` are read at 64 bits and may be any JSON
 ///   integer that fits an `int64_t` (9223372036854775808 and -9223372036854775809 are errors), which the store then
 ///   clamps into D1's domain (start first, then the length against the space left); `pitch` and `velocity` are
 ///   clamped by the store, as an `insertChords` velocity is. Floats, strings and null are never integers. Every
@@ -469,6 +469,21 @@ std::string heardJson(const Listener& listener, const Key& projectKey);
 ///   - `updateNotes {trackId, notes, baseRevision?}`: `updateNotes`, one undo step; `notes` at most `kMaxNotesPerTrack`
 ///     objects `{id, pitch?, start?, length?, velocity?}` with absolute values (an absent field keeps the note's, null
 ///     is an error); an empty array is a valid no-op, an unknown or repeated id the store's refusal.
+///   - `generateBass {trackId, pattern, scope?}` (D16): `DocumentStore::generateBass`, ONE undo step: the notes the
+///     scope's chords own in the track are replaced by the bass line `pattern` gives them (generate.h), anchored to
+///     their chords; notes of other chords and other tracks stay. `pattern` is one of "roots", "rootPulse",
+///     "rootFifth", "octaves", "followFeel", "walking" (`bassPatternName`; missing is `missing "pattern"`, anything
+///     else, a wrong case or type included, `"pattern" must be "roots", "rootPulse", "rootFifth", "octaves",
+///     "followFeel" or "walking"`). `scope` is absent or an array of at most `kMaxChords` chord ids (integers as
+///     `ids`, errors naming the entry: "scope[2] must be an integer"; longer is an error before the store is
+///     touched); absent or empty means every chord, a repeat counts once. No `baseRevision` (not a drag; one sent is
+///     ignored, as any unused field). The generated notes are not selected. Store refusals, as
+///     `"generateBass" refused: <reason>`: "No track with id 9", "Add chords first", "No chord with id 42" (a scope id
+///     no chord has), "No note ids are left", and the track invariant's own words ("At most 1024 notes per track", "At
+///     most 8 track notes can sound at once", "At most 15 notes can start within one beat across all tracks"). Nothing
+///     owned and nothing generated (Follow feel finding no bass-class hit) is a valid no-op, `documentChanged` false;
+///     generating the same pattern again is a new step (fresh note ids). Walking reads the document's Loop when it
+///     runs: the line is baked.
 ///   - `baseRevision` (optional, on those three): a non-negative JSON integer (read as `uint64_t`; negative, fractional
 ///     or beyond 2^64 - 1 is an error). When present and not equal to `DocumentStore::revision()` the command is
 ///     refused before anything else, store untouched, no history, `documentChanged` false: `"insertNotes" refused: The

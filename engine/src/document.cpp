@@ -1381,6 +1381,65 @@ std::vector<int> DocumentStore::insertNotes(int trackId, const std::vector<NoteS
     return ids;
 }
 
+bool DocumentStore::generateBass(int trackId, BassPattern pattern, const std::vector<int>& scopeEventIds,
+                                 std::string* refusal) {
+    clearRefusal(refusal);
+    const int index = findTrackIndex(trackId);
+    if (index < 0) {
+        refuse(refusal, noTrackReason(trackId));
+        return false;
+    }
+    if (doc_.events.empty()) {
+        refuse(refusal, noOwnerReason(doc_));
+        return false;
+    }
+    const ChordTimeline timeline = chordTimeline(doc_);
+    // The scope as a set of chord ids (a repeat counts once), every chord when empty; an id no chord has refuses.
+    std::set<int> scope;
+    for (int id : scopeEventIds) {
+        if (timeline.indexOf(id) < 0) {
+            refuse(refusal, "No chord with id " + std::to_string(id));
+            return false;
+        }
+        scope.insert(id);
+    }
+    if (scope.empty()) {
+        scope.insert(timeline.eventIds.begin(), timeline.eventIds.end());
+    }
+    if (refuseDanglingAnchor(doc_.tracks[static_cast<std::size_t>(index)].notes, timeline, refusal)) {
+        return false;
+    }
+    const std::vector<GeneratedNote> generated = chordlab::generateBass(doc_, pattern, scopeEventIds);
+    // Ids stop below INT_MAX, as insertNotes' do: the notes take nextNoteId_ .. nextNoteId_ + n - 1. Compared in
+    // 64 bits: n is not bounded by the track limit here (validateTracks refuses an oversized result below).
+    const std::int64_t publishedNoteId =
+        static_cast<std::int64_t>(nextNoteId_) + static_cast<std::int64_t>(generated.size());
+    if (publishedNoteId > INT_MAX) {
+        refuse(refusal, "No note ids are left");
+        return false;
+    }
+    Document next = doc_;
+    std::vector<TrackNote>& notes = next.tracks[static_cast<std::size_t>(index)].notes;
+    // The notes the scope's chords own go, inactive ones included (D3: ownership follows the anchor).
+    notes.erase(std::remove_if(notes.begin(), notes.end(),
+                               [&](const TrackNote& n) { return scope.count(n.anchorEventId) != 0; }),
+                notes.end());
+    notes.reserve(notes.size() + generated.size());
+    int id = nextNoteId_;
+    for (const GeneratedNote& g : generated) {
+        notes.push_back(TrackNote{id++, g.pitch, g.anchorEventId, g.offsetTick, g.lengthTicks, g.velocity});
+    }
+    sortTrackNotes(notes, timeline);
+    // Validated whole with the counter it will publish; equal to the current document (nothing removed, nothing
+    // generated) it is a no-op without a reason.
+    const int published = static_cast<int>(publishedNoteId);
+    if (!commitTracks(std::move(next), nextTrackId_, published, refusal)) {
+        return false;
+    }
+    nextNoteId_ = published;  // only now, with the document: a throw above leaves the counter untouched
+    return true;
+}
+
 bool DocumentStore::removeNotes(int trackId, const std::vector<int>& ids, std::string* refusal) {
     clearRefusal(refusal);
     const int index = findTrackIndex(trackId);
