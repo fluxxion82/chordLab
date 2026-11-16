@@ -4,8 +4,9 @@ import Foundation
 /// One track's piano roll view state (tracks design D14: "Each track's scroll, zoom, grid, snap and mode are
 /// UI-only, remembered per track id"): where the grid is scrolled (`scroll`, content coordinates of the viewport's
 /// top-left, see `RollGeometry`), the zoom (`pxPerBeat`, `rowHeight`), the toolbar's Grid, Snap pitch, Mode and
-/// Other tracks, the Generate menu's Motif take, the gesture machine's state (`editState`, `RollEditLogic`; plan Task 18 feeds it), and whether
-/// the first open has scrolled to the role's register yet. Never saved and never sent to the engine.
+/// Other tracks, the Generate menu's Motif take, the gesture machine's state (`editState`, `RollEditLogic`; plan
+/// Task 18 feeds it), and whether the first open has scrolled to the role's register yet. Never saved and never sent
+/// to the engine.
 ///
 /// Every scroll it stores is clamped to the content (`RollGeometry.clampedScroll`): the progression, or the latest
 /// note end past it (`RollTiming.contentEndTick`), plus one bar of the meter (`RollTiming.barTicks`, like the
@@ -37,8 +38,8 @@ struct RollViewState: Equatable {
   /// Whether the other tracks' notes are drawn as faint outlines (design D14: a toggle, default on).
   var showsOtherTracks = true
   /// The track's Motif take (design D22), 0…63, default 0: the take the Generate menu's "Motif (take N of 64)"
-  /// rewrites; "Motif, another take" advances it once its command was sent and applied (`GenerateEntry.takeAfterSending`).
-  /// Kept in 0…63 (`GenerateOptions.take`).
+  /// rewrites; "Motif, another take" advances it once its command was sent and applied
+  /// (`GenerateEntry.takeAfterSending`). Kept in 0…63 (`GenerateOptions.take`).
   var motifTake = 0 {
     didSet { if motifTake != GenerateOptions.take(motifTake) { motifTake = GenerateOptions.take(motifTake) } }
   }
