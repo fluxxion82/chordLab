@@ -19,8 +19,10 @@ std::vector<std::uint8_t> vlq(std::uint32_t value);
 /// `tpqn` ticks per quarter note) and one `MTrk` chunk holding, in order, a tempo meta event
 /// (`FF 51 03`, `lround(60e6 / bpm)` microseconds per quarter), a time signature meta event
 /// (`FF 58 04 num log2(den) 18 08`), when `trackName` is not empty a track name meta event (`FF 03 len
-/// bytes`, the bytes of `trackName` as given, UTF-8 by convention; Live names a clip dropped from the file
-/// after it, "Track 0" without one), every note of `compiled` as a note-on (`9n`) or note-off (`8n`) on
+/// bytes`, the bytes of `trackName` as given; Live 12 on macOS names a clip dropped from the file after it,
+/// reading the bytes as Mac Roman, so only ASCII names show as written there: the engine's own names are ASCII,
+/// a user's section or track name with other characters is written as UTF-8 and shows wrong in Live; "Track 0"
+/// without one), every note of `compiled` as a note-on (`9n`) or note-off (`8n`) on
 /// channel `channel` with an explicit status byte (no running status), and an end-of-track meta event
 /// (`FF 2F 00`).
 ///

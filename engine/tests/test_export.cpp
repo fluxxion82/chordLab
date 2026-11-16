@@ -588,15 +588,19 @@ TEST_CASE("trackClipName: the track's name, with an en dash and the section's na
     const Document& doc = store.doc();
     CHECK(trackClipName(doc, bass, -1) == "Bass");
     CHECK(trackClipName(doc, lead, -1) == "Lead 1");
-    CHECK(trackClipName(doc, bass, 0) == "Bass \xE2\x80\x93 Verse");
-    CHECK(trackClipName(doc, lead, 0) == "Lead 1 \xE2\x80\x93 Verse");
+    CHECK(trackClipName(doc, bass, 0) == "Bass - Verse");
+    CHECK(trackClipName(doc, lead, 0) == "Lead 1 - Verse");
     // The second section's name is empty: its chords, as exportClipName spells them.
     CHECK(exportClipName(doc, 1) == "F G7");
-    CHECK(trackClipName(doc, bass, 1) == "Bass \xE2\x80\x93 F G7");
-    // The dash is U+2013 with a space either side: bytes 20 E2 80 93 20.
+    CHECK(trackClipName(doc, bass, 1) == "Bass - F G7");
+    // The separator is an ASCII hyphen with a space either side: bytes 20 2D 20. Live reads a MIDI file's track
+    // name as Mac Roman, not UTF-8, so an en dash (E2 80 93) showed in Live as three wrong characters (Live Test 15).
     const std::string name = trackClipName(doc, bass, 0);
-    CHECK(name.find("\x20\xE2\x80\x93\x20") == 4);
-    CHECK(name.size() == 4 + 5 + 5);
+    CHECK(name.find("\x20\x2D\x20") == 4);
+    for (const char c : name) {
+        CHECK(static_cast<unsigned char>(c) < 0x80);  // ASCII names in, an ASCII name out
+    }
+    CHECK(name.size() == 4 + 3 + 5);
 }
 
 TEST_CASE("trackClipName: unknown track or section is empty; no sections means index 0 is the whole progression") {
@@ -746,14 +750,14 @@ TEST_CASE("exportClip: allLanes is the chords plus every non-empty track, mute a
     CHECK(f.ntrks == 3);
     REQUIRE(f.tracks.size() == 3);
     CHECK(nameOf(f.tracks[1]) == "Section 1");
-    CHECK(nameOf(f.tracks[2]) == "Bass \xE2\x80\x93 Section 1");
+    CHECK(nameOf(f.tracks[2]) == "Bass - Section 1");
 
     all.sectionIndex = 1;  // the second section: the third track has a note, Bass none
     f = requireFile(exportClip(doc, all, kBpm));
     CHECK(f.ntrks == 3);
     REQUIRE(f.tracks.size() == 3);
     CHECK(nameOf(f.tracks[1]) == "F G7");
-    CHECK(nameOf(f.tracks[2]) == "Track \xE2\x80\x93 F G7");
+    CHECK(nameOf(f.tracks[2]) == "Track - F G7");
 }
 
 TEST_CASE("exportClip: allLanes with only the chords lane non-empty is the format 0 chords file") {
