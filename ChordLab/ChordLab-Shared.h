@@ -16,7 +16,7 @@ static const NSInteger kNoCtrlTag = -1;
 // Message tags of the UI <-> plugin bridge. Every payload is UTF-8 JSON in the engine's wire format
 // (engine/include/chordlab/json_api.h): commands and snapshots carry "schema":1.
 // UI -> plugin
-static const NSInteger kMsgTagCommand = 10;          // payload: one command, {"schema":1,"cmd":"...",...}
+static const NSInteger kMsgTagCommand = 10;          // payload: one command, {"schema":1,"cmd":"...",...,"lineage":"<token>"}; the editor stamps every command with its document lineage (the clipboard token), and a lineage that is not the shell's current token applies nothing and is answered with the current snapshot (bridge/command_lineage.h); a command without lineage is applied unchecked
 static const NSInteger kMsgTagRequestSnapshot = 11;  // no payload: asks for a fresh snapshot
 static const NSInteger kMsgTagPreview = 12;          // payload: {"schema":1,"id":n,"on":true|false,"velocity":100,"pitches":[..]} (<= 8) or {"schema":1,"id":n,"extend":true}
 static const NSInteger kMsgTagPanic = 13;            // no payload: silence everything on the next audio block
