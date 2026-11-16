@@ -240,6 +240,43 @@ final class RollViewStateTests: XCTestCase {
     XCTAssertEqual(store.trackIds, [])
   }
 
+  // MARK: - The insert marker against a shorter progression (Task 20 review 2, finding 3)
+
+  /// Tracks 1 (open) and 2 (parked) measured at the 14400-tick timing, each with an insert marker.
+  private func storeWithMarkers(open: Int, parked: Int) -> RollViewStates {
+    var store = RollViewStates()
+    store.setViewport(viewport, trackId: 1, role: .bass, timing: timing)
+    store.setViewport(viewport, trackId: 2, role: .lead, timing: timing)
+    store.edit(trackId: 1, timing: timing) { state, _, _ in state.editState.insertMarker = open }
+    store.edit(trackId: 2, timing: timing) { state, _, _ in state.editState.insertMarker = parked }
+    return store
+  }
+
+  func testAnInsertMarkerBeyondAShorterProgressionsEndIsCleared() {
+    var store = storeWithMarkers(open: 11520, parked: 11520)
+    let short = RollTiming(ticksPerBeat: 960, barTicks: 3840, endTick: 7680, minNoteTicks: 30)
+    store.snapshotApplied(tracks: [track(1, .bass), track(2, .lead)], timing: short, openTrackId: 1)
+    XCTAssertNil(store[1].editState.insertMarker, "a paste there would start where no chord owns it")
+    XCTAssertNil(store[2].editState.insertMarker, "the parked track's marker too: it pastes there once reopened")
+  }
+
+  func testAnInsertMarkerInsideTheProgressionStays() {
+    var store = storeWithMarkers(open: 3840, parked: 7679)
+    let short = RollTiming(ticksPerBeat: 960, barTicks: 3840, endTick: 7680, minNoteTicks: 30)
+    store.snapshotApplied(tracks: [track(1, .bass), track(2, .lead)], timing: short, openTrackId: 1)
+    XCTAssertEqual(store[1].editState.insertMarker, 3840)
+    XCTAssertEqual(store[2].editState.insertMarker, 7679)
+  }
+
+  func testAnInsertMarkerExactlyAtTheEndIsCleared() {
+    // The end is not a paste position: no chord owns it (half-open spans), and a click there sets no marker.
+    var store = storeWithMarkers(open: 7680, parked: 0)
+    let short = RollTiming(ticksPerBeat: 960, barTicks: 3840, endTick: 7680, minNoteTicks: 30)
+    store.snapshotApplied(tracks: [track(1, .bass), track(2, .lead)], timing: short, openTrackId: 1)
+    XCTAssertNil(store[1].editState.insertMarker)
+    XCTAssertEqual(store[2].editState.insertMarker, 0)
+  }
+
   func testASnapshotForATrackNotYetMeasuredCreatesNothing() {
     var store = RollViewStates()
     store.snapshotApplied(tracks: [track(3, .other)], timing: timing, openTrackId: 3)

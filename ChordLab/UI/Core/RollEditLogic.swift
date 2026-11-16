@@ -218,8 +218,9 @@ struct RollEditState: Equatable {
   /// The insert marker (design D15 paste: a paste lands here, else after the selection's end, else at 0): the grid
   /// tick (`grid.snapDown`, bar-relative) of the last PLAIN click on empty space inside the progression (an up
   /// without a drag: the deselect click and the insert click, either mode). Nil before one; cleared by a press on a
-  /// note (any zone, either mode, at the down), by a committed rubber band and by a plain click at or after the
-  /// progression's end. A down alone, a drag in progress and a cancelled gesture leave it as it was.
+  /// note (any zone, either mode, at the down), by a committed rubber band, by a plain click at or after the
+  /// progression's end, and by a snapshot whose progression ends at or before it (`RollViewStates.snapshotApplied`).
+  /// A down alone, a drag in progress and a cancelled gesture leave it as it was.
   var insertMarker: Int?
   var gesture: Gesture = .idle
 

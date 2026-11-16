@@ -116,7 +116,8 @@ struct RollViewState: Equatable {
 ///
 /// An entry is made by the roll's first measurement of that track (`setViewport`, from the grid's
 /// `onGeometryChange`), which is also its first open; a snapshot (`snapshotApplied`) drops the entries of removed
-/// tracks and re-fits the open track's (its content may have shrunk). An id without an entry reads the defaults.
+/// tracks, clears insert markers the progression no longer reaches and re-fits the open track's (its content may
+/// have shrunk). An id without an entry reads the defaults.
 ///
 /// Depends on nothing but CoreGraphics and Foundation; unit-tested by the `ChordLabUICore` package
 /// (Tests/ChordLabUICoreTests/RollViewStateTests.swift).
@@ -146,11 +147,19 @@ struct RollViewStates: Equatable {
     change(&byTrack[trackId, default: RollViewState()], viewport, timing)
   }
 
-  /// After a snapshot: drops the entries of tracks it no longer has, and re-fits the open track's entry (when it has
-  /// one) to the new content; a role change keeps the scroll (the first open is done).
+  /// After a snapshot: drops the entries of tracks it no longer has, clears every remaining track's insert marker at
+  /// or after the progression's new end (`timing.endTick`: no chord owns that tick, so a paste there would be refused,
+  /// and a click there sets no marker either; the open track's and the parked ones', which paste there once
+  /// reopened), and re-fits the open track's entry (when it has one) to the new content; a role change keeps the
+  /// scroll (the first open is done).
   mutating func snapshotApplied(tracks: [TrackJSON], timing: RollTiming, openTrackId: Int?) {
     let ids = Set(tracks.map(\.id))
     byTrack = byTrack.filter { ids.contains($0.key) }
+    for (trackId, state) in byTrack {
+      if let marker = state.editState.insertMarker, marker >= timing.endTick {
+        byTrack[trackId]?.editState.insertMarker = nil
+      }
+    }
     if let openTrackId, let track = tracks.first(where: { $0.id == openTrackId }), byTrack[openTrackId] != nil {
       byTrack[openTrackId]?.fit(viewport: viewport, timing: timing, role: track.role)
     }
