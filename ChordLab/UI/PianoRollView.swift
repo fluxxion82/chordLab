@@ -191,8 +191,9 @@ struct RollToolbar: View, Equatable {
     .frame(height: PianoRollView.toolbarHeight)
   }
 
-  /// One layout of the row: `compactGenerate` draws Generate as its icon and tightens the gaps from 8 to 6 pt, which
-  /// leaves the widest row at the 700-pt minimum width some room (with 8-pt gaps it would fit with none to spare).
+  /// One layout of the row: `compactGenerate` draws Generate as its icon and tightens the gaps from 8 to 6 pt. With the
+  /// widest titles at the 700-pt minimum width the compact row leaves about 53 pt of slack, while the text row needs
+  /// about 29 pt more than the roll's 676; with the default titles the text row fits.
   private func row(compactGenerate: Bool) -> some View {
     HStack(spacing: compactGenerate ? 6 : 8) {
       Menu {

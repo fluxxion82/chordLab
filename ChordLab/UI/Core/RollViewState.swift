@@ -14,8 +14,13 @@ import Foundation
 /// in, so a resize, a zoom or a shorter progression (`fit`) always lands the scroll inside the content.
 ///
 /// **First open** (design D2, D14): the first `fit` with a real viewport (both sides positive) scrolls to bar 1 and
-/// centres the role's register (`RollGeometry.initialScroll(register:viewport:)`), once; a later role change
-/// does not scroll again, and a scroll the user (or the input view) set before that counts as the first open.
+/// centres the role's register (`RollGeometry.initialScroll(register:viewport:)`), once; a track that already has
+/// active notes opens on those notes' rows instead (`RollNoteSpan`, placed by the reveal's vertical rule), so a
+/// pasted or generated track opens where its notes are. A later role change does not scroll again, and a scroll the
+/// user (or the input view, or a reveal) set before that counts as the first open.
+///
+/// **Reveal** (`reveal`, after Generate): brings a set of notes into view by the least surprising scroll, clamped like
+/// every other (see `revealedScroll`).
 ///
 /// Depends on nothing but CoreGraphics and Foundation; unit-tested by the `ChordLabUICore` package
 /// (Tests/ChordLabUICoreTests/RollViewStateTests.swift).
@@ -51,15 +56,57 @@ struct RollViewState: Equatable {
     geometry.contentSize(endTick: timing.contentEndTick, slackTicks: timing.barTicks, viewport: viewport)
   }
 
-  /// After a measurement or a snapshot: the first open's scroll when it is due (see the type comment), then the
-  /// scroll clamped to the content of this viewport and timing.
-  mutating func fit(viewport: CGSize, timing: RollTiming, role: TrackRole) {
+  /// After a measurement or a snapshot: the first open's scroll when it is due (see the type comment: bar 1, and the
+  /// rows of `notes`, the track's active notes, or the role's register when it has none), then the scroll clamped to
+  /// the content of this viewport and timing.
+  mutating func fit(viewport: CGSize, timing: RollTiming, role: TrackRole, notes: RollNoteSpan? = nil) {
     let geometry = geometry(ticksPerBeat: timing.ticksPerBeat)
     if !initialScrollApplied, viewport.width > 0, viewport.height > 0 {
-      scroll = geometry.initialScroll(register: role.register, viewport: viewport)
+      if let notes {
+        scroll = CGPoint(x: 0, y: Self.placedScrollY(pitches: notes.pitches, geometry: geometry, viewport: viewport))
+      } else {
+        scroll = geometry.initialScroll(register: role.register, viewport: viewport)
+      }
       initialScrollApplied = true
     }
     adopt(geometry, scroll: scroll, viewport: viewport, timing: timing)
+  }
+
+  /// Scrolls so that `notes` are in view (`revealedScroll`), clamped; counts as the first open. Nothing without a
+  /// real viewport (both sides positive): there is nothing to reveal them in yet.
+  mutating func reveal(_ notes: RollNoteSpan, viewport: CGSize, timing: RollTiming) {
+    guard viewport.width > 0, viewport.height > 0 else { return }
+    let geometry = geometry(ticksPerBeat: timing.ticksPerBeat)
+    let content = Self.contentSize(geometry: geometry, timing: timing, viewport: viewport)
+    initialScrollApplied = true
+    scroll = Self.revealedScroll(notes, from: scroll, geometry: geometry, viewport: viewport, contentSize: content)
+  }
+
+  /// The scroll from `scroll` that brings `notes` into view, clamped to `contentSize` (`RollGeometry.clampedScroll`):
+  /// - vertically, nothing moves when the notes' rows (from the top of the highest to the bottom of the lowest) lie
+  ///   inside the viewport; otherwise `placedScrollY`: the rows centred when they fit, else the LOWEST row one row
+  ///   above the bottom edge (a bass line reads from its lowest notes);
+  /// - horizontally, nothing moves when the earliest note's start is visible (`scroll.x ≤ x < scroll.x + width`);
+  ///   otherwise that start sits half a beat in from the left edge.
+  static func revealedScroll(_ notes: RollNoteSpan, from scroll: CGPoint, geometry: RollGeometry, viewport: CGSize,
+                             contentSize: CGSize) -> CGPoint {
+    let top = geometry.y(pitch: notes.pitches.upperBound)
+    let bottom = geometry.y(pitch: notes.pitches.lowerBound) + geometry.rowHeight
+    let rowsInside = top >= scroll.y && bottom <= scroll.y + viewport.height
+    let y = rowsInside ? scroll.y : placedScrollY(pitches: notes.pitches, geometry: geometry, viewport: viewport)
+    let start = geometry.x(tick: notes.firstStart)
+    let startVisible = start >= scroll.x && start < scroll.x + viewport.width
+    let x = startVisible ? scroll.x : start - geometry.pxPerBeat / 2
+    return geometry.clampedScroll(CGPoint(x: x, y: y), viewport: viewport, contentSize: contentSize)
+  }
+
+  /// Where the reveal (and the first open of a track with notes) puts the rows of `pitches`, unclamped: centred in
+  /// the viewport when they fit its height, else with the lowest row's bottom one row above the bottom edge.
+  static func placedScrollY(pitches: ClosedRange<Int>, geometry: RollGeometry, viewport: CGSize) -> CGFloat {
+    let top = geometry.y(pitch: pitches.upperBound)
+    let bottom = geometry.y(pitch: pitches.lowerBound) + geometry.rowHeight
+    if bottom - top <= viewport.height { return (top + bottom) / 2 - viewport.height / 2 }
+    return bottom + geometry.rowHeight - viewport.height
   }
 
   /// Sets the scroll, clamped; counts as the first open.
@@ -135,10 +182,11 @@ struct RollViewStates: Equatable {
   var trackIds: [Int] { byTrack.keys.sorted() }
 
   /// The roll of track `trackId` measured its grid: stores the viewport and fits that track (its first open when
-  /// this is the first measurement with a real size).
-  mutating func setViewport(_ viewport: CGSize, trackId: Int, role: TrackRole, timing: RollTiming) {
+  /// this is the first measurement with a real size: on `notes`, the track's active notes, else the role's register).
+  mutating func setViewport(_ viewport: CGSize, trackId: Int, role: TrackRole, timing: RollTiming,
+                            notes: RollNoteSpan? = nil) {
     self.viewport = viewport
-    byTrack[trackId, default: RollViewState()].fit(viewport: viewport, timing: timing, role: role)
+    byTrack[trackId, default: RollViewState()].fit(viewport: viewport, timing: timing, role: role, notes: notes)
   }
 
   /// Changes track `trackId`'s state with the current viewport and `timing` (a setter, the toolbar, the input
@@ -161,8 +209,38 @@ struct RollViewStates: Equatable {
       }
     }
     if let openTrackId, let track = tracks.first(where: { $0.id == openTrackId }), byTrack[openTrackId] != nil {
-      byTrack[openTrackId]?.fit(viewport: viewport, timing: timing, role: track.role)
+      byTrack[openTrackId]?.fit(viewport: viewport, timing: timing, role: track.role,
+                                notes: RollNoteSpan(notes: track.notes))
     }
+  }
+}
+
+/// Where a set of a track's notes lies, for the roll's reveal and its first open (`RollViewState.reveal`, `fit`): the
+/// lowest to the highest pitch and the earliest start tick. Only active notes count (an inactive note is not played,
+/// and sits at a derived position past its chord).
+///
+/// Depends on nothing but Foundation; unit-tested by the `ChordLabUICore` package
+/// (Tests/ChordLabUICoreTests/RollViewStateTests.swift).
+struct RollNoteSpan: Equatable {
+  let pitches: ClosedRange<Int>
+  let firstStart: Int
+
+  init(pitches: ClosedRange<Int>, firstStart: Int) {
+    self.pitches = pitches
+    self.firstStart = firstStart
+  }
+
+  /// The span of `notes`' active notes anchored to a chord in `anchors` (every chord when nil); nil when there are
+  /// none.
+  init?(notes: TrackNotesJSON, anchors: Set<Int>? = nil) {
+    var low = Int.max, high = Int.min, first = Int.max
+    for i in notes.indices where notes.active[i] && anchors.map({ $0.contains(notes.anchor[i]) }) ?? true {
+      low = min(low, notes.pitch[i])
+      high = max(high, notes.pitch[i])
+      first = min(first, notes.start[i])
+    }
+    guard low <= high else { return nil }
+    self.init(pitches: low...high, firstStart: first)
   }
 }
 

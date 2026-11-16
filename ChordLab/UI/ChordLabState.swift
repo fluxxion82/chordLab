@@ -574,11 +574,12 @@ class ChordLabState: NSObject, ObservableObject {
 
   /// The roll of track `trackId` measured its grid (`PianoRollView`'s `onGeometryChange`): stores the viewport and
   /// fits the track's scroll to it; the first measurement with a real size is the track's first open, which
-  /// scrolls to its role's register at bar 1 (`RollViewState.fit`). Nothing for a track the snapshot lacks.
+  /// scrolls to bar 1 and the track's active notes, or its role's register when it has none (`RollViewState.fit`).
+  /// Nothing for a track the snapshot lacks.
   @MainActor func setRollViewport(trackId: Int, _ size: CGSize) {
     guard let snapshot, let timing = rollTiming, let track = snapshot.track(id: trackId) else { return }
     var states = rolls.states
-    states.setViewport(size, trackId: trackId, role: track.role, timing: timing)
+    states.setViewport(size, trackId: trackId, role: track.role, timing: timing, notes: RollNoteSpan(notes: track.notes))
     publishRolls(states)
   }
 
@@ -738,11 +739,24 @@ class ChordLabState: NSObject, ObservableObject {
   /// (`GenerateOptions.command(for:trackId:in:lineage:)`: the menu was drawn for another selection, or for the
   /// document a state load has since replaced). A refusal ("Add chords first", the track limits) comes back as any
   /// refused command does (`applyError`, `lastError`).
+  ///
+  /// The engine answers inline, inside the send (its new snapshot, or an error), so afterwards the roll shows what was
+  /// written: the track's active notes in the entry's chords (every chord's for a whole-progression entry), from the
+  /// snapshot current now, are revealed (`RollViewState.reveal`). Nothing scrolls when nothing was sent, when the
+  /// answer was an error or no snapshot, when the document lineage changed meanwhile (a stale command is answered with
+  /// another document's snapshot), or when those chords hold no active note.
   @MainActor func generateBass(trackId: Int, _ entry: GenerateEntry) {
     guard let snapshot,
           let command = GenerateOptions.command(for: entry, trackId: trackId, in: snapshot,
                                                 lineage: clipboardToken) else { return }
+    let errors = errorSerial
+    let snapshots = snapshotSerial
+    let lineage = clipboardToken
     send(command: command)
+    guard errorSerial == errors, snapshotSerial != snapshots, clipboardToken == lineage,
+          let written = self.snapshot?.track(id: trackId),
+          let span = RollNoteSpan(notes: written.notes, anchors: entry.scope.chordIds) else { return }
+    editRoll(trackId: trackId) { $0.reveal(span, viewport: $1, timing: $2) }
   }
 
   /// Whether the pasteboard holds ChordLab notes (the roll menu's Paste here is disabled otherwise).
@@ -976,10 +990,14 @@ class ChordLabState: NSObject, ObservableObject {
 
   // MARK: - Messages from the plugin
 
+  /// Counts the snapshots applied, so an action can tell whether its command was answered with one (`generateBass`).
+  private var snapshotSerial = 0
+
   /// `kMsgTagSnapshot` payload.
   func applySnapshot(json: Data) {
     do {
       let decoded = try JSONDecoder().decode(Snapshot.self, from: json)
+      snapshotSerial += 1
       snapshot = decoded
       lastError = nil
       // Snapshots are applied on the main thread (the controller's message handler, the harness).

@@ -282,4 +282,130 @@ final class RollViewStateTests: XCTestCase {
     store.snapshotApplied(tracks: [track(3, .other)], timing: timing, openTrackId: 3)
     XCTAssertEqual(store.trackIds, [], "the roll's own measurement makes the entry and its first open")
   }
+
+  // MARK: - Revealing notes (after Generate, and the first open of a track with notes)
+
+  /// Notes from columns: (pitch, start, anchor, active), 240 ticks long.
+  private func notes(_ rows: [(Int, Int, Int, Bool)]) -> TrackNotesJSON {
+    TrackNotesJSON(id: Array(1...max(1, rows.count)).prefix(rows.count).map { $0 }, pitch: rows.map(\.0),
+                   start: rows.map(\.1), length: rows.map { _ in 240 }, velocity: rows.map { _ in 100 },
+                   anchor: rows.map(\.2), offset: rows.map { _ in 0 }, active: rows.map(\.3))
+  }
+
+  func testTheSpanOfNotesIsTheirActiveNotesInTheGivenChords() throws {
+    let track = notes([(40, 960, 1, true), (52, 0, 2, true), (28, 3840, 2, true), (90, 100, 1, false), (35, 7680, 3, true)])
+    XCTAssertEqual(RollNoteSpan(notes: track), RollNoteSpan(pitches: 28...52, firstStart: 0), "every active note")
+    XCTAssertEqual(RollNoteSpan(notes: track, anchors: [1]), RollNoteSpan(pitches: 40...40, firstStart: 960),
+                   "the inactive note of chord 1 does not count")
+    XCTAssertEqual(RollNoteSpan(notes: track, anchors: [2, 3]), RollNoteSpan(pitches: 28...52, firstStart: 0))
+    XCTAssertNil(RollNoteSpan(notes: track, anchors: [4]), "no notes in that chord")
+    XCTAssertNil(RollNoteSpan(notes: notes([(60, 0, 1, false)])), "inactive notes only")
+    XCTAssertNil(RollNoteSpan(notes: notes([])))
+  }
+
+  /// A Lead roll after its first open (C4–C6 centred), scrolled to bar 1.
+  private func leadView(viewport: CGSize? = nil) -> RollViewState {
+    var state = RollViewState()
+    state.fit(viewport: viewport ?? self.viewport, timing: timing, role: .lead)
+    return state
+  }
+
+  func testRevealLeavesTheScrollAloneWhenTheNotesAreInView() {
+    var state = leadView()
+    let before = state.scroll
+    let visible = RollGeometry().visiblePitches(viewport: viewport, scroll: before)
+    // Rows fully inside the viewport (the partly shown top and bottom rows excluded) and a start on screen.
+    let inside = (visible.lowerBound + 1)...(visible.upperBound - 1)
+    state.reveal(RollNoteSpan(pitches: inside, firstStart: 960 * 4), viewport: viewport, timing: timing)
+    XCTAssertEqual(state.scroll, before)
+    state.reveal(RollNoteSpan(pitches: 72...72, firstStart: 0), viewport: viewport, timing: timing)
+    XCTAssertEqual(state.scroll, before)
+  }
+
+  func testRevealCentresRowsThatFitTheViewport() {
+    var state = leadView()
+    // E2–E3: 13 rows of 14 pt = 182 pt in a 300-pt viewport. Top of E3's row y(52) = 75 × 14 = 1050, bottom of E2's
+    // row 87 × 14 + 14 = 1232: centred, the scroll is 1141 − 150 = 991.
+    state.reveal(RollNoteSpan(pitches: 40...52, firstStart: 0), viewport: viewport, timing: timing)
+    XCTAssertEqual(state.scroll, CGPoint(x: 0, y: 991))
+    let visible = RollGeometry().visiblePitches(viewport: viewport, scroll: state.scroll)
+    XCTAssertTrue(visible.contains(40) && visible.contains(52), "\(visible)")
+    XCTAssertTrue(state.initialScrollApplied)
+  }
+
+  func testRevealPutsTheLowestRowOfATallRangeOneRowAboveTheBottom() {
+    var state = leadView()
+    // E1–E3, 25 rows = 350 pt in 300: the bottom of E1's row (99 × 14 + 14 = 1400) one row (14 pt) above the
+    // viewport's bottom edge: 1400 + 14 − 300 = 1114.
+    state.reveal(RollNoteSpan(pitches: 28...52, firstStart: 0), viewport: viewport, timing: timing)
+    XCTAssertEqual(state.scroll.y, 1114)
+    let visible = RollGeometry().visiblePitches(viewport: viewport, scroll: state.scroll)
+    XCTAssertEqual(visible.lowerBound, 27, "one row under the lowest note shows: \(visible)")
+    XCTAssertTrue(visible.contains(28))
+  }
+
+  func testRevealScrollsTimeOnlyWhenTheFirstStartIsOffScreen() {
+    let narrow = CGSize(width: 300, height: 300)
+    var state = leadView(viewport: narrow)
+    let y = state.scroll.y
+    // Bar 3 beat 2 (9120 ticks, x 456) is right of a 300-pt viewport at x 0: half a beat (24 pt) in from the left.
+    state.reveal(RollNoteSpan(pitches: 72...72, firstStart: 9120), viewport: narrow, timing: timing)
+    XCTAssertEqual(state.scroll, CGPoint(x: 432, y: y))
+    // Now on screen: no change.
+    state.reveal(RollNoteSpan(pitches: 72...72, firstStart: 9120 + 960), viewport: narrow, timing: timing)
+    XCTAssertEqual(state.scroll.x, 432)
+    // Left of the viewport: back to half a beat before it, clamped at 0 for tick 0.
+    state.reveal(RollNoteSpan(pitches: 72...72, firstStart: 3840), viewport: narrow, timing: timing)
+    XCTAssertEqual(state.scroll.x, 168, "192 − 24")
+    state.reveal(RollNoteSpan(pitches: 72...72, firstStart: 0), viewport: narrow, timing: timing)
+    XCTAssertEqual(state.scroll.x, 0, "−24 clamps to 0")
+  }
+
+  func testRevealIsClampedToTheContent() {
+    var state = leadView()
+    // The top octave cannot be centred: clamped to the first row.
+    state.reveal(RollNoteSpan(pitches: 124...127, firstStart: 0), viewport: viewport, timing: timing)
+    XCTAssertEqual(state.scroll.y, 0)
+    state.reveal(RollNoteSpan(pitches: 0...2, firstStart: 14000), viewport: viewport, timing: timing)
+    XCTAssertEqual(state.scroll, CGPoint(x: 312, y: 1792 - 300), "the bottom rows and the content's right end")
+  }
+
+  func testRevealCountsAsTheFirstOpenAndNeedsAViewport() {
+    var fresh = RollViewState()
+    fresh.reveal(RollNoteSpan(pitches: 40...52, firstStart: 0), viewport: .zero, timing: timing)
+    XCTAssertEqual(fresh, RollViewState(), "no viewport: nothing to reveal in")
+    fresh.reveal(RollNoteSpan(pitches: 40...52, firstStart: 0), viewport: viewport, timing: timing)
+    XCTAssertEqual(fresh.scroll, CGPoint(x: 0, y: 991))
+    fresh.fit(viewport: viewport, timing: timing, role: .lead)
+    XCTAssertEqual(fresh.scroll, CGPoint(x: 0, y: 991), "the first open's register scroll does not undo it")
+  }
+
+  func testTheFirstOpenOfATrackWithNotesCentresOnItsNotes() {
+    var state = RollViewState()
+    state.fit(viewport: viewport, timing: timing, role: .lead, notes: RollNoteSpan(pitches: 40...52, firstStart: 3840))
+    XCTAssertEqual(state.scroll, CGPoint(x: 0, y: 991), "the notes' rows centred by the reveal's rule, at bar 1")
+    XCTAssertTrue(state.initialScrollApplied)
+    var tall = RollViewState()
+    tall.fit(viewport: viewport, timing: timing, role: .lead, notes: RollNoteSpan(pitches: 28...52, firstStart: 0))
+    XCTAssertEqual(tall.scroll, CGPoint(x: 0, y: 1114), "taller than the viewport: its lowest row one row above the bottom")
+    var empty = RollViewState()
+    empty.fit(viewport: viewport, timing: timing, role: .lead, notes: nil)
+    XCTAssertEqual(empty.scroll, RollGeometry().initialScroll(register: TrackRole.lead.register, viewport: viewport),
+                   "no notes: the role's register as before")
+    // Only the first open: a later fit with notes elsewhere keeps the scroll.
+    state.fit(viewport: viewport, timing: timing, role: .lead, notes: RollNoteSpan(pitches: 100...110, firstStart: 0))
+    XCTAssertEqual(state.scroll, CGPoint(x: 0, y: 991))
+  }
+
+  func testTheStoreOpensATrackWithNotesOnItsNotes() {
+    var store = RollViewStates()
+    store.setViewport(viewport, trackId: 1, role: .lead, timing: timing, notes: RollNoteSpan(pitches: 40...52, firstStart: 0))
+    store.setViewport(viewport, trackId: 2, role: .lead, timing: timing, notes: nil)
+    XCTAssertEqual(store[1].scroll, CGPoint(x: 0, y: 991))
+    XCTAssertEqual(store[2].scroll, RollGeometry().initialScroll(register: TrackRole.lead.register, viewport: viewport))
+    // The snapshot's re-fit of the open track passes its notes too, but the first open is done: nothing moves.
+    store.snapshotApplied(tracks: [TrackJSON(id: 1, name: "Bass", role: .lead, mute: false, solo: false, audible: true,
+                                             notes: notes([(100, 0, 1, true)]))], timing: timing, openTrackId: 1)
+    XCTAssertEqual(store[1].scroll, CGPoint(x: 0, y: 991))
+  }
 }
