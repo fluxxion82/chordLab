@@ -178,8 +178,8 @@ std::vector<GeneratedNote> generateBass(const Document& doc, BassPattern pattern
 /// The lead generator's patterns (tracks design D22): one chord tone held over each chord (`HeldTone`); the chord's
 /// third and seventh (or their stand-ins), one per half of the chord (`GuideTones`); the chord tones up and down on the
 /// subdivisions (`Arpeggio`); a line stepping through the chord scale between chord tones on the pulses
-/// (`Stepwise`); a short rhythmic and melodic figure restated in every bar, one of 64 takes (`Motif`, the default);
-/// the top note's pitch class wherever the document's feel plays it (`FollowFeel`). `generateLead` says exactly what
+/// (`Stepwise`); a short rhythmic and melodic figure restated around C5 in every bar, one of 64 takes (`Motif`, the
+/// default); the top note's pitch class, in C5..B5, wherever the document's feel plays it (`FollowFeel`). `generateLead` says exactly what
 /// each writes. A separate enum from `BassPattern` on purpose: the two families are offered and validated apart.
 enum class LeadPattern { HeldTone, GuideTones, Arpeggio, Stepwise, Motif, FollowFeel };
 
@@ -200,8 +200,12 @@ std::optional<LeadPattern> leadPatternFromName(std::string_view name) noexcept;
 constexpr int kLeadLowest = 60;
 constexpr int kLeadHighest = 84;
 
-/// The pitch a lead line starts from (D22): the previous pitch at progression tick 0, C5. Loop never changes it.
+/// The pitch a lead line starts from (D22): the previous pitch at progression tick 0, C5. Loop never changes it. Also
+/// the pitch every Motif fragment's base is taken nearest to.
 constexpr int kLeadSeed = 72;
+
+/// The lowest pitch of the octave Follow feel plays in, 72..83 (C5..B5): each pitch class has exactly one place there.
+constexpr int kFollowFeelLowest = 72;
 
 /// The member of `candidates` nearest `pitch` (D22's `nearest`): the smallest `abs(candidate - pitch)`, an equal
 /// distance going to the higher pitch. `candidates` need not be sorted but must not be empty.
@@ -266,7 +270,14 @@ int motifReflectIndex(int n, int base, int offset) noexcept;
 /// **Continuity.** One line is generated over the whole progression and then filtered by ownership: out-of-scope
 /// chords advance the previous pitch and Stepwise's direction exactly as if their notes were kept, so a
 /// non-contiguous scope never restarts the line. The previous pitch starts at `kLeadSeed` (72) and becomes each
-/// emitted note's pitch; a silent chord leaves it. Loop changes nothing (no approach to the first chord).
+/// emitted note's pitch; a silent chord leaves it. Held tone, Guide tones, Arpeggio and Stepwise read it; Motif and
+/// Follow feel do not (their notes for a chord never depend on earlier chords). Loop changes nothing (no approach to
+/// the first chord).
+///
+/// **Two rules replace D22's text** (decided 2026-11-16, after a probe on ordinary loops showed D22's Motif ratcheting
+/// to an edge of the register and its Follow feel following fifths low): every Motif fragment's base is the chord tone
+/// nearest `kLeadSeed`, not nearest the previous note; Follow feel plays the top note's pitch class in
+/// `kFollowFeelLowest`..`kFollowFeelLowest + 11` (72..83), not nearest the previous note.
 ///
 /// **Pitches.** Every pitch lies in `kLeadLowest`..`kLeadHighest`. For each chord, from `harmonicGuide(chord,
 /// doc.projectKey)`: `T`, the pitches whose role is Root or ChordTone; `S`, the pitches whose class is in the chord
@@ -294,15 +305,15 @@ int motifReflectIndex(int n, int base, int offset) noexcept;
 ///   go the same way by one or two semitones; otherwise it becomes its preceding structural pitch.
 /// - `Motif`: take v = variation mod 64, rhythm `motifRhythm(v % 8)`, contour `motifContour(v / 8)`. A chord's starts
 ///   are s plus every bar's `motifSlotTick`s strictly inside it, deduplicated, finalized with the gated length capped
-///   at one pulse. Grouped by bar, the first kept hit of each chord/bar fragment sets the base nearest(T, previous);
-///   hit k of the fragment plays T[`motifReflectIndex`(|T|, index of base, contour[k % 4])]. No hash, id or random
-///   number is involved.
+///   at one pulse. Grouped by bar, each chord/bar fragment's base is nearest(T, `kLeadSeed`) (replacing D22's
+///   nearest(T, previous)); hit k of the fragment plays T[`motifReflectIndex`(|T|, index of base, contour[k % 4])]. No
+///   hash, id or random number is involved, and no state from earlier fragments.
 /// - `FollowFeel`: when the document's feel is over budget (`feelPerforms` and `compile(doc).feelLimited`) the whole
 ///   document is generated as `HeldTone`, then filtered. Otherwise each chord's `rhythmHits` (the feel, meter, span,
 ///   voicing size, chord velocity and id; indices through `arpeggioNotes` under an arpeggio, else the voicing) is kept
 ///   where a hit plays the pitch class of the voicing's top note, clipped to the span and dropped under
-///   `kMinBassHitTicks`, at the raw start, end and velocity, at that class's pitch nearest the previous one (ties up);
-///   one note per hit, strum and humanise ignored; no qualifying hit means silence.
+///   `kMinBassHitTicks`, at the raw start, end and velocity, at that class's one pitch in 72..83 (replacing D22's
+///   nearest-previous placement); one note per hit, strum and humanise ignored; no qualifying hit means silence.
 /// `variation` is read by Motif only and must be non-negative (the store refuses anything else; a negative value is
 /// reduced mathematically here). The result is baked: a later harmony, key, meter, feel, Loop or role change does not
 /// regenerate it. The document must satisfy the store's invariants (as for `compile`).

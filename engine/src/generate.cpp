@@ -22,6 +22,8 @@ static_assert(static_cast<int>(BassPattern::Walking) == kBassPatternCount - 1, "
 static_assert(static_cast<int>(LeadPattern::FollowFeel) == kLeadPatternCount - 1, "the lead name table covers the enum");
 static_assert(kLeadLowest <= kLeadSeed && kLeadSeed <= kLeadHighest, "the seed lies in the lead register");
 static_assert(kLeadHighest - kLeadLowest >= 11, "the lead register holds every pitch class");
+static_assert(kLeadLowest <= kFollowFeelLowest && kFollowFeelLowest + 11 <= kLeadHighest,
+              "Follow feel's octave lies in the lead register");
 
 namespace {
 
@@ -733,22 +735,22 @@ std::vector<GeneratedNote> generateLead(const Document& doc, LeadPattern pattern
                 const std::vector<GridHit> hits =
                     omitShortLoneHit(finalizeHits(meter, std::move(starts), e, HitGate::Gated, pulse));
                 // One fragment per chord/bar intersection: its first kept hit sets the base, the contour restarts.
+                // The base is the chord tone nearest the seed, never the previous note (replaces D22's rule, which
+                // ratcheted the line to an edge of the register): Motif carries no state between fragments.
                 int fragmentBar = -1;
                 int baseIndex = 0;
                 std::size_t k = 0;
-                int last = previous;
                 for (const GridHit& h : hits) {
                     if (h.start / bar != fragmentBar) {
                         fragmentBar = h.start / bar;
-                        const int base = nearestPitch(sets.tones, last);
+                        const int base = nearestPitch(sets.tones, kLeadSeed);
                         baseIndex = static_cast<int>(std::lower_bound(sets.tones.begin(), sets.tones.end(), base) -
                                                      sets.tones.begin());
                         k = 0;
                     }
                     const int index =
                         motifReflectIndex(static_cast<int>(sets.tones.size()), baseIndex, contour[k % contour.size()]);
-                    last = sets.tones[static_cast<std::size_t>(index)];
-                    notes.push_back(LeadNote{h.start, h.length, last, h.velocity});
+                    notes.push_back(LeadNote{h.start, h.length, sets.tones[static_cast<std::size_t>(index)], h.velocity});
                     ++k;
                 }
                 break;
@@ -759,8 +761,9 @@ std::vector<GeneratedNote> generateLead(const Document& doc, LeadPattern pattern
                 const std::vector<int> list =
                     arpeggio ? arpeggioNotes(event.chord, voicing, doc.feel.pattern, doc.feel.range) : voicing;
                 const int topClass = mod12(voicing.back());
-                const std::vector<int> tops = leadPitchesOf(topClass);
-                int last = previous;
+                // The top note's class in the lead octave, for every kept hit (replaces D22's nearest-previous rule,
+                // which followed fifths low in the register): no state between notes.
+                const int top = kFollowFeelLowest + mod12(topClass - kFollowFeelLowest);
                 for (const Hit& h : rhythmHits(doc.feel, meter, s, e, static_cast<int>(voicing.size()), event.velocity,
                                                event.id)) {
                     const bool plays = std::any_of(h.notes.begin(), h.notes.end(), [&](int index) {
@@ -771,13 +774,13 @@ std::vector<GeneratedNote> generateLead(const Document& doc, LeadPattern pattern
                     const int end = std::min(h.end, e);
                     // Clipped first, then the minimum: a short hit is dropped, never stretched over a rest.
                     if (plays && end - start >= kMinBassHitTicks) {
-                        last = nearestPitch(tops, last);
-                        notes.push_back(LeadNote{start, end - start, last, h.velocity});
+                        notes.push_back(LeadNote{start, end - start, top, h.velocity});
                     }
                 }
                 break;
             }
         }
+        // Held tone, Guide tones, Arpeggio and Stepwise read it; Motif and Follow feel ignore it.
         if (!notes.empty()) {
             previous = notes.back().pitch;
         }
