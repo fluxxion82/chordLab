@@ -1,5 +1,6 @@
 #include "doctest.h"
 
+#include "bridge/command_lineage.h"
 #include "bridge/export_request.h"
 
 #include <string>
@@ -286,6 +287,30 @@ TEST_CASE("resolveClipExport: the whole progression has no section and spec.sect
     REQUIRE(r.spec.lanes.size() == 1);
     CHECK(r.spec.lanes[0].chords);
     CHECK(r.laneNames == std::vector<std::string>{"Chords"});
+}
+
+TEST_CASE("parseClipExportRequest: a text beyond the lineage reader's limits is no request") {
+    // readLineage reads nothing from a text longer than kMaxJsonBytes or nested deeper than kMaxJsonDepth (it
+    // answers Absent), so such a text must not be an export request either: a stale `lineage` hidden behind an
+    // over-limit ignored member would otherwise be exported unchecked.
+    const std::string deep = std::string(R"({"schema":1,"lanes":"all","sectionId":null,"lineage":"A","x":)") +
+                             std::string(64, '[') + std::string(64, ']') + "}";
+    CHECK(chordlab::bridge::readLineage(deep).kind == chordlab::bridge::LineageField::Kind::Absent);
+    CHECK_FALSE(parseClipExportRequest(deep).has_value());
+    const std::string shallow = std::string(R"({"schema":1,"lanes":"all","sectionId":null,"lineage":"A","x":)") +
+                                std::string(63, '[') + std::string(63, ']') + "}";
+    CHECK(chordlab::bridge::readLineage(shallow).kind == chordlab::bridge::LineageField::Kind::String);
+    CHECK(parseClipExportRequest(shallow).has_value());
+
+    const std::string head = R"({"schema":1,"lanes":"all","sectionId":null,"lineage":"A","x":")";
+    const std::string atLimit = head + std::string(chordlab::kMaxJsonBytes - head.size() - 2, 'a') + "\"}";
+    REQUIRE(atLimit.size() == chordlab::kMaxJsonBytes);
+    CHECK(chordlab::bridge::readLineage(atLimit).kind == chordlab::bridge::LineageField::Kind::String);
+    CHECK(parseClipExportRequest(atLimit).has_value());
+    const std::string tooLong = head + std::string(chordlab::kMaxJsonBytes - head.size() - 1, 'a') + "\"}";
+    REQUIRE(tooLong.size() == chordlab::kMaxJsonBytes + 1);
+    CHECK(chordlab::bridge::readLineage(tooLong).kind == chordlab::bridge::LineageField::Kind::Absent);
+    CHECK_FALSE(parseClipExportRequest(tooLong).has_value());
 }
 
 TEST_CASE("resolveClipExport: a section is its position in doc.sections and its name") {

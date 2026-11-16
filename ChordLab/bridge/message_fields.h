@@ -3,12 +3,51 @@
 // Plain C++17, header-only: no iPlug2, no Objective-C, no Foundation, so the plug-in shell's message
 // handling can be unit-tested outside Xcode (ChordLab/bridge/tests).
 
+#include "chordlab/json_api.h"
+
 #include <nlohmann/json.hpp>
 
 #include <cstdint>
 #include <optional>
+#include <string_view>
 
 namespace chordlab::bridge {
+
+/// Whether `text` is within the limits the engine sets on a message before parsing it (json_api.h): at most
+/// `kMaxJsonBytes` long, no raw NUL byte, and nested at most `kMaxJsonDepth` deep, counted as the engine's prescan
+/// counts (`{` and `[` outside string literals). The one check shared by readLineage, which reads nothing from a
+/// text beyond them, and parseClipExportRequest, which must then refuse the same texts: a member the lineage
+/// reader did not look past cannot hide a stale `lineage` from the export. Never throws, never allocates.
+inline bool withinMessageLimits(std::string_view text) noexcept
+{
+    if (text.size() > chordlab::kMaxJsonBytes || text.find('\0') != std::string_view::npos)
+        return false;
+    int depth = 0;
+    bool inString = false;
+    bool escaped = false;
+    for (const char c : text)
+    {
+        if (inString)
+        {
+            if (escaped)
+                escaped = false;
+            else if (c == '\\')
+                escaped = true;
+            else if (c == '"')
+                inString = false;
+        }
+        else if (c == '"')
+            inString = true;
+        else if (c == '{' || c == '[')
+        {
+            if (++depth > chordlab::kMaxJsonDepth)
+                return false;
+        }
+        else if ((c == '}' || c == ']') && depth > 0)
+            --depth;
+    }
+    return true;
+}
 
 /// `value` as an int, if it is a JSON integer in `lo..hi` (both inclusive); otherwise nullopt. A float
 /// (even `1.0`), a string, a boolean, null, an array or an object is nullopt. The one place the plug-in

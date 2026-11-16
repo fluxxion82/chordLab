@@ -3,6 +3,7 @@
 // Plain C++17, header-only: no iPlug2, no Objective-C, no Foundation, so the plug-in shell's message
 // handling can be unit-tested outside Xcode (ChordLab/bridge/tests).
 
+#include "message_fields.h"
 #include "chordlab/json_api.h"
 
 #include <nlohmann/json.hpp>
@@ -48,9 +49,9 @@ struct LineageField {
 };
 
 /// Reads `text`'s `lineage` member; the shell calls it outside mModelMutex. Only text the engine itself would read is
-/// read here: longer than kMaxJsonBytes, containing a raw NUL byte, nested deeper than kMaxJsonDepth (counted as the
-/// engine's prescan counts: `{` and `[` outside string literals), malformed JSON or a top level that is not an object
-/// is Absent, so the engine (or the export's own parse) refuses it with exactly the message it always gave. In an
+/// read here: a text beyond `withinMessageLimits` (too long, a raw NUL byte, nested too deep), malformed JSON or a
+/// top level that is not an object is Absent, so the engine (or the export's own parse, which applies the same
+/// limits) refuses it with exactly the message it always gave. In an
 /// object, only the top-level member named `lineage` counts (after JSON decoding, so an escaped key counts too; a
 /// nested one or another spelling is just a field the engine ignores); a member given twice counts with its last
 /// value, as nlohmann (and so the engine) reads it. Never throws: anything thrown (an allocation failure) is Failed.
@@ -58,32 +59,8 @@ inline LineageField readLineage(std::string_view text) noexcept
 {
     try
     {
-        if (text.size() > chordlab::kMaxJsonBytes || text.find('\0') != std::string_view::npos)
+        if (!withinMessageLimits(text))
             return {};
-        int depth = 0;
-        bool inString = false;
-        bool escaped = false;
-        for (const char c : text)
-        {
-            if (inString)
-            {
-                if (escaped)
-                    escaped = false;
-                else if (c == '\\')
-                    escaped = true;
-                else if (c == '"')
-                    inString = false;
-            }
-            else if (c == '"')
-                inString = true;
-            else if (c == '{' || c == '[')
-            {
-                if (++depth > chordlab::kMaxJsonDepth)
-                    return {};
-            }
-            else if ((c == '}' || c == ']') && depth > 0)
-                --depth;
-        }
         const nlohmann::json message = nlohmann::json::parse(text, nullptr, /*allow_exceptions=*/false);
         if (!message.is_object())                                // a discarded parse is not an object either
             return {};
