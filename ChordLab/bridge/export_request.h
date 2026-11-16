@@ -72,15 +72,18 @@ struct ClipExportRequest {
 ///    refused: exportClip would write it twice. Request order is kept;
 ///  - `sectionId` is absent or JSON null (the whole progression), or a JSON integer in 1..INT_MAX (boundedInt, as
 ///    `id` in the section request); any other type or value, a float such as 1.0 included, is refused.
-/// Other members are ignored. Anything else (malformed JSON, an empty payload, a non-object top level) is
+/// Other members are ignored, the editor's `lineage` among them (the shell checks it separately, command_lineage.h).
+/// Anything else (malformed JSON, an empty payload, a non-object top level) is
 /// nullopt; the caller answers it with kMsgTagError "clip export message needs schema 1, lanes and a section id
 /// or null". The parse never throws on malformed input (allow_exceptions=false). Whether a track id or the
 /// section id names something in the document is the caller's question (it answers "no such track" / "no such
 /// section"). Raw NUL bytes are refused before the parse and an escaped `\u0000` is an ordinary string
-/// character, exactly as in parseSectionExportRequest (see there).
+/// character, exactly as in parseSectionExportRequest (see there); so is a text beyond the engine's message
+/// limits (`withinMessageLimits`: longer than kMaxJsonBytes or nested deeper than kMaxJsonDepth), because
+/// readLineage reads no `lineage` from such a text and the request's lineage could then not be checked.
 inline std::optional<ClipExportRequest> parseClipExportRequest(std::string_view json)
 {
-    if (json.find('\0') != std::string_view::npos)
+    if (!withinMessageLimits(json))                              // a raw NUL, too long or too deep: readLineage's limits
         return std::nullopt;
     const nlohmann::json message = nlohmann::json::parse(json, nullptr, /*allow_exceptions=*/false);
     if (!boundedIntField(message, "schema", chordlab::kJsonSchema, chordlab::kJsonSchema))

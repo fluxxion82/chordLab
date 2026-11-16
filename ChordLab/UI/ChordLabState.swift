@@ -58,6 +58,10 @@ class ChordLabState: NSObject, ObservableObject {
   /// The pending `addTrack`, until its answer: the next snapshot opens the one new track (`LaneOpener`,
   /// `LaneTabs.laneAfterSnapshot`); a refusal (`applyError`) forgets it.
   private var laneOpener = LaneOpener()
+  /// The lineage of the action in progress (`action`, `ActionLineage`): every command and export request it sends
+  /// carries the token read once at its start, so a stale answer to its first command (which renews the token inline)
+  /// cannot let its later commands, computed from the old document, through.
+  private var actionLineage = ActionLineage()
   /// Every track's piano roll view state (scroll, zoom, grid, snap, mode, other tracks, the gesture state) and the
   /// roll's viewport, by track id (tracks design D14; UI-only, never saved). A separate observable object, not a
   /// `@Published` property here: the roll scrolls at display rate, and a change published by this object would
@@ -178,8 +182,10 @@ class ChordLabState: NSObject, ObservableObject {
   /// appends by itself), was superseded or disappeared records nothing.
   @MainActor func releaseCell(_ cell: CellJSON, _ release: PressRelease) {
     guard heldCellId == cell.id else { return }
-    releaseHeld()
-    record(cell, release)
+    action {
+      releaseHeld()
+      record(cell, release)
+    }
   }
 
   /// Record's insert for a released cell (D9), or nothing (`RecordLength.recordedBeats`): the chord's root and
@@ -228,19 +234,22 @@ class ChordLabState: NSObject, ObservableObject {
   /// preview messages are sent, a one-shot's end is scheduled, a `.cancelRoll` cancels that track's gesture (its held
   /// preview is already stopped, so the stop it hands back sends nothing); then the keep-alive follows the hold.
   @MainActor private func route(_ outputs: [PreviewOutput]) {
-    for output in outputs {
-      switch output {
-      case .command(let command):
-        send(command: command.json)
-      case .preview(let message):
-        send(message.json, tag: kMsgTagPreview)
-      case .scheduleOneShotEnd(let id):
-        DispatchQueue.main.asyncAfter(deadline: .now() + PreviewBook.oneShotSeconds) { [weak self] in
-          guard let self else { return }
-          self.route(self.previews.oneShotEnded(id: id))
+    action {
+      for output in outputs {
+        switch output {
+        case .command(let command):
+          send(command: command.json)
+        case .preview(let message):
+          send(message.json, tag: kMsgTagPreview)
+        case .scheduleOneShotEnd(let id):
+          let lineage = actionLineage.lineage(current: clipboardToken)   // deferred: the lineage it was queued under
+          DispatchQueue.main.asyncAfter(deadline: .now() + PreviewBook.oneShotSeconds) { [weak self] in
+            guard let self else { return }
+            self.action(lineage: lineage) { self.route(self.previews.oneShotEnded(id: id)) }
+          }
+        case .cancelRoll(let trackId):
+          cancelRollGesture(trackId: trackId)
         }
-      case .cancelRoll(let trackId):
-        cancelRollGesture(trackId: trackId)
       }
     }
     syncHold()
@@ -308,9 +317,26 @@ class ChordLabState: NSObject, ObservableObject {
   // MARK: - Commands (engine wire format, json_api.h)
 
   /// Sends one command, e.g. `["cmd": "appendChord", "root": 0, "type": "maj"]`; `"schema": 1` is added
-  /// here. The plugin answers with a snapshot (`kMsgTagSnapshot`) or an error (`kMsgTagError`).
+  /// here, and `"lineage"`: the document lineage it was computed for (`clipboardToken`, `CommandLineage`, plan Task
+  /// 24a). The plugin answers with a snapshot (`kMsgTagSnapshot`) or an error (`kMsgTagError`); a command whose
+  /// lineage a state load has since replaced applies nothing and is answered with the loaded document's snapshot.
+  /// Every `kMsgTagCommand` goes through here; export requests carry the lineage too (`exportDrag`); previews, panic,
+  /// snapshot requests and the heard group's clear carry none.
   @MainActor func send(command: [String: Any]) {
-    send(command, tag: kMsgTagCommand)
+    send(command: command, lineage: actionLineage.lineage(current: clipboardToken))
+  }
+
+  /// `send(command:)` with an explicit lineage: deferred work sends with the lineage captured when it was queued.
+  @MainActor func send(command: [String: Any], lineage: String) {
+    send(CommandLineage.stamp(command, token: lineage), tag: kMsgTagCommand)
+  }
+
+  /// Runs one user action (`ActionLineage`): every command and export request it sends, through any helper, carries
+  /// the token current at its start (or `lineage`, for deferred work); inside another action it keeps the outer one's.
+  @MainActor @discardableResult private func action<T>(lineage: String? = nil, _ body: () -> T) -> T {
+    let opened = actionLineage.begin(token: lineage ?? clipboardToken)
+    defer { if opened { actionLineage.end() } }
+    return body()
   }
 
   /// Runs a keyboard command, dispatched by the key target (`KeyCommand.route`, tracks design D15 "Keyboard"): undo and
@@ -320,6 +346,10 @@ class ChordLabState: NSObject, ObservableObject {
   /// router consumes every mapped key whether or not it did anything, so the host never acts on it (see
   /// `KeyCommandMap`, `EditorKeyRouter`).
   @MainActor func perform(_ command: KeyCommand) {
+    action { performAction(command) }
+  }
+
+  @MainActor private func performAction(_ command: KeyCommand) {
     switch command.route(target: keyTarget, openLane: openLane) {
     case .shared:
       send(command: ["cmd": command == .redo ? "redo" : "undo"])
@@ -386,11 +416,30 @@ class ChordLabState: NSObject, ObservableObject {
   /// another (another instance, or this one before the load: track ids that mean nothing here) drops the notes'
   /// track ids so the engine matches lanes by name and role or creates tracks. A blank value resolves to a fresh one
   /// (`ClipboardToken.resolve`).
+  ///
+  /// It is also the document lineage every command and export request carries (`CommandLineage`, plan Task 24a). A
+  /// change means another document (the shell renews it before the loaded snapshot): what was waiting for a reply to
+  /// a command sent for the old one is dropped (`lineageChanged`).
   var clipboardToken: String {
     get { resolvedClipboardToken }
-    set { resolvedClipboardToken = ClipboardToken.resolve(newValue) }
+    set {
+      let change = ClipboardToken.change(from: resolvedClipboardToken, to: newValue)
+      resolvedClipboardToken = change.token
+      if change.changed { lineageChanged() }
+    }
   }
   private var resolvedClipboardToken: String
+
+  /// The document was replaced (Task 24a review): a stale command's answer is the loaded document's snapshot, not an
+  /// error, so nothing else would forget what its command left waiting. The pending track add (the loaded document's
+  /// tracks are not its answer), the pending key change (a stale `setKey`; a loaded document already in the target key
+  /// would otherwise show a hint built from the old tonic and write `setKeyHintSeen` into it) and the row under the key
+  /// bar (the hint and the moved note belong to the old document) go now, before the loaded snapshot is applied.
+  private func lineageChanged() {
+    laneOpener.refused()
+    pendingKeyChange = nil
+    if keyRow != nil { keyRow = nil }
+  }
 
   /// The ids of the strip's blocks in order; empty before the first snapshot.
   private var eventIds: [Int] { snapshot?.events.map(\.id) ?? [] }
@@ -600,11 +649,13 @@ class ChordLabState: NSObject, ObservableObject {
     if event.phase == .down, keyTarget != .notes(trackId: trackId) { keyTarget = .notes(trackId: trackId) }
     // A press here ends a key's or a cell's held preview (and another track's roll hold) before the machine runs, so
     // a press that starts no preview of its own never leaves one sounding (`PreviewBook.rollPressed`).
-    if event.phase == .down { route(previews.rollPressed(trackId: trackId)) }
-    var states = rolls.states
-    let effects = states.handle(event, trackId: trackId, snapshot: snapshot, timing: timing)
-    publishRolls(states)
-    performRollEffects(effects, trackId: trackId)
+    action {
+      if event.phase == .down { route(previews.rollPressed(trackId: trackId)) }
+      var states = rolls.states
+      let effects = states.handle(event, trackId: trackId, snapshot: snapshot, timing: timing)
+      publishRolls(states)
+      performRollEffects(effects, trackId: trackId)
+    }
   }
 
   /// Cancels track `trackId`'s gesture: the open lane left it, or the preview book ended its hold (`.cancelRoll`:
@@ -683,8 +734,10 @@ class ChordLabState: NSObject, ObservableObject {
   /// A roll context-menu item chosen: what it sends against the snapshot current now (`RollContextMenu.commands`).
   @MainActor func performRollMenu(_ item: RollContextMenu.Item, _ menu: RollContextMenu) {
     guard let snapshot, let timing = rollTiming else { return }
-    for command in menu.commands(for: item, snapshot: snapshot, timing: timing, pasteboard: pasteboard) {
-      send(command: command.json)
+    action {
+      for command in menu.commands(for: item, snapshot: snapshot, timing: timing, pasteboard: pasteboard) {
+        send(command: command.json)
+      }
     }
   }
 
@@ -731,8 +784,10 @@ class ChordLabState: NSObject, ObservableObject {
                         showHint: KeyTransposeHint.shows(fromPc: fromPc, toPc: pc, transposeWithKey: switchOn,
                                                          eventCount: count, hintSeen: snapshot.keyHintSeen ?? false),
                         transposing: switchOn && fromPc != pc, count: count)
-    send(command: ["cmd": "setKey", "letter": tonic.letter, "alter": tonic.alter, "mode": mode])
-    send(command: ["cmd": "browseKey", "home": true])
+    action {   // one lineage: a stale setKey's answer must not let the browseKey through into the loaded document
+      send(command: ["cmd": "setKey", "letter": tonic.letter, "alter": tonic.alter, "mode": mode])
+      send(command: ["cmd": "browseKey", "home": true])
+    }
   }
 
   // MARK: - What the plug-in heard (the Heard group, design D11–D13)
@@ -775,8 +830,10 @@ class ChordLabState: NSObject, ObservableObject {
       return
     }
     keyRow = nil
-    if always { send(command: ["cmd": "setTransposeWithKey", "on": true]) }
-    send(command: ["cmd": "transposeFromKey", "fromTonicPc": fromPc])
+    action {   // one lineage: fromPc is the old document's tonic
+      if always { send(command: ["cmd": "setTransposeWithKey", "on": true]) }
+      send(command: ["cmd": "transposeFromKey", "fromTonicPc": fromPc])
+    }
   }
 
   /// The hint's Keep chords: closes it; the chords stay as they are.
@@ -801,8 +858,10 @@ class ChordLabState: NSObject, ObservableObject {
         // Once per project, even if closed at once. On a later main-queue turn: this runs inside a
         // command's reply (setKey, or the browseKey {home} after it), and the plug-in would answer
         // setKeyHintSeen inline, re-entering here.
+        // The lineage of the snapshot that resolved the key change (its token always arrives first).
+        let lineage = clipboardToken
         DispatchQueue.main.async { [weak self] in
-          self?.send(command: ["cmd": "setKeyHintSeen", "on": true])
+          self?.send(command: ["cmd": "setKeyHintSeen", "on": true], lineage: lineage)
         }
       } else if pending.transposing && pending.count > 0 {
         showMovedNote(count: pending.count, tonic: KeyNames.tonicName(snapshot.projectKey.tonic))
@@ -873,7 +932,10 @@ class ChordLabState: NSObject, ObservableObject {
   @MainActor private func exportDrag(_ request: ClipExportRequest?) -> ExportDrag {
     exports.drag(request) { request in
       exportPath = nil
-      return send(request.fields, tag: kMsgTagExportClip)
+      // The export reads the document: it carries the lineage too, and the shell writes nothing for a stale one (it
+      // answers with the current snapshot and then an error, which fails this exchange: no file is offered).
+      return send(CommandLineage.stamp(request.fields, token: actionLineage.lineage(current: clipboardToken)),
+                  tag: kMsgTagExportClip)
     }
   }
 

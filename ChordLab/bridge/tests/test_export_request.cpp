@@ -1,5 +1,6 @@
 #include "doctest.h"
 
+#include "bridge/command_lineage.h"
 #include "bridge/export_request.h"
 
 #include <string>
@@ -212,6 +213,21 @@ TEST_CASE("parseClipExportRequest: extra members are ignored") {
     CHECK(*r->sectionId == 4);
 }
 
+TEST_CASE("parseClipExportRequest: the editor's lineage member is ignored here, whatever its type (the shell checks it)") {
+    for (const char* text : {R"({"schema":1,"lanes":"all","sectionId":null,"lineage":"6F1C2A9E"})",
+                             R"({"schema":1,"lanes":"all","sectionId":null,"lineage":5})",
+                             R"({"schema":1,"lanes":"all","sectionId":null,"lineage":null})"}) {
+        const auto r = parseClipExportRequest(text);
+        REQUIRE(r.has_value());
+        CHECK(r->allLanes);
+        CHECK_FALSE(r->sectionId.has_value());
+    }
+    const auto lanes = parseClipExportRequest(R"({"lineage":"A","schema":1,"lanes":["chords",1],"sectionId":2})");
+    REQUIRE(lanes.has_value());
+    CHECK(lanes->lanes.size() == 2);
+    CHECK(*lanes->sectionId == 2);
+}
+
 TEST_CASE("parseClipExportRequest: malformed or non-object payloads are nullopt, never a throw") {
     CHECK_FALSE(parseClipExportRequest(R"({"schema":1,"lanes":"all")").has_value());
     CHECK_FALSE(parseClipExportRequest(R"({"schema":1,"lanes":"all"}trailing)").has_value());
@@ -271,6 +287,30 @@ TEST_CASE("resolveClipExport: the whole progression has no section and spec.sect
     REQUIRE(r.spec.lanes.size() == 1);
     CHECK(r.spec.lanes[0].chords);
     CHECK(r.laneNames == std::vector<std::string>{"Chords"});
+}
+
+TEST_CASE("parseClipExportRequest: a text beyond the lineage reader's limits is no request") {
+    // readLineage reads nothing from a text longer than kMaxJsonBytes or nested deeper than kMaxJsonDepth (it
+    // answers Absent), so such a text must not be an export request either: a stale `lineage` hidden behind an
+    // over-limit ignored member would otherwise be exported unchecked.
+    const std::string deep = std::string(R"({"schema":1,"lanes":"all","sectionId":null,"lineage":"A","x":)") +
+                             std::string(64, '[') + std::string(64, ']') + "}";
+    CHECK(chordlab::bridge::readLineage(deep).kind == chordlab::bridge::LineageField::Kind::Absent);
+    CHECK_FALSE(parseClipExportRequest(deep).has_value());
+    const std::string shallow = std::string(R"({"schema":1,"lanes":"all","sectionId":null,"lineage":"A","x":)") +
+                                std::string(63, '[') + std::string(63, ']') + "}";
+    CHECK(chordlab::bridge::readLineage(shallow).kind == chordlab::bridge::LineageField::Kind::String);
+    CHECK(parseClipExportRequest(shallow).has_value());
+
+    const std::string head = R"({"schema":1,"lanes":"all","sectionId":null,"lineage":"A","x":")";
+    const std::string atLimit = head + std::string(chordlab::kMaxJsonBytes - head.size() - 2, 'a') + "\"}";
+    REQUIRE(atLimit.size() == chordlab::kMaxJsonBytes);
+    CHECK(chordlab::bridge::readLineage(atLimit).kind == chordlab::bridge::LineageField::Kind::String);
+    CHECK(parseClipExportRequest(atLimit).has_value());
+    const std::string tooLong = head + std::string(chordlab::kMaxJsonBytes - head.size() - 1, 'a') + "\"}";
+    REQUIRE(tooLong.size() == chordlab::kMaxJsonBytes + 1);
+    CHECK(chordlab::bridge::readLineage(tooLong).kind == chordlab::bridge::LineageField::Kind::Absent);
+    CHECK_FALSE(parseClipExportRequest(tooLong).has_value());
 }
 
 TEST_CASE("resolveClipExport: a section is its position in doc.sections and its name") {
