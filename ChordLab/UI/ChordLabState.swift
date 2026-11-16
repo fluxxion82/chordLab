@@ -308,9 +308,12 @@ class ChordLabState: NSObject, ObservableObject {
   // MARK: - Commands (engine wire format, json_api.h)
 
   /// Sends one command, e.g. `["cmd": "appendChord", "root": 0, "type": "maj"]`; `"schema": 1` is added
-  /// here. The plugin answers with a snapshot (`kMsgTagSnapshot`) or an error (`kMsgTagError`).
+  /// here, and `"lineage"`: the document lineage it was computed for (`clipboardToken`, `CommandLineage`, plan Task
+  /// 24a). The plugin answers with a snapshot (`kMsgTagSnapshot`) or an error (`kMsgTagError`); a command whose
+  /// lineage a state load has since replaced applies nothing and is answered with the loaded document's snapshot.
+  /// Every `kMsgTagCommand` goes through here; previews, export and snapshot requests carry no lineage.
   @MainActor func send(command: [String: Any]) {
-    send(command, tag: kMsgTagCommand)
+    send(CommandLineage.stamp(command, token: clipboardToken), tag: kMsgTagCommand)
   }
 
   /// Runs a keyboard command, dispatched by the key target (`KeyCommand.route`, tracks design D15 "Keyboard"): undo and
