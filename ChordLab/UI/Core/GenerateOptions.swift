@@ -56,15 +56,16 @@ struct GenerateEntry: Equatable, Identifiable {
 /// `Equatable` over plain values: the toolbar compares it to decide whether to re-render.
 struct GenerateMenu: Equatable {
   struct Group: Equatable, Identifiable {
-    /// The group's header: what its entries replace ("Bass line for the 2 selected chords", "Whole progression").
+    /// The group's header: what its entries replace ("Replace notes in the 2 selected chords", "Replace notes in all
+    /// 4 chords").
     let title: String
     let entries: [GenerateEntry]
     var id: String { title }
   }
 
   let isEnabled: Bool
-  /// The selection's (or every chord's) group, then "Whole progression" only when chords are selected; empty when
-  /// the menu is disabled.
+  /// The selection's (or every chord's) group, then every chord's only when some, not all, chords are selected;
+  /// empty when the menu is disabled.
   let groups: [Group]
   /// The one-line note on Walking and Loop (`GenerateOptions.walkingNote`); nil when the menu is disabled.
   let walkingNote: String?
@@ -93,28 +94,29 @@ enum GenerateOptions {
   /// Why nothing can be generated on an empty progression: the engine's own refusal text.
   static let unavailableReason = "Add chords first"
 
-  /// The second group's header, offered while chords are selected (a click on the strip usually leaves one selected,
-  /// so the whole progression stays one choice away without deselecting first).
-  static let wholeProgressionTitle = "Whole progression"
-
   /// The enabled menu's tooltip.
   static let help = "Generate a bass line on this track, replacing its notes in the chosen chords (one undo step)"
 
   /// What a choice writes: the selected chords (`Snapshot.selection`) in strip order, ids no chord has dropped (the
-  /// engine would refuse them), or every chord when none remains.
+  /// engine would refuse them), or every chord when none remains or when all of them are selected (the same notes
+  /// either way, so the menu shows one group and the command carries no `scope`).
   static func scope(_ snapshot: Snapshot) -> GenerateScope {
     let selected = Set(snapshot.selection)
     guard !selected.isEmpty else { return .everyChord }
     let ids = snapshot.events.map(\.id).filter { selected.contains($0) }
-    return ids.isEmpty ? .everyChord : .chords(ids)
+    return ids.isEmpty || ids.count == snapshot.events.count ? .everyChord : .chords(ids)
   }
 
-  /// A group's header for `scope`: whether the selection or every chord, and how many chords are selected.
-  static func scopeTitle(_ scope: GenerateScope) -> String {
+  /// A group's header for `scope` in a progression of `chordCount` chords: that the track's notes there are replaced,
+  /// whether in the selection or in every chord, and in how many chords. One wording for every chord, whether or not
+  /// chords are selected.
+  static func scopeTitle(_ scope: GenerateScope, chordCount: Int) -> String {
     switch scope {
-    case .everyChord: return "Bass line for every chord"
-    case .chords(let ids) where ids.count == 1: return "Bass line for the selected chord"
-    case .chords(let ids): return "Bass line for the \(ids.count) selected chords"
+    case .everyChord where chordCount == 1: return "Replace notes in the only chord"
+    case .everyChord where chordCount == 2: return "Replace notes in both chords"
+    case .everyChord: return "Replace notes in all \(chordCount) chords"
+    case .chords(let ids) where ids.count == 1: return "Replace notes in the selected chord"
+    case .chords(let ids): return "Replace notes in the \(ids.count) selected chords"
     }
   }
 
@@ -137,7 +139,8 @@ enum GenerateOptions {
   }
 
   /// The menu for `snapshot`: disabled with `unavailableReason` on an empty progression; otherwise the scope's group
-  /// of the six patterns, plus the whole progression's when chords are selected, and the Walking note.
+  /// of the six patterns, plus every chord's when the scope is a selection (a click on the strip usually leaves a
+  /// chord selected, so the whole progression stays one choice away without deselecting first), and the Walking note.
   static func menu(_ snapshot: Snapshot) -> GenerateMenu {
     guard isAvailable(snapshot) else {
       return GenerateMenu(isEnabled: false, groups: [], walkingNote: nil, value: unavailableReason,
@@ -147,11 +150,21 @@ enum GenerateOptions {
     func entries(_ scope: GenerateScope) -> [GenerateEntry] {
       patterns.map { GenerateEntry(pattern: $0, scope: scope) }
     }
-    var groups = [GenerateMenu.Group(title: scopeTitle(scope), entries: entries(scope))]
-    if scope != .everyChord {
-      groups.append(GenerateMenu.Group(title: wholeProgressionTitle, entries: entries(.everyChord)))
+    func group(_ scope: GenerateScope) -> GenerateMenu.Group {
+      GenerateMenu.Group(title: scopeTitle(scope, chordCount: snapshot.events.count), entries: entries(scope))
     }
+    var groups = [group(scope)]
+    if scope != .everyChord { groups.append(group(.everyChord)) }
     return GenerateMenu(isEnabled: true, groups: groups, walkingNote: walkingNote(loop: snapshot.progressionLoop),
-                        value: scopeTitle(scope), help: help)
+                        value: groups[0].title, help: help)
+  }
+
+  /// The command choosing `entry` sends for track `trackId`, or nil when the menu of `snapshot`, the current one, no
+  /// longer offers it. An open menu keeps the entries it was drawn with; a host state load can replace the document
+  /// meanwhile, and the old chord ids may then name other chords, so a stale entry sends nothing (the reopened menu
+  /// shows the new scope). The scope is not resolved again at the click: that would write a scope the header the user
+  /// just read did not describe.
+  static func command(for entry: GenerateEntry, trackId: Int, in snapshot: Snapshot) -> [String: Any]? {
+    menu(snapshot).groups.contains { $0.entries.contains(entry) } ? entry.command(trackId: trackId) : nil
   }
 }

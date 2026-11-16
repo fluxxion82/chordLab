@@ -66,13 +66,34 @@ final class GenerateOptionsTests: XCTestCase {
     XCTAssertEqual(GenerateOptions.scope(try fixture(selecting([3, 42]))), .chords([3]))
     XCTAssertEqual(GenerateOptions.scope(try fixture(selecting([42]))), .everyChord,
                    "a selection naming no chord is no selection (the engine would refuse it: No chord with id 42)")
+    XCTAssertEqual(GenerateOptions.scope(try fixture(selecting([3, 3]))), .chords([3]), "a repeat counts once")
+    let legacyUnknown = try fixture { object in
+      object.removeValue(forKey: "selectedEventIds")
+      object["selectedEventId"] = 42
+    }
+    XCTAssertEqual(GenerateOptions.scope(legacyUnknown), .everyChord, "an older build's one id, naming no chord")
+  }
+
+  func testEveryChordSelectedIsEveryChord() throws {
+    // Selecting all four chords and selecting none write the same notes: one scope, one group, no `scope` sent.
+    let all = try fixture(selecting([1, 2, 3, 4]))
+    XCTAssertEqual(GenerateOptions.scope(all), .everyChord)
+    XCTAssertEqual(GenerateOptions.scope(try fixture(selecting([4, 2, 1, 3]))), .everyChord)
+    XCTAssertEqual(GenerateOptions.scope(try fixture(selecting([1, 2, 3, 4, 42]))), .everyChord)
+    XCTAssertEqual(GenerateOptions.scope(try fixture(selecting([1, 2, 3]))), .chords([1, 2, 3]), "one short of all")
+    let menu = GenerateOptions.menu(all)
+    XCTAssertEqual(menu.groups.map(\.title), ["Replace notes in all 4 chords"])
+    XCTAssertNil(menu.groups[0].entries[0].command(trackId: 1)["scope"])
   }
 
   func testTheScopeTitleSaysWhatWillBeReplaced() {
-    XCTAssertEqual(GenerateOptions.scopeTitle(.everyChord), "Bass line for every chord")
-    XCTAssertEqual(GenerateOptions.scopeTitle(.chords([3])), "Bass line for the selected chord")
-    XCTAssertEqual(GenerateOptions.scopeTitle(.chords([1, 2, 4])), "Bass line for the 3 selected chords")
-    XCTAssertEqual(GenerateOptions.scopeTitle(.chords([2, 3])), "Bass line for the 2 selected chords")
+    XCTAssertEqual(GenerateOptions.scopeTitle(.everyChord, chordCount: 4), "Replace notes in all 4 chords")
+    XCTAssertEqual(GenerateOptions.scopeTitle(.everyChord, chordCount: 2), "Replace notes in both chords")
+    XCTAssertEqual(GenerateOptions.scopeTitle(.everyChord, chordCount: 1), "Replace notes in the only chord")
+    XCTAssertEqual(GenerateOptions.scopeTitle(.chords([3]), chordCount: 4), "Replace notes in the selected chord")
+    XCTAssertEqual(GenerateOptions.scopeTitle(.chords([1, 2, 4]), chordCount: 4),
+                   "Replace notes in the 3 selected chords")
+    XCTAssertEqual(GenerateOptions.scopeTitle(.chords([2, 3]), chordCount: 4), "Replace notes in the 2 selected chords")
   }
 
   // MARK: - Command
@@ -129,26 +150,30 @@ final class GenerateOptionsTests: XCTestCase {
   func testWithoutASelectionTheMenuIsOneGroupForEveryChord() throws {
     let menu = GenerateOptions.menu(try fixture(selecting([])))
     XCTAssertTrue(menu.isEnabled)
-    XCTAssertEqual(menu.groups.map(\.title), ["Bass line for every chord"])
+    XCTAssertEqual(menu.groups.map(\.title), ["Replace notes in all 4 chords"])
     XCTAssertEqual(menu.groups[0].entries.map(\.title),
                    ["Roots", "Root pulse", "Root–fifth", "Octaves", "Follow feel", "Walking"])
     XCTAssertEqual(menu.groups[0].entries.map(\.scope), Array(repeating: .everyChord, count: 6))
     XCTAssertEqual(menu.groups[0].entries.map(\.pattern), GenerateOptions.patterns)
-    XCTAssertEqual(menu.value, "Bass line for every chord")
+    XCTAssertEqual(menu.value, "Replace notes in all 4 chords")
   }
 
   func testWithASelectionTheMenuAddsTheWholeProgression() throws {
     let menu = GenerateOptions.menu(try fixture())
     XCTAssertTrue(menu.isEnabled)
-    XCTAssertEqual(menu.groups.map(\.title), ["Bass line for the 2 selected chords", "Whole progression"])
+    XCTAssertEqual(menu.groups.map(\.title), ["Replace notes in the 2 selected chords", "Replace notes in all 4 chords"],
+                   "the same words for every chord, whether or not chords are selected")
     XCTAssertEqual(menu.groups[0].entries.map(\.scope), Array(repeating: .chords([2, 3]), count: 6))
     XCTAssertEqual(menu.groups[1].entries.map(\.scope), Array(repeating: .everyChord, count: 6))
     for group in menu.groups { XCTAssertEqual(group.entries.map(\.pattern), GenerateOptions.patterns) }
-    XCTAssertEqual(menu.value, "Bass line for the 2 selected chords")
+    XCTAssertEqual(menu.value, "Replace notes in the 2 selected chords")
 
     let one = GenerateOptions.menu(try fixture(selecting([4])))
-    XCTAssertEqual(one.groups.map(\.title), ["Bass line for the selected chord", "Whole progression"])
+    XCTAssertEqual(one.groups.map(\.title), ["Replace notes in the selected chord", "Replace notes in all 4 chords"])
     XCTAssertEqual(one.groups[0].entries.map(\.scope), Array(repeating: .chords([4]), count: 6))
+
+    let dropped = GenerateOptions.menu(try fixture(selecting([3, 42])))
+    XCTAssertEqual(dropped.groups[0].title, "Replace notes in the selected chord", "counted after the unknown id is dropped")
   }
 
   func testEntryIdsAreUniqueAcrossGroups() throws {
@@ -176,6 +201,48 @@ final class GenerateOptionsTests: XCTestCase {
     XCTAssertNil(menu.walkingNote)
     XCTAssertEqual(menu.value, "Add chords first")
     XCTAssertEqual(menu.help, "Add chords first")
+
+    let stillSelected = try fixture { object in
+      object["events"] = [Any]()
+      object["selectedEventIds"] = [2]
+      object["selectedEventId"] = 2
+    }
+    XCTAssertEqual(GenerateOptions.menu(stillSelected), menu, "a selection naming no chord changes nothing")
+    XCTAssertEqual(GenerateOptions.scope(stillSelected), .everyChord)
+  }
+
+  // MARK: - Choosing an entry
+
+  func testAnEntryTheCurrentMenuOffersGivesItsCommand() throws {
+    let snapshot = try fixture()
+    let menu = GenerateOptions.menu(snapshot)
+    assertCommand(try XCTUnwrap(GenerateOptions.command(for: menu.groups[0].entries[5], trackId: 2, in: snapshot)),
+                  ["cmd": "generateBass", "trackId": 2, "pattern": "walking", "scope": [2, 3]])
+    assertCommand(try XCTUnwrap(GenerateOptions.command(for: menu.groups[1].entries[0], trackId: 2, in: snapshot)),
+                  ["cmd": "generateBass", "trackId": 2, "pattern": "roots"])
+  }
+
+  func testAnEntryFromAnOlderMenuSendsNothing() throws {
+    // The menu was drawn for chords [2, 3]; a host state load then replaced the document while it was open. The
+    // entry's ids may name other chords now, so it is dropped: the reopened menu shows the new scope.
+    let stale = GenerateEntry(pattern: .walking, scope: .chords([2, 3]))
+    XCTAssertNotNil(GenerateOptions.command(for: stale, trackId: 1, in: try fixture()))
+    XCTAssertNil(GenerateOptions.command(for: stale, trackId: 1, in: try fixture(selecting([]))),
+                 "nothing selected any more")
+    XCTAssertNil(GenerateOptions.command(for: stale, trackId: 1, in: try fixture(selecting([2]))),
+                 "another selection")
+    XCTAssertNil(GenerateOptions.command(for: stale, trackId: 1, in: try fixture { object in
+      object["events"] = [Any]()
+    }), "no chords left")
+    let everyChord = GenerateEntry(pattern: .roots, scope: .everyChord)
+    XCTAssertNotNil(GenerateOptions.command(for: everyChord, trackId: 1, in: try fixture(selecting([]))))
+    XCTAssertNotNil(GenerateOptions.command(for: everyChord, trackId: 1, in: try fixture(selecting([1]))),
+                    "every chord is offered under any selection")
+    XCTAssertNil(GenerateOptions.command(for: everyChord, trackId: 1, in: try fixture { object in
+      object["events"] = [Any]()
+      object["selectedEventIds"] = [Int]()
+      object["selectedEventId"] = NSNull()
+    }), "an empty progression offers nothing")
   }
 
   func testTheHelpSaysWhatGeneratingDoes() throws {
@@ -187,6 +254,15 @@ final class GenerateOptionsTests: XCTestCase {
     let base = GenerateOptions.menu(try fixture())
     XCTAssertEqual(GenerateOptions.menu(try fixture { $0["revision"] = 99 }), base,
                    "a content revision alone changes nothing the menu shows")
+    let edited = try fixture { object in
+      var events = object["events"] as! [[String: Any]]
+      events[0]["symbol"] = "Dm7"
+      events[0]["root"] = 2
+      events[0]["velocity"] = 64
+      events[0]["lengthBeats"] = 2.0
+      object["events"] = events
+    }
+    XCTAssertEqual(GenerateOptions.menu(edited), base, "a chord edit that keeps the ids changes nothing either")
     XCTAssertNotEqual(GenerateOptions.menu(try fixture(selecting([1]))), base)
     XCTAssertNotEqual(GenerateOptions.menu(try fixture { $0["progressionLoop"] = false }), base)
   }
