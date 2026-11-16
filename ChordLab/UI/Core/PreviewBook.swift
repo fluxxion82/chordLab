@@ -32,41 +32,47 @@ enum PreviewMessage: Equatable {
   }
 }
 
-/// How the held preview must end (`PreviewBook.release(before:)`): nothing is held; the book stops it itself
-/// (`endHold`, a cell's or a key's hold); or the roll's gesture of that track is cancelled, whose own stop comes back
-/// through the seam (`ChordLabState.cancelRollGesture`), so the machine never believes it holds a pitch that was
-/// stopped behind its back.
-enum PreviewRelease: Equatable {
-  case none
-  case stop
-  case cancelRoll(trackId: Int)
+/// A hold a view starts itself (`PreviewBook.hold`): a palette cell or a keyboard key. A roll hold comes only from the
+/// roll's effects (`PreviewBook.perform`), so no caller can start one behind its gesture machine.
+enum PreviewHoldRequest: Equatable {
+  case cell(String)
+  case key(pitch: Int)
+
+  var owner: PreviewOwner {
+    switch self {
+    case .cell(let id): return .cell(id)
+    case .key(let pitch): return .key(pitch: pitch)
+    }
+  }
 }
 
-/// What the roll's effects seam does for one batch of `RollEffect`s (`PreviewBook.perform`): send a command, send a
-/// preview message, or schedule a one-shot's end (`PreviewBook.oneShotEnded(id:)` after `PreviewBook.oneShotSeconds`).
-enum RollSeamOutput: Equatable {
+/// What the caller does for the book (`ChordLabState` routes these and nothing else): send a command, send a preview
+/// message, schedule a one-shot's end (`PreviewBook.oneShotEnded(id:)` after `PreviewBook.oneShotSeconds`), or cancel a
+/// track's roll gesture (`ChordLabState.cancelRollGesture`) whose held preview the book has ALREADY stopped (the stop
+/// precedes this output), so the stop that machine hands back finds no hold and sends nothing.
+enum PreviewOutput: Equatable {
   case command(RollCommand)
   case preview(PreviewMessage)
   case scheduleOneShotEnd(id: Int)
+  case cancelRoll(trackId: Int)
 }
 
 /// The bookkeeping of the editor's note previews through the engine's scheduler (tracks design D15 "Preview": note
 /// presses, inserts and key clicks use the existing preview path, one pitch, paired Start/Stop with keep-alive): one
 /// id counter, AT MOST ONE held preview whoever holds it (a palette cell, the roll, a keyboard key; `ChordLabState`
 /// keeps it alive with `extend`s), and the short one-shot previews (an insert, a velocity drag's release), each
-/// ended by its own timer.
+/// ended by its own timer. Every decision lives here; `ChordLabState` only routes the `PreviewOutput`s.
 ///
-/// The invariant: every `start` the book emits is followed by exactly one `stop` with the same id, and a `stop` is
-/// emitted only for an id that is sounding. A hold over a hold stops the old one first; an owner's end stops only
-/// its own hold; a one-shot's end stops it once.
-///
-/// The roll's hold belongs to that track's gesture machine (`RollEditLogic`: a held `previewStart` is always followed
-/// by exactly one `previewStop`): another owner taking the hold, the keep-alive's lost-release, the editor closing and
-/// panic end it by cancelling the gesture (`release(before:)` says `.cancelRoll`), so the machine's stop is the one
-/// that reaches the scheduler and the two never disagree.
+/// The invariants: every `start` is followed by exactly one `stop` with the same id, and a `stop` goes out only for an
+/// id that is sounding; and a track's gesture machine (`RollEditLogic`: a held `previewStart` is always followed by
+/// exactly one `previewStop`) believes it holds a pitch exactly when the book holds for that track. So whenever the
+/// book ends a roll hold for any other reason than that machine's own stop (another owner takes the hold, a press on
+/// another track, the keep-alive's lost release, the editor closing, panic), it stops the id AND emits `.cancelRoll`
+/// for the track in the same outputs; the cancelled machine's stop then finds no hold. A new hold always ends the old
+/// one explicitly that way; nothing is stopped silently.
 ///
 /// Depends on nothing but Foundation and Core's `RollEffect` / `RollCommand`; unit-tested by the `ChordLabUICore`
-/// package (Tests/ChordLabUICoreTests/PreviewBookTests.swift).
+/// package (Tests/ChordLabUICoreTests/PreviewBookTests.swift, with the real gesture machine).
 struct PreviewBook: Equatable {
   /// How long a one-shot sounds before its stop (an insert's or a velocity drag's preview).
   static let oneShotSeconds: TimeInterval = 0.3
@@ -88,57 +94,68 @@ struct PreviewBook: Equatable {
     return lastId
   }
 
-  /// How the current hold must end before `owner` holds (nil: it just ends — the editor closing, the keep-alive's
-  /// lost release, panic). A roll hold of ANOTHER owner (or for nil) is `.cancelRoll`; the same track's roll is
-  /// `.stop` (its machine always stops before it starts again, so this is only a guard).
-  func release(before owner: PreviewOwner?) -> PreviewRelease {
-    guard let held else { return .none }
-    if case .roll(let trackId) = held.owner, owner != held.owner { return .cancelRoll(trackId: trackId) }
-    return .stop
-  }
-
-  /// `owner` holds `pitches`: a new id's start, after the stop of any hold still there (the caller has ended a roll
-  /// hold through its gesture first, per `release(before:)`).
-  mutating func startHold(_ owner: PreviewOwner, pitches: [Int], velocity: Int) -> [PreviewMessage] {
-    var messages = endHold()
-    let id = nextId()
-    held = PreviewHold(id: id, owner: owner)
-    messages.append(.start(id: id, pitches: pitches, velocity: velocity))
-    return messages
-  }
-
-  /// Stops whatever is held; nothing when nothing is.
-  mutating func endHold() -> [PreviewMessage] {
+  /// Stops the held preview; a roll hold's gesture is cancelled too unless `keepingGesture` (that machine's own stop).
+  private mutating func stopHeld(keepingGesture: Bool = false) -> [PreviewOutput] {
     guard let held else { return [] }
     self.held = nil
-    return [.stop(id: held.id)]
+    var outputs: [PreviewOutput] = [.preview(.stop(id: held.id))]
+    if !keepingGesture, case .roll(let trackId) = held.owner { outputs.append(.cancelRoll(trackId: trackId)) }
+    return outputs
   }
 
-  /// Stops the hold when `owner` says it is its own; nothing otherwise.
-  mutating func endHold(if owner: (PreviewOwner) -> Bool) -> [PreviewMessage] {
-    guard let held, owner(held.owner) else { return [] }
-    return endHold()
+  private mutating func start(_ owner: PreviewOwner, pitches: [Int], velocity: Int) -> (id: Int, output: PreviewOutput) {
+    let id = nextId()
+    held = PreviewHold(id: id, owner: owner)
+    return (id, .preview(.start(id: id, pitches: pitches, velocity: velocity)))
+  }
+
+  /// A cell or key press holds `pitches`: the held preview ends first (a roll hold with its gesture's cancel), then the
+  /// new id's start. Returns the id, which only this press's end may stop (`endHold(id:)`).
+  mutating func hold(_ request: PreviewHoldRequest, pitches: [Int], velocity: Int) -> (id: Int, outputs: [PreviewOutput]) {
+    var outputs = stopHeld()
+    let started = start(request.owner, pitches: pitches, velocity: velocity)
+    outputs.append(started.output)
+    return (started.id, outputs)
+  }
+
+  /// Ends whatever is held (a cell's release, the keep-alive's lost release, the editor closing, panic): its stop, and
+  /// for a roll hold its gesture's cancel. Nothing when nothing is held.
+  mutating func endHold() -> [PreviewOutput] {
+    stopHeld()
+  }
+
+  /// Ends the hold `id` (a key press's own up or cancel); nothing when another hold, or none, is there now.
+  mutating func endHold(id: Int) -> [PreviewOutput] {
+    held?.id == id ? stopHeld() : []
+  }
+
+  /// A press went down in track `trackId`'s roll (before the machine sees it): a cell's or a key's hold, or another
+  /// track's roll hold, ends now, so a press that starts no preview of its own (an empty click, a rubber band, a
+  /// Velocity-mode press) never leaves one sounding behind it. This track's own hold is its machine's to stop.
+  mutating func rollPressed(trackId: Int) -> [PreviewOutput] {
+    held?.owner == .roll(trackId: trackId) ? [] : stopHeld()
   }
 
   /// A one-shot's timer fired: its stop, once.
-  mutating func oneShotEnded(id: Int) -> [PreviewMessage] {
-    oneShots.remove(id) == nil ? [] : [.stop(id: id)]
+  mutating func oneShotEnded(id: Int) -> [PreviewOutput] {
+    oneShots.remove(id) == nil ? [] : [.preview(.stop(id: id))]
   }
 
   /// The roll's effects of track `trackId`, in order (the seam, `ChordLabState.performRollEffects`): a `send` is the
-  /// command; a `previewStart` holds as `.roll(trackId)` (the caller ends another owner's hold first, per
-  /// `release(before:)`); a `previewStop` stops that track's roll hold and nothing else (never a second stop); a
-  /// `previewOneShot` starts under a new id and schedules its end.
-  mutating func perform(_ effects: [RollEffect], trackId: Int) -> [RollSeamOutput] {
-    var outputs: [RollSeamOutput] = []
+  /// command; a `previewStart` ends the held preview (another owner's with `.cancelRoll` for a roll; this track's own,
+  /// which its machine always stops first, without) and holds as `.roll(trackId)`; a `previewStop` stops this track's
+  /// roll hold and nothing else (never a second stop); a `previewOneShot` starts under a new id and schedules its end.
+  mutating func perform(_ effects: [RollEffect], trackId: Int) -> [PreviewOutput] {
+    var outputs: [PreviewOutput] = []
     for effect in effects {
       switch effect {
       case .send(let command):
         outputs.append(.command(command))
       case .previewStart(let pitch, let velocity):
-        outputs += startHold(.roll(trackId: trackId), pitches: [pitch], velocity: velocity).map(RollSeamOutput.preview)
+        outputs += stopHeld(keepingGesture: held?.owner == .roll(trackId: trackId))
+        outputs.append(start(.roll(trackId: trackId), pitches: [pitch], velocity: velocity).output)
       case .previewStop:
-        outputs += endHold(if: { $0 == .roll(trackId: trackId) }).map(RollSeamOutput.preview)
+        if held?.owner == .roll(trackId: trackId) { outputs += stopHeld(keepingGesture: true) }
       case .previewOneShot(let pitch, let velocity):
         let id = nextId()
         oneShots.insert(id)
@@ -146,20 +163,5 @@ struct PreviewBook: Equatable {
       }
     }
     return outputs
-  }
-}
-
-/// The roll's keyboard column (tracks design D14: clicking a key previews it): which key a point is on, and the
-/// velocity a key preview plays at.
-enum PianoKeys {
-  /// A key click's velocity (an insert's, design D15).
-  static let velocity = 100
-
-  /// The pitch of the key at the column's view y (top-left origin) with the grid scrolled to content y `scrollY`;
-  /// nil above pitch 127's row, below pitch 0's, or for a y that is not a number.
-  static func pitch(atViewY y: CGFloat, geometry: RollGeometry, scrollY: CGFloat) -> Int? {
-    let content = y + scrollY
-    guard content.isFinite, content >= 0, content < CGFloat(RollGeometry.pitchCount) * geometry.rowHeight else { return nil }
-    return geometry.pitch(atY: content)
   }
 }

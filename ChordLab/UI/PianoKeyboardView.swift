@@ -83,19 +83,25 @@ struct PianoKeyInputView: NSViewRepresentable {
                              scrollY: roll.scroll.y)
     }
     view.press = { [weak state] pitch in state?.pressKey(pitch: pitch) }
-    view.release = { [weak state] in state?.releaseKey() }
+    view.release = { [weak state] id in state?.releaseKey(id: id) }
   }
 }
 
 /// The AppKit half of `PianoKeyInputView`: flipped (the column's own top-left coordinates), first mouse accepted (a
-/// plug-in window is often not key), never first responder, never moves the window.
+/// plug-in window is often not key), never first responder, never moves the window, not an accessibility element
+/// (the column is hidden from accessibility). It keeps the preview id its press got and ends only that one.
 final class PianoKeyInputNSView: NSView {
   var pitchAt: @MainActor (CGPoint) -> Int? = { _ in nil }
-  var press: @MainActor (Int) -> Void = { _ in }
-  var release: @MainActor () -> Void = {}
-  /// Between this view's own down on a key and its up (or a cancel).
-  private(set) var pressing = false
+  /// Starts a key's preview; returns its id (`ChordLabState.pressKey`), nil when nothing started.
+  var press: @MainActor (Int) -> Int? = { _ in nil }
+  /// Ends the preview with this id (`ChordLabState.releaseKey(id:)`).
+  var release: @MainActor (Int) -> Void = { _ in }
+  /// This view's press in progress: the preview id it holds, between its down on a key and its up (or a cancel).
+  private(set) var pressId: Int?
+  var pressing: Bool { pressId != nil }
   private var observers: [NSObjectProtocol] = []
+
+  override func isAccessibilityElement() -> Bool { false }
 
   override var isFlipped: Bool { true }
   override var acceptsFirstResponder: Bool { false }
@@ -104,10 +110,9 @@ final class PianoKeyInputNSView: NSView {
 
   override func mouseDown(with event: NSEvent) {
     guard !event.modifierFlags.contains(.control) else { return }
-    if pressing { end() }
+    end()
     guard let pitch = pitchAt(convert(event.locationInWindow, from: nil)) else { return }
-    pressing = true
-    press(pitch)
+    pressId = press(pitch)
   }
 
   override func mouseUp(with event: NSEvent) {
@@ -136,10 +141,10 @@ final class PianoKeyInputNSView: NSView {
     observers = []
   }
 
-  /// Ends this view's press (its up or a cancel): the key's preview stops once.
+  /// Ends this view's press (its up or a cancel): its own preview stops once (nothing if another hold replaced it).
   func end() {
-    guard pressing else { return }
-    pressing = false
-    release()
+    guard let id = pressId else { return }
+    pressId = nil
+    release(id)
   }
 }

@@ -23,8 +23,10 @@
 //
 // Chord preview goes through the engine's Scheduler, not iPlug2's MIDI-from-UI queue (which holds 32
 // messages and drops silently, so a note-off could be lost while the host had processing suspended).
-// The Swift palette sends kMsgTagPreview {id, on, pitches, velocity}, and {id, extend} once a second
-// while a cell is held (merged in the ring while the host is not processing); OnMessage (main thread)
+// The Swift UI sends kMsgTagPreview {id, on, pitches, velocity}, and {id, extend} once a second while a
+// preview is held (merged in the ring while the host is not processing): a palette cell, a piano-roll note press or
+// a keyboard-column key (one held preview at a time, ChordLabState / PreviewBook), plus the roll's short one-shots
+// (an insert, a velocity drag's release) that may overlap the held one, each with its own id; OnMessage (main thread)
 // parses it and calls Scheduler::pushPreview, the scheduler's single other-thread entry (an SPSC ring of
 // 64; a full ring is reported to the UI as an error). The audio thread owns everything else: ProcessBlock
 // consumes the pending reset/bypass/panic flags, runs Scheduler::process and forwards the events with
@@ -811,6 +813,9 @@ void ChordLab::HandlePreview(std::string_view text)
   }
   switch (cmd.kind)
   {
+    // Only the LAST Start is remembered: a roll one-shot started over a held preview replaces it here, so
+    // CloseWindow's fallback Stop can miss the held one. Accepted: the UI's onDisappear stops the held preview
+    // itself, and the scheduler's 4 s watchdog ends anything whose Stop never arrives.
     case chordlab::PreviewCmd::Start:  mOpenPreviewId = cmd.id; break;
     case chordlab::PreviewCmd::Stop:   if (cmd.id == mOpenPreviewId) mOpenPreviewId = -1; break;
     case chordlab::PreviewCmd::Extend: break;                    // the open Start stays open

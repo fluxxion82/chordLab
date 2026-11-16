@@ -69,7 +69,7 @@ struct PianoRollView: View {
           .background(RollColors.ribbonGround)
           HStack(spacing: 0) {
             PianoKeyboardView(geometry: geometry, scrollY: view.scroll.y)
-              .overlay(PianoKeyInputView(trackId: track.id, state: state))
+              .overlay(PianoKeyInputView(trackId: track.id, state: state).accessibilityHidden(true))
               .frame(width: Self.keyboardWidth)
             grid(snapshot: snapshot, view: view, timing: timing, geometry: geometry, playhead: playhead, name: name)
           }
