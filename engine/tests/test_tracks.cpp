@@ -3,6 +3,7 @@
 #include "chordlab/chord.h"
 #include "chordlab/document.h"
 #include "chordlab/feel.h"
+#include "chordlab/generate.h"
 #include "chordlab/meter.h"
 #include "chordlab/tracks.h"
 #include "chordlab/transpose.h"
@@ -2647,4 +2648,231 @@ TEST_CASE("validateTracks: the fault classifies the failure (D17a); a null point
     CHECK(faultOf(threeChordDoc({track(1, burst)})) == TrackFault::Onsets);
     burst.pop_back();
     CHECK(faultOf(threeChordDoc({track(1, burst)})) == TrackFault::None);
+}
+
+// --- generateBass (D16): one validated transaction ---------------------------------------------
+
+TEST_CASE("generateBass: replaces the notes the scope's chords own, one undo step, fresh ids, nothing selected") {
+    DocumentStore store = threeChordsAndBass();
+    REQUIRE(store.insertNotes(1, {ns(48, 100, 480), ns(50, kBar + 200, 480), ns(52, 2 * kBar + 300, 480)}) ==
+            std::vector<int>{1, 2, 3});
+    store.setNoteSelection(1, {1, 2});
+    const std::uint64_t revision = store.revision();
+    std::string refusal = "stale";
+    CHECK(store.generateBass(1, BassPattern::Roots, {3, 1}, &refusal));  // a non-contiguous scope, in any order
+    CHECK(refusal.empty());
+    // C and G7 now hold their Roots notes (fresh ids, in chord order); F's note is untouched.
+    CHECK(notesOf(store) == std::vector<TrackNote>{TrackNote{4, 36, 1, 0, kBar, 100}, TrackNote{2, 50, 2, 200, 480, 100},
+                                                   TrackNote{5, 31, 3, 0, kBar, 100}});
+    CHECK(store.nextNoteId() == 6);
+    CHECK(store.revision() == revision + 1);
+    // The generated notes are not selected; the selection only lost the note that went.
+    CHECK(store.noteSelection() == NoteSelection{1, {2}});
+    // Exactly one step: undo brings the three old notes back, redo the generated ones.
+    const std::vector<TrackNote> generatedNotes = notesOf(store);
+    REQUIRE(store.undo());
+    CHECK(noteIdsOf(store) == std::vector<int>{1, 2, 3});
+    REQUIRE(store.redo());
+    CHECK(notesOf(store) == generatedNotes);
+    DocumentStore again = threeChordsAndBass();
+    REQUIRE(again.insertNotes(1, {ns(48, 100, 480)}).size() == 1);
+    checkOneStep(again, [](DocumentStore& s) { REQUIRE(s.generateBass(1, BassPattern::Walking, {})); });
+}
+
+TEST_CASE("generateBass: notes of chords outside the scope stay, also when they sound over a scope chord") {
+    DocumentStore store = threeChordsAndBass();
+    // F's note lasts into G7; G7's own note goes.
+    REQUIRE(store.insertNotes(1, {ns(41, kBar, 2 * kBar), ns(43, 2 * kBar + 960, 480)}) == std::vector<int>{1, 2});
+    REQUIRE(store.generateBass(1, BassPattern::RootPulse, {3}));
+    const std::vector<TrackNote>& notes = notesOf(store);
+    REQUIRE(notes.size() == 5);
+    CHECK(notes[0] == TrackNote{1, 41, 2, 0, 2 * kBar, 100});
+    for (std::size_t i = 1; i < notes.size(); ++i) {
+        CHECK(notes[i].anchorEventId == 3);
+        CHECK(notes[i].pitch == 31);
+        CHECK(notes[i].offsetTick == static_cast<std::int32_t>(960 * (i - 1)));
+    }
+}
+
+TEST_CASE("generateBass: owned notes go, inactive ones included; the other tracks are untouched") {
+    DocumentStore store = threeChordsAndBass();
+    REQUIRE(store.addTrack(TrackRole::Lead) == 2);
+    REQUIRE(store.insertNotes(1, {ns(48, 3000, 480)}) == std::vector<int>{1});
+    REQUIRE(store.insertNotes(2, {ns(72, 100, 480)}) == std::vector<int>{2});
+    REQUIRE(store.setLength(1, 2.0));  // C ends at 1920 now: note 1 (offset 3000) is inactive, kept
+    REQUIRE(notesOf(store).size() == 1);
+    REQUIRE_FALSE(noteActive(store.doc(), notesOf(store).front()));
+    const Track lead = trackAt(store, 1);
+    REQUIRE(store.generateBass(1, BassPattern::Roots, {1}));
+    CHECK(notesOf(store) == std::vector<TrackNote>{TrackNote{3, 36, 1, 0, 1920, 100}});
+    CHECK(trackAt(store, 1) == lead);
+}
+
+TEST_CASE("generateBass: refused for an unknown track, no chords, an unknown scope id, exhausted ids") {
+    DocumentStore store = threeChordsAndBass();
+    const DocumentStore reference = store;
+    std::string refusal;
+    CHECK_FALSE(store.generateBass(9, BassPattern::Roots, {}, &refusal));
+    CHECK(refusal == "No track with id 9");
+    checkRefused(store, reference);
+    CHECK_FALSE(store.generateBass(1, BassPattern::Roots, {1, 42, 43}, &refusal));
+    CHECK(refusal == "No chord with id 42");
+    checkRefused(store, reference);
+    DocumentStore empty;
+    REQUIRE(empty.addTrack(TrackRole::Bass) == 1);
+    const DocumentStore emptyReference = empty;
+    CHECK_FALSE(empty.generateBass(1, BassPattern::Walking, {}, &refusal));
+    CHECK(refusal == "Add chords first");
+    checkRefused(empty, emptyReference);
+    // The note id counter: four Root pulse notes need four ids below INT_MAX, one Roots note one.
+    DocumentStore late;
+    Document doc;
+    doc.events.push_back(ChordEvent{1, kC, 4.0, 100});
+    doc.tracks.push_back(Track{1, "Bass", TrackRole::Bass});
+    late.replace(doc, 2, 0, 0, INT_MAX - 2);
+    const DocumentStore lateReference = late;
+    CHECK_FALSE(late.generateBass(1, BassPattern::RootPulse, {}, &refusal));
+    CHECK(refusal == "No note ids are left");
+    checkRefused(late, lateReference);
+    CHECK(late.generateBass(1, BassPattern::Roots, {}, &refusal));
+    CHECK(refusal.empty());
+    CHECK(noteIdsOf(late) == std::vector<int>{INT_MAX - 2});
+    CHECK(late.nextNoteId() == INT_MAX - 1);
+    // The boundary: the last four ids below INT_MAX can be handed out, leaving the counter at INT_MAX, where the
+    // next generation is refused.
+    DocumentStore last;
+    last.replace(doc, 2, 0, 0, INT_MAX - 4);
+    CHECK(last.generateBass(1, BassPattern::RootPulse, {}, &refusal));
+    CHECK(refusal.empty());
+    CHECK(noteIdsOf(last) == std::vector<int>{INT_MAX - 4, INT_MAX - 3, INT_MAX - 2, INT_MAX - 1});
+    CHECK(last.nextNoteId() == INT_MAX);
+    const DocumentStore lastReference = last;
+    CHECK_FALSE(last.generateBass(1, BassPattern::Roots, {}, &refusal));
+    CHECK(refusal == "No note ids are left");
+    checkRefused(last, lastReference);
+}
+
+TEST_CASE("generateBass: refused whole by validateTracks, in its words; the replaced notes do not count") {
+    SUBCASE("polyphony across tracks") {
+        DocumentStore store = threeChordsAndBass();
+        REQUIRE(store.addTrack(TrackRole::Lead) == 2);
+        std::vector<NoteSpec> pad;
+        for (int i = 0; i < kMaxTrackPolyphony - 1; ++i) {
+            pad.push_back(ns(60 + i, 0, kBar));
+        }
+        REQUIRE(store.insertNotes(2, pad).size() == static_cast<std::size_t>(kMaxTrackPolyphony - 1));
+        REQUIRE(store.insertNotes(1, {ns(40, 0, kBar)}).size() == 1);
+        REQUIRE(trackPolyphony(store.doc()) == kMaxTrackPolyphony);
+        // At the cap: Roots over C replaces the bass's own note, so it still fits.
+        CHECK(store.generateBass(1, BassPattern::Roots, {1}));
+        CHECK(trackPolyphony(store.doc()) == kMaxTrackPolyphony);
+        // One more sounding note anywhere over C, and a generation that adds one is refused whole.
+        REQUIRE(store.addTrack(TrackRole::Other) == 3);
+        REQUIRE(store.insertNotes(3, {ns(90, kBar + 100, 480)}).size() == 1);
+        REQUIRE(store.insertNotes(2, {ns(84, kBar, kBar)}).size() == 1);
+        std::vector<NoteSpec> more;
+        for (int i = 0; i < kMaxTrackPolyphony - 2; ++i) {
+            more.push_back(ns(70 + i, kBar, kBar));
+        }
+        REQUIRE(store.insertNotes(2, more).size() == more.size());
+        REQUIRE(trackPolyphony(store.doc()) == kMaxTrackPolyphony);
+        store.setNoteSelection(3, {});
+        const DocumentStore reference = store;
+        std::string refusal;
+        CHECK_FALSE(store.generateBass(1, BassPattern::Roots, {2}, &refusal));
+        CHECK(refusal == kPolyphonyMessage);
+        checkRefused(store, reference);
+    }
+    SUBCASE("onsets across tracks") {
+        // Fifteen starts of another track inside the first beat of C: the cap. Root pulse over C would start a
+        // sixteenth note in that window; over F, a bar later, it fits.
+        DocumentStore store = threeChordsAndBass();
+        REQUIRE(store.addTrack(TrackRole::Lead) == 2);
+        std::vector<NoteSpec> busy;
+        for (int i = 0; i < kMaxTrackOnsetsPerBeat; ++i) {
+            busy.push_back(ns(60 + i % 12, i * 60, kMinTrackNoteTicks));
+        }
+        REQUIRE(store.insertNotes(2, busy).size() == busy.size());
+        REQUIRE(densestOnsetWindow(store.doc()) == kMaxTrackOnsetsPerBeat);
+        store.setNoteSelection(kNoTrackId, {});
+        const DocumentStore reference = store;
+        std::string refusal;
+        CHECK_FALSE(store.generateBass(1, BassPattern::RootPulse, {1}, &refusal));
+        CHECK(refusal == kOnsetMessage);
+        checkRefused(store, reference);
+        CHECK(store.generateBass(1, BassPattern::RootPulse, {2}, &refusal));
+        CHECK(refusal.empty());
+        CHECK(densestOnsetWindow(store.doc()) == kMaxTrackOnsetsPerBeat);
+    }
+    SUBCASE("more than kMaxNotesPerTrack notes") {
+        // Five 64-beat chords in 7/8: 256 subdivisions each, 1280 Octaves notes; two to the beat over all tracks.
+        DocumentStore store;
+        store.setMeter({7, 8});
+        for (int i = 0; i < 5; ++i) {
+            REQUIRE(store.appendChord(kC, kMaxLengthBeats) == i + 1);
+        }
+        REQUIRE(store.addTrack(TrackRole::Bass) == 1);
+        const DocumentStore reference = store;
+        std::string refusal;
+        CHECK_FALSE(store.generateBass(1, BassPattern::Octaves, {}, &refusal));
+        CHECK(refusal == "At most " + std::to_string(kMaxNotesPerTrack) + " notes per track");
+        checkRefused(store, reference);
+        CHECK(store.generateBass(1, BassPattern::Octaves, {1, 2, 3, 4}, &refusal));  // exactly 1024
+        CHECK(notesOf(store).size() == static_cast<std::size_t>(kMaxNotesPerTrack));
+    }
+}
+
+TEST_CASE("generateBass: nothing owned and nothing generated is a no-op; silence still removes the owned notes") {
+    DocumentStore store;
+    REQUIRE(store.appendChord(kC, 0.5) == 1);
+    REQUIRE(store.addTrack(TrackRole::Bass) == 1);
+    Feel down;
+    down.rhythm = Rhythm::Arpeggio;
+    down.pattern = ArpPattern::Down;
+    down.rate = ArpRate::Half;
+    store.setFeel(down);  // [0, 480) plays G then E: Follow feel finds no C
+    const DocumentStore reference = store;
+    std::string refusal = "stale";
+    CHECK_FALSE(store.generateBass(1, BassPattern::FollowFeel, {}, &refusal));
+    CHECK(refusal.empty());
+    checkRefused(store, reference);
+    REQUIRE(store.insertNotes(1, {ns(36, 0, 240)}).size() == 1);
+    CHECK(store.generateBass(1, BassPattern::FollowFeel, {1}, &refusal));
+    CHECK(refusal.empty());
+    CHECK(notesOf(store).empty());
+}
+
+TEST_CASE("generateBass: a repeat in the scope counts once; regenerating makes a new step with fresh ids") {
+    DocumentStore store = threeChordsAndBass();
+    REQUIRE(store.generateBass(1, BassPattern::Roots, {2, 2}));
+    CHECK(notesOf(store) == std::vector<TrackNote>{TrackNote{1, 29, 2, 0, kBar, 100}});
+    const std::uint64_t revision = store.revision();
+    REQUIRE(store.generateBass(1, BassPattern::Roots, {2}));
+    CHECK(notesOf(store) == std::vector<TrackNote>{TrackNote{2, 29, 2, 0, kBar, 100}});
+    CHECK(store.revision() == revision + 1);
+    REQUIRE(store.undo());
+    CHECK(noteIdsOf(store) == std::vector<int>{1});
+}
+
+TEST_CASE("generateBass: the notes are anchored to their chords, so a later resize carries them") {
+    DocumentStore store = threeChordsAndBass();
+    REQUIRE(store.generateBass(1, BassPattern::RootPulse, {}));
+    REQUIRE(notesOf(store).size() == 12);
+    const std::vector<TrackNote> before = notesOf(store);
+    REQUIRE(store.setLength(1, 8.0));  // F and G7 start a bar later; their notes keep chord and offset
+    CHECK(notesOf(store) == before);
+    for (const TrackNote& n : notesOf(store)) {
+        const std::int64_t chordStart = n.anchorEventId == 1 ? 0 : (n.anchorEventId == 2 ? 2 * kBar : 3 * kBar);
+        CHECK(noteStart(store.doc(), n) == chordStart + n.offsetTick);
+    }
+}
+
+TEST_CASE("generateBass: a role never limits the track it writes to") {
+    DocumentStore store = threeChords();
+    REQUIRE(store.addTrack(TrackRole::Lead) == 1);
+    REQUIRE(store.addTrack(TrackRole::Other) == 2);
+    CHECK(store.generateBass(1, BassPattern::Octaves, {1}));
+    CHECK(store.generateBass(2, BassPattern::RootFifth, {3}));
+    CHECK(notesOf(store, 0).size() == 8);
+    CHECK(notesOf(store, 1).size() == 4);
 }

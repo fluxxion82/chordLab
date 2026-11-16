@@ -477,7 +477,7 @@ DocumentStore prefilledTrackStore(bool withRedo = false) {
     return store;
 }
 
-/// One valid message per track and note command (and `insertChords` with notes), against `prefilledTrackStore(false)`:
+/// One valid message per track and note command (and `insertChords` with notes, and `generateBass`), against `prefilledTrackStore(false)`:
 /// `revision` is that store's revision, for the `baseRevision` entries (stale on a store with a redo step, which is
 /// the refusal path).
 std::vector<std::string> trackCommandCorpus(std::uint64_t revision) {
@@ -505,6 +505,10 @@ std::vector<std::string> trackCommandCorpus(std::uint64_t revision) {
          {"notes", json::array({json({{"id", 1}, {"pitch", 50}, {"velocity", 30}}),
                                 json({{"id", 2}, {"start", 7700}, {"length", 480}})})},
          {"baseRevision", revision}},
+        {{"cmd", "generateBass"}, {"trackId", 1}, {"pattern", "walking"}, {"scope", json::array({3, 1, 3})}},
+        {{"cmd", "generateBass"}, {"trackId", 3}, {"pattern", "octaves"}},
+        {{"cmd", "generateBass"}, {"trackId", 2}, {"pattern", "followFeel"}, {"scope", json::array()}},
+        {{"cmd", "generateBass"}, {"trackId", 1}, {"pattern", "rootFifth"}, {"scope", json::array({4})}},
         {{"cmd", "selectNotes"}, {"trackId", 1}, {"ids", json::array({3, 1, 77})}},
         {{"cmd", "selectNotes"}, {"trackId", nullptr}, {"ids", json::array()}},
         {{"cmd", "insertChords"}, {"index", 1},
@@ -839,6 +843,9 @@ TEST_CASE("json robustness: integers at the edges of 64 and 32 bits are refused 
     sweep(R"({"schema":1,"cmd":"removeNotes","trackId":1,"ids":[1],"baseRevision":)", "}");
     sweep(R"({"schema":1,"cmd":"removeNotes","trackId":1,"ids":[)", "]}");
     sweep(R"({"schema":1,"cmd":"selectNotes","trackId":)", R"(,"ids":[1]})");
+    sweep(R"({"schema":1,"cmd":"generateBass","pattern":"roots","trackId":)", "}");
+    sweep(R"({"schema":1,"cmd":"generateBass","trackId":1,"pattern":"roots","scope":[)", "]}");
+    sweep(R"({"schema":1,"cmd":"generateBass","trackId":1,"pattern":"walking","scope":[2,)", "]}");
     sweep(R"({"schema":1,"cmd":"moveTrack","id":1,"index":)", "}");
     sweep(R"({"schema":1,"cmd":"setTrackMute","on":true,"id":)", "}");
     sweep(R"({"schema":1,"cmd":"removeTrack","id":)", "}");

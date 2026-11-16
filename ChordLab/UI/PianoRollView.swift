@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// The open track's piano roll (tracks design D14), in the place the suggestions, palette and home row take with
@@ -8,8 +9,8 @@ import SwiftUI
 ///   centre, each disabled at its limit), Other tracks (the faint outlines of the other tracks' notes, default on),
 ///   and the nudge buttons ◀ ▶ ▲ ▼ (`RollNudge`: one `updateNotes` per press for the selected notes, each enabled
 ///   only for a direction the selection can move in). Grid, Snap pitch, Mode, zoom and Other tracks change the
-///   track's view state (`ChordLabState.rolls`), never the document: nothing is sent. Generate ▸ comes with the bass
-///   generator (M4).
+///   track's view state (`ChordLabState.rolls`), never the document: nothing is sent. Generate ▸ (after Mode, D14)
+///   writes a bass line (`GenerateOptions`: one `generateBass` per choice, for the selected chords or every chord).
 /// - **Chord ribbon** (`ribbonHeight`) over the grid: the meter's bar numbers and pulse ticks (the sequence ruler's
 ///   look), then the chord symbols over their playback spans on their sections' tints (`SectionStyle`), the chord
 ///   boundaries, the dashed end line, and the playhead.
@@ -55,6 +56,7 @@ struct PianoRollView: View {
                     showsOtherTracks: view.showsOtherTracks, canZoomIn: geometry.canZoomIn,
                     canZoomOut: geometry.canZoomOut,
                     nudges: RollNudge.availability(trackId: track.id, snapshot: snapshot, timing: timing, grid: view.grid),
+                    generate: GenerateOptions.menu(snapshot, lineage: state.clipboardToken),
                     actions: .roll(of: state, trackId: track.id))
           .equatable()
         VStack(spacing: 0) {
@@ -114,8 +116,8 @@ struct PianoRollView: View {
   }
 }
 
-/// What the roll's toolbar does (`RollToolbar`): the `ChordLabState` roll setters of one track, and its nudge (the only
-/// toolbar action that sends a command).
+/// What the roll's toolbar does (`RollToolbar`): the `ChordLabState` roll setters of one track, its nudge and its
+/// Generate menu (the toolbar actions that send a command).
 struct RollToolbarActions {
   let setGrid: @MainActor (RollGrid) -> Void
   let setSnap: @MainActor (PitchSnap) -> Void
@@ -124,6 +126,7 @@ struct RollToolbarActions {
   let zoomIn: @MainActor () -> Void
   let zoomOut: @MainActor () -> Void
   let nudge: @MainActor (ArrowDirection) -> Void
+  let generate: @MainActor (GenerateEntry) -> Void
 
   /// Track `trackId`'s setters on `state`.
   static func roll(of state: ChordLabState, trackId: Int) -> RollToolbarActions {
@@ -133,13 +136,19 @@ struct RollToolbarActions {
                        setShowsOtherTracks: { state.setRollShowsOtherTracks(trackId: trackId, $0) },
                        zoomIn: { state.zoomRollIn(trackId: trackId) },
                        zoomOut: { state.zoomRollOut(trackId: trackId) },
-                       nudge: { state.nudgeRoll(trackId: trackId, $0) })
+                       nudge: { state.nudgeRoll(trackId: trackId, $0) },
+                       generate: { state.generateBass(trackId: trackId, $0) })
   }
 }
 
 /// The roll's toolbar (tracks design D14; see `PianoRollView`): plain values and an actions struct, no observed
 /// object, and `Equatable` over the values (the actions are the same setters of the same track, `trackId`), so
-/// with `.equatable()` it re-renders only when a value changes: never on a scroll or a transport push.
+/// with `.equatable()` it re-renders only when a value changes: never on a scroll or a transport push. The Generate
+/// menu's model is one of the values, so a chord selection or Loop change updates the menu.
+///
+/// The row is laid out twice in a `ViewThatFits`: Generate reads "Generate" when the row has room for it, and shrinks
+/// to its icon (same menu, same accessibility label) when not, as at the 700-pt minimum width with the widest Grid
+/// (1/16T) and Snap (Chord + tensions) titles.
 struct RollToolbar: View, Equatable {
   let trackId: Int
   let grid: RollGrid
@@ -150,12 +159,14 @@ struct RollToolbar: View, Equatable {
   let canZoomOut: Bool
   /// Which nudge buttons are enabled (`RollNudge.availability`).
   let nudges: RollNudgeAvailability
+  /// The Generate menu (`GenerateOptions.menu`): its groups, the Walking note, whether it is enabled, value and help.
+  let generate: GenerateMenu
   let actions: RollToolbarActions
 
   static func == (a: RollToolbar, b: RollToolbar) -> Bool {
     a.trackId == b.trackId && a.grid == b.grid && a.snap == b.snap && a.mode == b.mode
       && a.showsOtherTracks == b.showsOtherTracks && a.canZoomIn == b.canZoomIn && a.canZoomOut == b.canZoomOut
-      && a.nudges == b.nudges
+      && a.nudges == b.nudges && a.generate == b.generate
   }
 
   /// An icon button's square (zoom, nudges): borderless, like the lane tab row's +, so the widest toolbar (Grid
@@ -163,7 +174,19 @@ struct RollToolbar: View, Equatable {
   static let iconSize: CGFloat = 20
 
   var body: some View {
-    HStack(spacing: 8) {
+    ViewThatFits(in: .horizontal) {
+      row(compactGenerate: false)
+      row(compactGenerate: true)
+    }
+    .font(.system(size: 12))
+    .controlSize(.small)
+    .frame(height: PianoRollView.toolbarHeight)
+  }
+
+  /// One layout of the row: `compactGenerate` draws Generate as its icon and tightens the gaps from 8 to 6 pt, which
+  /// leaves the widest row at the 700-pt minimum width some room (with 8-pt gaps it would fit with none to spare).
+  private func row(compactGenerate: Bool) -> some View {
+    HStack(spacing: compactGenerate ? 6 : 8) {
       Menu {
         ForEach(RollGrid.allCases, id: \.self) { option in
           Button(option.title + (option == grid ? "  ✓" : "")) { actions.setGrid(option) }
@@ -197,6 +220,8 @@ struct RollToolbar: View, Equatable {
       .fixedSize()
       .help("Notes: draw, move and resize; Velocity: drag a note up or down to change how hard it plays")
 
+      generateMenu(compact: compactGenerate)
+
       HStack(spacing: 0) {
         iconButton("minus.magnifyingglass", label: "Zoom out", help: "Zoom out in time",
                    enabled: canZoomOut) { actions.zoomOut() }
@@ -227,9 +252,59 @@ struct RollToolbar: View, Equatable {
                    enabled: nudges.down) { actions.nudge(.down) }
       }
     }
-    .font(.system(size: 12))
-    .controlSize(.small)
-    .frame(height: PianoRollView.toolbarHeight)
+  }
+
+  /// The SF Symbol of the compact Generate menu.
+  static let generateSymbol = "wand.and.stars"
+
+  /// The compact Generate menu's icon at the icon buttons' 12-pt medium weight. Made as an `NSImage` with its own
+  /// accessibility description, because the menu button reports its image's description ("Magic wand with sparkles"
+  /// for `Image(systemName:)`) before the menu's label.
+  static let generateIcon: Image = {
+    let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .medium)
+    guard let image = NSImage(systemSymbolName: generateSymbol, accessibilityDescription: "Generate")?
+      .withSymbolConfiguration(config) else { return Image(systemName: generateSymbol) }
+    return Image(nsImage: image)
+  }()
+
+  /// Generate ▸ (`GenerateOptions.menu`): a header per group naming what it replaces, the six patterns under each, the
+  /// Walking note last; choosing an entry sends its one `generateBass`. Disabled on an empty progression, its tooltip
+  /// then saying why. `compact` draws only the icon, borderless and without the menu arrow, in an icon button's square.
+  @ViewBuilder private func generateMenu(compact: Bool) -> some View {
+    let menu = Menu {
+      ForEach(generate.groups) { group in
+        Section(group.title) {
+          ForEach(group.entries) { entry in
+            Button(entry.title) { actions.generate(entry) }
+          }
+        }
+      }
+      if let note = generate.walkingNote {
+        Section { Text(note) }
+      }
+    } label: {
+      if compact {
+        Self.generateIcon
+          .frame(width: Self.iconSize, height: Self.iconSize)
+          .contentShape(Rectangle())
+      } else {
+        Text("Generate")
+      }
+    }
+    Group {
+      if compact {
+        menu.menuStyle(.borderlessButton).menuIndicator(.hidden)
+          .frame(width: Self.iconSize, height: Self.iconSize)
+          .contentShape(Rectangle())
+      } else {
+        menu
+      }
+    }
+    .fixedSize()
+    .disabled(!generate.isEnabled)
+    .help(generate.help)
+    .accessibilityLabel("Generate")
+    .accessibilityValue(generate.value)
   }
 
   private func iconButton(_ symbol: String, label: String, help: String, enabled: Bool,

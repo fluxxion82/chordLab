@@ -646,6 +646,19 @@ class ChordLabState: NSObject, ObservableObject {
     send(command: command.json)
   }
 
+  /// The toolbar's Generate menu for track `trackId` (`GenerateOptions`): the chosen entry's one `generateBass` (its
+  /// pattern, and the chord ids it was offered for, or none for every chord): one undo step, no confirmation. Nothing
+  /// when the snapshot and document lineage (`clipboardToken`) current now no longer offer the entry
+  /// (`GenerateOptions.command(for:trackId:in:lineage:)`: the menu was drawn for another selection, or for the
+  /// document a state load has since replaced). A refusal ("Add chords first", the track limits) comes back as any
+  /// refused command does (`applyError`, `lastError`).
+  @MainActor func generateBass(trackId: Int, _ entry: GenerateEntry) {
+    guard let snapshot,
+          let command = GenerateOptions.command(for: entry, trackId: trackId, in: snapshot,
+                                                lineage: clipboardToken) else { return }
+    send(command: command)
+  }
+
   /// Whether the pasteboard holds ChordLab notes (the roll menu's Paste here is disabled otherwise).
   @MainActor var canPasteNotes: Bool {
     NoteClipboard.paste(from: pasteboard) != nil

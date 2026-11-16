@@ -6,6 +6,7 @@
 #include "chordlab/document.h"
 #include "chordlab/feel.h"
 #include "chordlab/function.h"
+#include "chordlab/generate.h"
 #include "chordlab/guide.h"
 #include "chordlab/harmony.h"
 #include "chordlab/identify.h"
@@ -943,6 +944,7 @@ struct Command {
         InsertNotes,
         RemoveNotes,
         UpdateNotes,
+        GenerateBass,
         SelectNotes,
         Undo,
         Redo
@@ -979,13 +981,14 @@ struct Command {
     bool hasName = false;                             // AddTrack, PatchTrack: a `name` was given (it travels in `name`)
     bool hasBaseRevision = false;                     // InsertNotes, RemoveNotes, UpdateNotes: `baseRevision` was given
     std::uint64_t baseRevision = 0;                   // ... and this is it
+    BassPattern bassPattern = BassPattern::Roots;     // GenerateBass (its scope travels in `CommandLists::ids`)
 };
 static_assert(std::is_trivially_destructible_v<Command>, "Command must be plain data: destroying one must not allocate");
 
 /// What a command carries besides `Command`'s plain fields, owned by the reader's frame like the section name:
 /// the chords of `insertChords` (with their notes), the ids of `removeChords`, `setLengths`, `selectEvents`,
-/// `removeNotes` and `selectNotes`, and the notes of `insertNotes` and `updateNotes`. Its destructor frees,
-/// never allocates.
+/// `removeNotes` and `selectNotes` and the scope of `generateBass`, and the notes of `insertNotes` and
+/// `updateNotes`. Its destructor frees, never allocates.
 struct CommandLists {
     std::vector<ChordSpec> chords;
     std::vector<int> ids;
@@ -1371,27 +1374,29 @@ bool parseInsertChords(Fields& fields, Command& out, std::vector<ChordSpec>& cho
     return true;
 }
 
-/// `ids`: an array of integers, non-empty unless `allowEmpty` (`selectEvents`, where an empty list clears).
-/// Repeats and ids no event has are kept here; the store skips them. A bad element is named by its index
-/// ("ids[1] must be an integer").
+/// `ids` (or the array field `name`): an array of integers, non-empty unless `allowEmpty` (`selectEvents`, where an
+/// empty list clears), of at most `maxCount`. Repeats and ids no event has are kept here: the store call decides what
+/// they mean (most skip an unknown id, `generateBass` refuses one in its `scope`). Each
+/// element is read through `toInt` (a JSON integer that fits an `int`, checked at 64 bits, never wrapped) and a bad
+/// one is named by its index ("ids[1] must be an integer", "scope[2] must be an integer").
 bool parseIds(Fields& fields, bool allowEmpty, std::vector<int>& ids, std::string& error,
-              std::size_t maxCount = std::numeric_limits<std::size_t>::max()) {
-    const json* list = fields.getArray("ids");
+              std::size_t maxCount = std::numeric_limits<std::size_t>::max(), const char* name = "ids") {
+    const json* list = fields.getArray(name);
     if (list == nullptr) {
         return false;
     }
     if (list->empty() && !allowEmpty) {
-        return fields.fail("ids", "must hold at least one id");
+        return fields.fail(name, "must hold at least one id");
     }
     if (list->size() > maxCount) {
-        return fields.fail("ids", "must hold at most " + std::to_string(maxCount) + " ids");
+        return fields.fail(name, "must hold at most " + std::to_string(maxCount) + " ids");
     }
     ids.clear();
     ids.reserve(list->size());
     for (std::size_t i = 0; i < list->size(); ++i) {
         int id = 0;
         if (!toInt((*list)[i], id)) {
-            error = "ids[" + std::to_string(i) + "] must be an integer";
+            error = std::string(name) + "[" + std::to_string(i) + "] must be an integer";
             return false;
         }
         ids.push_back(id);
@@ -1545,6 +1550,34 @@ bool parseRemoveNotes(Fields& fields, Command& out, std::vector<int>& ids, std::
     out.kind = Command::Kind::RemoveNotes;
     return fields.getInt("trackId", out.id) && parseIds(fields, true, ids, error, static_cast<std::size_t>(kMaxNotesPerTrack)) &&
            parseBaseRevision(fields, out);
+}
+
+/// `generateBass {trackId, pattern, scope?}`: `pattern` one of the `bassPatternName` names (missing is "missing
+/// \"pattern\"", anything else one message listing the six); `scope` absent, or an array of at most `kMaxChords`
+/// integers read as `ids` are (absent or empty: every chord), into `ids`. No `baseRevision`: not a drag.
+bool parseGenerateBass(Fields& fields, Command& out, std::vector<int>& ids, std::string& error) {
+    out.kind = Command::Kind::GenerateBass;
+    if (!fields.getInt("trackId", out.id)) {
+        return false;
+    }
+    const json* pattern = fields.require("pattern");
+    if (pattern == nullptr) {
+        return false;
+    }
+    const std::optional<BassPattern> named =
+        pattern->is_string() ? bassPatternFromName(pattern->get_ref<const std::string&>()) : std::nullopt;
+    if (!named) {
+        std::string expected = "must be ";
+        for (int i = 0; i < kBassPatternCount; ++i) {
+            expected += std::string(i == 0 ? "" : (i + 1 == kBassPatternCount ? " or " : ", ")) + "\"" +
+                        bassPatternName(static_cast<BassPattern>(i)) + "\"";
+        }
+        return fields.fail("pattern", expected);
+    }
+    out.bassPattern = *named;
+    ids.clear();
+    return !fields.has("scope") ||
+           parseIds(fields, true, ids, error, static_cast<std::size_t>(kMaxChords), "scope");
 }
 
 /// `selectNotes {trackId, ids}`: `trackId` an integer, or null for no track (null, like `kNoTrackId` = -1, clears the
@@ -1748,6 +1781,9 @@ bool parseCommand(std::string_view text, Command& out, std::string& name, Comman
     if (cmd == "updateNotes") {
         return parseUpdateNotes(fields, out, lists.edits, error);
     }
+    if (cmd == "generateBass") {
+        return parseGenerateBass(fields, out, lists.ids, error);
+    }
     if (cmd == "selectNotes") {
         return parseSelectNotes(fields, out, lists.ids, error);
     }
@@ -1815,6 +1851,8 @@ const char* commandWireName(Command::Kind kind) {
             return "removeNotes";
         case Command::Kind::UpdateNotes:
             return "updateNotes";
+        case Command::Kind::GenerateBass:
+            return "generateBass";
         default:
             break;
     }
@@ -2069,6 +2107,8 @@ Refusal applyCommand(DocumentStore& store, const Command& command, std::string& 
                 return Refusal::Store;
             }
             return storeRefusal(store.updateNotes(command.id, lists.edits, &reason), reason);
+        case Command::Kind::GenerateBass:
+            return storeRefusal(store.generateBass(command.id, command.bassPattern, lists.ids, &reason), reason);
         case Command::Kind::SelectNotes:
             store.setNoteSelection(command.id, lists.ids);  // live state; an unknown track is a no-op, as selectEvent
             return Refusal::None;

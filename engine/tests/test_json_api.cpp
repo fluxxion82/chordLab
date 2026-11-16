@@ -5022,6 +5022,103 @@ TEST_CASE("removeNotes: removes the listed notes of the track, unknown ids skipp
     CHECK(noteIds(store) == std::vector<int>{1, 2, 3});
 }
 
+TEST_CASE("generateBass: replaces the scope's notes in one undo step, every chord without a scope, nothing selected") {
+    DocumentStore store = chordsAndNotes();
+    store.setNoteSelection(1, {1, 2});
+    const std::uint64_t revision = store.revision();
+    const std::pair<int, int> depth = historyDepth(store);
+    CHECK(changes(store, {{"cmd", "generateBass"}, {"trackId", 1}, {"pattern", "roots"}, {"scope", {3, 1}}}));
+    CHECK(notesOfTrack(store) == std::vector<TrackNote>{TrackNote{4, 36, 1, 0, kBarTicks, 100},
+                                                        TrackNote{2, 38, 2, 200, 480, 100},
+                                                        TrackNote{5, 31, 3, 0, kBarTicks, 100}});
+    CHECK(store.revision() == revision + 1);
+    CHECK(historyDepth(store).first == depth.first + 1);
+    CHECK(store.noteSelection() == NoteSelection{1, {2}});  // the generated notes are not selected
+    // No scope, and an empty one: every chord.
+    CHECK(changes(store, {{"cmd", "generateBass"}, {"trackId", 1}, {"pattern", "rootPulse"}}));
+    CHECK(notesOfTrack(store).size() == 12);
+    CHECK(changes(store, {{"cmd", "generateBass"}, {"trackId", 1}, {"pattern", "octaves"}, {"scope", json::array()}}));
+    CHECK(notesOfTrack(store).size() == 24);
+    // Every pattern name is accepted; a baseRevision is not read (this is not a drag), stale or not.
+    for (const char* pattern : {"roots", "rootPulse", "rootFifth", "octaves", "followFeel", "walking"}) {
+        CAPTURE(pattern);
+        CHECK(changes(store, {{"cmd", "generateBass"}, {"trackId", 1}, {"pattern", pattern}, {"scope", {2}},
+                              {"baseRevision", 1}}));
+    }
+    applyOk(store, {{"cmd", "undo"}});
+    applyOk(store, {{"cmd", "undo"}});
+    CHECK(changes(store, {{"cmd", "generateBass"}, {"trackId", 1}, {"pattern", "walking"}, {"scope", {1}}}));
+    CHECK(notesOfTrack(store).front().pitch == 36);
+}
+
+TEST_CASE("generateBass: nothing owned and nothing generated is an accepted no-op") {
+    DocumentStore store;
+    REQUIRE(store.appendChord(kC, 0.5) == 1);
+    REQUIRE(store.addTrack(TrackRole::Bass) == 1);
+    applyOk(store, {{"cmd", "setFeel"}, {"rhythm", "arpeggio"}, {"arpPattern", "down"}, {"arpRate", "half"},
+                    {"strum", "off"}, {"strumSpeed", "medium"}, {"humanise", "off"}});
+    const std::uint64_t revision = store.revision();
+    CHECK_FALSE(changes(store, {{"cmd", "generateBass"}, {"trackId", 1}, {"pattern", "followFeel"}}));
+    CHECK(store.revision() == revision);
+}
+
+TEST_CASE("generateBass: refusals by the store name the command and its reason") {
+    DocumentStore store = chordsAndNotes();
+    checkRefusedWith(store, {{"cmd", "generateBass"}, {"trackId", 9}, {"pattern", "roots"}}, "generateBass",
+                     "No track with id 9");
+    checkRefusedWith(store, {{"cmd", "generateBass"}, {"trackId", 1}, {"pattern", "roots"}, {"scope", {1, 42}}},
+                     "generateBass", "No chord with id 42");
+    DocumentStore empty;
+    REQUIRE(empty.addTrack(TrackRole::Lead) == 1);
+    checkRefusedWith(empty, {{"cmd", "generateBass"}, {"trackId", 1}, {"pattern", "walking"}}, "generateBass",
+                     "Add chords first");
+    // Eight notes sounding over the second half of G7 on another track, after the bass's own short note there:
+    // Roots over G7 replaces that note with one lasting the chord, a ninth sounding note.
+    REQUIRE(store.addTrack(TrackRole::Lead) == 2);
+    std::vector<NoteSpec> pad;
+    for (int i = 0; i < kMaxTrackPolyphony; ++i) {
+        pad.push_back(NoteSpec{60 + i, 2 * kBarTicks + 2 * kFeelTicksPerBeat, 2 * kFeelTicksPerBeat});
+    }
+    REQUIRE(store.insertNotes(2, pad).size() == static_cast<std::size_t>(kMaxTrackPolyphony));
+    checkRefusedWith(store, {{"cmd", "generateBass"}, {"trackId", 1}, {"pattern", "roots"}, {"scope", {3}}},
+                     "generateBass", "At most " + std::to_string(kMaxTrackPolyphony) + " track notes can sound at once");
+}
+
+TEST_CASE("generateBass: every field's type and range error names the field, scope entries with their index") {
+    DocumentStore store = chordsAndNotes();
+    const std::string patterns =
+        "must be \"roots\", \"rootPulse\", \"rootFifth\", \"octaves\", \"followFeel\" or \"walking\"";
+    checkError(store, {{"cmd", "generateBass"}, {"pattern", "roots"}}, "missing \"trackId\"");
+    for (const json& v : {json("1"), json(1.5), json(nullptr), json(true), json(2147483648ll), json(-2147483649ll)}) {
+        checkError(store, {{"cmd", "generateBass"}, {"trackId", v}, {"pattern", "roots"}}, "\"trackId\" must be an integer");
+    }
+    checkError(store, {{"cmd", "generateBass"}, {"trackId", 1}}, "missing \"pattern\"");
+    for (const json& v : {json("Roots"), json("root"), json(""), json(0), json(nullptr), json::array({"roots"})}) {
+        checkError(store, {{"cmd", "generateBass"}, {"trackId", 1}, {"pattern", v}}, "\"pattern\" " + patterns);
+    }
+    for (const json& v : {json("1"), json(1), json(nullptr), json::object()}) {
+        checkError(store, {{"cmd", "generateBass"}, {"trackId", 1}, {"pattern", "roots"}, {"scope", v}},
+                   "\"scope\" must be an array");
+    }
+    for (const json& v : {json("2"), json(1.5), json(nullptr), json(true), json(2147483648ll), json(-2147483649ll)}) {
+        checkError(store, {{"cmd", "generateBass"}, {"trackId", 1}, {"pattern", "roots"}, {"scope", {1, 2, v}}},
+                   "scope[2] must be an integer");
+    }
+    json many = json::array();
+    for (int i = 0; i <= kMaxChords; ++i) {
+        many.push_back(1);
+    }
+    checkError(store, {{"cmd", "generateBass"}, {"trackId", 1}, {"pattern", "roots"}, {"scope", many}},
+               "\"scope\" must hold at most " + std::to_string(kMaxChords) + " ids");
+    many.erase(many.size() - 1);  // exactly kMaxChords: accepted (repeats count once)
+    CHECK(changes(store, {{"cmd", "generateBass"}, {"trackId", 1}, {"pattern", "roots"}, {"scope", many}}));
+    // Beyond 64 bits as raw text.
+    const std::string head = R"({"schema":1,"cmd":"generateBass","trackId":1,"pattern":"roots","scope":[)";
+    for (const char* beyond : {"9223372036854775808", "-9223372036854775809", "18446744073709551616", "1e19"}) {
+        checkErrorRaw(store, head + beyond + "]}", "scope[0] must be an integer");
+    }
+}
+
 TEST_CASE("updateNotes: absolute values, a moved start re-anchors, an absent field keeps the note's, no-ops accepted") {
     DocumentStore store = chordsAndNotes();
     const std::vector<TrackNote> before = notesOfTrack(store);
