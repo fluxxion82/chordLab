@@ -1,6 +1,7 @@
 #include "doctest.h"
 
 #include "chordlab/chord.h"
+#include "chordlab/compiler.h"
 #include "chordlab/document.h"
 #include "chordlab/feel.h"
 #include "chordlab/generate.h"
@@ -53,6 +54,13 @@ DocumentStore threeChords() {
 DocumentStore threeChordsAndBass() {
     DocumentStore store = threeChords();
     REQUIRE(store.addTrack(TrackRole::Bass) == 1);
+    return store;
+}
+
+/// `threeChords` plus one empty Lead track (id 1).
+DocumentStore threeChordsAndLead() {
+    DocumentStore store = threeChords();
+    REQUIRE(store.addTrack(TrackRole::Lead) == 1);
     return store;
 }
 
@@ -2875,4 +2883,213 @@ TEST_CASE("generateBass: a role never limits the track it writes to") {
     CHECK(store.generateBass(2, BassPattern::RootFifth, {3}));
     CHECK(notesOf(store, 0).size() == 8);
     CHECK(notesOf(store, 1).size() == 4);
+}
+
+// --- generateLead (D22): the same transaction as generateBass ----------------------------------
+
+TEST_CASE("generateLead: replaces the notes the scope's chords own, one undo step, fresh ids, nothing selected") {
+    DocumentStore store = threeChordsAndLead();
+    REQUIRE(store.insertNotes(1, {ns(60, 100, 480), ns(62, kBar + 200, 480), ns(64, 2 * kBar + 300, 480)}) ==
+            std::vector<int>{1, 2, 3});
+    store.setNoteSelection(1, {1, 2});
+    const std::uint64_t revision = store.revision();
+    std::string refusal = "stale";
+    // Held tone over C and G7 (a non-contiguous scope, in any order): C holds C5; F, outside the scope, still moves
+    // the line (to C5); G7 holds B4, nearest C5.
+    CHECK(store.generateLead(1, LeadPattern::HeldTone, {3, 1}, 0, &refusal));
+    CHECK(refusal.empty());
+    CHECK(notesOf(store) == std::vector<TrackNote>{TrackNote{4, 72, 1, 0, kBar, 100}, TrackNote{2, 62, 2, 200, 480, 100},
+                                                   TrackNote{5, 71, 3, 0, kBar, 100}});
+    CHECK(store.nextNoteId() == 6);
+    CHECK(store.revision() == revision + 1);
+    CHECK(store.noteSelection() == NoteSelection{1, {2}});  // the generated notes are not selected
+    const std::vector<TrackNote> generatedNotes = notesOf(store);
+    REQUIRE(store.undo());
+    CHECK(noteIdsOf(store) == std::vector<int>{1, 2, 3});
+    REQUIRE(store.redo());
+    CHECK(notesOf(store) == generatedNotes);
+    // The store writes exactly the pure generator's notes, for every pattern.
+    for (int p = 0; p < kLeadPatternCount; ++p) {
+        const auto pattern = static_cast<LeadPattern>(p);
+        CAPTURE(leadPatternName(pattern));
+        DocumentStore fresh = threeChordsAndLead();
+        const std::vector<GeneratedNote> expected = generateLead(fresh.doc(), pattern, {});
+        checkOneStep(fresh, [&](DocumentStore& s) { REQUIRE(s.generateLead(1, pattern, {}, 0)); });
+        REQUIRE(notesOf(fresh).size() == expected.size());
+        for (std::size_t i = 0; i < expected.size(); ++i) {
+            const TrackNote& n = notesOf(fresh)[i];
+            CHECK(n.id == static_cast<int>(i) + 1);
+            CHECK(GeneratedNote{n.anchorEventId, n.offsetTick, n.lengthTicks, n.pitch, n.velocity} == expected[i]);
+        }
+    }
+}
+
+TEST_CASE("generateLead: owned notes go, inactive ones included; notes of other chords and tracks stay") {
+    DocumentStore store = threeChordsAndLead();
+    REQUIRE(store.addTrack(TrackRole::Bass) == 2);
+    REQUIRE(store.insertNotes(1, {ns(70, 3000, 480), ns(65, kBar, 2 * kBar)}) == std::vector<int>{1, 2});
+    REQUIRE(store.insertNotes(2, {ns(36, 100, 480)}) == std::vector<int>{3});
+    REQUIRE(store.setLength(1, 2.0));  // C ends at 1920: note 1 (offset 3000) is inactive, kept
+    REQUIRE_FALSE(noteActive(store.doc(), notesOf(store).back()));
+    const Track bass = trackAt(store, 1);
+    REQUIRE(store.generateLead(1, LeadPattern::HeldTone, {1}, 0));
+    // C's inactive note went; F's note, lasting into G7, stays.
+    const std::vector<TrackNote>& notes = notesOf(store);
+    REQUIRE(notes.size() == 2);
+    CHECK(notes[0] == TrackNote{4, 72, 1, 0, 1920, 100});
+    CHECK(notes[1].id == 2);
+    CHECK(trackAt(store, 1) == bass);
+}
+
+TEST_CASE("generateLead: Motif's variation; non-zero variation refused for the other patterns, negatives for all") {
+    DocumentStore store = threeChordsAndLead();
+    REQUIRE(store.generateLead(1, LeadPattern::Motif, {}, 9));
+    const std::vector<GeneratedNote> nine = generateLead(store.doc(), LeadPattern::Motif, {}, 9);
+    REQUIRE(notesOf(store).size() == nine.size());
+    CHECK(notesOf(store).front().pitch == nine.front().pitch);
+    // 73 is 9 again (modulo 64): the same notes, fresh ids, a new step.
+    const std::vector<TrackNote> before = notesOf(store);
+    const std::uint64_t revision = store.revision();
+    REQUIRE(store.generateLead(1, LeadPattern::Motif, {}, 73));
+    CHECK(store.revision() == revision + 1);
+    REQUIRE(notesOf(store).size() == before.size());
+    for (std::size_t i = 0; i < before.size(); ++i) {
+        CHECK(notesOf(store)[i].id == before[i].id + static_cast<int>(before.size()));
+        CHECK(notesOf(store)[i].pitch == before[i].pitch);
+        CHECK(notesOf(store)[i].offsetTick == before[i].offsetTick);
+    }
+    CHECK(store.generateLead(1, LeadPattern::Motif, {}, INT_MAX));
+    const DocumentStore reference = store;
+    std::string refusal;
+    for (int p = 0; p < kLeadPatternCount; ++p) {
+        const auto pattern = static_cast<LeadPattern>(p);
+        CAPTURE(leadPatternName(pattern));
+        CHECK_FALSE(store.generateLead(1, pattern, {}, -1, &refusal));
+        CHECK(refusal == "variation must not be negative");
+        checkRefused(store, reference);
+        CHECK_FALSE(store.generateLead(1, pattern, {}, INT_MIN, &refusal));
+        CHECK(refusal == "variation must not be negative");
+        checkRefused(store, reference);
+        if (pattern != LeadPattern::Motif) {
+            for (int variation : {1, 64, INT_MAX}) {
+                CHECK_FALSE(store.generateLead(1, pattern, {}, variation, &refusal));
+                CHECK(refusal == "variation is only supported for motif");
+                checkRefused(store, reference);
+            }
+        }
+    }
+    // The arguments are checked first: a bad variation is reported even for an unknown track.
+    CHECK_FALSE(store.generateLead(9, LeadPattern::HeldTone, {}, 1, &refusal));
+    CHECK(refusal == "variation is only supported for motif");
+    checkRefused(store, reference);
+}
+
+TEST_CASE("generateLead: refused for an unknown track, no chords, an unknown scope id, exhausted ids") {
+    DocumentStore store = threeChordsAndLead();
+    const DocumentStore reference = store;
+    std::string refusal;
+    CHECK_FALSE(store.generateLead(9, LeadPattern::Motif, {}, 0, &refusal));
+    CHECK(refusal == "No track with id 9");
+    checkRefused(store, reference);
+    CHECK_FALSE(store.generateLead(1, LeadPattern::Motif, {1, 42, 43}, 0, &refusal));
+    CHECK(refusal == "No chord with id 42");
+    checkRefused(store, reference);
+    DocumentStore empty;
+    REQUIRE(empty.addTrack(TrackRole::Lead) == 1);
+    const DocumentStore emptyReference = empty;
+    CHECK_FALSE(empty.generateLead(1, LeadPattern::Stepwise, {}, 0, &refusal));
+    CHECK(refusal == "Add chords first");
+    checkRefused(empty, emptyReference);
+    // Four Motif notes need four ids below INT_MAX, one Held tone note one.
+    DocumentStore late;
+    Document doc;
+    doc.events.push_back(ChordEvent{1, kC, 4.0, 100});
+    doc.tracks.push_back(Track{1, "Lead", TrackRole::Lead});
+    late.replace(doc, 2, 0, 0, INT_MAX - 2);
+    const DocumentStore lateReference = late;
+    CHECK_FALSE(late.generateLead(1, LeadPattern::Motif, {}, 0, &refusal));
+    CHECK(refusal == "No note ids are left");
+    checkRefused(late, lateReference);
+    CHECK(late.generateLead(1, LeadPattern::HeldTone, {}, 0, &refusal));
+    CHECK(refusal.empty());
+    CHECK(noteIdsOf(late) == std::vector<int>{INT_MAX - 2});
+}
+
+TEST_CASE("generateLead: the capacity pin is refused whole; a smaller scope of the same line fits") {
+    // 32 C power chords of 64 beats under LowThenUpper: within the feel budget, 1,536 Follow feel notes (48 a chord).
+    DocumentStore store;
+    for (int i = 0; i < 32; ++i) {
+        REQUIRE(store.appendChord(chord(0, "5"), kMaxLengthBeats) == i + 1);
+    }
+    store.setFeel(Feel{Rhythm::LowThenUpper});
+    REQUIRE(store.addTrack(TrackRole::Lead) == 1);
+    const DocumentStore reference = store;
+    std::string refusal;
+    CHECK_FALSE(store.generateLead(1, LeadPattern::FollowFeel, {}, 0, &refusal));
+    CHECK(refusal == "At most " + std::to_string(kMaxNotesPerTrack) + " notes per track");
+    checkRefused(store, reference);
+    // Capacity is the replacement's own: 21 chords are 1,008 notes.
+    std::vector<int> scope;
+    for (int id = 1; id <= 21; ++id) {
+        scope.push_back(id);
+    }
+    CHECK(store.generateLead(1, LeadPattern::FollowFeel, scope, 0, &refusal));
+    CHECK(notesOf(store).size() == 21u * 48u);
+}
+
+TEST_CASE("generateLead: nothing owned and nothing generated is a no-op; silence still removes the owned notes") {
+    DocumentStore store;
+    REQUIRE(store.appendChord(kC, 0.5) == 1);
+    REQUIRE(store.addTrack(TrackRole::Lead) == 1);
+    Feel up;
+    up.rhythm = Rhythm::Arpeggio;
+    up.pattern = ArpPattern::Up;
+    up.rate = ArpRate::Half;
+    store.setFeel(up);  // [0, 480) plays C then E: Follow feel finds no G, the top note's class
+    const DocumentStore reference = store;
+    std::string refusal = "stale";
+    CHECK_FALSE(store.generateLead(1, LeadPattern::FollowFeel, {}, 0, &refusal));
+    CHECK(refusal.empty());
+    checkRefused(store, reference);
+    REQUIRE(store.insertNotes(1, {ns(72, 0, 240)}).size() == 1);
+    CHECK(store.generateLead(1, LeadPattern::FollowFeel, {1}, 0, &refusal));
+    CHECK(refusal.empty());
+    CHECK(notesOf(store).empty());
+}
+
+TEST_CASE("generateLead: every Follow feel note is audible in compilePlayback, none merged into a chord note") {
+    // Am, F, C, G under Block feel: Follow feel plays each voicing's top note an octave up. In the same instrument a
+    // lead note in unison with the top note, starting with it, would be merged into the chord's note by playback.
+    DocumentStore store;
+    for (const Chord& c : {chord(9, "min"), kF, kC, chord(7, "maj")}) {
+        store.appendChord(c, 4.0, 100);
+    }
+    REQUIRE(store.addTrack(TrackRole::Lead) == 1);
+    const std::size_t chordEvents = compilePlayback(store.doc()).events.size();
+    REQUIRE(chordEvents == compile(store.doc()).events.size());
+    REQUIRE(store.generateLead(1, LeadPattern::FollowFeel, {}, 0));
+    REQUIRE(notesOf(store).size() == 4);
+    const Compiled played = compilePlayback(store.doc());
+    CHECK(played.events.size() == chordEvents + 2 * notesOf(store).size());
+    const std::vector<std::vector<int>> voiced = voicings(store.doc());
+    for (std::size_t i = 0; i < notesOf(store).size(); ++i) {
+        const TrackNote& n = notesOf(store)[i];
+        CAPTURE(n.pitch);
+        CHECK(n.pitch == voiced[i].back() + 12);
+        const double beat = static_cast<double>(noteStart(store.doc(), n)) / kFeelTicksPerBeat;
+        const auto ons = std::count_if(played.events.begin(), played.events.end(), [&](const NoteEvent& e) {
+            return e.on && e.pitch == n.pitch && e.beat == beat;
+        });
+        CHECK(ons == 1);
+    }
+}
+
+TEST_CASE("generateLead: a role never limits the track it writes to") {
+    DocumentStore store = threeChords();
+    REQUIRE(store.addTrack(TrackRole::Bass) == 1);
+    REQUIRE(store.addTrack(TrackRole::Other) == 2);
+    CHECK(store.generateLead(1, LeadPattern::Arpeggio, {1}, 0));
+    CHECK(store.generateLead(2, LeadPattern::GuideTones, {3}, 0));
+    CHECK(notesOf(store, 0).size() == 8);
+    CHECK(notesOf(store, 1).size() == 2);
 }

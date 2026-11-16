@@ -11,8 +11,9 @@ import SwiftUI
 ///   default on), and the nudge buttons ◀ ▶ ▲ ▼ (`RollNudge`: one `updateNotes` per press for the selected notes,
 ///   each enabled only for a direction the selection can move in). Grid, Snap pitch, Mode, zoom and View change the
 ///   view state (`ChordLabState.rolls`, `guideDisplay`), never the document: nothing is sent. Generate ▸ (after
-///   Mode, D14) writes a bass line (`GenerateOptions`: one `generateBass` per choice, for the selected chords or
-///   every chord) and then scrolls the roll to the notes it wrote.
+///   Mode, D14, D22) writes the lines the track's role offers (`GenerateOptions`: a lead line on a Lead track, a bass
+///   line on a Bass track, either on an Other track; one `generateLead` or `generateBass` per choice, for the
+///   selected chords or every chord) and then scrolls the roll to the notes it wrote.
 /// - **Chord ribbon** (`ribbonHeight`) over the grid: the meter's bar numbers and pulse ticks (the sequence ruler's
 ///   look), then the chord symbols over their playback spans on their sections' tints (`SectionStyle`), the chord
 ///   boundaries, the dashed end line, and the playhead.
@@ -58,7 +59,8 @@ struct PianoRollView: View {
                     showsOtherTracks: view.showsOtherTracks, guides: state.guideDisplay, canZoomIn: geometry.canZoomIn,
                     canZoomOut: geometry.canZoomOut,
                     nudges: RollNudge.availability(trackId: track.id, snapshot: snapshot, timing: timing, grid: view.grid),
-                    generate: GenerateOptions.menu(snapshot, lineage: state.clipboardToken),
+                    generate: GenerateOptions.menu(snapshot, trackId: track.id, role: track.role, take: view.motifTake,
+                                                   lineage: state.clipboardToken),
                     actions: .roll(of: state, trackId: track.id))
           .equatable()
         VStack(spacing: 0) {
@@ -142,15 +144,16 @@ struct RollToolbarActions {
                        zoomIn: { state.zoomRollIn(trackId: trackId) },
                        zoomOut: { state.zoomRollOut(trackId: trackId) },
                        nudge: { state.nudgeRoll(trackId: trackId, $0) },
-                       generate: { state.generateBass(trackId: trackId, $0) })
+                       generate: { state.generate($0) })
   }
 }
 
 /// The roll's toolbar (tracks design D14; see `PianoRollView`): plain values and an actions struct, no observed
 /// object, and `Equatable` over the values (the actions are the same setters of the same track, `trackId`), so
 /// with `.equatable()` it re-renders only when a value changes: never on a scroll or a transport push. The Generate
-/// menu's model is one of the values, so a chord selection or Loop change updates the menu; the View menu's values
-/// are the guide display and Other tracks, so a choice there updates its checkmarks.
+/// menu's model is one of the values (built from the track's role and Motif take, the selection, Loop and the document
+/// lineage), so a role, take, selection, Loop (where the Walking note shows) or lineage change updates the menu; the
+/// View menu's values are the guide display and Other tracks, so a choice there updates its checkmarks.
 ///
 /// The row is laid out twice in a `ViewThatFits`: Generate reads "Generate" when the row has room for it, and shrinks
 /// to its icon (same menu, same accessibility label) when not, as at the 700-pt minimum width with the widest Grid
@@ -167,7 +170,8 @@ struct RollToolbar: View, Equatable {
   let canZoomOut: Bool
   /// Which nudge buttons are enabled (`RollNudge.availability`).
   let nudges: RollNudgeAvailability
-  /// The Generate menu (`GenerateOptions.menu`): its groups, the Walking note, whether it is enabled, value and help.
+  /// The Generate menu (`GenerateOptions.menu` for this track's role and Motif take): its groups and families, the
+  /// Walking note, whether it is enabled, value and help.
   let generate: GenerateMenu
   let actions: RollToolbarActions
 
@@ -293,15 +297,27 @@ struct RollToolbar: View, Equatable {
     return Image(nsImage: image)
   }()
 
-  /// Generate ▸ (`GenerateOptions.menu`): a header per group naming what it replaces, the six patterns under each, the
-  /// Walking note last; choosing an entry sends its one `generateBass`. Disabled on an empty progression, its tooltip
-  /// then saying why. `compact` draws only the icon, borderless and without the menu arrow, in an icon button's square.
+  /// Generate ▸ (`GenerateOptions.menu`): a header per group naming what it replaces; under it the patterns of the
+  /// track's one family listed flat, or, when the track offers two (`nestsFamilies`, an Other track), a submenu per
+  /// family ("Lead line", "Bass line"); the Walking note when bass patterns are offered, last in a flat menu, last
+  /// inside each Bass line submenu of a nested one (`GenerateMenu.Section.note`). Choosing an entry sends
+  /// its one `generateLead` or `generateBass`. Disabled on an empty progression, its tooltip then saying why.
+  /// `compact` draws only the icon, borderless and without the menu arrow, in an icon button's square.
   @ViewBuilder private func generateMenu(compact: Bool) -> some View {
     let menu = Menu {
       ForEach(generate.groups) { group in
         Section(group.title) {
-          ForEach(group.entries) { entry in
-            Button(entry.title) { actions.generate(entry) }
+          ForEach(group.sections) { section in
+            if generate.nestsFamilies {
+              Menu(section.title) {
+                generateButtons(section.entries)
+                if let note = section.note {
+                  Section { Text(note) }
+                }
+              }
+            } else {
+              generateButtons(section.entries)
+            }
           }
         }
       }
@@ -331,6 +347,13 @@ struct RollToolbar: View, Equatable {
     .help(generate.help)
     .accessibilityLabel("Generate")
     .accessibilityValue(generate.value)
+  }
+
+  /// One button per entry, choosing it through `actions.generate`.
+  private func generateButtons(_ entries: [GenerateEntry]) -> some View {
+    ForEach(entries) { entry in
+      Button(entry.title) { actions.generate(entry) }
+    }
   }
 
   private func iconButton(_ symbol: String, label: String, help: String, enabled: Bool,

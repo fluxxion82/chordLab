@@ -4,8 +4,9 @@ import Foundation
 /// One track's piano roll view state (tracks design D14: "Each track's scroll, zoom, grid, snap and mode are
 /// UI-only, remembered per track id"): where the grid is scrolled (`scroll`, content coordinates of the viewport's
 /// top-left, see `RollGeometry`), the zoom (`pxPerBeat`, `rowHeight`), the toolbar's Grid, Snap pitch, Mode and
-/// Other tracks, the gesture machine's state (`editState`, `RollEditLogic`; plan Task 18 feeds it), and whether
-/// the first open has scrolled to the role's register yet. Never saved and never sent to the engine.
+/// Other tracks, the Generate menu's Motif take, the gesture machine's state (`editState`, `RollEditLogic`; plan
+/// Task 18 feeds it), and whether the first open has scrolled to the role's register yet. Never saved; nothing in it
+/// is sent to the engine except the Motif take, which reaches it as a `generateLead` command's `variation`.
 ///
 /// Every scroll it stores is clamped to the content (`RollGeometry.clampedScroll`): the progression, or the latest
 /// note end past it (`RollTiming.contentEndTick`), plus one bar of the meter (`RollTiming.barTicks`, like the
@@ -36,6 +37,12 @@ struct RollViewState: Equatable {
   var mode: RollMode = .notes
   /// Whether the other tracks' notes are drawn as faint outlines (design D14: a toggle, default on).
   var showsOtherTracks = true
+  /// The track's Motif take (design D22), 0…63, default 0: the take the Generate menu's "Motif (take N of 64)"
+  /// rewrites; "Motif, next take" advances it once its command was sent and answered by the same document, applied or
+  /// refused (`GenerateOutcome.takeToStore(for:)`). Kept in 0…63 (`GenerateOptions.take`).
+  var motifTake = 0 {
+    didSet { if motifTake != GenerateOptions.take(motifTake) { motifTake = GenerateOptions.take(motifTake) } }
+  }
   /// The gesture machine's state: the drag preview, the hidden notes, the rubber band and the insert marker the
   /// canvas draws.
   var editState = RollEditState()
@@ -180,6 +187,13 @@ struct RollViewStates: Equatable {
 
   /// The ids with an entry, ascending.
   var trackIds: [Int] { byTrack.keys.sorted() }
+
+  /// A loaded document (another lineage, `ChordLabState.lineageChanged`): every track starts at Motif take 0 again; no
+  /// entry is made and nothing else changes. Track ids are not lineage-stable either way: a track removed and added
+  /// again under the same id also starts at take 0, since its entry went with the removal (`snapshotApplied`).
+  mutating func resetMotifTakes() {
+    for trackId in byTrack.keys { byTrack[trackId]?.motifTake = 0 }
+  }
 
   /// The roll of track `trackId` measured its grid: stores the viewport and fits that track (its first open when
   /// this is the first measurement with a real size: on `notes`, the track's active notes, else the role's register).

@@ -477,7 +477,7 @@ DocumentStore prefilledTrackStore(bool withRedo = false) {
     return store;
 }
 
-/// One valid message per track and note command (and `insertChords` with notes, and `generateBass`), against `prefilledTrackStore(false)`:
+/// One valid message per track and note command (and `insertChords` with notes, `generateBass` and `generateLead`), against `prefilledTrackStore(false)`:
 /// `revision` is that store's revision, for the `baseRevision` entries (stale on a store with a redo step, which is
 /// the refusal path).
 std::vector<std::string> trackCommandCorpus(std::uint64_t revision) {
@@ -509,6 +509,11 @@ std::vector<std::string> trackCommandCorpus(std::uint64_t revision) {
         {{"cmd", "generateBass"}, {"trackId", 3}, {"pattern", "octaves"}},
         {{"cmd", "generateBass"}, {"trackId", 2}, {"pattern", "followFeel"}, {"scope", json::array()}},
         {{"cmd", "generateBass"}, {"trackId", 1}, {"pattern", "rootFifth"}, {"scope", json::array({4})}},
+        {{"cmd", "generateLead"}, {"trackId", 2}, {"pattern", "motif"}, {"scope", json::array({3, 1, 3})}, {"variation", 9}},
+        {{"cmd", "generateLead"}, {"trackId", 1}, {"pattern", "stepwise"}},
+        {{"cmd", "generateLead"}, {"trackId", 3}, {"pattern", "followFeel"}, {"scope", json::array()}, {"variation", 0}},
+        {{"cmd", "generateLead"}, {"trackId", 1}, {"pattern", "heldTone"}, {"variation", 0}, {"baseRevision", 1}},
+        {{"cmd", "generateLead"}, {"trackId", 2}, {"pattern", "guideTones"}, {"scope", json::array({4})}},
         {{"cmd", "selectNotes"}, {"trackId", 1}, {"ids", json::array({3, 1, 77})}},
         {{"cmd", "selectNotes"}, {"trackId", nullptr}, {"ids", json::array()}},
         {{"cmd", "insertChords"}, {"index", 1},
@@ -869,7 +874,7 @@ TEST_CASE("json robustness: a top-level lineage member changes nothing for any c
     }
     MESSAGE("lineage member: " << compared << " comparisons, " << refused << " of them refusals");
     CHECK(refused > 0);  // the stale baseRevision refusals, at least
-    for (const char* name : {"removeChords", "setLength", "insertNotes", "updateNotes", "generateBass", "undo", "redo",
+    for (const char* name : {"removeChords", "setLength", "insertNotes", "updateNotes", "generateBass", "generateLead", "undo", "redo",
                              "selectEvents", "selectNotes", "setTrackMute", "setChordsMute"}) {
         CHECK_MESSAGE(names.count(name) == 1, name << " is not in the corpora");
     }
@@ -902,6 +907,10 @@ TEST_CASE("json robustness: integers at the edges of 64 and 32 bits are refused 
     sweep(R"({"schema":1,"cmd":"generateBass","pattern":"roots","trackId":)", "}");
     sweep(R"({"schema":1,"cmd":"generateBass","trackId":1,"pattern":"roots","scope":[)", "]}");
     sweep(R"({"schema":1,"cmd":"generateBass","trackId":1,"pattern":"walking","scope":[2,)", "]}");
+    sweep(R"({"schema":1,"cmd":"generateLead","pattern":"motif","trackId":)", "}");
+    sweep(R"({"schema":1,"cmd":"generateLead","trackId":1,"pattern":"motif","scope":[)", "]}");
+    sweep(R"({"schema":1,"cmd":"generateLead","trackId":1,"pattern":"motif","variation":)", "}");
+    sweep(R"({"schema":1,"cmd":"generateLead","trackId":1,"pattern":"arpeggio","variation":)", "}");
     sweep(R"({"schema":1,"cmd":"moveTrack","id":1,"index":)", "}");
     sweep(R"({"schema":1,"cmd":"setTrackMute","on":true,"id":)", "}");
     sweep(R"({"schema":1,"cmd":"removeTrack","id":)", "}");

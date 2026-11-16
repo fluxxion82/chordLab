@@ -484,6 +484,22 @@ std::string heardJson(const Listener& listener, const Key& projectKey);
 ///     owned and nothing generated (Follow feel finding no bass-class hit) is a valid no-op, `documentChanged` false;
 ///     generating the same pattern again is a new step (fresh note ids). Walking reads the document's Loop when it
 ///     runs: the line is baked.
+///   - `generateLead {trackId, pattern, scope?, variation?}` (D22): `DocumentStore::generateLead`, ONE undo step, the
+///     same transaction as `generateBass` with the lead line `pattern` gives (generate.h): the line runs over the whole
+///     progression and the scope's chords keep their part of it. `pattern` is one of "heldTone", "guideTones",
+///     "arpeggio", "stepwise", "motif", "followFeel" (`leadPatternName`; missing is `missing "pattern"`, anything else,
+///     a bass pattern's name, a wrong case or type included, `"pattern" must be "heldTone", "guideTones", "arpeggio",
+///     "stepwise", "motif" or "followFeel"`). `scope` exactly as `generateBass`'s. `variation` is absent (0) or a JSON
+///     integer in 0..2147483647, read at 64 bits before narrowing: a negative, boolean, null, string, fractional
+///     representation (`1.0` and `-0.0` included) or larger value is `"variation" must be an integer in
+///     0..2147483647`; `-0`, written without a fraction or exponent, is the JSON integer 0 and accepted as 0. Motif
+///     reduces it modulo 64 (64 takes: 73 plays as 9); any other pattern with a non-zero variation is the store's
+///     refusal `"generateLead" refused: variation is only supported for motif`. No `baseRevision` (ignored, as for
+///     `generateBass`). The generated notes are not selected. Store refusals, as `"generateLead" refused: <reason>`, are
+///     `generateBass`'s with the same words ("No track with id 9", "Add chords first", "No chord with id 42", "No note
+///     ids are left", the track invariant's words) plus the variation refusal above, which is checked first. Nothing
+///     owned and nothing generated (Follow feel finding no top-class hit) is a valid no-op, `documentChanged` false;
+///     generating again is a new step (fresh note ids). Loop never changes a lead line.
 ///   - `baseRevision` (optional, on `insertNotes`, `removeNotes` and `updateNotes`): a non-negative JSON integer
 ///     (read as `uint64_t`; negative, fractional or beyond 2^64 - 1 is an error). When present and not equal to
 ///     `DocumentStore::revision()` the command is refused before anything else, store untouched, no history,

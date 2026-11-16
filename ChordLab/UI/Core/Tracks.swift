@@ -15,9 +15,10 @@ enum Lane: Hashable {
   }
 }
 
-/// A track's role (tracks design D2): it sets defaults only (name, register, colour, guide emphasis), never
-/// what the user may write (the Generate menu is the same on every role). The raw values are the wire names the commands send
-/// (`addTrack`, `patchTrack`) and the snapshot carries.
+/// A track's role (tracks design D2): it sets defaults only (name, register, colour, guide emphasis, and which
+/// lines the Generate menu offers: `GenerateOptions.families(for:)`, design D22), never what the user may write or
+/// what a command accepts. The raw values are the wire names the commands send (`addTrack`, `patchTrack`) and the
+/// snapshot carries.
 ///
 /// Decoding is tolerant: a role this UI does not know (a newer plug-in's) is `.other`, so one unfamiliar track
 /// never loses the whole snapshot. Encoding writes the raw value.

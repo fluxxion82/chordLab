@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <optional>
 #include <string>
 #include <utility>
@@ -713,6 +714,19 @@ public:
     bool generateBass(int trackId, BassPattern pattern, const std::vector<int>& scopeEventIds,
                       std::string* refusal = nullptr);
 
+    /// Writes the lead line `pattern` gives the chords of `scopeEventIds` into track `trackId` (tracks design D22),
+    /// exactly as `generateBass` writes a bass line: the same single transaction (ownership removal of active and
+    /// inactive notes anchored to the scope's chords, insertion of `generateLead(doc, pattern, scopeEventIds,
+    /// variation)`'s notes with fresh increasing ids in the generator's order, re-sorting, whole validation), the same
+    /// refusals in the same order with the same words, the same no-op rule, one undo step, any role, and the generated
+    /// notes are not selected. The line is computed over the whole progression and filtered by ownership, so chords
+    /// outside the scope still steer it (generate.h); the capacity limits apply to the replacement actually written.
+    /// `variation` is Motif's take (reduced modulo `kMotifVariationCount` by the generator); it is checked before
+    /// anything else: a negative value is refused ("variation must not be negative"), and so is a non-zero one for any
+    /// other pattern ("variation is only supported for motif"), each with no history, no id consumed, no revision.
+    bool generateLead(int trackId, LeadPattern pattern, const std::vector<int>& scopeEventIds, int variation,
+                      std::string* refusal = nullptr);
+
     /// Live state (tracks design D4, D8): mutes or soloes track `id`. Never recorded in the history and leaves the
     /// revision alone; undo and redo keep each track's current flags by track id (a restored track that the
     /// current document does not hold, such as one an undone `removeTrack` brings back, keeps the flags it was
@@ -812,6 +826,18 @@ private:
     /// track and note counters (a timing edit hands out no track or note id). Every note of `next` must anchor one
     /// of its chords: the removals drop the notes of the chords they remove before calling it.
     bool commitTiming(Document next, std::string* refusal);
+
+    /// What a generator gives a generation transaction: the notes for the chords of the scope (empty: every chord),
+    /// anchored, from the current document. `generateBass` and `generateLead` pass the pure generators of generate.h.
+    using NoteGenerator = std::function<std::vector<GeneratedNote>(const Document&, const std::vector<int>&)>;
+
+    /// The one body of `generateBass` and `generateLead` (D16, D22): refuses an unknown track, an empty progression,
+    /// an unknown scope id (the first in the list) and, before anything is derived, a note of the track anchoring no
+    /// chord; calls `generate`; refuses a result that would exhaust the note ids; removes the track's notes owned by
+    /// the scope's chords (inactive ones included), inserts the generated notes with fresh ids, re-sorts, and commits
+    /// through `commitTracks` (whole validation; an unchanged candidate is a no-op). The note selection is not set.
+    bool generateIntoTrack(int trackId, const std::vector<int>& scopeEventIds, const NoteGenerator& generate,
+                           std::string* refusal);
 
     /// `commitTiming` publishing `nextTrackId` and `nextNoteId` with the document (an insert that created tracks
     /// and notes): validated with them; the caller assigns the counters after a true return, as the track edits do.

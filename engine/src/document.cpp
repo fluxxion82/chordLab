@@ -1383,6 +1383,33 @@ std::vector<int> DocumentStore::insertNotes(int trackId, const std::vector<NoteS
 
 bool DocumentStore::generateBass(int trackId, BassPattern pattern, const std::vector<int>& scopeEventIds,
                                  std::string* refusal) {
+    return generateIntoTrack(
+        trackId, scopeEventIds,
+        [pattern](const Document& doc, const std::vector<int>& scope) { return chordlab::generateBass(doc, pattern, scope); },
+        refusal);
+}
+
+bool DocumentStore::generateLead(int trackId, LeadPattern pattern, const std::vector<int>& scopeEventIds, int variation,
+                                 std::string* refusal) {
+    clearRefusal(refusal);
+    // The arguments first, whatever the document holds: only Motif has takes.
+    if (variation < 0) {
+        refuse(refusal, "variation must not be negative");
+        return false;
+    }
+    if (variation != 0 && pattern != LeadPattern::Motif) {
+        refuse(refusal, "variation is only supported for motif");
+        return false;
+    }
+    return generateIntoTrack(trackId, scopeEventIds,
+                             [pattern, variation](const Document& doc, const std::vector<int>& scope) {
+                                 return chordlab::generateLead(doc, pattern, scope, variation);
+                             },
+                             refusal);
+}
+
+bool DocumentStore::generateIntoTrack(int trackId, const std::vector<int>& scopeEventIds,
+                                      const NoteGenerator& generate, std::string* refusal) {
     clearRefusal(refusal);
     const int index = findTrackIndex(trackId);
     if (index < 0) {
@@ -1409,7 +1436,7 @@ bool DocumentStore::generateBass(int trackId, BassPattern pattern, const std::ve
     if (refuseDanglingAnchor(doc_.tracks[static_cast<std::size_t>(index)].notes, timeline, refusal)) {
         return false;
     }
-    const std::vector<GeneratedNote> generated = chordlab::generateBass(doc_, pattern, scopeEventIds);
+    const std::vector<GeneratedNote> generated = generate(doc_, scopeEventIds);
     // Ids stop below INT_MAX, as insertNotes' do: the notes take nextNoteId_ .. nextNoteId_ + n - 1. Compared in
     // 64 bits: n is not bounded by the track limit here (validateTracks refuses an oversized result below).
     const std::int64_t publishedNoteId =

@@ -945,6 +945,7 @@ struct Command {
         RemoveNotes,
         UpdateNotes,
         GenerateBass,
+        GenerateLead,
         SelectNotes,
         Undo,
         Redo
@@ -982,12 +983,14 @@ struct Command {
     bool hasBaseRevision = false;                     // InsertNotes, RemoveNotes, UpdateNotes: `baseRevision` was given
     std::uint64_t baseRevision = 0;                   // ... and this is it
     BassPattern bassPattern = BassPattern::Roots;     // GenerateBass (its scope travels in `CommandLists::ids`)
+    LeadPattern leadPattern = LeadPattern::Motif;     // GenerateLead (its scope travels in `CommandLists::ids`)
+    int variation = 0;                                // GenerateLead: 0..INT_MAX, 0 when absent
 };
 static_assert(std::is_trivially_destructible_v<Command>, "Command must be plain data: destroying one must not allocate");
 
 /// What a command carries besides `Command`'s plain fields, owned by the reader's frame like the section name:
 /// the chords of `insertChords` (with their notes), the ids of `removeChords`, `setLengths`, `selectEvents`,
-/// `removeNotes` and `selectNotes` and the scope of `generateBass`, and the notes of `insertNotes` and
+/// `removeNotes` and `selectNotes` and the scope of `generateBass` and `generateLead`, and the notes of `insertNotes` and
 /// `updateNotes`. Its destructor frees, never allocates.
 struct CommandLists {
     std::vector<ChordSpec> chords;
@@ -1580,6 +1583,44 @@ bool parseGenerateBass(Fields& fields, Command& out, std::vector<int>& ids, std:
            parseIds(fields, true, ids, error, static_cast<std::size_t>(kMaxChords), "scope");
 }
 
+/// `generateLead {trackId, pattern, scope?, variation?}`: `pattern` one of the `leadPatternName` names (missing is
+/// "missing \"pattern\"", anything else one message listing the six); `scope` as `generateBass`'s; `variation` absent
+/// (0) or a JSON integer in 0..INT_MAX, read at 64 bits before narrowing (a negative, fractional, boolean, null,
+/// string or larger value is an error naming the field). Whether a non-zero variation suits the pattern is the store's
+/// call (`DocumentStore::generateLead` refuses it for every pattern but Motif). No `baseRevision`: not a drag.
+bool parseGenerateLead(Fields& fields, Command& out, std::vector<int>& ids, std::string& error) {
+    out.kind = Command::Kind::GenerateLead;
+    if (!fields.getInt("trackId", out.id)) {
+        return false;
+    }
+    const json* pattern = fields.require("pattern");
+    if (pattern == nullptr) {
+        return false;
+    }
+    const std::optional<LeadPattern> named =
+        pattern->is_string() ? leadPatternFromName(pattern->get_ref<const std::string&>()) : std::nullopt;
+    if (!named) {
+        std::string expected = "must be ";
+        for (int i = 0; i < kLeadPatternCount; ++i) {
+            expected += std::string(i == 0 ? "" : (i + 1 == kLeadPatternCount ? " or " : ", ")) + "\"" +
+                        leadPatternName(static_cast<LeadPattern>(i)) + "\"";
+        }
+        return fields.fail("pattern", expected);
+    }
+    out.leadPattern = *named;
+    out.variation = 0;
+    if (fields.has("variation")) {
+        std::int64_t variation = 0;
+        if (!fields.getInt64In("variation", 0, INT_MAX, variation)) {
+            return false;
+        }
+        out.variation = static_cast<int>(variation);  // in range: checked at 64 bits above
+    }
+    ids.clear();
+    return !fields.has("scope") ||
+           parseIds(fields, true, ids, error, static_cast<std::size_t>(kMaxChords), "scope");
+}
+
 /// `selectNotes {trackId, ids}`: `trackId` an integer, or null for no track (null, like `kNoTrackId` = -1, clears the
 /// selection, as `selectEvent`); `ids` an array of at most `kMaxNotesPerTrack` integers, empty clears.
 bool parseSelectNotes(Fields& fields, Command& out, std::vector<int>& ids, std::string& error) {
@@ -1784,6 +1825,9 @@ bool parseCommand(std::string_view text, Command& out, std::string& name, Comman
     if (cmd == "generateBass") {
         return parseGenerateBass(fields, out, lists.ids, error);
     }
+    if (cmd == "generateLead") {
+        return parseGenerateLead(fields, out, lists.ids, error);
+    }
     if (cmd == "selectNotes") {
         return parseSelectNotes(fields, out, lists.ids, error);
     }
@@ -1853,6 +1897,8 @@ const char* commandWireName(Command::Kind kind) {
             return "updateNotes";
         case Command::Kind::GenerateBass:
             return "generateBass";
+        case Command::Kind::GenerateLead:
+            return "generateLead";
         default:
             break;
     }
@@ -2109,6 +2155,9 @@ Refusal applyCommand(DocumentStore& store, const Command& command, std::string& 
             return storeRefusal(store.updateNotes(command.id, lists.edits, &reason), reason);
         case Command::Kind::GenerateBass:
             return storeRefusal(store.generateBass(command.id, command.bassPattern, lists.ids, &reason), reason);
+        case Command::Kind::GenerateLead:
+            return storeRefusal(
+                store.generateLead(command.id, command.leadPattern, lists.ids, command.variation, &reason), reason);
         case Command::Kind::SelectNotes:
             store.setNoteSelection(command.id, lists.ids);  // live state; an unknown track is a no-op, as selectEvent
             return Refusal::None;
