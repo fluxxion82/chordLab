@@ -287,4 +287,12 @@ final class GenerateOptionsTests: XCTestCase {
     XCTAssertNotEqual(GenerateOptions.menu(try fixture(selecting([1]))), base)
     XCTAssertNotEqual(GenerateOptions.menu(try fixture { $0["progressionLoop"] = false }), base)
   }
+
+  // MARK: - Which chords' notes the roll reveals afterwards
+
+  func testAScopesChordIdsAreItsChordsOrNilForEveryChord() {
+    XCTAssertNil(GenerateScope.everyChord.chordIds)
+    XCTAssertEqual(GenerateScope.chords([3, 1]).chordIds, [1, 3])
+    XCTAssertEqual(GenerateEntry(pattern: .roots, scope: .chords([2])).scope.chordIds, [2])
+  }
 }

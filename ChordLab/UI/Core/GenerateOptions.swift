@@ -28,6 +28,15 @@ enum BassPattern: String, CaseIterable, Identifiable {
 enum GenerateScope: Equatable {
   case everyChord
   case chords([Int])
+
+  /// The chords whose notes a choice writes, as the anchors the roll reveals afterwards: the given ids, or nil for
+  /// every chord.
+  var chordIds: Set<Int>? {
+    switch self {
+    case .everyChord: return nil
+    case .chords(let ids): return Set(ids)
+    }
+  }
 }
 
 /// One entry of the Generate menu: a pattern for a scope, and the command choosing it sends. `lineage` names the

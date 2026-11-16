@@ -6,13 +6,15 @@ import SwiftUI
 ///
 /// 1. the grid's dark ground and the black-key rows, a subtle darker stripe (`RollColors.blackKeyRow`), under
 /// 2. the guide bands from the per-revision-and-zoom layout (`GuideBands`): per visible chord span and visible row,
-///    the role's hue (`GuideStyle.color`) at the role's opacity (`GuideStyle.opacity`), Outside nothing;
+///    the role's hue (`GuideStyle.color`) at the role's opacity (`GuideStyle.opacity`), Outside and every role the
+///    View menu hides (`GuideDisplay`, filtered in the layout) nothing;
 ///    the rects of one role are filled as one path;
 /// 3. row lines (a faint line between rows from 10-pt rows, a stronger one under each C), then the time lines (`RollLines`: bar,
 ///    the meter's pulse and the grid, bar-relative, none denser than 4 pt) and the chord boundaries at the
 ///    playback span starts;
 /// 4. the degree labels at the left of each span (kept at the viewport's left edge while the span runs on) on Root,
-///    ChordTone and Tension rows from 12-pt rows (`GuideBands.labels`), in `GuideStyle`'s font and colour per role;
+///    ChordTone and Tension rows from 12-pt rows (`GuideBands.labels`; none for a hidden role or with labels off),
+///    in `GuideStyle`'s font and colour per role;
 /// 5. the hatch after the progression's end (`RollTiming.endTick`): a darker area with faint diagonals anchored to
 ///    the content, and the dashed end line of the sequence ruler;
 /// 6. with Other tracks on, the other tracks' notes as faint outlines in their own colours;

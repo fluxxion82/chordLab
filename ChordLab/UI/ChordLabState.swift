@@ -68,6 +68,15 @@ class ChordLabState: NSObject, ObservableObject {
   /// re-run the body of every view that observes it (the key bar, the transport row, the strip, the tabs). Only the
   /// roll observes `rolls`; it changes through the `Roll` methods below.
   let rolls = RollViewStore()
+  /// What the rolls' harmonic guides draw (the roll toolbar's View menu, `GuideDisplay`): an editor-wide preference,
+  /// the same on every track, read from `defaults` when the state is made and written back by `setGuideDisplay`;
+  /// another editor of this process changing it (a second plug-in instance) updates it too. Never sent to the engine.
+  @Published private(set) var guideDisplay: GuideDisplay
+  /// Where editor-wide preferences are remembered (`guideDisplay`): `UserDefaults.standard`, the store `@AppStorage`
+  /// uses for the palette's label mode; a harness passes a store of its own so it never writes the user's.
+  let defaults: UserDefaults
+  /// Sees `defaults` change (`UserDefaults.didChangeNotification`), so another editor's View menu choice shows here.
+  private var defaultsObserver: NSObjectProtocol?
   /// The row under the key bar (`KeyTransposeRow`): the one-time "chords kept their notes" hint after a tonic
   /// change with Transpose with key off, or the four-second "moved" note after one with it on (D8, D9).
   /// Either closes as soon as a snapshot browses a key other than the project key.
@@ -129,27 +138,36 @@ class ChordLabState: NSObject, ObservableObject {
     self.sendCommand = { _, _ in }
     self.mouseButtonsDown = { NSEvent.pressedMouseButtons != 0 }
     self.resolvedClipboardToken = ClipboardToken.resolve(nil)
+    self.defaults = .standard
+    self.guideDisplay = GuideDisplay(rawValue: UserDefaults.standard.string(forKey: GuideDisplay.storageKey))
     super.init()
+    observeDefaults()
   }
 
   /// `clipboardToken` is the plug-in instance's (`ClipboardToken`: the view controller passes the one the C++ shell
-  /// made); nil makes one for this state alone.
+  /// made); nil makes one for this state alone. `defaults` is where editor-wide preferences are remembered
+  /// (`UserDefaults.standard` unless a harness passes its own).
   public init(beginEdit: @MainActor @escaping (Int) -> Void = { _ in },
               doEdit: @MainActor @escaping (Int, Double) -> Void = { _, _ in },
               endEdit: @MainActor @escaping (Int) -> Void = { _ in },
               sendCommand: @MainActor @escaping (Int, Data?) -> Void = { _, _ in },
               mouseButtonsDown: @escaping () -> Bool = { NSEvent.pressedMouseButtons != 0 },
-              clipboardToken: String? = nil) {
+              clipboardToken: String? = nil,
+              defaults: UserDefaults = .standard) {
     self.beginEdit = beginEdit
     self.doEdit = doEdit
     self.endEdit = endEdit
     self.sendCommand = sendCommand
     self.mouseButtonsDown = mouseButtonsDown
     self.resolvedClipboardToken = ClipboardToken.resolve(clipboardToken)
+    self.defaults = defaults
+    self.guideDisplay = GuideDisplay(rawValue: defaults.string(forKey: GuideDisplay.storageKey))
     super.init()
+    observeDefaults()
   }
 
   deinit {
+    if let defaultsObserver { NotificationCenter.default.removeObserver(defaultsObserver) }
     // The timer holds `self` weakly (`KeepAliveTarget`), so the last release can come from any thread; a run-loop timer must
     // be invalidated on the thread it was scheduled on, the main thread here.
     guard let timer = keepAlive else { return }
@@ -556,11 +574,12 @@ class ChordLabState: NSObject, ObservableObject {
 
   /// The roll of track `trackId` measured its grid (`PianoRollView`'s `onGeometryChange`): stores the viewport and
   /// fits the track's scroll to it; the first measurement with a real size is the track's first open, which
-  /// scrolls to its role's register at bar 1 (`RollViewState.fit`). Nothing for a track the snapshot lacks.
+  /// scrolls to bar 1 and the track's active notes, or its role's register when it has none (`RollViewState.fit`).
+  /// Nothing for a track the snapshot lacks.
   @MainActor func setRollViewport(trackId: Int, _ size: CGSize) {
     guard let snapshot, let timing = rollTiming, let track = snapshot.track(id: trackId) else { return }
     var states = rolls.states
-    states.setViewport(size, trackId: trackId, role: track.role, timing: timing)
+    states.setViewport(size, trackId: trackId, role: track.role, timing: timing, notes: RollNoteSpan(notes: track.notes))
     publishRolls(states)
   }
 
@@ -618,6 +637,23 @@ class ChordLabState: NSObject, ObservableObject {
 
   @MainActor func setRollShowsOtherTracks(trackId: Int, _ on: Bool) {
     editRoll(trackId: trackId) { state, _, _ in state.showsOtherTracks = on }
+  }
+
+  /// The View menu's guide choice (`GuideDisplay`): stores it in `defaults` under `GuideDisplay.storageKey` and
+  /// publishes it, so every roll draws it; nothing is sent.
+  @MainActor func setGuideDisplay(_ display: GuideDisplay) {
+    defaults.set(display.rawValue, forKey: GuideDisplay.storageKey)
+    if display != guideDisplay { guideDisplay = display }
+  }
+
+  /// Re-reads `guideDisplay` whenever `defaults` changes (another editor's choice); publishes only a change.
+  private func observeDefaults() {
+    defaultsObserver = NotificationCenter.default.addObserver(forName: UserDefaults.didChangeNotification,
+                                                              object: defaults, queue: .main) { [weak self] _ in
+      guard let self else { return }
+      let stored = GuideDisplay(rawValue: self.defaults.string(forKey: GuideDisplay.storageKey))
+      if stored != self.guideDisplay { self.guideDisplay = stored }
+    }
   }
 
   /// Publishes `states` only when it changed, so an unchanged fit redraws nothing.
@@ -703,11 +739,24 @@ class ChordLabState: NSObject, ObservableObject {
   /// (`GenerateOptions.command(for:trackId:in:lineage:)`: the menu was drawn for another selection, or for the
   /// document a state load has since replaced). A refusal ("Add chords first", the track limits) comes back as any
   /// refused command does (`applyError`, `lastError`).
+  ///
+  /// The engine answers inline, inside the send (its new snapshot, or an error), so afterwards the roll shows what was
+  /// written: the track's active notes in the entry's chords (every chord's for a whole-progression entry), from the
+  /// snapshot current now, are revealed (`RollViewState.reveal`). Nothing scrolls when nothing was sent, when the
+  /// answer was an error or no snapshot, when the document lineage changed meanwhile (a stale command is answered with
+  /// another document's snapshot), or when those chords hold no active note.
   @MainActor func generateBass(trackId: Int, _ entry: GenerateEntry) {
     guard let snapshot,
           let command = GenerateOptions.command(for: entry, trackId: trackId, in: snapshot,
                                                 lineage: clipboardToken) else { return }
+    let errors = errorSerial
+    let snapshots = snapshotSerial
+    let lineage = clipboardToken
     send(command: command)
+    guard errorSerial == errors, snapshotSerial != snapshots, clipboardToken == lineage,
+          let written = self.snapshot?.track(id: trackId),
+          let span = RollNoteSpan(notes: written.notes, anchors: entry.scope.chordIds) else { return }
+    editRoll(trackId: trackId) { $0.reveal(span, viewport: $1, timing: $2) }
   }
 
   /// Whether the pasteboard holds ChordLab notes (the roll menu's Paste here is disabled otherwise).
@@ -941,10 +990,14 @@ class ChordLabState: NSObject, ObservableObject {
 
   // MARK: - Messages from the plugin
 
+  /// Counts the snapshots applied, so an action can tell whether its command was answered with one (`generateBass`).
+  private var snapshotSerial = 0
+
   /// `kMsgTagSnapshot` payload.
   func applySnapshot(json: Data) {
     do {
       let decoded = try JSONDecoder().decode(Snapshot.self, from: json)
+      snapshotSerial += 1
       snapshot = decoded
       lastError = nil
       // Snapshots are applied on the main thread (the controller's message handler, the harness).
