@@ -63,6 +63,25 @@ Phase 3, so far:
 - Sequence bar editing: ⇧/⌘ multi-select, ⌘C ⌘X ⌘V ⌘D ⌘A, a Length menu with a default length for new chords,
   and a Record toggle that turns palette presses into blocks as long as they were held.
 
+Tracks, on `main` and not in the 1.0.0 release (see Status):
+
+- Up to four Bass, Lead or Other tracks of notes over the progression, in a lane tab row under the sequence bar
+  with mute and solo per lane (the chords included). They play with the chords on MIDI channel 1 and are saved
+  with the set.
+- A piano roll per track in place of the palette: draw, move, resize either end, ⌥-drag to duplicate, a velocity
+  mode, rubber-band and ⇧ selection, a right-click menu, ⌘C ⌘X ⌘V ⌘D ⌘A and arrow-key nudges (with buttons for
+  hosts that keep the arrows), grid and zoom, one undo history with the chords.
+- Harmonic guides: each row shaded by what the pitch is over the chord playing there (root, chord tone, tension,
+  avoid note), weighted by the track's role, with degree labels and an optional pitch snap to the chord's scale or
+  tones.
+- Notes follow their chords: moving, resizing or deleting a chord carries the notes that start in it, a shortened
+  chord keeps the notes past its end silent until it is lengthened again, chord copy and duplicate carry their
+  notes, and Transpose with key moves them.
+- A bass generator with six patterns (Roots, Root pulse, Root–fifth, Octaves, Follow feel, Walking) for the
+  selected chords or all of them, in one undo step.
+- MIDI drag-out per lane (each tab's ♫), of every lane at once ("♫ All": one file, one clip per lane, muted lanes
+  included), and of the open lane from the bottom control and the section handles.
+
 ## Install
 
 Download `ChordLab-<version>.pkg` from the [latest release](https://github.com/fluxxion82/chordLab/releases/latest)
@@ -153,7 +172,7 @@ The suites, each runnable on its own:
 | `engine_tests` (doctest) | theory, document/undo, compiler, scheduler, SMF, JSON API, golden fixtures, mutation fuzz of the JSON readers | `cmake -S engine -B engine/build -DCMAKE_BUILD_TYPE=Debug && cmake --build engine/build -j8 && (cd engine/build && ctest --output-on-failure)` |
 | `engine_rt_alloc_test` | no allocation on the audio-thread surface | same ctest run |
 | `ChordLabUICoreTests` (XCTest) | the UI's pure logic in `ChordLab/UI/Core/`: geometry, harmony text, symbols, key names, snapshot decoding | `cd ChordLab && swift test` |
-| `bridge_tests` (doctest) | the plug-in shell's pure helpers in `ChordLab/bridge/`: message validation, preview and section-export parsing, export file naming | `cmake -S ChordLab/bridge/tests -B ChordLab/build-bridge-tests && cmake --build ChordLab/build-bridge-tests -j8 && (cd ChordLab/build-bridge-tests && ctest --output-on-failure)` |
+| `bridge_tests` (doctest) | the plug-in shell's pure helpers in `ChordLab/bridge/`: message validation, preview, section-export and clip-export parsing, export file naming | `cmake -S ChordLab/bridge/tests -B ChordLab/build-bridge-tests && cmake --build ChordLab/build-bridge-tests -j8 && (cd ChordLab/build-bridge-tests && ctest --output-on-failure)` |
 
 **JSON fixtures.** `engine/tests/fixtures/` holds the engine's own `snapshotJson`/`stateJson` output for
 a few documents (empty, a four-chord progression with sections and a manual voicing, the same while
@@ -241,8 +260,11 @@ binaries.
 - Sanitizers: with Apple clang 17 (Xcode 16) ASan deadlocked before `main()` and TSan hung; since
   Apple clang 21 (Xcode 27.1) UBSan, ASan and TSan all run the engine suite cleanly
   (`scripts/check.sh --ubsan --asan --tsan`, each step under a hard timeout).
-- Not yet: piano roll, melody tracks (Phase 3); chords are contiguous; one suggestion
-  style (pop); macOS only (VST3, Audio Unit, app). The Xcode project still carries
+- Tracks (the engine model and playback, the editor's logic, the lane tabs and piano roll, and the bass
+  generator, milestones M1–M4) are merged on `main` but not released: the 1.0.0 pkg does not have them. They pass
+  the engine, Swift and bridge suites; nothing of them has been checked in Live yet (Test 15) or in Logic.
+- Not yet: an instrument per track while composing (every lane plays on channel 1), a lead generator, feel on
+  tracks; chords are contiguous; one suggestion style (pop); macOS only (VST3, Audio Unit, app). The Xcode project still carries
   iPlug2's AUv3, AAX, VST2 and iOS targets and Windows project files from the template; they are not
   maintained or tested.
 
