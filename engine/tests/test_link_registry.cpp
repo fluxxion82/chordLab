@@ -2384,6 +2384,64 @@ TEST_CASE("link registry: panicFollowers flags every follower bound to the leade
     CHECK(w.reg.panicFollowers(m.token) == 0);
 }
 
+TEST_CASE("link registry: stopForwards ends every record of the originator on the followers it reached, and no "
+          "other's") {
+    Song s;
+    World w;
+    Inst& l = w.addPlayer("L");
+    Inst& m = w.addPlayer("M");
+    Inst& f = w.addPlayer("F");
+    Inst& g = w.addPlayer("G");
+    Inst& k = w.addPlayer("K");
+    w.reg.setFollow(f.token, follow("L", s.uidA));
+    w.reg.setFollow(g.token, follow("L", s.uidB));
+    w.reg.setFollow(k.token, follow("M", s.uidA));
+    // L: a held preview on F and a one-shot on G (two records); M: one on K.
+    REQUIRE(w.reg.forwardPreview(l.token, "doc-1", s.uidA, startCmd(1, {60})) == LinkForward::Forwarded);
+    REQUIRE(w.reg.forwardPreview(l.token, "doc-1", s.uidB, startCmd(2, {62})) == LinkForward::Forwarded);
+    REQUIRE(w.reg.forwardPreview(m.token, "doc-1", s.uidA, startCmd(1, {67})) == LinkForward::Forwarded);
+    for (Inst* inst : {&f, &g, &k}) block(*inst);
+    REQUIRE(sounds(f) == Pitches{60});
+    REQUIRE(sounds(g) == Pitches{62});
+    REQUIRE(sounds(k) == Pitches{67});
+    const std::uint64_t serial = w.reg.serial();
+
+    CHECK(w.reg.stopForwards(l.token) == 2);
+    CHECK(w.reg.serial() == serial);  // rule 10: no view changed
+    for (Inst* inst : {&l, &m, &f, &g, &k}) block(*inst);
+    CHECK(sounds(f).empty());  // ended by a Stop on the next block, no panic
+    CHECK(sounds(g).empty());
+    CHECK(sounds(k) == Pitches{67});  // M's record untouched
+    for (Inst* inst : {&l, &m, &f, &g, &k}) CHECK_FALSE_MESSAGE(inst->panic->load(), inst->name);
+    // The records are gone: a later Stop of L's ids is not forwarded; M's still is.
+    CHECK(w.reg.forwardPreview(l.token, "doc-1", s.uidA, stopCmd(1)) == LinkForward::NotForwarded);
+    CHECK(w.reg.forwardPreview(l.token, "doc-1", s.uidB, stopCmd(2)) == LinkForward::NotForwarded);
+    CHECK(w.reg.stopForwards(l.token) == 0);
+    CHECK(w.reg.forwardPreview(m.token, "doc-1", s.uidA, stopCmd(1)) == LinkForward::Forwarded);
+    block(k);
+    CHECK(sounds(k).empty());
+
+    // A follower removed meanwhile is skipped (its sink is never touched again); the others still get their Stop.
+    Inst& h = w.addPlayer("H");
+    w.reg.setFollow(h.token, follow("L", s.uidA));
+    REQUIRE(w.reg.forwardPreview(l.token, "doc-1", s.uidA, startCmd(3, {64})) == LinkForward::Forwarded);  // F, H
+    for (Inst* inst : {&f, &h}) block(*inst);
+    REQUIRE(sounds(f) == Pitches{64});
+    REQUIRE(sounds(h) == Pitches{64});
+    w.reg.remove(h.token);
+    h.scheduler.reset();
+    h.panic.reset();
+    const std::uint64_t serialAfterRemove = w.reg.serial();
+    CHECK(w.reg.stopForwards(l.token) == 1);
+    CHECK(w.reg.serial() == serialAfterRemove);
+    block(f);
+    CHECK(sounds(f).empty());
+    CHECK_FALSE(f.panic->load());
+
+    CHECK(w.reg.stopForwards(0) == 0);
+    CHECK(w.reg.stopForwards(f.token) == 0);  // a follower forwarded nothing
+}
+
 TEST_CASE("link registry: what is not forwarded") {
     Song s;
     World w;

@@ -1379,6 +1379,36 @@ TEST_CASE("link endpoint: a preview Start names its lane by the track's uid, or 
     CHECK(onBass.endpoint->panicFollowers() == 0);
 }
 
+TEST_CASE("link endpoint: stopForwards ends everything this instance forwarded, and nothing it plays itself") {
+    LinkRegistry registry;
+    const LinkEndpoint::UidGenerator uids = counter();
+    PreviewInst leader(registry, "L", uids);
+    leader.store.appendChord(chord(0, "maj"), 4.0, 100);
+    const int bass = addTrackWith(leader.store, TrackRole::Bass, "Bass", {ns(36, 0, 960)});
+    leader.publish();
+    PreviewInst onBass(registry, "B", uids);
+    PreviewInst onChords(registry, "C", uids);
+    onBass.follow(leader, leader.endpoint->state().lanes.at(bass));
+    onChords.follow(leader, std::string(kChordsLaneUid));
+    leader.publish();
+    REQUIRE(leader.endpoint->forwardPreview(bass, previewStart(1, 50)) == LinkForward::Forwarded);
+    REQUIRE(leader.endpoint->forwardPreview(bass, previewStart(2, 51)) == LinkForward::Forwarded);
+    REQUIRE(leader.endpoint->forwardPreview(std::nullopt, previewStart(3, 52)) == LinkForward::Forwarded);
+    for (PreviewInst* inst : {&leader, &onBass, &onChords}) inst->block();
+    REQUIRE(onBass.sounds() == (std::vector<int>{50, 51}));
+    REQUIRE(onChords.sounds() == std::vector<int>{52});
+
+    CHECK(leader.endpoint->stopForwards() == 3);
+    for (PreviewInst* inst : {&leader, &onBass, &onChords}) inst->block();
+    CHECK(onBass.sounds().empty());
+    CHECK(onChords.sounds().empty());
+    CHECK_FALSE(onBass.panic->load());
+    CHECK_FALSE(onChords.panic->load());
+    CHECK(leader.endpoint->forwardPreview(std::nullopt, previewStop(1)) == LinkForward::NotForwarded);
+    CHECK(leader.endpoint->stopForwards() == 0);
+    CHECK(onBass.endpoint->stopForwards() == 0);
+}
+
 TEST_CASE("link endpoint: a follower's endpoint destroyed takes its records with it") {
     LinkRegistry registry;
     const LinkEndpoint::UidGenerator uids = counter();

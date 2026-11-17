@@ -398,10 +398,12 @@ struct LinkView {
 ///    every follower bound to the caller that takes forwards, whatever its lane or document, and drops every record
 ///    of the caller. A panic releases everything the follower sounds, its own notes too (its lane's notes come
 ///    back with their next events, `Scheduler::panic`), and discards the preview commands queued before it, so a
-///    Start forwarded to it after the cleanup and before its next audio block never sounds. Forwarding and
-///    `panicFollowers` change no view: the serial does not move (rule 10). What the registry does to a follower is
-///    only those pushes and stores, under the mutex. A scheduler's preview ring has one producer, so every
-///    `forwardPreview` must be called on the thread that makes the followers' own pushes (the plug-in's main
+///    Start forwarded to it after the cleanup and before its next audio block never sounds. `stopForwards` (the
+///    caller's editor closing) ends every record of the caller: a Stop under the recorded id to each recorded
+///    follower, and the record dropped; no panic flag is set. Forwarding, `panicFollowers` and `stopForwards`
+///    change no view: the serial does not move (rule 10). What the registry does to a follower is only those
+///    pushes and stores, under the mutex. A scheduler's preview ring has one producer, so every `forwardPreview`
+///    and `stopForwards` must be called on the thread that makes the followers' own pushes (the plug-in's main
 ///    thread): the caller's obligation. The panic flag is an atomic, set from whichever thread runs the call.
 ///
 /// A follow is changed (rules 4 and 6) when its `leaderId`, `documentId` or `laneUid` differ, or when it is set
@@ -513,6 +515,15 @@ public:
     /// `token`. Returns how many flags it set (0 for an unknown token or one with no such follower). Pushes nothing,
     /// so any thread may call it. Never moves the serial.
     int panicFollowers(LinkToken token);
+
+    /// Rule 12: everything instance `token` forwarded ends, for its editor closing. For every record of `token`,
+    /// pushes a Stop under the recorded id to each recorded follower (each still lives and takes forwards: the
+    /// records hold no other) and drops the record, also when a push found a full ring (that follower's watchdog
+    /// then ends the preview). Returns how many records it ended (0 for an unknown token or one with none). Sets no
+    /// panic flag and touches no other instance's records. Never moves the serial. It pushes into the followers'
+    /// schedulers, so it has `forwardPreview`'s obligation: called only on the thread that makes every other
+    /// `pushPreview` into them (the plug-in's main thread). Allocates nothing.
+    int stopForwards(LinkToken token);
 
     /// Atomic: moves on every change of what some `view` would return (rule 10). Readable without the mutex.
     std::uint64_t serial() const noexcept;
@@ -723,6 +734,12 @@ public:
     /// follower bound to it and drops what it forwarded. Returns how many flags were set. The caller still panics
     /// its own scheduler.
     int panicFollowers();
+    /// The instance's editor closing, for its followers (`LinkRegistry::stopForwards`): a Stop to every follower
+    /// for everything this instance forwarded, and the records dropped. Returns how many records were ended. What
+    /// it plays itself is the caller's to stop. In the caller's model-mutex section, as every endpoint call, and on
+    /// the thread that makes every other `pushPreview` of the process's instances (the main thread):
+    /// `LinkRegistry::stopForwards`' obligation.
+    int stopForwards();
 
     /// Whether the instance follows. Atomic: the audio thread reads it at the top of every block
     /// (`LinkSource::select`). It turns true only after the link buffer holds a publication.

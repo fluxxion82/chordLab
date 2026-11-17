@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstdint>
 #include <initializer_list>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -790,6 +791,22 @@ int LinkRegistry::panicFollowers(LinkToken token) {
     return flagged;
 }
 
+int LinkRegistry::stopForwards(LinkToken token) {
+    State& s = *state_;
+    const std::lock_guard<std::mutex> lock(s.mutex);
+    PreviewCmd stop{};
+    stop.kind = PreviewCmd::Stop;
+    int ended = 0;
+    // The keys are (originator, id): this originator's records are one contiguous run.
+    auto it = s.forwards.lower_bound({token, std::numeric_limits<int>::min()});
+    while (it != s.forwards.end() && it->first.first == token) {
+        s.pushRecorded(it->second, stop);  // a full ring: that follower's watchdog ends it
+        it = s.forwards.erase(it);
+        ++ended;
+    }
+    return ended;
+}
+
 std::optional<int> nextForwardedPreviewId(int& cursor, const std::set<int>& held, int first, int last) {
     assert(first <= last && "nextForwardedPreviewId: a range");
     assert(cursor >= first && cursor <= last && "nextForwardedPreviewId: the cursor lies in the range");
@@ -1051,6 +1068,10 @@ LinkForward LinkEndpoint::forwardPreview(std::optional<int> trackId, const Previ
 
 int LinkEndpoint::panicFollowers() {
     return registry_.panicFollowers(token_);
+}
+
+int LinkEndpoint::stopForwards() {
+    return registry_.stopForwards(token_);
 }
 
 std::uint64_t LinkEndpoint::serial() const noexcept {
