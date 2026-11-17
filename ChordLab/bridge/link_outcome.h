@@ -9,6 +9,11 @@
 
 namespace chordlab::bridge {
 
+/// The error a link message without its own `lineage` member is answered with (plan I9: every link command carries
+/// the follower's lineage; no editor that predates links sends one, so a missing lineage is refused, not let through
+/// unchecked as a command's is).
+inline constexpr const char* kMissingLinkLineageError = "a link message must carry \"lineage\"";
+
 /// What a kMsgTagLink message (per-track instruments plan I9, I12) leads to after it was parsed (parseLinkRequest)
 /// and its document lineage compared (readLineage before mModelMutex, compareLineage under it), beyond what the
 /// shell always does: whatever the outcome, an open editor then gets the fresh link state (kMsgTagLinkState), which
@@ -21,12 +26,13 @@ struct LinkOutcome
 };
 
 /// Whether the shell calls the endpoint (LinkEndpoint::follow or unfollow) at all: only for an instance that links
-/// (`linking`: it is in the process's shared registry, the VST3; plan I15), and then exactly as for a command, for an
-/// absent or a current lineage (lineageApplies). A stale, malformed or unreadable one applies nothing. An instance
-/// with a registry of its own (the AU, the app) never applies a link message: nothing could ever bind there.
+/// (`linking`: it is in the process's shared registry, the VST3; plan I15), and then only for a current lineage. An
+/// absent one applies nothing (unlike a command's: a link message must carry the follower's lineage, plan I9), nor
+/// does a stale, malformed or unreadable one. An instance with a registry of its own (the AU, the app) never applies
+/// a link message: nothing could ever bind there.
 inline bool linkApplies(CommandLineage lineage, bool linking) noexcept
 {
-    return linking && lineageApplies(lineage);
+    return linking && lineage == CommandLineage::Current;
 }
 
 /// What a state load hands LinkEndpoint::adopt: the loaded instance block, without its follow when the instance does
@@ -55,9 +61,10 @@ inline InstanceState adoptableState(InstanceState loaded, bool linking)
 ///  - Not linking: nothing applied, nothing else (no dirty, no snapshot, no error), for every lineage.
 ///  - Stale: nothing applied, `pushSnapshot`, no error (a click that a state load overtook; as a command).
 ///  - Malformed, Failed: nothing applied, `error` kMalformedLineageError / kLineageFailedError (as a command).
-///  - Absent or Current, follow: `markDirty` only when `result` is Applied AND the saved follow changed; a refused
-///    follow (StaleLeader, UnknownLeader, UnknownLane) changes nothing and is no error.
-///  - Absent or Current, unfollow: `markDirty` only when the saved follow changed (the instance was following).
+///  - Absent: nothing applied, `error` kMissingLinkLineageError (a link message must carry its lineage, plan I9).
+///  - Current, follow: `markDirty` only when `result` is Applied AND the saved follow changed; a refused follow
+///    (StaleLeader, UnknownLeader, UnknownLane) changes nothing and is no error.
+///  - Current, unfollow: `markDirty` only when the saved follow changed (the instance was following).
 inline LinkOutcome linkOutcome(bool linking, CommandLineage lineage, bool follow, LinkFollowResult result,
                                bool savedFollowChanged) noexcept
 {
@@ -76,6 +83,8 @@ inline LinkOutcome linkOutcome(bool linking, CommandLineage lineage, bool follow
             outcome.error = kLineageFailedError;
             return outcome;
         case CommandLineage::Absent:
+            outcome.error = kMissingLinkLineageError;
+            return outcome;
         case CommandLineage::Current:
             break;
     }

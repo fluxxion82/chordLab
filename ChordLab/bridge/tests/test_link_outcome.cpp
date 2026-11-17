@@ -15,6 +15,7 @@ using chordlab::bridge::adoptableState;
 using chordlab::bridge::CommandLineage;
 using chordlab::bridge::kLineageFailedError;
 using chordlab::bridge::kMalformedLineageError;
+using chordlab::bridge::kMissingLinkLineageError;
 using chordlab::bridge::LinkOutcome;
 using chordlab::bridge::linkOutcome;
 
@@ -37,7 +38,7 @@ bool quiet(const LinkOutcome& o) {
 }  // namespace
 
 TEST_CASE("linkOutcome: an applied follow that changed the saved follow marks the host dirty, nothing else") {
-    for (const CommandLineage lineage : {CommandLineage::Absent, CommandLineage::Current}) {
+    for (const CommandLineage lineage : {CommandLineage::Current}) {   // Absent is refused (plan I9)
         const LinkOutcome o = linkOutcome(kLinking, lineage, kFollow, LinkFollowResult::Applied, kChanged);
         CHECK(o.markDirty);
         CHECK_FALSE(o.pushSnapshot);
@@ -46,13 +47,13 @@ TEST_CASE("linkOutcome: an applied follow that changed the saved follow marks th
 }
 
 TEST_CASE("linkOutcome: an applied follow that saves what was saved already (the same link, the same hints) is clean") {
-    for (const CommandLineage lineage : {CommandLineage::Absent, CommandLineage::Current}) {
+    for (const CommandLineage lineage : {CommandLineage::Current}) {   // Absent is refused (plan I9)
         CHECK(quiet(linkOutcome(kLinking, lineage, kFollow, LinkFollowResult::Applied, kUnchanged)));
     }
 }
 
 TEST_CASE("linkOutcome: a refused follow changes nothing and is no error: the fresh link state is the answer") {
-    for (const CommandLineage lineage : {CommandLineage::Absent, CommandLineage::Current}) {
+    for (const CommandLineage lineage : {CommandLineage::Current}) {   // Absent is refused (plan I9)
         for (const LinkFollowResult result :
              {LinkFollowResult::StaleLeader, LinkFollowResult::UnknownLeader, LinkFollowResult::UnknownLane}) {
             CHECK(quiet(linkOutcome(kLinking, lineage, kFollow, result, kUnchanged)));
@@ -63,7 +64,7 @@ TEST_CASE("linkOutcome: a refused follow changes nothing and is no error: the fr
 }
 
 TEST_CASE("linkOutcome: an unfollow dirties the host only when the instance was following") {
-    for (const CommandLineage lineage : {CommandLineage::Absent, CommandLineage::Current}) {
+    for (const CommandLineage lineage : {CommandLineage::Current}) {   // Absent is refused (plan I9)
         const LinkOutcome wasFollowing = linkOutcome(kLinking, lineage, kUnfollow, LinkFollowResult::Applied, kChanged);
         CHECK(wasFollowing.markDirty);
         CHECK_FALSE(wasFollowing.pushSnapshot);
@@ -110,12 +111,30 @@ TEST_CASE("linkOutcome: a malformed or unreadable lineage applies nothing and is
     }
 }
 
-TEST_CASE("linkOutcome: the endpoint is called exactly for an absent or current lineage, as for a command") {
-    CHECK(chordlab::bridge::linkApplies(CommandLineage::Absent, kLinking));
+TEST_CASE("linkOutcome: the endpoint is called exactly for a current lineage (a link message must carry one)") {
+    CHECK_FALSE(chordlab::bridge::linkApplies(CommandLineage::Absent, kLinking));
     CHECK(chordlab::bridge::linkApplies(CommandLineage::Current, kLinking));
     CHECK_FALSE(chordlab::bridge::linkApplies(CommandLineage::Stale, kLinking));
     CHECK_FALSE(chordlab::bridge::linkApplies(CommandLineage::Malformed, kLinking));
     CHECK_FALSE(chordlab::bridge::linkApplies(CommandLineage::Failed, kLinking));
+}
+
+TEST_CASE("linkOutcome: a link message without its own lineage applies nothing and is an error of its own") {
+    // Plan I9: every link command carries the follower's own lineage; no editor that predates links sends tag 18,
+    // so, unlike a command, a missing one is not let through unchecked.
+    for (const bool follow : {kFollow, kUnfollow}) {
+        for (const LinkFollowResult result : kResults) {
+            for (const bool changed : {kChanged, kUnchanged}) {
+                const LinkOutcome o = linkOutcome(kLinking, CommandLineage::Absent, follow, result, changed);
+                CHECK_FALSE(o.markDirty);
+                CHECK_FALSE(o.pushSnapshot);
+                REQUIRE(o.error != nullptr);
+                CHECK(std::strcmp(o.error, kMissingLinkLineageError) == 0);
+                CHECK(std::strcmp(o.error, kMalformedLineageError) != 0);
+                CHECK(std::strcmp(o.error, kLineageFailedError) != 0);
+            }
+        }
+    }
 }
 
 TEST_CASE("linkOutcome: an instance that is not linking applies no link message and answers with the link state alone") {

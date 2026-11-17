@@ -136,7 +136,8 @@
 // Messages (plan I12): the editor sends kMsgTagLink (18), follow a leader's lane or unfollow, handled by HandleLink
 // on the main thread, inline from OnMessage (so with no Lifeline lock held): parseLinkRequest, the message's own
 // "lineage" read before mModelMutex and compared under it as a command's (stale: nothing applied, PushSnapshot; not
-// a string or unreadable: the command path's errors), and when it applies LinkEndpoint::follow or unfollow in that
+// a string or unreadable: the command path's errors; absent, unlike a command's: nothing applied and an error of its
+// own, since a link message must carry it, plan I9), and when it is current LinkEndpoint::follow or unfollow in that
 // same section; then the hooks with nothing held, the own republish, MarkHostDirty when the follow the state saves
 // changed, and always PushLinkState (chordlab::bridge::linkOutcome decides which). A refused follow (the leader's
 // lineage stale, an unknown leader or lane) changes nothing and sends no error: the fresh link state is the answer.

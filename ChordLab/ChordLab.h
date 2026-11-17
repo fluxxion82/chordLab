@@ -166,7 +166,8 @@ private:
   // A kMsgTagLink payload (follow a leader's lane, or stop following; plan I9, I12). Main thread, called only inline
   // from OnMessage, never from inside an OnMain hop, so it holds no Lifeline lock when it runs the hooks. Parsed
   // (parseLinkRequest; a failure is a kMsgTagError), its "lineage" read before mModelMutex and compared under it as
-  // a command's; when it applies, LinkEndpoint::follow / unfollow in that section, then the hooks with nothing held,
+  // a command's, except that an absent one is refused (kMissingLinkLineageError); when it is current,
+  // LinkEndpoint::follow / unfollow in that section, then the hooks with nothing held,
   // then the own republish. What follows (dirty, snapshot, error) is chordlab::bridge::linkOutcome; the fresh link
   // state is pushed after every parsed message.
   void HandleLink(std::string_view json);
