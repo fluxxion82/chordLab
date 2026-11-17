@@ -12,7 +12,8 @@ import SwiftUI
 /// In a window shorter than `FollowOffer.compactHeight` it takes its compact form (`FollowOffer.text(compact:)`,
 /// callout text, small buttons, less padding) on one line, so the palette keeps a full row in view at the 700 x 632
 /// minimum (measured by the render harness, ChordLab/Tests/viewharness). The line keeps as many buttons as fit and
-/// leaves the rest to More…; only when not even one fits do the buttons go under the sentence.
+/// leaves the rest to More…; only when not even one fits do the buttons go under the sentence, again as many as fit
+/// there, down to More… alone.
 struct FollowBannerView: View {
   @EnvironmentObject var state: ChordLabState
   let offer: FollowOffer
@@ -23,23 +24,27 @@ struct FollowBannerView: View {
 
   var body: some View {
     VStack(alignment: .leading, spacing: compact ? 2 : 6) {
-      // One line with as many buttons as fit (in the picker's order; More… then covers the rest), else the
-      // sentence above every button.
+      // One line with as many buttons as fit (in the picker's order; More… then covers the rest); when not even one
+      // fits beside the sentence, the sentence above a row that sheds buttons the same way, down to More… alone (the
+      // last candidate, which `ViewThatFits` falls back to): nothing in the banner is ever wider than the banner.
       ViewThatFits(in: .horizontal) {
-        ForEach(Array(stride(from: offer.buttons.count, through: 1, by: -1)), id: \.self) { shown in
-          HStack(spacing: 8) {
-            sentence
-            buttons(shown: shown)
-            Spacer(minLength: 0)
-            dismiss
-          }
-        }
-        VStack(alignment: .leading, spacing: compact ? 4 : 6) {
-          sentence
-          HStack(spacing: 8) {
-            buttons(shown: offer.buttons.count)
-            Spacer(minLength: 0)
-            dismiss
+        ForEach(layouts, id: \.self) { layout in
+          if layout.oneLine {
+            HStack(spacing: 8) {
+              sentence
+              buttons(shown: layout.shown)
+              Spacer(minLength: 0)
+              dismiss
+            }
+          } else {
+            VStack(alignment: .leading, spacing: compact ? 4 : 6) {
+              sentence
+              HStack(spacing: 8) {
+                buttons(shown: layout.shown)
+                Spacer(minLength: 0)
+                dismiss
+              }
+            }
           }
         }
       }
@@ -59,6 +64,20 @@ struct FollowBannerView: View {
     .accessibilityElement(children: .contain)
     .accessibilityLabel(offer.text(compact: false))
     .probeFrame("banner")
+  }
+
+  /// One of the banner's layouts, in the order `ViewThatFits` tries them: one line with `shown` buttons, or the
+  /// sentence above a row of `shown` buttons.
+  private struct Layout: Hashable {
+    let oneLine: Bool
+    let shown: Int
+  }
+
+  /// One line with every button, one fewer, … one; then two lines likewise, down to none (More… alone).
+  private var layouts: [Layout] {
+    let count = offer.buttons.count
+    return stride(from: count, through: 1, by: -1).map { Layout(oneLine: true, shown: $0) }
+      + stride(from: count, through: 0, by: -1).map { Layout(oneLine: false, shown: $0) }
   }
 
   private var sentence: some View {
@@ -89,6 +108,7 @@ struct FollowBannerView: View {
         }
         .fixedSize()
         .help(option.tooltip ?? "")
+        .probeFrame("banner.button.\(option.lane)")
       }
       if offer.showsMore(shown: shown) {
         Menu(FollowOffer.moreTitle) { FollowPickerItems() }
@@ -105,5 +125,6 @@ struct FollowBannerView: View {
       .buttonStyle(.borderless)
       .foregroundStyle(Color.white.opacity(0.7))
       .fixedSize()
+      .probeFrame("banner.dismiss")
   }
 }

@@ -57,7 +57,7 @@ struct ViewHarness {
                             header: repoChordLab.appendingPathComponent("ChordLab-Shared.h"))
       harness.checkConstants()
       for scenario in scenarios {
-        for size in sizes { harness.run(scenario, size: size) }
+        for size in scenario.sizes ?? sizes { harness.run(scenario, size: size) }
       }
       return harness.report()
     }
@@ -79,6 +79,8 @@ struct Scenario {
   let setup: @MainActor (Harness, ChordLabState, ShellStub) -> Void
   /// The checks on one render.
   let checks: @MainActor (Harness, Render) -> Void
+  /// The window sizes to render at; nil for `ViewHarness.sizes`.
+  var sizes: [CGSize]? = nil
 
   /// The link state for a follower of ChordLab A's Bass (the follower fixture) with `status` and no copy to switch to.
   @MainActor static func follower(_ h: Harness, status: String, switchTo: Bool = false) -> Data {
@@ -170,6 +172,23 @@ struct Scenario {
       h.check(r.state.followOffer?.buttons.count == 5, "the offer holds five lanes")
       h.check(r.frames["banner.more"] != nil, "More… shows")
     }),
+    Scenario(name: "banner-narrow-tall", setup: { h, state, _ in
+      // A tall window only 700 pt wide (the full sentence form) with the copy's wording, four wide-named tracks first
+      // and Chords last (another ChordLab plays it): not even one button fits beside the sentence, and the second row
+      // must shed buttons too, down to More… alone.
+      state.applySnapshot(json: h.data("snapshot-home-progression.json"))
+      state.applyLinkState(json: h.json("link-state-copy.json") { object in
+        var leaders = object["leaders"] as! [[String: Any]]
+        leaders[0]["lanes"] = [h.lane("chords", "Chords", "", followers: 1), h.lane("w1", "WMWMWMWMWMWMWMWM", "bass"),
+                               h.lane("w2", "MWMWMWMWMWMWMWMW", "lead"), h.lane("w3", "WMWMWMWMWMWMWMWM", "other"),
+                               h.lane("w4", "MWMWMWMWMWMWMWMW", "lead")]
+        object["leaders"] = leaders
+      })
+    }, checks: { h, r in
+      h.checkEditor(r, banner: true, followMenu: true)
+      h.checkBanner(r)
+      h.check(r.state.followOffer?.isCopy == true, "the copy's wording")
+    }, sizes: [CGSize(width: 700, height: 800), CGSize(width: 700, height: 632), CGSize(width: 900, height: 800)]),
     Scenario(name: "menu", setup: { h, state, _ in
       // A leader whose chords and Lead others play (routed): no banner, the Follow menu with its warning.
       state.applySnapshot(json: h.data("snapshot-tracks.json"))
@@ -890,17 +909,21 @@ struct Render {
                                                  banner.minY - keyBar.maxY))
     check(bar.minY >= banner.maxY + 4, String(format: "the transport bar keeps clear of the banner (gap %.1f pt)",
                                               bar.minY - banner.maxY))
+    let parts = r.frames.filter { $0.key.hasPrefix("banner.") }
+    let outside = parts.filter { !inside($0.value, banner) }.map(\.key).sorted()
+    check(outside.isEmpty, "every part of the banner (\(parts.count): sentence, buttons, More…, Not now) lies inside it (outside: \(outside))")
     let compact = FollowOffer.isCompact(height: r.size.height)
     print(String(format: "  banner height %.1f (%@)", banner.height, compact ? "compact" : "full"))
     if let sentence = r.frames["banner.sentence"], let buttons = r.frames["banner.buttons"] {
       // The refusal sentence in the sentence's place (a short window) may push the buttons under it; otherwise they
       // share one line.
-      let noticeInline = compact && r.state.followNotice != nil
-      if noticeInline {
-        check(banner.height <= 48, String(format: "the banner with its refusal sentence is at most two lines (%.1f pt)",
-                                          banner.height))
-      } else {
+      // In a short window the banner is one line (the palette needs the height); in a tall one, when not even one
+      // button fits beside the sentence, the buttons may go under it.
+      if compact {
         check(abs(sentence.midY - buttons.midY) < 2, "the sentence and the buttons share one line")
+      } else {
+        check(abs(sentence.midY - buttons.midY) < 2 || buttons.minY >= sentence.maxY,
+              "the buttons are beside the sentence, or under it")
       }
       check(buttons.height <= (compact ? 24 : 28), String(format: "the buttons are one line (%.1f pt)", buttons.height))
     } else {
