@@ -1,5 +1,6 @@
 #include "doctest.h"
 
+#include "bridge/command_lineage.h"
 #include "bridge/link_request.h"
 
 #include <optional>
@@ -180,4 +181,45 @@ TEST_CASE("parseLinkRequest: a text beyond the engine's message limits is refuse
     CHECK_FALSE(accepted(atLimit).follow);
     CHECK(problemOf(atLimit + " ") == kParseProblem);
     CHECK(problemOf(std::string(chordlab::kMaxJsonBytes + 1, ' ')) == kParseProblem);
+}
+
+TEST_CASE("parseLinkRequest and readLineage agree at the message limits, for an unfollow and a follow alike") {
+    // The combined property (Codex review): a request whose own `lineage` readLineage does not read (Absent: "not
+    // checked") is never accepted, and one that is accepted always had its lineage read. A stale lineage rides in
+    // each request with a pad member parseLinkRequest ignores, sized just at and just over each limit.
+    using chordlab::bridge::LineageField;
+    using chordlab::bridge::readLineage;
+    const std::string unfollowHead = R"({"schema":1,"op":"unfollow","lineage":"stale","pad":)";
+    const std::string followHead =
+        R"({"schema":1,"op":"follow","leader":"x","lane":"u","leaderLineage":"l","lineage":"stale","pad":)";
+    for (const std::string& head : {unfollowHead, followHead}) {
+        const bool isFollow = head == followHead;
+        CAPTURE(isFollow);
+        const auto checkRead = [&](const std::string& text) {
+            const LineageField field = readLineage(text);
+            CHECK(field.kind == LineageField::Kind::String);
+            CHECK(field.value == "stale");
+            CHECK(accepted(text).follow == isFollow);
+        };
+        const auto checkRefused = [&](const std::string& text) {
+            CHECK(readLineage(text).kind == LineageField::Kind::Absent);
+            CHECK(problemOf(text) == kParseProblem);
+        };
+        // Size: a string pad making the text exactly kMaxJsonBytes, then one byte more.
+        const std::size_t frame = head.size() + 3;  // the pad's two quotes and the closing brace
+        REQUIRE(frame < chordlab::kMaxJsonBytes);
+        const std::string atSize = head + "\"" + std::string(chordlab::kMaxJsonBytes - frame, 'p') + "\"}";
+        REQUIRE(atSize.size() == chordlab::kMaxJsonBytes);
+        checkRead(atSize);
+        const std::string overSize = head + "\"" + std::string(chordlab::kMaxJsonBytes - frame + 1, 'p') + "\"}";
+        REQUIRE(overSize.size() == chordlab::kMaxJsonBytes + 1);
+        checkRefused(overSize);
+        // Depth: the top-level object is level 1, so kMaxJsonDepth - 1 nested arrays are the deepest accepted.
+        const auto nested = [&](int arrays) {
+            const auto n = static_cast<std::size_t>(arrays);
+            return head + std::string(n, '[') + std::string(n, ']') + "}";
+        };
+        checkRead(nested(chordlab::kMaxJsonDepth - 1));
+        checkRefused(nested(chordlab::kMaxJsonDepth));
+    }
 }
