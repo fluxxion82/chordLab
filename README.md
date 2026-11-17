@@ -82,6 +82,20 @@ Tracks, on `main` and not in the 1.0.0 release (see Status):
 - MIDI drag-out per lane (each tab's ♫), of every lane at once ("♫ All": one file, one clip per lane, muted lanes
   included), and of the open lane from the bottom control and the section handles.
 
+Per-track instruments, on `main`, not in the 1.0.0 release and not yet tested in Live (see Status):
+
+- A second ChordLab in the same Live set can play one track of the main one (its chords, or a Bass, Lead or Other
+  track), so each line drives its own instrument track while everything is still written in one window. The main
+  ChordLab stops playing a track that another one plays. VST3 in Ableton Live only.
+- The usual set-up is one Live track with an Instrument Rack: the main ChordLab in the first chain, one duplicate
+  of that chain per extra line; each instrument track takes MIDI From that track and that chain's ChordLab.
+- A duplicated or empty ChordLab offers the main one's tracks in a banner; otherwise the Follow menu in the
+  transport bar does. A ChordLab that plays another's track shows a small panel instead of the editor (what it
+  plays, its state and the way out of each problem, Change and Stop following, its own Thru and Panic), and the
+  main ChordLab marks the tabs of tracks that play elsewhere.
+- Links are saved with the set and come back in any loading order; a deleted main ChordLab leaves the others
+  waiting, and undoing the deletion relinks them.
+
 ## Install
 
 Download `ChordLab-<version>.pkg` from the [latest release](https://github.com/fluxxion82/chordLab/releases/latest)
@@ -161,7 +175,8 @@ scripts/check.sh --all      # + UBSan, ASan and TSan builds, Swift tests, bridge
 ```
 
 Flags combine (`--ubsan`, `--asan`, `--tsan`, `--swift`, `--bridge`, `--plugin`, `--release`: the release
-script's preflight in report mode). The script stops at
+script's preflight in report mode; `--shell` and `--views`, below). Only `--plugin` and `--all` install anything
+(the VST3 into `~/Library/Audio/Plug-Ins/VST3`, the app into `~/Applications`). The script stops at
 the first failure and prints a PASS/FAIL table. Every sanitizer step runs under a hard timeout because
 older Apple clang releases hung under ASan and TSan (see "Status").
 
@@ -172,14 +187,17 @@ The suites, each runnable on its own:
 | `engine_tests` (doctest) | theory, document/undo, compiler, scheduler, SMF, JSON API, golden fixtures, mutation fuzz of the JSON readers | `cmake -S engine -B engine/build -DCMAKE_BUILD_TYPE=Debug && cmake --build engine/build -j8 && (cd engine/build && ctest --output-on-failure)` |
 | `engine_rt_alloc_test` | no allocation on the audio-thread surface | same ctest run |
 | `ChordLabUICoreTests` (XCTest) | the UI's pure logic in `ChordLab/UI/Core/`: geometry, harmony text, symbols, key names, snapshot decoding | `cd ChordLab && swift test` |
-| `bridge_tests` (doctest) | the plug-in shell's pure helpers in `ChordLab/bridge/`: message validation, preview, section-export and clip-export parsing, export file naming | `cmake -S ChordLab/bridge/tests -B ChordLab/build-bridge-tests && cmake --build ChordLab/build-bridge-tests -j8 && (cd ChordLab/build-bridge-tests && ctest --output-on-failure)` |
+| `vst3host` | the plug-in shell itself, without a DAW: a command-line VST3 host loads a freshly built `ChordLab.vst3` in-process and checks life cycle, state, playback against an engine reference, and two linked instances | `scripts/check.sh --shell` (builds the VST3 and the app into a scratch directory, installs nothing, then runs it; not combinable with `--plugin` or `--all`) |
+| `viewharness` | the editor's views, offscreen: renders `ContentView` in each state of the follow feature at two window sizes, checks the frames and scripts the shell's answers to the editor | `scripts/check.sh --views` (same scratch directory rules; needs the display awake) |
+| `bridge_tests` (doctest) | the plug-in shell's pure helpers in `ChordLab/bridge/`: message validation, preview, section-export, clip-export and link-request parsing, what a link message leads to, export file naming | `cmake -S ChordLab/bridge/tests -B ChordLab/build-bridge-tests && cmake --build ChordLab/build-bridge-tests -j8 && (cd ChordLab/build-bridge-tests && ctest --output-on-failure)` |
 
 **JSON fixtures.** `engine/tests/fixtures/` holds the engine's own `snapshotJson`/`stateJson` output for
 a few documents (empty, a four-chord progression with sections and a manual voicing, the same while
-browsing another key) plus hand-written Phase 1-shaped files. The engine compares its output to them
-byte for byte, and the Swift tests decode them, so the two sides cannot drift apart silently. When the
-contract changes on purpose, regenerate the generated files with
-`CHORDLAB_UPDATE_FIXTURES=1 engine/build/engine_tests -tc="*golden*"` and review the diff; the legacy
+browsing another key), its `linkStateJson` output for linked instances (`link-state-*.json`: a leader
+with followers, a copy nobody follows, a playing follower, a waiting one), plus hand-written Phase
+1-shaped files. The engine compares its output to them byte for byte, and the Swift tests decode them, so
+the two sides cannot drift apart silently. When the contract changes on purpose, regenerate the generated
+ones with `CHORDLAB_UPDATE_FIXTURES=1 engine/build/engine_tests -tc="*golden*"` and review the diff; the legacy
 files are maintained by hand. The Swift fixture tests fail if the directory is missing;
 `CHORDLAB_UI_SKIP_FIXTURES=1 swift test` skips them and `CHORDLAB_UI_FIXTURES_DIR=<dir>` points them
 elsewhere.
@@ -264,7 +282,13 @@ binaries.
   generator, milestones M1–M4) are merged on `main` but not released: the 1.0.0 pkg does not have them. They pass
   the engine, Swift and bridge suites, and Live Test 15 (2026-11-16, Live 12: lanes, note editing, the generator,
   playback with mute and solo, the drag-outs, saving); modifier clicks, pinch and Logic are not checked yet.
-- Not yet: an instrument per track while composing (every lane plays on channel 1), a lead generator, feel on
+- Per-track instruments (a second ChordLab playing one track of the main one; engine, shell and editor) are
+  merged on `main` but not released and **not yet run in Live**: they pass the engine suite with its two-instance
+  simulation, the headless host test (two linked instances exact to the sample against the engine) and the
+  editor's render harness. Live Test 16 (routing through a rack, sync, save and reopen, freeze and export) is
+  pending. Not built: auditions from a track's piano roll sounding on that track's own instrument; the Audio Unit
+  and the app do not link.
+- Not yet: a lead generator, feel on
   tracks; chords are contiguous; one suggestion style (pop); macOS only (VST3, Audio Unit, app). The Xcode project still carries
   iPlug2's AUv3, AAX, VST2 and iOS targets and Windows project files from the template; they are not
   maintained or tested.

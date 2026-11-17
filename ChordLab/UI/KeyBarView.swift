@@ -93,6 +93,7 @@ struct KeyBarView: View {
       }
     }
     .font(.body)
+    .probeFrame("keyBar")
   }
 
   private var projectKeyControls: some View {

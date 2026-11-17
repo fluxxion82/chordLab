@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cassert>
+#include <chrono>
 #include <cstdint>
 #include <initializer_list>
 #include <mutex>
@@ -70,6 +71,14 @@ bool LaneUids::cover(const Document& doc, const std::vector<int>& historyTrackId
 std::string LaneUids::uidOf(int trackId) const {
     const auto it = entries_.find(trackId);
     return it == entries_.end() ? std::string() : it->second;
+}
+
+int LaneUids::trackOf(std::string_view uid) const {
+    if (uid.empty() || uid == kChordsLaneUid) return 0;
+    for (const auto& entry : entries_) {
+        if (entry.second == uid) return entry.first;
+    }
+    return 0;
 }
 
 std::optional<LaneKey> LaneUids::laneOf(const Document& doc, std::string_view uid) const {
@@ -215,6 +224,8 @@ struct LinkRegistry::Entry {
     LinkToken boundTo = 0;                         // a follower's leader instance, 0 while waiting (rule 2)
     LinkToken copiedFrom = 0;                      // the instance the last state load found it a copy of (rule 3)
     std::uint64_t copyOrder = 0;                   // when it became that copy, for "the newest" (rule 8)
+    bool copyCarriedFollow = false;                // that load carried a follow (rule 8); meaningful with copiedFrom
+    std::int64_t copyMadeAtMs = 0;                 // the clock when that load made it a copy (rule 8)
     std::shared_ptr<const LinkFeed> feed;          // a leader's last feed; null before one and once it follows
     std::uint64_t bindings = 0;                    // moves on every bind to and unbind from this instance
 };
@@ -227,6 +238,7 @@ struct LinkRegistry::State {
     std::uint64_t labelsGiven = 0;
     std::uint64_t copiesMade = 0;
     std::atomic<std::uint64_t> serial{0};
+    Clock clock;  // set by the constructor, never empty
 
     Entry* find(LinkToken token) {
         const auto it = entries.find(token);
@@ -362,6 +374,32 @@ struct LinkRegistry::State {
         return v;
     }
 
+    /// Rule 8: the instance `f`'s `switchTo` names, or null. `f` follows, is bound, and became a copy by a load
+    /// that carried a follow; the answer is the newest copy of `f`'s leader that is not following and was made a
+    /// copy within kPasteWindowMs of `f`, in either order.
+    const Entry* switchTarget(const Entry& f) const {
+        if (!f.follow || f.boundTo == 0 || f.copiedFrom == 0 || !f.copyCarriedFollow) return nullptr;
+        const Entry* newest = nullptr;
+        for (const auto& entry : entries) {
+            const Entry& c = entry.second;
+            if (c.copiedFrom != f.boundTo || c.follow) continue;
+            const std::int64_t apart =
+                c.copyMadeAtMs > f.copyMadeAtMs ? c.copyMadeAtMs - f.copyMadeAtMs : f.copyMadeAtMs - c.copyMadeAtMs;
+            if (apart > kPasteWindowMs) continue;
+            if (newest == nullptr || c.copyOrder > newest->copyOrder) newest = &c;
+        }
+        return newest;
+    }
+
+    /// Rule 11: the instance `e` (token `token`) is a leader in its own right: a follower is bound to it, or some
+    /// follower's `switchTo` names it.
+    bool leadsOthers(LinkToken token, const Entry& e) const {
+        for (const auto& entry : entries) {
+            if (entry.second.boundTo == token || switchTarget(entry.second) == &e) return true;
+        }
+        return false;
+    }
+
     /// Rule 7, for a bound follower.
     static LinkStatus boundStatus(const LinkFollow& follow, const LinkFeed* feed) {
         if (feed == nullptr || feed->documentId != follow.documentId) return LinkStatus::ProjectChanged;
@@ -374,7 +412,18 @@ struct LinkRegistry::State {
     void moved() { serial.fetch_add(1, std::memory_order_acq_rel); }
 };
 
-LinkRegistry::LinkRegistry() : state_(std::make_unique<State>()) {}
+LinkRegistry::LinkRegistry() : LinkRegistry(Clock{}) {}
+
+LinkRegistry::LinkRegistry(Clock clock) : state_(std::make_unique<State>()) {
+    if (!clock) {
+        clock = [] {
+            return static_cast<std::int64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                 std::chrono::steady_clock::now().time_since_epoch())
+                                                 .count());
+        };
+    }
+    state_->clock = std::move(clock);
+}
 
 LinkRegistry::~LinkRegistry() = default;
 
@@ -442,6 +491,8 @@ LinkRegistry::Adopted LinkRegistry::adoptState(LinkToken token, std::string load
         e->id = std::move(freshId);
         e->copiedFrom = holder->first;
         e->copyOrder = ++s.copiesMade;
+        e->copyCarriedFollow = follow.has_value();  // rule 8: copied as a follower
+        e->copyMadeAtMs = s.clock();
         out.copy = true;
     } else {
         e->id = std::move(loadedId);
@@ -458,6 +509,20 @@ LinkRegistry::Adopted LinkRegistry::adoptState(LinkToken token, std::string load
         s.moved();
     }
     return out;
+}
+
+LinkRegistry::Hooks LinkRegistry::adoptWithoutBlock(LinkToken token) {
+    std::shared_ptr<const LinkFeed> dropped;  // released after the mutex
+    Hooks hooks;
+    State& s = *state_;
+    const std::lock_guard<std::mutex> lock(s.mutex);
+    Entry* e = s.find(token);
+    if (e == nullptr) return hooks;
+    const bool wasCopy = e->copiedFrom != 0;
+    e->copiedFrom = 0;  // rule 3: its document is no copy of the original's now
+    const bool followChanged = s.setFollowLocked(token, *e, std::nullopt, dropped, hooks);
+    if (wasCopy || followChanged) s.moved();
+    return hooks;
 }
 
 LinkRegistry::Hooks LinkRegistry::setFollow(LinkToken token, std::optional<LinkFollow> follow) {
@@ -554,17 +619,13 @@ LinkView LinkRegistry::view(LinkToken token) const {
             v.follow->leaderId = leader->id;
             v.follow->leaderLabel = leader->label;
             v.status = State::boundStatus(*e->follow, leader->feed.get());
-            if (e->copiedFrom != 0) {  // rule 8
-                const Entry* newest = nullptr;
-                for (const auto& entry : s.entries) {
-                    const Entry& c = entry.second;
-                    if (c.copiedFrom == e->boundTo && !c.follow &&
-                        (newest == nullptr || c.copyOrder > newest->copyOrder)) {
-                        newest = &c;
-                    }
-                }
-                if (newest != nullptr) v.switchTo = LinkInstanceRef{newest->id, newest->label};
-            }
+            if (const Entry* target = s.switchTarget(*e)) v.switchTo = LinkInstanceRef{target->id, target->label};
+        }
+    }
+    if (!e->follow && e->copiedFrom != 0) {  // rule 11
+        const Entry* original = s.find(e->copiedFrom);
+        if (original != nullptr && !original->follow && !s.leadsOthers(token, *e)) {
+            v.copyOf = LinkInstanceRef{original->id, original->label};
         }
     }
     for (const auto& entry : s.entries) {
@@ -759,7 +820,7 @@ void LinkEndpoint::adopt(const State& loaded, LinkRegistry::Hooks& hooks) {
 }
 
 void LinkEndpoint::adoptWithoutBlock(LinkRegistry::Hooks& hooks) {
-    hooks = registry_.setFollow(token_, std::nullopt);       // empties the link buffer if it followed
+    hooks = registry_.adoptWithoutBlock(token_);             // empties the link buffer if it followed
     following_.store(false, std::memory_order_release);      // after the registry wrote it
     documentId_ = makeUid_();
     uids_.replace({});
@@ -771,7 +832,9 @@ std::uint64_t LinkEndpoint::serial() const noexcept {
 }
 
 LinkView LinkEndpoint::view() const {
-    return registry_.view(token_);
+    LinkView v = registry_.view(token_);
+    for (LinkLaneView& lane : v.routed) lane.trackId = uids_.trackOf(lane.uid);
+    return v;
 }
 
 }  // namespace chordlab

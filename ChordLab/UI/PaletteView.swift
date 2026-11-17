@@ -105,6 +105,7 @@ struct PaletteView: View {
         // cells disappear (releasing a held one) rather than being reused.
         .id(view)
       }
+      .probeFrame("palette.viewport")
     }
     .background(Self.background)
   }

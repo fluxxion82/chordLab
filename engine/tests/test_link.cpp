@@ -276,6 +276,30 @@ TEST_CASE("link uids: laneOf names the chords lane, a track by its uid, and noth
     CHECK_FALSE(uids.laneOf(docWithTracks({b + 100}), uids.uidOf(a)).has_value());
 }
 
+TEST_CASE("link uids: trackOf names a track by its uid, and 0 for the chords lane, an empty or an unknown uid") {
+    DocumentStore store;
+    const int a = store.addTrack(TrackRole::Bass);
+    const int b = store.addTrack(TrackRole::Lead);
+    LaneUids uids;
+    REQUIRE(uids.cover(store.doc(), store.historyTrackIds(), counter()));
+    REQUIRE(uids.entries().size() == 2);  // a table that holds entries: an unknown uid must not land on one
+    CHECK(uids.trackOf(uids.uidOf(a)) == a);
+    CHECK(uids.trackOf(uids.uidOf(b)) == b);
+    CHECK(uids.trackOf("uid-404") == 0);
+    CHECK(uids.trackOf("") == 0);
+    CHECK(uids.trackOf(kChordsLaneUid) == 0);
+    CHECK(LaneUids{}.trackOf("uid-1") == 0);
+    // The entry of a track undo can bring back still answers (whether the document holds it is not asked).
+    const std::string uidB = uids.uidOf(b);
+    REQUIRE(store.removeTrack(b));
+    REQUIRE(uids.cover(store.doc(), store.historyTrackIds(), counter()) == false);
+    CHECK(uids.trackOf(uidB) == b);
+    // A replaced table answers from its own entries only.
+    uids.replace({{7, "uid-seven"}});
+    CHECK(uids.trackOf("uid-seven") == 7);
+    CHECK(uids.trackOf(uidB) == 0);
+}
+
 TEST_CASE("link uids: replace swaps the whole table") {
     DocumentStore store;
     const int a = store.addTrack(TrackRole::Bass);

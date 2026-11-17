@@ -529,6 +529,10 @@ final class SnapshotTests: XCTestCase {
     "snapshot-feel.json",
     "snapshot-tracks.json",
     "state-progression.json",
+    "link-state-leader.json",
+    "link-state-follower.json",
+    "link-state-waiting.json",
+    "link-state-copy.json",
   ]
 
   /// A missing fixture directory or file: thrown from a test, it fails that test (never a skip).

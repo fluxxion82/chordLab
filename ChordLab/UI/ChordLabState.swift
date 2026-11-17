@@ -1,8 +1,8 @@
 import SwiftUI
 
 /// UI-side state. Logic lives in C++; this object only mirrors what the plugin
-/// pushes (snapshot, error, status, transport, export-ready and heard JSON) and forwards user intent
-/// (commands, previews, export requests, forgetting what was heard) back.
+/// pushes (snapshot, error, status, transport, export-ready, heard and link-state JSON) and forwards user intent
+/// (commands, previews, export requests, forgetting what was heard, following another ChordLab's lane) back.
 class ChordLabState: NSObject, ObservableObject {
   var params: [Param] = []
   @Published var bundleID = String("")
@@ -32,6 +32,24 @@ class ChordLabState: NSObject, ObservableObject {
   /// What the plug-in hears on its MIDI input (`kMsgTagHeard`, design D14); nil until the first push. The
   /// Heard group (`HeardView`) shows only while `active` is true.
   @Published var heard: HeardJSON?
+  /// Who this instance is among the ChordLabs of the set, what it follows and which of its lanes others play
+  /// (`kMsgTagLinkState`, per-track instruments plan I12); nil until the first push, which can come before the first
+  /// snapshot. While `following` is set the window is the follower's panel (`ContentView`) and no key command reaches
+  /// the hidden editor (`LinkKeys`).
+  @Published private(set) var linkState: LinkStateJSON?
+  /// The last follow request and the sentence its refusal leaves (`FollowAttempt`): the shell answers a refused follow
+  /// with a fresh link state and no error, inside the send.
+  private let followAttempt = FollowAttempt()
+  /// `followAttempt.notice`, published for the banner, the picker's first entry and the follower's panel; nil when
+  /// there is none.
+  @Published private(set) var followNotice: String?
+  /// The own document lineage a follow or unfollow request was stamped with, while its send is in flight: when the
+  /// state's token differs from it as the answer arrives, the shell answered a stale own lineage (it pushed the current
+  /// document's token and snapshot first, or the entry was drawn before a load). Nil outside such a send.
+  private var followSendToken: String?
+  /// The documents the user dismissed the Follow banner in (`FollowOffer`; Stop following counts as a dismissal), for
+  /// the life of the process: `FollowDismissals.shared` unless a harness passes its own. A new document may offer again.
+  let followDismissals: FollowDismissals
   /// Whether a text field (a section rename) is being edited: the key routes (`EditorKeyRouter`) stand
   /// down meanwhile, so typing a name never appends or removes chords.
   @Published var editingText = false
@@ -139,6 +157,7 @@ class ChordLabState: NSObject, ObservableObject {
     self.mouseButtonsDown = { NSEvent.pressedMouseButtons != 0 }
     self.resolvedClipboardToken = ClipboardToken.resolve(nil)
     self.defaults = .standard
+    self.followDismissals = .shared
     self.guideDisplay = GuideDisplay(rawValue: UserDefaults.standard.string(forKey: GuideDisplay.storageKey))
     super.init()
     observeDefaults()
@@ -146,14 +165,16 @@ class ChordLabState: NSObject, ObservableObject {
 
   /// `clipboardToken` is the plug-in instance's (`ClipboardToken`: the view controller passes the one the C++ shell
   /// made); nil makes one for this state alone. `defaults` is where editor-wide preferences are remembered
-  /// (`UserDefaults.standard` unless a harness passes its own).
+  /// (`UserDefaults.standard` unless a harness passes its own), `followDismissals` where the Follow banner's
+  /// dismissals are (the process's, `FollowDismissals.shared`, unless a harness passes its own).
   public init(beginEdit: @MainActor @escaping (Int) -> Void = { _ in },
               doEdit: @MainActor @escaping (Int, Double) -> Void = { _, _ in },
               endEdit: @MainActor @escaping (Int) -> Void = { _ in },
               sendCommand: @MainActor @escaping (Int, Data?) -> Void = { _, _ in },
               mouseButtonsDown: @escaping () -> Bool = { NSEvent.pressedMouseButtons != 0 },
               clipboardToken: String? = nil,
-              defaults: UserDefaults = .standard) {
+              defaults: UserDefaults = .standard,
+              followDismissals: FollowDismissals = .shared) {
     self.beginEdit = beginEdit
     self.doEdit = doEdit
     self.endEdit = endEdit
@@ -161,6 +182,7 @@ class ChordLabState: NSObject, ObservableObject {
     self.mouseButtonsDown = mouseButtonsDown
     self.resolvedClipboardToken = ClipboardToken.resolve(clipboardToken)
     self.defaults = defaults
+    self.followDismissals = followDismissals
     self.guideDisplay = GuideDisplay(rawValue: defaults.string(forKey: GuideDisplay.storageKey))
     super.init()
     observeDefaults()
@@ -186,8 +208,10 @@ class ChordLabState: NSObject, ObservableObject {
   /// Sounds `cell`'s voicing. At most one preview is held (`PreviewBook`): pressing a cell first ends the held one
   /// (a roll's with its gesture's cancel), so every Start this object sends is matched by exactly one Stop with the
   /// same id (and the scheduler's 4 s watchdog ends a preview whose Stop never arrived; `extend`s every second keep a
-  /// held one alive).
+  /// held one alive). While this instance follows another ChordLab nothing happens (`LinkGate.allowsHold`): a press the
+  /// editor left outstanding holds no cell, runs no keep-alive and leaves nothing for its release or Record.
   @MainActor func pressCell(_ cell: CellJSON) {
+    guard LinkGate.allowsHold(following: LinkKeys.isFollowing(linkState)) else { return }
     targetChords()
     route(previews.hold(.cell(cell.id), pitches: Array(cell.voicing.filter { (0...127).contains($0) }.prefix(8)),
                         velocity: 100).outputs)
@@ -221,9 +245,9 @@ class ChordLabState: NSObject, ObservableObject {
 
   /// A press on the roll's keyboard column (tracks design D14: clicking a key previews it): holds `pitch` until
   /// `releaseKey(id:)` with the id returned (or a lost release, which the keep-alive ends), ending any other hold
-  /// first. Nil for a pitch outside 0...127.
+  /// first. Nil for a pitch outside 0...127, and while this instance follows another ChordLab (`LinkGate.allowsHold`).
   @MainActor func pressKey(pitch: Int) -> Int? {
-    guard (0...127).contains(pitch) else { return nil }
+    guard (0...127).contains(pitch), LinkGate.allowsHold(following: LinkKeys.isFollowing(linkState)) else { return nil }
     let held = previews.hold(.key(pitch: pitch), pitches: [pitch], velocity: PianoKeys.velocity)
     route(held.outputs)
     return held.id
@@ -315,6 +339,10 @@ class ChordLabState: NSObject, ObservableObject {
     keepAliveId = id
   }
 
+  /// Whether the keep-alive timer runs (a preview is held): for the render harness, which checks that a refused hold
+  /// leaves none.
+  var isKeepingPreviewAlive: Bool { keepAlive != nil }
+
   @MainActor private func stopKeepAlive() {
     keepAlive?.invalidate()
     keepAlive = nil
@@ -363,7 +391,10 @@ class ChordLabState: NSObject, ObservableObject {
   /// the arrows, each at most one command, one undo step). Each does nothing when it has nothing to act on, and the
   /// router consumes every mapped key whether or not it did anything, so the host never acts on it (see
   /// `KeyCommandMap`, `EditorKeyRouter`).
+  /// While this instance follows another ChordLab's lane nothing is performed (`LinkKeys.delivers`): the editor's
+  /// document is hidden behind the follower's panel, kept but not played.
   @MainActor func perform(_ command: KeyCommand) {
+    guard LinkKeys.delivers(command, following: LinkKeys.isFollowing(linkState)) else { return }
     action { performAction(command) }
   }
 
@@ -722,10 +753,12 @@ class ChordLabState: NSObject, ObservableObject {
   /// selection echo or a commit's new revision reaches the roll here, after the effects' state was published.
   ///
   /// `rollEffectsObserver` (nil in production) sees every call first, so a test or the harness can check what reaches
-  /// the seam.
+  /// the seam. While this instance follows another ChordLab no roll preview starts (`LinkGate.allowsHold`, passed to
+  /// `PreviewBook.perform`); the stop of a hold begun before still goes out.
   @MainActor func performRollEffects(_ effects: [RollEffect], trackId: Int) {
     rollEffectsObserver?(effects, trackId)
-    route(previews.perform(effects, trackId: trackId))
+    route(previews.perform(effects, trackId: trackId,
+                           startsAllowed: LinkGate.allowsHold(following: LinkKeys.isFollowing(linkState))))
   }
 
   /// The toolbar's nudge ◀ ▶ ▲ ▼ for track `trackId` (`RollNudge.command`): one `updateNotes` of the selected notes
@@ -875,6 +908,65 @@ class ChordLabState: NSObject, ObservableObject {
     sendCommand(kMsgTagClearHeard, Data())
   }
 
+  // MARK: - Following another ChordLab's lane (per-track instruments plan section 5)
+
+  /// The banner (`FollowOffer`) for the current link state, snapshot and document, nil when it does not show.
+  var followOffer: FollowOffer? {
+    FollowOffer.make(link: linkState, snapshot: snapshot, lineage: clipboardToken, dismissals: followDismissals)
+  }
+
+  /// A click on a picker entry, a banner button or the follower panel's switch: `kMsgTagLink` with the entry's
+  /// follow stamped with the own lineage the entry was drawn under (`FollowOption.stampedCommand`), so an entry drawn
+  /// before a state load is answered as stale rather than applied over the follow the load brought. The shell answers
+  /// inside the send with a link state (and, for a stale own lineage, the current snapshot first), never an error for a
+  /// refusal: `FollowAttempt` judges that answer. The sequence: `sent`, the send, `sendReturned`; `applyLinkState` and
+  /// `applyError` report what arrives in between.
+  @MainActor func follow(_ option: FollowOption) {
+    followAttempt.sent(FollowRequest(option))
+    syncFollowNotice()
+    followSendToken = option.ownLineage
+    send(option.stampedCommand, tag: kMsgTagLink)
+    followSendToken = nil
+    followAttempt.sendReturned()
+    syncFollowNotice()
+  }
+
+  /// The panel's Stop following: `kMsgTagLink` `unfollow`, stamped with the own lineage, judged like a follow
+  /// (`FollowAttempt.sentUnfollow`: a stale own lineage leaves the panel with the sentence that this ChordLab changed;
+  /// an error inside the send is the request's, never a refused editor command's). It also dismisses the banner for
+  /// this document (`FollowOffer.dismissedLineage(afterStopFollowing:)`), so the editor that comes back does not offer
+  /// at once.
+  @MainActor func unfollow() {
+    dismissFollowBanner(in: FollowOffer.dismissedLineage(afterStopFollowing: clipboardToken))
+    let token = actionLineage.lineage(current: clipboardToken)
+    followAttempt.sentUnfollow()
+    syncFollowNotice()
+    followSendToken = token
+    send(CommandLineage.stamp(LinkCommands.unfollow(), token: token), tag: kMsgTagLink)
+    followSendToken = nil
+    followAttempt.sendReturned()
+    syncFollowNotice()
+  }
+
+  /// The banner's Not now: it does not show again in this document, for the life of the process; its refusal sentence
+  /// goes with it.
+  @MainActor func dismissFollowBanner() {
+    dismissFollowBanner(in: clipboardToken)
+    followAttempt.dismiss()
+    syncFollowNotice()
+  }
+
+  /// Records the dismissal in the shared store and redraws (the store is not observed).
+  private func dismissFollowBanner(in lineage: String) {
+    objectWillChange.send()
+    followDismissals.dismiss(lineage)
+  }
+
+  /// Publishes `followAttempt.notice` when it changed.
+  private func syncFollowNotice() {
+    if followAttempt.notice != followNotice { followNotice = followAttempt.notice }
+  }
+
   /// The transport row's Thru switch: the snapshot's `midiThru` (off when an older plug-in sends none; the
   /// switch is hidden then), set with `setMidiThru`. The answering snapshot is what flips it.
   @MainActor var thru: Binding<Bool> {
@@ -954,8 +1046,13 @@ class ChordLabState: NSObject, ObservableObject {
   }
 
   /// JSON-encodes `fields` plus `"schema": 1` and sends it under `tag`; false (and an error shown) when it is not valid
-  /// JSON.
+  /// JSON. Every command and preview message goes through here, so this is the one place `LinkGate` is asked: while
+  /// this instance follows another ChordLab's lane no editor command but the panel's own and no preview start leaves
+  /// (false, nothing shown), whichever callback the editor left outstanding sends it.
   @MainActor @discardableResult private func send(_ fields: [String: Any], tag: Int) -> Bool {
+    let following = LinkKeys.isFollowing(linkState)
+    if tag == kMsgTagCommand, !LinkGate.allowsCommand(fields, following: following) { return false }
+    if tag == kMsgTagPreview, !LinkGate.allowsPreview(fields, following: following) { return false }
     var message = fields
     message["schema"] = 1
     guard JSONSerialization.isValidJSONObject(message),
@@ -1050,6 +1147,28 @@ class ChordLabState: NSObject, ObservableObject {
     }
   }
 
+  /// `kMsgTagLinkState` payload. Independent of `snapshot` (the first push can come before the first snapshot). Inside
+  /// a follow's send it is that request's answer (`FollowAttempt.received`; `ownDocumentChanged` when the shell pushed
+  /// another document's token in the same send, its answer to a stale own lineage); outside one it only clears a
+  /// notice that no longer applies. The first state that follows releases what the editor held (`releaseHeld`). Only
+  /// a changed value is published (the shell pushes on every registry change, often
+  /// the same state). A payload that does not decode is reported and leaves the last one shown.
+  func applyLinkState(json: Data) {
+    do {
+      let decoded = try JSONDecoder().decode(LinkStateJSON.self, from: json)
+      let ownDocumentChanged = followSendToken.map { $0 != clipboardToken } ?? false
+      followAttempt.received(decoded, ownDocumentChanged: ownDocumentChanged)
+      syncFollowNotice()
+      let startsFollowing = decoded.isFollowing && !LinkKeys.isFollowing(linkState)
+      if decoded != linkState { linkState = decoded }
+      // The panel replaces the editor: whatever the editor held (a cell, a key, a roll press) stops now, not when its
+      // release would have come.
+      if startsFollowing { MainActor.assumeIsolated { releaseHeld() } }
+    } catch {
+      reportError("link state decode failed: \(error)")
+    }
+  }
+
   /// `kMsgTagExportReady` payload: the export request in flight gets it as its answer (`ClipExportExchange`).
   func applyExportReady(json: Data) {
     if let ready = try? JSONDecoder().decode(ExportReadyJSON.self, from: json) {
@@ -1059,12 +1178,13 @@ class ChordLabState: NSObject, ObservableObject {
   }
 
   /// `kMsgTagError` payload. An error answering the export request in flight is that export's failure
-  /// (`ClipExportExchange.receivedError`): only its text shows. Otherwise it is a refused command: a key change still
-  /// waiting for its snapshot was most likely it, so it is dropped (a later snapshot with that tonic, an undo or a
-  /// redo, shows nothing), and so is a pending track add (a refused add opens nothing).
+  /// (`ClipExportExchange.receivedError`), one answering a follow request in flight is that request's answer
+  /// (`FollowAttempt.receivedError`: no refusal sentence follows); only its text shows. Otherwise it is a refused
+  /// command: a key change still waiting for its snapshot was most likely it, so it is dropped (a later snapshot with
+  /// that tonic, an undo or a redo, shows nothing), and so is a pending track add (a refused add opens nothing).
   func applyError(json: Data) {
     let message = (try? JSONDecoder().decode(ErrorJSON.self, from: json))?.error ?? String(decoding: json, as: UTF8.self)
-    if !exports.receivedError(message) {
+    if !exports.receivedError(message) && !followAttempt.receivedError() {
       pendingKeyChange = nil
       laneOpener.refused()
     }

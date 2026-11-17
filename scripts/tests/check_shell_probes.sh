@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Regression probes for the guards of `scripts/check.sh --shell`, filesystem only: no xcodebuild, cmake, ctest or
-# swift ever runs. Shims of those four (first on PATH) record their calls and do nothing else, except that the
-# xcodebuild shim reports success and creates an empty ChordLab binary under the DSTROOT it is given, so that the
-# sections after the build can be reached. Everything happens in a fresh directory under /private/tmp made by this
-# run, plus (for one probe) a fresh build-check-probe.XXXXXX directory at the repository root (ignored by git:
-# build-*), the stand-in for a place outside every allowed scratch root. Each is removed at the end, and only if this
-# run created it.
+# Regression probes for the guards of `scripts/check.sh --shell` (and of --views' refusal next to an install),
+# filesystem only: no xcodebuild, cmake, ctest or swift ever runs. Shims of those four (first on PATH) record their
+# calls and do nothing else, except that the xcodebuild shim reports success and creates an empty ChordLab binary
+# under the DSTROOT it is given, so that the sections after the build can be reached. Everything happens in a fresh
+# directory under /private/tmp made by this run, plus (for one probe) a fresh build-check-probe.XXXXXX directory at
+# the repository root (ignored by git: build-*), the stand-in for a place outside every allowed scratch root. Each is
+# removed at the end, and only if this run created it.
 #
 #   scripts/tests/check_shell_probes.sh
 #
@@ -102,6 +102,17 @@ for args in "--shell --plugin" "--plugin --shell" "--shell --all" "--all --shell
     # shellcheck disable=SC2086
     run -- $args
     if [ "$RC" -eq 2 ] && echo "$OUT" | grep -q -- "--shell cannot be combined" && [ ! -s "$T/calls.log" ]; then
+        ok "check.sh $args: refused while parsing, before any section ran"
+    else
+        bad "check.sh $args: status $RC, $(wc -l <"$T/calls.log" | tr -d ' ') tool calls; output tail: $(echo "$OUT" | tail -3 | tr '\n' ' ')"
+    fi
+done
+
+# --- --views is never combined with an installing section either ---------------------------------------------------
+for args in "--views --plugin" "--plugin --views" "--views --all" "--all --views"; do
+    # shellcheck disable=SC2086
+    run -- $args
+    if [ "$RC" -eq 2 ] && echo "$OUT" | grep -q -- "--views cannot be combined" && [ ! -s "$T/calls.log" ]; then
         ok "check.sh $args: refused while parsing, before any section ran"
     else
         bad "check.sh $args: status $RC, $(wc -l <"$T/calls.log" | tr -d ' ') tool calls; output tail: $(echo "$OUT" | tail -3 | tr '\n' ' ')"
