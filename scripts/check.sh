@@ -14,7 +14,8 @@
 #   scripts/check.sh --shell    ... plus the same two schemes built into a scratch directory, installing nothing:
 #                               DSTROOT, SYMROOT, OBJROOT and -derivedDataPath under $CHORDLAB_SHELL_OUT (default
 #                               ${TMPDIR:-/tmp}/chordlab-shell-gate; only inside $TMPDIR, /private/tmp or
-#                               /private/var/folders); fails if the installed VST3 or app binary changes
+#                               /private/var/folders); fails if the installed VST3 or app binary changes. Then
+#                               builds ChordLab/Tests/vst3host there and runs it against the scratch ChordLab.vst3
 #   scripts/check.sh --all      everything but --shell
 #   scripts/check.sh --release  ... plus the release script's preflight, in report mode
 # Flags combine; section 1 always runs first.
@@ -45,7 +46,7 @@ for arg in "$@"; do
         --shell) want_shell=1 ;;
         --release) want_release=1 ;;
         --all) want_ubsan=1 want_asan=1 want_tsan=1 want_swift=1 want_bridge=1 want_plugin=1 want_release=1 ;;
-        -h|--help) sed -n '2,25p' "$SELF" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$SELF"; exit 0 ;;   # the header comment
         *) echo "check.sh: unknown option '$arg' (try --help)" >&2; exit 2 ;;
     esac
 done
@@ -328,6 +329,37 @@ shell_builds() {
     return 0
 }
 
+# Section 5t: the shell's runtime test. Configures and builds ChordLab/Tests/vst3host (a command-line VST3 host made
+# from iPlug2's vendored VST3 SDK and the engine) in the same validated scratch directory, then runs it against the
+# ChordLab.vst3 that section 5s just built there: the plug-in is loaded into the host's process and constructed,
+# given states, processed and destroyed, with no DAW, window or device. Fails on a failed build, a non-zero exit (a
+# failed check exits 1, a crash 70 or by its signal) or a timeout, or if the installed VST3 or app binary changes.
+shell_host_test() {
+    local out
+    out="$(shell_out_dir)" || return 1
+    local bundle="$out/dst/ChordLab.vst3"
+    local build="$out/vst3host-build"
+    if [ ! -f "$bundle/Contents/MacOS/ChordLab" ]; then
+        echo "check.sh: no scratch ChordLab.vst3 at $bundle (section 5s builds it)" >&2
+        return 1
+    fi
+    local vst3Before vst3After appBefore appAfter rc=0
+    vst3Before="$(installed_sha "$INSTALLED_VST3_BIN")" || return 1
+    appBefore="$(installed_sha "$INSTALLED_APP_BIN")" || return 1
+    step "$DEFAULT_TIMEOUT" cmake -S ChordLab/Tests/vst3host -B "$build" -DCMAKE_BUILD_TYPE=Debug || rc=1
+    [ "$rc" -eq 0 ] && { step "$PLUGIN_TIMEOUT" cmake --build "$build" -j8 || rc=1; }
+    [ "$rc" -eq 0 ] && { step "$DEFAULT_TIMEOUT" "$build/vst3host" "$bundle" || rc=1; }
+    vst3After="$(installed_sha "$INSTALLED_VST3_BIN")" || return 1
+    appAfter="$(installed_sha "$INSTALLED_APP_BIN")" || return 1
+    echo "installed VST3 before/after: $vst3Before / $vst3After"
+    echo "installed app before/after:  $appBefore / $appAfter"
+    if [ "$vst3Before" != "$vst3After" ] || [ "$appBefore" != "$appAfter" ]; then
+        echo "check.sh: an installed binary changed during the shell host test" >&2
+        return 1
+    fi
+    return "$rc"
+}
+
 release_preflight() {
     step "$DEFAULT_TIMEOUT" scripts/release.sh preflight --report || return 1
 }
@@ -388,6 +420,9 @@ fi
 
 if [ "$FAILED" -eq 0 ] && [ "$want_shell" -eq 1 ]; then
     section "5s shell build (not installed)" shell_builds
+fi
+if [ "$FAILED" -eq 0 ] && [ "$want_shell" -eq 1 ]; then
+    section "5t shell host test" shell_host_test
 fi
 
 if [ "$FAILED" -eq 0 ] && [ "$want_release" -eq 1 ]; then
