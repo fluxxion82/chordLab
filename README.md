@@ -176,11 +176,11 @@ The suites, each runnable on its own:
 
 **JSON fixtures.** `engine/tests/fixtures/` holds the engine's own `snapshotJson`/`stateJson` output for
 a few documents (empty, a four-chord progression with sections and a manual voicing, the same while
-browsing another key), its `linkStateJson` output for three linked instances (`link-state-*.json`: a
-leader that is a copy, a playing follower, a waiting one), plus hand-written Phase 1-shaped files. The
-engine compares its output to them byte for byte, and the Swift tests decode them, so the two sides
-cannot drift apart silently. When the contract changes on purpose, regenerate the generated files with
-`CHORDLAB_UPDATE_FIXTURES=1 engine/build/engine_tests -tc="*golden*"` and review the diff; the legacy
+browsing another key), its `linkStateJson` output for linked instances (`link-state-*.json`: a leader
+with followers, a copy nobody follows, a playing follower, a waiting one), plus hand-written Phase
+1-shaped files. The engine compares its output to them byte for byte, and the Swift tests decode them, so
+the two sides cannot drift apart silently. When the contract changes on purpose, regenerate the generated
+ones with `CHORDLAB_UPDATE_FIXTURES=1 engine/build/engine_tests -tc="*golden*"` and review the diff; the legacy
 files are maintained by hand. The Swift fixture tests fail if the directory is missing;
 `CHORDLAB_UI_SKIP_FIXTURES=1 swift test` skips them and `CHORDLAB_UI_FIXTURES_DIR=<dir>` points them
 elsewhere.

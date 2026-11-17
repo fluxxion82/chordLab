@@ -6,8 +6,9 @@
 //     CHORDLAB_UPDATE_FIXTURES=1 build/engine_tests -tc="golden fixtures*"
 // (the test rewrites the files, still passes, and a second run without the variable proves equality).
 //
-// The three link-state-*.json files are `linkStateJson` of views of real registries and endpoints (link.h), built
-// with fixed instance ids, fixed lineages and a counting uid generator, so they are the same on every run.
+// The four link-state-*.json files are `linkStateJson` of views of real registries and endpoints (link.h), built
+// with fixed instance ids, fixed lineages, a counting uid generator and a registry clock the test drives, so they
+// are the same on every run.
 //
 // The two *-legacy-phase1.json files are hand-written Phase 1 shapes, state-legacy-feel.json a pre-arpeggio feel,
 // state-legacy-length.json a state from before the new-chord length and state-legacy-tracks.json a state from before
@@ -572,6 +573,12 @@ LinkEndpoint::UidGenerator fixtureUids() {
     return [n] { return "uid-" + std::to_string(++*n); };
 }
 
+/// A registry clock the fixture drives: `*now` milliseconds (the copy rules, `LinkRegistry` rule 8, compare the
+/// times at which loads made copies; a fixture never reads the real clock).
+LinkRegistry::Clock fixtureClock(const std::shared_ptr<std::int64_t>& now) {
+    return [now] { return *now; };
+}
+
 /// One instance as the shell drives its link, reduced to that: a store, its own buffer and publication, a lineage
 /// (a fixed string per load), and its endpoint, whose hook republishes. Each operation runs the hooks it returned
 /// and then publishes for itself, as the shell does. Held by unique_ptr: the hook keeps `this`.
@@ -662,14 +669,17 @@ DocumentStore linkOtherStore() {
 
 /// link-state-leader.json: ChordLab B, a duplicate of ChordLab A (it loaded A's state while A lived, so it is a
 /// copy under a fresh id), sees A (chords and two tracks; A muted its Lead after the copy was made, and C follows
-/// A's Bass) and leads two followers of its own: D plays its chords, E its Lead (track 2).
+/// A's Bass) and leads two followers of its own: D plays its chords, E its Lead (track 2). It has followers, so it
+/// is a leader in its own right and `copyOf` is null (rule 11).
 std::string linkStateLeader() {
-    LinkRegistry registry;
+    const auto now = std::make_shared<std::int64_t>(0);
+    LinkRegistry registry{fixtureClock(now)};
     const LinkEndpoint::UidGenerator uids = fixtureUids();
     auto a = std::make_unique<LinkInstance>(registry, "id-original", uids);
     a->open(linkSongStore());
     auto b = std::make_unique<LinkInstance>(registry, "id-ctor-b", uids);
     b->load(a->store, a->endpoint->state(), "lineage-copy-1");  // Live's duplicate of A's chain
+    *now += 60 * 1000;                                           // a person's pace from here on
     a->edit([](DocumentStore& d) { REQUIRE(d.setTrackMute(2, true)); });
     auto c = std::make_unique<LinkInstance>(registry, "id-follower-c", uids);
     auto d = std::make_unique<LinkInstance>(registry, "id-follower-d", uids);
@@ -682,16 +692,22 @@ std::string linkStateLeader() {
 }
 
 /// link-state-follower.json: a duplicated group. ChordLab B follows the Bass of ChordLab A; then both were
-/// duplicated (C is A's copy, D is B's copy and so follows A's Bass too). D's view: playing, offered C instead.
+/// duplicated in one go (C is A's copy, D is B's copy and so follows A's Bass too). D's view: playing, offered C
+/// instead.
 std::string linkStateFollower() {
-    LinkRegistry registry;
+    const auto now = std::make_shared<std::int64_t>(0);
+    LinkRegistry registry{fixtureClock(now)};
     const LinkEndpoint::UidGenerator uids = fixtureUids();
     auto a = std::make_unique<LinkInstance>(registry, "id-leader", uids);
     a->open(linkSongStore());
     auto b = std::make_unique<LinkInstance>(registry, "id-follower", uids);
     b->follow("id-leader", a->laneUid(1));
+    // The host duplicates the group's two chains 3 ms apart, well inside kPasteWindowMs, a minute after B's
+    // follow: this is what makes D's switchTo appear (rule 8). Two duplications at a person's pace would not.
+    *now += 60 * 1000;
     auto c = std::make_unique<LinkInstance>(registry, "id-ctor-c", uids);
     c->load(a->store, a->endpoint->state(), "lineage-leader-copy-1");
+    *now += 3;
     auto d = std::make_unique<LinkInstance>(registry, "id-ctor-d", uids);
     d->load(b->store, b->endpoint->state(), "lineage-follower-copy-1");
     return linkStateJson(d->endpoint->view());
@@ -701,7 +717,8 @@ std::string linkStateFollower() {
 /// ChordLab D loads B's saved state (B's id, its follow with the hints saved then) while A is missing. D sees
 /// ChordLab C, another leader, and waits.
 std::string linkStateWaiting() {
-    LinkRegistry registry;
+    const auto now = std::make_shared<std::int64_t>(0);
+    LinkRegistry registry{fixtureClock(now)};
     const LinkEndpoint::UidGenerator uids = fixtureUids();
     auto a = std::make_unique<LinkInstance>(registry, "id-leader", uids);
     a->open(linkSongStore());
@@ -716,6 +733,23 @@ std::string linkStateWaiting() {
     auto d = std::make_unique<LinkInstance>(registry, "id-ctor-d", uids);
     d->load(savedDoc, savedLink, "lineage-follower-2");
     return linkStateJson(d->endpoint->view());
+}
+
+/// link-state-copy.json: ChordLab B, a fresh duplicate of ChordLab A that nobody follows, so it is offered its
+/// original (`copyOf`); A has chords and two tracks, and C has followed A's Bass since before (a minute later, by
+/// command: no paste). B's `routed` is empty.
+std::string linkStateCopy() {
+    const auto now = std::make_shared<std::int64_t>(0);
+    LinkRegistry registry{fixtureClock(now)};
+    const LinkEndpoint::UidGenerator uids = fixtureUids();
+    auto a = std::make_unique<LinkInstance>(registry, "id-original", uids);
+    a->open(linkSongStore());
+    auto b = std::make_unique<LinkInstance>(registry, "id-ctor-b", uids);
+    b->load(a->store, a->endpoint->state(), "lineage-copy-1");  // Live's duplicate of A's chain
+    *now += 60 * 1000;
+    auto c = std::make_unique<LinkInstance>(registry, "id-follower-c", uids);
+    c->follow("id-original", a->laneUid(1));
+    return linkStateJson(b->endpoint->view());
 }
 
 /// Every member of `object` by name.
@@ -756,23 +790,26 @@ TEST_CASE("golden fixtures: the link states match the committed files byte for b
     const std::string leader = linkStateLeader();
     const std::string follower = linkStateFollower();
     const std::string waiting = linkStateWaiting();
+    const std::string copy = linkStateCopy();
     CHECK(linkStateLeader() == leader);
     CHECK(linkStateFollower() == follower);
     CHECK(linkStateWaiting() == waiting);
+    CHECK(linkStateCopy() == copy);
     checkGolden("link-state-leader.json", leader);
     checkGolden("link-state-follower.json", follower);
     checkGolden("link-state-waiting.json", waiting);
+    checkGolden("link-state-copy.json", copy);
 }
 
 TEST_CASE("golden fixtures: the link states carry the documented members and what each one is for") {
-    for (const std::string& text : {linkStateLeader(), linkStateFollower(), linkStateWaiting()}) {
+    for (const std::string& text : {linkStateLeader(), linkStateFollower(), linkStateWaiting(), linkStateCopy()}) {
         checkLinkStateShape(text);
     }
 
     const json leader = json::parse(linkStateLeader());
     CHECK(leader.at("self").at("label") == "ChordLab B");
     CHECK(leader.at("self").at("id") != "id-original");
-    CHECK(leader.at("self").at("copyOf") == json({{"leader", "id-original"}, {"label", "ChordLab A"}}));
+    CHECK(leader.at("self").at("copyOf").is_null());  // a copy with followers of its own (rule 11)
     CHECK(leader.at("following").is_null());
     REQUIRE(leader.at("leaders").size() == 1);  // followers are never listed
     const json& original = leader.at("leaders").at(0);
@@ -814,4 +851,20 @@ TEST_CASE("golden fixtures: the link states carry the documented members and wha
     REQUIRE(waiting.at("leaders").size() == 1);
     CHECK(waiting.at("leaders").at(0).at("label") == "ChordLab C");
     CHECK(waiting.at("routed") == json::array());
+
+    const json copy = json::parse(linkStateCopy());
+    CHECK(copy.at("self").at("label") == "ChordLab B");
+    CHECK(copy.at("self").at("id") != "id-original");
+    CHECK(copy.at("self").at("copyOf") == json({{"leader", "id-original"}, {"label", "ChordLab A"}}));
+    CHECK(copy.at("following").is_null());
+    CHECK(copy.at("routed") == json::array());
+    REQUIRE(copy.at("leaders").size() == 1);  // C follows: never listed
+    const json& itsOriginal = copy.at("leaders").at(0);
+    CHECK(itsOriginal.at("id") == "id-original");
+    REQUIRE(itsOriginal.at("lanes").size() == 3);
+    CHECK(itsOriginal.at("lanes").at(0).at("lane") == kChordsLaneUid);
+    CHECK(itsOriginal.at("lanes").at(1).at("name") == "Bass");
+    CHECK(itsOriginal.at("lanes").at(1).at("followers") == 1);
+    CHECK(itsOriginal.at("lanes").at(2).at("name") == "Lead");
+    CHECK(itsOriginal.at("lanes").at(2).at("followers") == 0);
 }
