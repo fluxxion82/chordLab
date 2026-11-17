@@ -12,7 +12,7 @@ The editor's render harness. A command-line program compiled with the editor's S
 
 What it stubs: the plug-in connection (`ShellStub`: records every message the editor sends and, in the modes that need it, answers a link message inline through `onLink` with what the shell would push, in its order: a new token, a snapshot, an error, a link state); the bridged constants of `ChordLab/ChordLab-Shared.h` (`Stubs.swift`, compared with the header at start-up); the preferences (`MemoryDefaults`, in memory, also as the views' `@AppStorage`), and the banner's dismissals (a `FollowDismissals` per mode, so modes do not see each other's). It writes nothing but `<png dir>/<mode>-<width>x<height>.png` (the directory must exist); `build.sh` writes the binary and the module cache into its build directory. The window is offscreen and never ordered in (the harness checks it was never visible); the app takes no Dock icon or menu bar.
 
-Modes (each at both sizes):
+Modes (each at both sizes unless the table says otherwise):
 
 | mode | state | checks beyond the common ones |
 |---|---|---|
@@ -29,9 +29,10 @@ Modes (each at both sizes):
 | `rows-before-banner` | the key hint and the Heard group, no link state (what existed before the banner) | the palette keeps its row (100 pt at 700 x 632, as before) |
 | `rows-banner-heard`, `rows-banner-heard-notice`, `rows-banner-key-hint`, `rows-banner-key-hint-notice`, `rows-banner-key-hint-heard`, `rows-all`, `rows-long-names-notice-heard` | the banner with every combination of the key hint, the Heard group and the refusal sentence | at 700 x 632 the key row wins over the banner and the palette keeps 76 pt or more; in a tall window both show |
 | `follow-stale-entry` | an entry drawn before a token change, clicked after it | sent with its old lineage; answered stale: "This ChordLab changed…", no error, nothing applied |
-| `gate-retained-callbacks` | a roll menu choice, a rename commit, an append and a cell press after the panel appeared | only the panel's Thru command and Panic leave; no preview start |
+| `gate-retained-callbacks` | a roll menu choice, a rename commit, an append, a key, roll note and cell press with Record on after the panel appeared, then following stops and the cell's button comes up | only the panel's Thru command and Panic leave; no preview start, no held cell, no keep-alive, no `insertChords` |
+| `banner-narrow-tall` (700 x 800, 700 x 632, 900 x 800) | a copy's full sentence in a 700-pt-wide tall window, four wide-named tracks first, Chords played elsewhere | not even one button fits beside the sentence: the row under it sheds buttons, down to More… alone; nothing past the banner |
 | `dismiss-reopen` | Not now, then a second state of the same document (a reopened window) | it does not offer; another document does |
 | `answer-stale`, `answer-malformed-lineage`, `answer-parse-error`, `answer-none`, `answer-applied-while-held`, `answer-applied` | what the shell sends inside a follow's send, in its order (`ShellStub.onLink`) | the sentence, the error or the panel each answer gives; a held preview stops when the panel appears |
 | `unfollow-stale`, `unfollow-error` | Stop following answered stale, or with an error and the link state | the panel stays with "This ChordLab changed…", or with the error and no sentence |
 
-Common checks: the render is not empty and the window was never on screen; in the editor, the transport bar and the Follow menu lie inside the window's padding, the Follow menu sits after Length in its row, every transport row is one line, and at 700 x 632 the palette viewport keeps one full row (76 pt); in the panel, every reported part lies inside the window and the panel, no two rows overlap, the panel is centred and at most 520 pt wide, and its buttons are one line.
+Common checks: the render is not empty and the window was never on screen; in the editor, the transport bar and the Follow menu lie inside the window's padding, the Follow menu sits after Length in its row, every transport row is one line, and at 700 x 632 the palette viewport keeps one full row (76 pt); every part of the banner (sentence, each button, More…, Not now) lies inside the banner; in the panel, every reported part lies inside the window and the panel, no two rows overlap, the panel is centred and at most 520 pt wide, and its buttons are one line.
