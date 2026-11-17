@@ -378,10 +378,13 @@ struct LinkView {
 ///    follow names that document and that lane (the test `followedLanes` counts by), each under an id of its own
 ///    from the reserved range (`kForwardedPreviewIdFirst` to `kForwardedPreviewIdLast`, `nextForwardedPreviewId`
 ///    with a cursor per follower, skipping the ids still recorded for it), and records, for the caller and the
-///    Start's id, every follower whose push succeeded, with its id. A follower whose ring is full is left out; if
+///    Start's id, every follower whose push succeeded, with its id. A follower whose ring is full is left out, and
+///    so is one for which no reserved id is free (every one still recorded for it: counted as a full ring); if
 ///    every one was, nothing is recorded and the answer is `QueueFull`. An Extend or a Stop of a recorded id goes
 ///    to exactly the recorded followers under their ids, whoever is bound on the lane now (a follower that joined
-///    the lane since gets neither); a Stop ends the record; an Extend or a Stop with no record is not forwarded. A
+///    the lane since gets neither); a Stop ends the record, also when it is answered `QueueFull` (a follower whose
+///    ring was full is left to its scheduler's watchdog), while an Extend answered `QueueFull` keeps it; an Extend
+///    or a Stop with no record is not forwarded. A
 ///    Start of an id the caller has recorded first ends that record (a Stop to each recorded follower), whether or
 ///    not the new Start is forwarded, as a scheduler releases a preview whose id starts again. A follower stays
 ///    recorded only while it is bound to the caller without a break and loads no state: when it stops being bound
@@ -392,9 +395,14 @@ struct LinkView {
 ///    the lane unbinds no one (rules 2 and 7): its records stay, and a forwarded preview then sounds until its
 ///    Stop, which still reaches the follower, or the scheduler's watchdog. `panicFollowers` sets the panic flag of
 ///    every follower bound to the caller that takes forwards, whatever its lane or document, and drops every record
-///    of the caller. A panic releases everything the follower sounds, its own notes too (its lane's notes come
-///    back with their next events, `Scheduler::panic`), and discards the preview commands queued before it, so a
-///    Start forwarded to it after the cleanup and before its next audio block never sounds. `stopForwards` (the
+///    of the caller. A panic (`Scheduler::panic`, at the top of the follower's next block, before its
+///    `LinkSource::select`) releases everything the follower sounds: the previews, the lane it plays and its thru
+///    notes (the incoming notes it passes through; those queued and not yet played are discarded, with the preview
+///    commands queued before the panic). So a Start forwarded to it after the cleanup and before its next audio
+///    block never sounds. The lane is not chased after the panic: its notes come back with their next attacks, or
+///    at once when a block chases (`Scheduler::adopt`): the first block that adopts a new link-buffer generation,
+///    which is the panic's own block when the leader published since the follower's last block (the adopt comes
+///    after the panic), and likewise a seek or a transport start. `stopForwards` (the
 ///    caller's editor closing) ends every record of the caller: a Stop under the recorded id to each recorded
 ///    follower, and the record dropped; no panic flag is set. Forwarding, `panicFollowers` and `stopForwards`
 ///    change no view: the serial does not move (rule 10). What the registry does to a follower is only those
@@ -499,10 +507,12 @@ public:
     /// least one follower's scheduler took it (the caller does not play it), `QueueFull` when it was for followers
     /// but every one of their rings was full (nothing pushed; for a Start nothing recorded), and `NotForwarded`
     /// otherwise: no follower takes forwards on that lane, an Extend or a Stop of an id not recorded, an instance
-    /// that follows, an unknown token. The caller plays a `NotForwarded` command itself, as without links. Never
-    /// moves the serial. Caller's obligation: called only on the thread that makes every other `pushPreview` into
-    /// the followers' schedulers (the plug-in's main thread, where their editors push), since a scheduler's preview
-    /// ring has a single producer. Allocates (the record table).
+    /// that follows, an unknown token. A follower for which no reserved id is free counts as one whose ring is full.
+    /// A Stop ends the record whatever the answer, `QueueFull` included (those followers' watchdogs end the
+    /// preview); an Extend answered `QueueFull` keeps it. The caller plays a `NotForwarded` command itself, as
+    /// without links. Never moves the serial. Caller's obligation: called only on the thread that makes every other
+    /// `pushPreview` into the followers' schedulers (the plug-in's main thread, where their editors push), since a
+    /// scheduler's preview ring has a single producer. Allocates (the record table).
     LinkForward forwardPreview(LinkToken token, std::string_view documentId, std::string_view laneUid,
                                const PreviewCmd& cmd);
 
