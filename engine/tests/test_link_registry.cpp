@@ -2565,7 +2565,7 @@ TEST_CASE("link registry: forwarded ids cycle inside their range, skip the held 
     CHECK_FALSE(nextForwardedPreviewId(one, {5}, 5, 5).has_value());
 }
 
-TEST_CASE("link registry: a follower's ids skip those still recorded for it") {
+TEST_CASE("link registry: a follower's ids skip those still recorded for it once its cursor has gone round") {
     Song s;
     World w;
     Inst& l = w.addPlayer("L");
@@ -2573,14 +2573,55 @@ TEST_CASE("link registry: a follower's ids skip those still recorded for it") {
     w.reg.setFollow(f.token, follow("L", s.uidA));
     REQUIRE(w.reg.forwardPreview(l.token, "doc-1", s.uidA, startCmd(1, {60})) == LinkForward::Forwarded);  // First
     REQUIRE(w.reg.forwardPreview(l.token, "doc-1", s.uidA, startCmd(2, {62})) == LinkForward::Forwarded);  // +1
-    REQUIRE(w.reg.forwardPreview(l.token, "doc-1", s.uidA, stopCmd(2)) == LinkForward::Forwarded);
-    REQUIRE(w.reg.forwardPreview(l.token, "doc-1", s.uidA, startCmd(3, {64})) == LinkForward::Forwarded);  // +2
+    REQUIRE(w.reg.forwardPreview(l.token, "doc-1", s.uidA, stopCmd(2)) == LinkForward::Forwarded);  // +1 free again
+    block(f);
+    REQUIRE(sounds(f) == Pitches{60});
+
+    // The cursor goes once round the real range: with F's ring full, every Start takes F's next id, finds the ring
+    // full and records nothing (QueueFull), so the ids from First + 2 to Last pass and First alone stays held.
+    int queued = 0;
+    while (f.scheduler->pushPreview(extendCmd(1000 + queued))) ++queued;  // distinct ids: no merging
+    REQUIRE(queued > 0);
+    const std::int64_t passing = static_cast<std::int64_t>(kForwardedPreviewIdLast) - kForwardedPreviewIdFirst - 1;
+    std::int64_t notFull = 0;
+    for (std::int64_t n = 0; n < passing; ++n) {
+        if (w.reg.forwardPreview(l.token, "doc-1", s.uidA, startCmd(100, {64})) != LinkForward::QueueFull) ++notFull;
+    }
+    CHECK(notFull == 0);
+    block(f);  // drains the ring
+    CHECK(sounds(f) == Pitches{60});
+
+    // The cursor is back at First, still held by Start 1: the next Start skips it and takes First + 1.
+    REQUIRE(w.reg.forwardPreview(l.token, "doc-1", s.uidA, startCmd(3, {64})) == LinkForward::Forwarded);
     block(f);
     REQUIRE(sounds(f) == Pitches{60, 64});
-    REQUIRE(f.scheduler->pushPreview(stopCmd(kForwardedPreviewIdFirst + 2)));
+    REQUIRE(f.scheduler->pushPreview(stopCmd(kForwardedPreviewIdFirst + 1)));
     block(f);
     CHECK(sounds(f) == Pitches{60});
-    REQUIRE(f.scheduler->pushPreview(stopCmd(kForwardedPreviewIdFirst)));
+    CHECK(w.reg.forwardPreview(l.token, "doc-1", s.uidA, stopCmd(1)) == LinkForward::Forwarded);  // First, Start 1's
+    block(f);
+    CHECK(sounds(f).empty());
+    // Every reserved id held for one follower (the branch where `nextForwardedPreviewId` finds none, answered as a
+    // full ring) needs 2^20 + 1 records at once: out of a test's reach; the free function's test shows the exhaustion.
+}
+
+TEST_CASE("link registry: an Extend answered QueueFull keeps the record") {
+    Song s;
+    World w;
+    Inst& l = w.addPlayer("L");
+    Inst& f = w.addPlayer("F");
+    w.reg.setFollow(f.token, follow("L", s.uidA));
+    REQUIRE(w.reg.forwardPreview(l.token, "doc-1", s.uidA, startCmd(1, {60})) == LinkForward::Forwarded);
+    block(f);
+    REQUIRE(sounds(f) == Pitches{60});
+    int queued = 0;
+    while (f.scheduler->pushPreview(extendCmd(1000 + queued))) ++queued;  // distinct ids: no merging
+    REQUIRE(queued > 0);
+    CHECK(w.reg.forwardPreview(l.token, "doc-1", s.uidA, extendCmd(1)) == LinkForward::QueueFull);
+    block(f);  // drains the ring
+    CHECK(sounds(f) == Pitches{60});
+    CHECK(w.reg.forwardPreview(l.token, "doc-1", s.uidA, extendCmd(1)) == LinkForward::Forwarded);  // still recorded
+    CHECK(w.reg.forwardPreview(l.token, "doc-1", s.uidA, stopCmd(1)) == LinkForward::Forwarded);
     block(f);
     CHECK(sounds(f).empty());
 }
