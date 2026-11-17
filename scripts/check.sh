@@ -12,13 +12,13 @@
 #   scripts/check.sh --plugin   ... plus both Xcode schemes (macOS-VST3, macOS-APP), no signing; INSTALLS them
 #                               (the project installs into ~/Library/Audio/Plug-Ins/VST3 and ~/Applications)
 #   scripts/check.sh --shell    ... plus the same two schemes built into a scratch directory, installing nothing:
-#                               DSTROOT, SYMROOT, OBJROOT, -derivedDataPath and the logs under $CHORDLAB_SHELL_OUT
-#                               (default ${TMPDIR:-/tmp}/chordlab-shell-gate), which must lie inside /private/tmp or
-#                               /private/var/folders (where macOS's own $TMPDIR is; $TMPDIR itself is no allowed root);
-#                               each path under it is refused if it is a symlink or resolves outside it
-#                               (scripts/tests/check_shell_probes.sh). Fails if the installed VST3 or app binary
-#                               changes. Then builds ChordLab/Tests/vst3host there and runs it against the scratch
-#                               ChordLab.vst3 (section 5t)
+#                               $CHORDLAB_SHELL_OUT (default ${TMPDIR:-/tmp}/chordlab-shell-gate), which must lie
+#                               inside /private/tmp or /private/var/folders (where macOS's own $TMPDIR is; $TMPDIR
+#                               itself is no allowed root). Each invocation works in a fresh run.XXXXXX directory
+#                               there (the previous runs are removed): DSTROOT, SYMROOT, OBJROOT, -derivedDataPath and
+#                               the logs, all cold (scripts/tests/check_shell_probes.sh). Fails if the installed VST3
+#                               or app binary changes. Then builds ChordLab/Tests/vst3host in the same run directory and
+#                               runs it against the scratch ChordLab.vst3 (section 5t)
 #   scripts/check.sh --all      everything but --shell (--shell with --plugin or --all is refused)
 #   scripts/check.sh --release  ... plus the release script's preflight, in report mode
 # Flags combine; section 1 always runs first.
@@ -289,85 +289,68 @@ shell_out_dir() {
     echo "$resolved"
 }
 
-# shell_dir_ok <out> <path>: true when `path`, a directory the --shell sections are about to write, is absent or a real
-# directory (not a symbolic link) whose physical path lies inside the physical scratch directory `out`; otherwise
-# fails with a message. Validating `out` alone is not enough: a symlink already sitting at $out/build (say) would send
-# xcodebuild's writes wherever it points. Called right before each use; a path inside another (build/obj) is checked
-# after its parent. Absent is fine: whatever creates it then creates a real directory under a checked parent.
-shell_dir_ok() {
-    local out="$1" path="$2" phys
-    if [ -L "$path" ]; then
-        echo "check.sh: --shell refuses '$path': it is a symbolic link" >&2
-        return 1
-    fi
-    [ -e "$path" ] || return 0
-    if [ ! -d "$path" ]; then
-        echo "check.sh: --shell refuses '$path': it exists and is not a directory" >&2
-        return 1
-    fi
-    phys="$(cd -P "$path" 2>/dev/null && pwd -P)" || { echo "check.sh: --shell refuses '$path': it cannot be resolved" >&2; return 1; }
-    case "$phys" in
-        "$out"/?*) return 0 ;;
-    esac
-    echo "check.sh: --shell refuses '$path': it resolves to '$phys', outside the scratch directory '$out'" >&2
-    return 1
-}
+# The run directory of this --shell invocation: set by section 5s (shell_run_dir), read by section 5t. Empty until then.
+SHELL_RUN=""
 
-# shell_log_ok <path>: true when `path`, a log file a --shell section is about to write (always directly inside the
-# checked scratch directory), is absent or a regular file, and not a symbolic link; otherwise fails with a message.
-shell_log_ok() {
-    if [ -L "$1" ]; then
-        echo "check.sh: --shell refuses '$1': it is a symbolic link" >&2
-        return 1
-    fi
-    if [ -e "$1" ] && [ ! -f "$1" ]; then
-        echo "check.sh: --shell refuses '$1': it exists and is not a regular file" >&2
-        return 1
-    fi
-    return 0
-}
-
-# shell_build_paths_ok <out>: every path section 5s writes: the DSTROOT, SYMROOT, OBJROOT and derived data
-# directories and the two build logs.
-shell_build_paths_ok() {
-    local out="$1" dir
-    for dir in "$out/dst" "$out/build" "$out/build/obj" "$out/DerivedData"; do
-        shell_dir_ok "$out" "$dir" || return 1
+# shell_run_dir <out>: prints a FRESH private directory for this invocation, $out/run.XXXXXX (mktemp -d: created new,
+# mode 0700, never an existing path), after checking that it is a real directory whose physical path lies inside the
+# physical scratch directory `out`; fails with a message otherwise. Everything --shell writes goes below it: DSTROOT,
+# SYMROOT, OBJROOT, derived data, the host test's build directory and the logs. Nothing that existed before the run is
+# written to or read, so nothing planted in the scratch directory (a symlink or a hard link at a path an earlier run
+# used, or anywhere below such a directory) can redirect a write. Before creating it, the previous runs are removed:
+# only entries directly in `out` named run.* that are real directories (a symlink named run.* is left alone, never
+# followed), with rm -rf, which removes the symlinks inside a tree without following them. Nothing else in `out` is
+# touched.
+shell_run_dir() {
+    local out="$1" entry run phys
+    for entry in "$out"/run.*; do
+        [ -d "$entry" ] && [ ! -L "$entry" ] || continue
+        rm -rf "$entry" || { echo "check.sh: --shell could not remove the previous run '$entry'" >&2; return 1; }
     done
-    shell_log_ok "$out/xcodebuild-macOS-VST3.log" && shell_log_ok "$out/xcodebuild-macOS-APP.log"
+    run="$(mktemp -d "$out/run.XXXXXX")" || { echo "check.sh: --shell could not create a run directory in '$out'" >&2; return 1; }
+    if [ -L "$run" ] || [ ! -d "$run" ]; then
+        echo "check.sh: --shell refuses the run directory '$run': not a real directory" >&2
+        return 1
+    fi
+    phys="$(cd -P "$run" 2>/dev/null && pwd -P)" || { echo "check.sh: --shell cannot resolve the run directory '$run'" >&2; return 1; }
+    case "$phys" in
+        "$out"/run.?*) ;;
+        *) echo "check.sh: --shell refuses the run directory '$run': it resolves to '$phys', outside '$out'" >&2; return 1 ;;
+    esac
+    echo "$phys"
 }
 
 # Section 5s: both schemes as --plugin builds them (Debug, unsigned), but into a scratch directory. The project sets
 # DEPLOYMENT_LOCATION=YES, INSTALL_PATH=/ and a per-target DSTROOT of ~/Library/Audio/Plug-Ins/VST3 (VST3) or
 # ~/Applications (APP); a DSTROOT on the command line overrides it (scripts/release.sh does the same), SYMROOT and
 # OBJROOT replace the project's ChordLab/build-mac, and -derivedDataPath keeps Xcode's own derived data (module
-# caches, logs) out of ~/Library/Developer. The scratch directory must pass shell_out_dir's allow-list before
-# anything is deleted or built, and every path under it the section writes (shell_build_paths_ok) is checked before the
-# deletion and again before each build; the logs are written inside it too. Fails if a build fails, if the VST3 binary is not under the scratch DSTROOT, or if
-# the installed VST3 or app binary cannot be hashed or its sha256 differs before and after.
+# caches, logs) out of ~/Library/Developer. The scratch directory must pass shell_out_dir's allow-list, and every one
+# of those paths, and the logs, lies in a fresh run directory below it (shell_run_dir): a cold build every time. Fails
+# if a build fails, if the VST3 binary is not under the run's DSTROOT, or if the installed VST3 or app binary cannot be
+# hashed or its sha256 differs before and after.
 shell_builds() {
     if [ ! -d ChordLab/projects/ChordLab-macOS.xcodeproj ]; then
         echo "check.sh: ChordLab/projects/ChordLab-macOS.xcodeproj not found" >&2
         return 1
     fi
-    local out
+    local out run
     out="$(shell_out_dir)" || return 1
+    run="$(shell_run_dir "$out")" || return 1
+    SHELL_RUN="$run"
     echo "scratch directory: $out"
-    local dst="$out/dst"
+    echo "run directory:     $run"
+    local dst="$run/dst"
     local product="$dst/ChordLab.vst3/Contents/MacOS/ChordLab"
     local vst3Before vst3After appBefore appAfter
     vst3Before="$(installed_sha "$INSTALLED_VST3_BIN")" || return 1
     appBefore="$(installed_sha "$INSTALLED_APP_BIN")" || return 1
     echo "installed VST3 before: $vst3Before ($INSTALLED_VST3_BIN)"
     echo "installed app before:  $appBefore ($INSTALLED_APP_BIN)"
-    shell_build_paths_ok "$out" || return 1
-    rm -rf "$dst"   # a product left by an earlier run must not pass the check below
     local rc=0 scheme
     for scheme in macOS-VST3 macOS-APP; do
-        shell_build_paths_ok "$out" || { rc=1; break; }
-        plugin_scheme "$scheme" "$out/xcodebuild-$scheme.log" \
-            -derivedDataPath "$out/DerivedData" \
-            DSTROOT="$dst" SYMROOT="$out/build" OBJROOT="$out/build/obj" || { rc=1; break; }
+        plugin_scheme "$scheme" "$run/xcodebuild-$scheme.log" \
+            -derivedDataPath "$run/DerivedData" \
+            DSTROOT="$dst" SYMROOT="$run/build" OBJROOT="$run/build/obj" || { rc=1; break; }
     done
     vst3After="$(installed_sha "$INSTALLED_VST3_BIN")" || return 1
     appAfter="$(installed_sha "$INSTALLED_APP_BIN")" || return 1
@@ -392,15 +375,19 @@ shell_builds() {
 }
 
 # Section 5t: the shell's runtime test. Configures and builds ChordLab/Tests/vst3host (a command-line VST3 host made
-# from iPlug2's vendored VST3 SDK and the engine) in the same validated scratch directory, then runs it against the
-# ChordLab.vst3 that section 5s just built there: the plug-in is loaded into the host's process and constructed,
-# given states, processed and destroyed, with no DAW, window or device. Fails on a failed build, a non-zero exit (a
-# failed check exits 1, a crash 70 or by its signal) or a timeout, or if the installed VST3 or app binary changes.
+# from iPlug2's vendored VST3 SDK and the engine) in the run directory section 5s created (SHELL_RUN), then runs it
+# against the ChordLab.vst3 that section 5s just built there: the plug-in is loaded into the host's process and
+# constructed, given states, processed and destroyed, with no DAW, window or device. Fails on a failed build, a
+# non-zero exit (a failed check exits 1, a crash 70 or by its signal) or a timeout, or if the installed VST3 or app
+# binary changes.
 shell_host_test() {
-    local out
-    out="$(shell_out_dir)" || return 1
-    local bundle="$out/dst/ChordLab.vst3"
-    local build="$out/vst3host-build"
+    if [ -z "$SHELL_RUN" ]; then
+        echo "check.sh: no run directory (section 5s creates it)" >&2
+        return 1
+    fi
+    local bundle="$SHELL_RUN/dst/ChordLab.vst3"
+    local build="$SHELL_RUN/vst3host-build"
+    echo "run directory: $SHELL_RUN"
     if [ ! -f "$bundle/Contents/MacOS/ChordLab" ]; then
         echo "check.sh: no scratch ChordLab.vst3 at $bundle (section 5s builds it)" >&2
         return 1
@@ -408,10 +395,9 @@ shell_host_test() {
     local vst3Before vst3After appBefore appAfter rc=0
     vst3Before="$(installed_sha "$INSTALLED_VST3_BIN")" || return 1
     appBefore="$(installed_sha "$INSTALLED_APP_BIN")" || return 1
-    # The build directory is checked as section 5s checks its own (shell_dir_ok), right before each step that uses it.
-    shell_dir_ok "$out" "$build" && step "$DEFAULT_TIMEOUT" cmake -S ChordLab/Tests/vst3host -B "$build" -DCMAKE_BUILD_TYPE=Debug || rc=1
-    [ "$rc" -eq 0 ] && { shell_dir_ok "$out" "$build" && step "$PLUGIN_TIMEOUT" cmake --build "$build" -j8 || rc=1; }
-    [ "$rc" -eq 0 ] && { shell_dir_ok "$out" "$build" && step "$DEFAULT_TIMEOUT" "$build/vst3host" "$bundle" || rc=1; }
+    step "$DEFAULT_TIMEOUT" cmake -S ChordLab/Tests/vst3host -B "$build" -DCMAKE_BUILD_TYPE=Debug || rc=1
+    [ "$rc" -eq 0 ] && { step "$PLUGIN_TIMEOUT" cmake --build "$build" -j8 || rc=1; }
+    [ "$rc" -eq 0 ] && { step "$DEFAULT_TIMEOUT" "$build/vst3host" "$bundle" || rc=1; }
     vst3After="$(installed_sha "$INSTALLED_VST3_BIN")" || return 1
     appAfter="$(installed_sha "$INSTALLED_APP_BIN")" || return 1
     echo "installed VST3 before/after: $vst3Before / $vst3After"
