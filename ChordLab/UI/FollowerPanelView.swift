@@ -131,25 +131,24 @@ struct FollowerPanelView: View {
     }
   }
 
-  /// `model.actions` in order: Change… opens the picker (a menu), Stop following sends the unfollow; the status's
-  /// emphasised one is drawn prominent.
+  /// `model.actions` in order: Change… opens the picker (a menu), Stop following sends the unfollow. The status's
+  /// emphasised one sits on an accent fill (`emphasisFill`), drawn by the view rather than `.borderedProminent`, which
+  /// greys out while the plug-in window is not the host's key window (the reason for `AccentSwitchToggleStyle`).
   private var actionsRow: some View {
     HStack(spacing: 12) {
       ForEach(model.actions, id: \.repair) { action in
-        Group {
-          if model.emphasised == action.repair {
-            actionControl(action)
-              .buttonStyle(.borderedProminent)
-          } else {
-            actionControl(action)
-          }
-        }
-        .fixedSize()
-        .probeFrame(action.repair == .change ? "panel.action.change" : "panel.action.stop")
+        actionControl(action)
+          .fixedSize()
+          .background(RoundedRectangle(cornerRadius: 6)
+            .fill(model.emphasised == action.repair ? Self.emphasisFill : Color.clear))
+          .probeFrame(action.repair == .change ? "panel.action.change" : "panel.action.stop")
       }
       Spacer(minLength: 0)
     }
   }
+
+  /// Behind the emphasised action.
+  static let emphasisFill = Color.accentColor.opacity(0.75)
 
   @ViewBuilder private func actionControl(_ action: FollowerRepairButton) -> some View {
     switch action.repair {
