@@ -111,6 +111,10 @@
 // does nothing once it is retired, else takes its mModelMutex and calls PublishSnapshotLocked, and nothing else
 // (no editor, no host call; editors refresh from the idle timer). An instance never receives its own hook. A hook
 // may run on any non-audio thread: the main thread of another instance, a host's state thread, or a destructor's.
+// Construction: the constructor takes mModelMutex BEFORE making mLink and holds it through the first publish. The
+// endpoint registers (LinkRegistry::add) inside its own constructor, before mLink is assigned; neither calls a hook
+// (add returns none and never runs one under the registry's mutex), and a hook of this instance that another thread
+// ran in that window waits on mModelMutex until mLink exists and the first publish is done.
 // Destruction, in this order: the AU editor close; chordlab::retire(*mLifeline), which waits for a hop or hook in
 // flight and makes later ones no-ops, so no other instance enters this one any more; mLink.reset(), which removes
 // the registration (followers are emptied and wait for this id, the registry never writes this link buffer
@@ -274,13 +278,16 @@ ChordLab::ChordLab(const InstanceInfo& info)
   mPrivateRegistry = std::make_unique<chordlab::LinkRegistry>();
   chordlab::LinkRegistry& registry = *mPrivateRegistry;
 #endif
+  // mModelMutex from before the registration to the first publish: the endpoint registers inside its constructor,
+  // before mLink is assigned, and a hook that reached this instance in that window would publish through a null
+  // mLink. The hook takes mModelMutex, so it waits until the instance is whole (order: model, then the registry's,
+  // which LinkRegistry::add takes; add and the endpoint's constructor call no hook, they return none).
+  std::lock_guard<std::mutex> lock(mModelMutex);
   mLink = std::make_unique<chordlab::LinkEndpoint>(registry, MakeUid(), &ChordLab::MakeUid,
                                                    chordlab::guardedHook(mLifeline, [this] {
                                                      std::lock_guard<std::mutex> lock(mModelMutex);
                                                      PublishSnapshotLocked();
                                                    }));
-
-  std::lock_guard<std::mutex> lock(mModelMutex);
   RebuildPaletteLocked();
   PublishSnapshotLocked();                                       // the empty progression, generation 1
 }
