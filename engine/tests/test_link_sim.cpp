@@ -212,6 +212,22 @@ public:
         endpoint_->adopt(saved.link, hooks);
         return hooks;
     }
+    /// A state load from JSON, as the shell's: the document and, when the state has one, the instance block
+    /// (`adopt`); without a block the link identity is reset (`adoptWithoutBlock`). Both in the store's section.
+    Hooks loadJsonStep(const std::string& text) {
+        const std::lock_guard<std::mutex> lock(model_);
+        std::optional<InstanceState> block;
+        std::string error;
+        REQUIRE_MESSAGE(loadStateJson(store_, text, error, nullptr, nullptr, &block), error);
+        lineage_ = "lineage-" + uids_();
+        Hooks hooks;
+        if (block) {
+            endpoint_->adopt(*block, hooks);
+        } else {
+            endpoint_->adoptWithoutBlock(hooks);
+        }
+        return hooks;
+    }
     static void run(const Hooks& hooks) {
         for (const auto& hook : hooks) {
             REQUIRE(hook != nullptr);
@@ -235,6 +251,10 @@ public:
         run(loadStep(saved));
         republish();
     }
+    void loadJson(const std::string& text) {
+        run(loadJsonStep(text));
+        republish();
+    }
 
     /// What its hook does: publishOwn and the own buffer's publish under the model mutex.
     void republish() {
@@ -250,6 +270,7 @@ public:
     LinkView view() const { return endpoint_->view(); }
     std::string id() const { return endpoint_->view().id; }
     std::uint64_t serial() const { return endpoint_->serial(); }
+    const LinkEndpoint& endpoint() const { return *endpoint_; }
     /// The lane uid this instance gave track `trackId` (empty if none).
     std::string laneUid(int trackId) const {
         const auto lanes = endpoint_->state().lanes;
@@ -1072,7 +1093,9 @@ Overlap checkHandOver(const HandOver& h, std::size_t spans) {
     return overlap;
 }
 
-enum class Op { Link, Unlink, Replace };
+/// A link, an unlink, a different project loaded into the bound leader with its instance block (the same lane uid
+/// for the same track number), or the same without a block (a legacy state: `adoptWithoutBlock`).
+enum class Op { Link, Unlink, Replace, ReplaceWithoutBlock };
 
 /// The four places a test puts audio blocks into an operation, each a string of 'L' (a leader block) and 'F'
 /// (a follower block), run in order.
@@ -1101,8 +1124,9 @@ Overlap runOrdering(Op op, const Gaps& gaps, const Song& s, const Song& other, c
     const std::string lane = leader->laneUid(s.bass);
     if (op != Op::Link) REQUIRE(follower->follow("L", lane, lineageOf(*follower, "L")) == Result::Applied);
 
-    // The watched lane: the bass, and for a replacement also the other project's track with the same number and uid.
-    const Bits watched = op == Op::Replace ? pitches({kBass1, kBass2, 48}) : pitches({kBass1, kBass2});
+    // The watched lane: the bass, and for a replacement also the other project's track with the same number.
+    const bool replace = op == Op::Replace || op == Op::ReplaceWithoutBlock;
+    const Bits watched = replace ? pitches({kBass1, kBass2, 48}) : pitches({kBass1, kBass2});
     Player pl(*leader, spans, watched);
     Player pf(*follower, spans, watched);
     rounds(pl, pf, pre);
@@ -1117,7 +1141,14 @@ Overlap runOrdering(Op op, const Gaps& gaps, const Song& s, const Song& other, c
         const bool firstProbe = probes++ == 0;
         gap(firstProbe ? gaps.g2 : gaps.g3, firstProbe ? 2 : 3);
     };
-    if (op == Op::Replace) {
+    if (op == Op::ReplaceWithoutBlock) {
+        DocumentStore otherStore;
+        otherStore.replace(other.state.doc, other.state.nextId, other.state.nextSectionId, other.state.nextTrackId,
+                           other.state.nextNoteId);
+        FakeInstance::run(leader->loadJsonStep(stateJson(otherStore)));
+        gap(gaps.g1, 1);
+        leader->republish();
+    } else if (op == Op::Replace) {
         Saved otherProject;
         otherProject.doc = other.state;
         otherProject.link.id = "another-instance";
@@ -1157,6 +1188,15 @@ Overlap runOrdering(Op op, const Gaps& gaps, const Song& s, const Song& other, c
                        : op == Op::Unlink ? HandOver{&pf, &pl, 1, 4}
                                           : HandOver{&pf, &pl, 3, Player::kAfter};
     const Overlap overlap = checkHandOver(h, spans.size());
+    if (replace) {  // the follower never sounds a note of the document it does not follow
+        const Bits otherPitches = chordPitches(other.state.doc) | pitches({48, 84});
+        for (std::size_t i = 0; i < spans.size(); ++i) {
+            for (const Msg& m : pf.out[i]) {
+                CHECK_MESSAGE(!(m.status == 0x90 && otherPitches[static_cast<std::size_t>(m.pitch)]),
+                              "span " << i << ": the follower played " << m.pitch << " of the loaded document");
+            }
+        }
+    }
     checkStopsClean(*leader, 0.0);
     checkStopsClean(*follower, 0.0);
     return overlap;
@@ -1178,8 +1218,11 @@ TEST_CASE("link sim: link, unlink and a document replacement with audio blocks b
     const auto nothing = silence(spans);
 
     const std::vector<std::string> patterns{"", "L", "F", "LF", "FL"};
-    for (const Op op : {Op::Link, Op::Unlink, Op::Replace}) {
-        const std::string opName = op == Op::Link ? "link" : op == Op::Unlink ? "unlink" : "replacement";
+    for (const Op op : {Op::Link, Op::Unlink, Op::Replace, Op::ReplaceWithoutBlock}) {
+        const std::string opName = op == Op::Link     ? "link"
+                                   : op == Op::Unlink ? "unlink"
+                                   : op == Op::Replace ? "replacement"
+                                                       : "replacement without a block";
         CAPTURE(opName);
         Overlap most;
         int interleavings = 0;
@@ -1187,7 +1230,8 @@ TEST_CASE("link sim: link, unlink and a document replacement with audio blocks b
             for (const std::string& g2 : patterns) {
                 for (const std::string& g3 : patterns) {
                     for (const std::string& g4 : patterns) {
-                        if (op == Op::Replace && !g4.empty()) continue;  // a load has no hook to run
+                        const bool load = op == Op::Replace || op == Op::ReplaceWithoutBlock;
+                        if (load && !g4.empty()) continue;  // a leader's load has no hook to run
                         const Gaps gaps{g1, g2, g3, g4};
                         const Overlap o =
                             op == Op::Link     ? runOrdering(op, gaps, s, other, spans, pre, *all,
@@ -1203,7 +1247,7 @@ TEST_CASE("link sim: link, unlink and a document replacement with audio blocks b
                 }
             }
         }
-        CHECK(interleavings == (op == Op::Replace ? 125 : 625));
+        CHECK(interleavings == (op == Op::Replace || op == Op::ReplaceWithoutBlock ? 125 : 625));
         // The design's bounds, on top of the hand-over rule checked in every run. A span has the lane on both
         // outputs only when it straddles the operation: its giver block ran before the giving publication, its
         // taker block after the taking one. On a link only the first gap precedes the leader's first publication,
@@ -1378,6 +1422,82 @@ TEST_CASE("link sim: a different project in a bound leader is played by the lead
     }
     checkStopsClean(*leader, 0.0);
     checkStopsClean(*follower, 0.0);
+}
+
+TEST_CASE("link sim: a state without the instance block resets a bound leader's link identity") {
+    // An unrelated document (track 1 too, other notes) loaded without a block into a bound leader: its followers
+    // must stop resolving (another document id), and the leader plays every lane itself.
+    const Song s = song();
+    const Song other = otherSong();
+    REQUIRE(other.bass == s.bass);
+    const std::vector<Span> spans = steady(100);
+    const auto otherAll = reference(other.state, nullptr, spans);
+    const auto nothing = silence(spans);
+    DocumentStore otherStore;
+    otherStore.replace(other.state.doc, other.state.nextId, other.state.nextSectionId, other.state.nextTrackId,
+                       other.state.nextNoteId);
+    const std::string legacy = stateJson(otherStore);  // no instance block: saved before linking existed
+
+    World w;
+    auto leader = w.make("L");
+    leader->loadDocument(s.state);
+    auto follower = w.make("F");
+    const std::string u1 = leader->laneUid(s.bass);
+    REQUIRE(follower->follow("L", u1, lineageOf(*follower, "L")) == Result::Applied);
+    const std::string documentBefore = leader->endpoint().documentId();
+    Player pl(*leader, spans);
+    Player pf(*follower, spans);
+    rounds(pl, pf, 30);
+
+    leader->loadJson(legacy);
+    CHECK(leader->id() == "L");  // the same instance
+    CHECK(leader->endpoint().documentId() != documentBefore);
+    CHECK_FALSE(leader->laneUid(other.bass).empty());
+    CHECK(leader->laneUid(other.bass) != u1);
+    CHECK(follower->view().status == LinkStatus::ProjectChanged);
+    rounds(pl, pf, spans.size());
+    CHECK(follower->played().none());  // its link slot holds no note
+    CHECK(leader->played()[48]);         // the leader's own slot holds track 1
+    checkSettles(pl, *otherAll, 30, spans.size(), "leader with the legacy document, every lane its own");
+    checkSettles(pf, *nothing, 30, spans.size(), "follower of the old document");
+}
+
+TEST_CASE("link sim: a state without the instance block ends a follower's link") {
+    const Song s = song();
+    DocumentStore loaded;
+    {
+        const DocState start = followerOwn();
+        loaded.replace(start.doc, start.nextId, start.nextSectionId, start.nextTrackId, start.nextNoteId);
+        loaded.appendChord(chord(7, "maj"), 4.0, 100);
+    }
+    const std::string legacy = stateJson(loaded);
+    const std::vector<Span> spans = steady(100);
+    const auto all = reference(s.state, nullptr, spans);
+    const auto own = reference(docStateOf(loaded), nullptr, spans);
+
+    World w;
+    auto leader = w.make("L");
+    leader->loadDocument(s.state);
+    auto follower = w.make("F");
+    follower->loadDocument(followerOwn());
+    REQUIRE(follower->follow("L", leader->laneUid(s.bass), lineageOf(*follower, "L")) == Result::Applied);
+    const std::string followerDocument = follower->endpoint().documentId();
+    Player pl(*leader, spans);
+    Player pf(*follower, spans);
+    rounds(pl, pf, 30);
+
+    const Hooks hooks = follower->loadJsonStep(legacy);
+    CHECK_FALSE(follower->endpoint().following());
+    CHECK_FALSE(follower->save().link.follow.has_value());
+    CHECK(follower->view().status == LinkStatus::NotFollowing);
+    CHECK(follower->id() == "F");
+    CHECK(follower->endpoint().documentId() != followerDocument);
+    REQUIRE(hooks.size() == 1);  // the old leader's
+    FakeInstance::run(hooks);
+    follower->republish();
+    rounds(pl, pf, spans.size());
+    checkSettles(pl, *all, 30, spans.size(), "leader with its lane back");
+    checkSettles(pf, *own, 30, spans.size(), "former follower on the loaded document");
 }
 
 // --- 7. revert ---------------------------------------------------------------------------------------------------

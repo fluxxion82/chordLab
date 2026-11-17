@@ -630,10 +630,6 @@ bool fillAndPublish(const Document& doc, const LaneSelection& selection, TripleB
     return true;
 }
 
-bool contains(const std::vector<std::string>& list, const std::string& value) {
-    return std::find(list.begin(), list.end(), value) != list.end();
-}
-
 }  // namespace
 
 bool LinkEndpoint::publishOwn(const DocumentStore& store, const std::string& lineage,
@@ -667,20 +663,24 @@ bool LinkEndpoint::publishOwn(const DocumentStore& store, const std::string& lin
     key.followed = std::move(followed.lanes);
     key.bindings = followed.bindings;
 
-    const auto excluding = [&](const std::vector<std::string>& uids) {
-        LaneSelection selection{LaneSelection::Mode::AllExcept, {}};
-        for (const std::string& uid : uids) {
-            if (const std::optional<LaneKey> lane = uids_.laneOf(doc, uid)) selection.lanes.push_back(*lane);
-        }
-        return selection;
+    // The lanes as keys of `doc`: what an own publication excludes. Kept by key between publishes, so that a lane
+    // let go stays let go across a document replacement until its follower was emptied, whether or not the new
+    // document's lane table gives that track number the old uid.
+    std::vector<LaneKey> followedKeys;
+    for (const std::string& uid : key.followed) {
+        if (const std::optional<LaneKey> lane = uids_.laneOf(doc, uid)) followedKeys.push_back(*lane);
+    }
+    const auto isFollowed = [&](const LaneKey& lane) {
+        return std::find(followedKeys.begin(), followedKeys.end(), lane) != followedKeys.end();
     };
 
-    // 1. Let go first: the followed lanes, and every lane the last own publication excluded that still resolves.
-    std::vector<std::string> letGo = key.followed;
-    for (const std::string& uid : ownExcluded_) {
-        if (!contains(letGo, uid) && uids_.laneOf(doc, uid)) letGo.push_back(uid);
+    // 1. Let go first: the followed lanes, and every lane the last own publication excluded that is still a lane.
+    std::vector<LaneKey> letGo = followedKeys;
+    for (const LaneKey& lane : ownExcluded_) {
+        if (!isFollowed(lane) && (lane.chords || holdsTrack(doc, lane.trackId))) letGo.push_back(lane);
     }
-    bool published = fillAndPublish(doc, excluding(letGo), ownBuffer, ownPublication);
+    bool published =
+        fillAndPublish(doc, LaneSelection{LaneSelection::Mode::AllExcept, letGo}, ownBuffer, ownPublication);
     ownExcluded_ = letGo;
     if (probe_) probe_();
 
@@ -698,10 +698,13 @@ bool LinkEndpoint::publishOwn(const DocumentStore& store, const std::string& lin
 
     // 3. Take back what nobody follows any more, now that its old follower is silent.
     const bool comesBack = std::any_of(ownExcluded_.begin(), ownExcluded_.end(),
-                                       [&](const std::string& uid) { return !contains(key.followed, uid); });
+                                       [&](const LaneKey& lane) { return !isFollowed(lane); });
     if (comesBack) {
-        published = fillAndPublish(doc, excluding(key.followed), ownBuffer, ownPublication) || published;
-        ownExcluded_ = key.followed;
+        published =
+            fillAndPublish(doc, LaneSelection{LaneSelection::Mode::AllExcept, followedKeys}, ownBuffer,
+                           ownPublication) ||
+            published;
+        ownExcluded_ = followedKeys;
     }
     return published;
 }
@@ -745,6 +748,14 @@ void LinkEndpoint::adopt(const State& loaded, LinkRegistry::Hooks& hooks) {
     following_.store(loaded.follow.has_value(), std::memory_order_release);  // the registry wrote it first
     lastFeed_.reset();
     hooks = std::move(adopted.hooks);
+}
+
+void LinkEndpoint::adoptWithoutBlock(LinkRegistry::Hooks& hooks) {
+    hooks = registry_.setFollow(token_, std::nullopt);       // empties the link buffer if it followed
+    following_.store(false, std::memory_order_release);      // after the registry wrote it
+    documentId_ = makeUid_();
+    uids_.replace({});
+    lastFeed_.reset();
 }
 
 std::uint64_t LinkEndpoint::serial() const noexcept {

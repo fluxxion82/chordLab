@@ -646,7 +646,8 @@ std::string stateJson(const DocumentStore& store, int editorWidth = kDefaultEdit
 ///
 /// The instance block (`instance`, optional; see `stateJson`). On success `*instance` (when `instance` is non-null)
 /// is set: to the block when the state has one, else to empty (a state saved before linking, or by a caller that
-/// gave none: the caller then keeps its fresh ids and no link). A block is validated whether or not `instance` is
+/// gave none: the caller then resets the link identity with `LinkEndpoint::adoptWithoutBlock`, link.h, a fresh
+/// document id, an empty lane table and no follow, never keeping what it had). A block is validated whether or not `instance` is
 /// given, and an invalid one rejects the whole state like every other malformed field (false, an error naming the
 /// field, the store and every out-param untouched). Valid means, with every error naming the field as shown:
 /// - `instance` an object (`"instance" must be an object`);

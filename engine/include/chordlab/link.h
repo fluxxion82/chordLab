@@ -221,7 +221,9 @@ struct LinkView {
 ///    lives and leads, whatever happens to ids.
 /// 3. *Ids on a state load* (`adoptState`), in this order: an instance with bound followers keeps its id; else if
 ///    another live instance holds `loadedId`, this one is a copy: it takes `freshId` and remembers which instance
-///    it was copied from; else it takes `loadedId`. The constructor's id (`add`) is assumed unique.
+///    it was copied from; else it takes `loadedId`. The constructor's id (`add`) is assumed unique. A load whose
+///    state has no instance block is no `adoptState`: the instance keeps its id, and only its follow is cleared
+///    (`setFollow`, `LinkEndpoint::adoptWithoutBlock`).
 /// 4. *Writes into a link buffer* happen under the mutex and only here: in `publish` (each bound follower's lane
 ///    from the feed, `fillSlotFromFeed(feed, follow.laneUid, follow.documentId, ...)`, then the buffer's
 ///    `publish` when that returned true), and "empty" (`fillSlotFromFeed(nullptr, ...)`, published when it
@@ -435,7 +437,10 @@ public:
     /// (a gap is preferred to a doubled lane, both ways):
     ///  1. it fills and publishes the own buffer (`fillSlot(doc, AllExcept{...}, ...)`, published when that
     ///     returns true) with every lane excluded that is followed now OR was excluded by the last own publication
-    ///     and still names a lane of `doc`: nothing comes back yet, newly followed lanes leave;
+    ///     and is still a lane of `doc`: nothing comes back yet, newly followed lanes leave. The last exclusions
+    ///     are kept by lane key (the chords lane, a track number), not by uid, so they carry over a document
+    ///     replacement whether or not the new lane table gives the number its old uid (`adopt` with another
+    ///     document, `adoptWithoutBlock`): the old follower is emptied in step 2 before the track comes back;
     ///  2. it publishes a feed (`buildLinkFeed`, the followed lanes compiled) when anything a feed carries changed
     ///     since the last one, which writes every bound follower's link buffer: newly bound followers get their
     ///     lane, followers whose lane no longer resolves (another document, a deleted track) are emptied;
@@ -477,8 +482,8 @@ public:
     /// What to save: the instance's id, its document id and lane uids, and its follow with `leaderId` (and the
     /// `leaderLabel` hint) replaced by the bound leader's current ones while bound (as stored while waiting).
     State state() const;
-    /// A state load (a state without the block is Task 6's business: the caller then keeps its current state).
-    /// Call it in the same model-mutex section as the store's replace, after the replace: otherwise another
+    /// A state load whose state has the instance block (`loadStateJson` returned one; for a state without one the
+    /// shell calls `adoptWithoutBlock`). Call it in the same model-mutex section as the store's replace, after the replace: otherwise another
     /// instance's hook could run `publishOwn` with the new document and the old document id and lane table, or the
     /// old document and the new ones. `publishOwn` may follow in that same section, as well as after the hooks.
     /// The registry decides the id (`LinkRegistry::adoptState` rule 3, a fresh uid from `makeUid` for a copy) and
@@ -486,6 +491,18 @@ public:
     /// ones; `following()` follows the loaded follow. `hooks` receives what the caller must run after releasing
     /// its lock (the old and new leader's). The next `publishOwn` publishes a feed.
     void adopt(const State& loaded, LinkRegistry::Hooks& hooks);
+    /// A state load whose state has no instance block (`loadStateJson` returned none: a state saved before linking,
+    /// or by a caller that gave none). The shell calls this whenever that happens, never "keeps what it has": the
+    /// loaded document is unrelated to the old one as far as links know, so a bound leader must not hand its
+    /// track 1 to the followers of the old document's track 1, and a follower must not keep a link its state says
+    /// nothing of. So: the document id becomes a fresh `makeUid()`; the lane uid table is emptied (the next
+    /// `cover` gives every track a fresh uid); the follow is cleared through the registry in `unfollow`'s order
+    /// (the registry empties the link buffer, then `following()` turns false); the instance keeps its id (it is the
+    /// same instance; no `adoptState`, so the id rules do not apply). `hooks` receives the old leader's hook, to run
+    /// after the lock. Same calling contract as `adopt`: in the model-mutex section of the store's replace, after
+    /// the replace. The next `publishOwn` publishes a feed, under the new document id, so every bound follower
+    /// stops resolving (`ProjectChanged`, its link buffer empty) while this instance plays every lane itself.
+    void adoptWithoutBlock(LinkRegistry::Hooks& hooks);
 
     /// Whether the instance follows. Atomic: the audio thread reads it at the top of every block
     /// (`LinkSource::select`). It turns true only after the link buffer holds a publication.
@@ -522,7 +539,7 @@ private:
     LaneUids uids_;
     std::atomic<bool> following_{false};
     std::optional<FeedKey> lastFeed_;  // empty: the next leading publishOwn publishes a feed
-    std::vector<std::string> ownExcluded_;  // the lane uids the last own publication excluded
+    std::vector<LaneKey> ownExcluded_;  // the lanes (by key) the last own publication excluded
     std::function<void()> probe_;
 };
 
