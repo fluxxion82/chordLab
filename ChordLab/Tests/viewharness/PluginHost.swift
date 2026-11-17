@@ -27,7 +27,7 @@ import SwiftUI
   override func viewDidLoad() {
     super.viewDidLoad()
     for idx in 0..<kNumParams { state.params.append(Param(id: idx, name: "Param \(idx)")) }
-    EditorHosting.install(rootView, in: view)
+    EditorHosting.install(rootView, in: self)
   }
 }
 
@@ -61,6 +61,11 @@ struct HostedInstance {
   var parent: NSView { window.contentView! }
   /// The hosting view inside the controller's view.
   var hostingView: NSView? { controller?.view.subviews.first }
+  /// Whether the hosting view's controller is alive as the one child of the editor's controller.
+  var hostingIsContained: Bool {
+    guard let controller, let hosting = hostingView else { return false }
+    return controller.children.count == 1 && controller.children[0].view === hosting
+  }
 
   init(_ h: Harness, size: CGSize, instance: HostedInstance) {
     self.size = size
@@ -300,6 +305,7 @@ extension Harness {
     } else {
       check(false, "the controller's view holds the hosting view")
     }
+    check(w.hostingIsContained, "the hosting controller is the one child of the editor's controller")
     checkHostProposals(w)
     switch shows {
     case .panel:

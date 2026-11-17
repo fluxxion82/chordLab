@@ -69,7 +69,7 @@ public typealias MIDIVelocity = UInt8
     state.bundleID = getBundleID()
     BundleLocator.shared.initialize(with: state.bundleID)
 
-    EditorHosting.install(ContentView().environmentObject(state), in: view)
+    EditorHosting.install(ContentView().environmentObject(state), in: self)
   }
 
   override func viewDidAppear() {
