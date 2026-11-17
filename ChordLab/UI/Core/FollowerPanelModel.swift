@@ -12,7 +12,7 @@ struct TextRun: Equatable {
   }
 }
 
-/// A repair the follower's panel offers next to its status.
+/// One of the follower panel's two actions.
 enum FollowerRepair: Equatable {
   /// Open the picker (Change…).
   case change
@@ -20,17 +20,18 @@ enum FollowerRepair: Equatable {
   case stopFollowing
 }
 
-/// A repair with its button title.
+/// An action with its button title.
 struct FollowerRepairButton: Equatable {
   let repair: FollowerRepair
   let title: String
 }
 
-/// What the panel's switch button does (plan I7: a follower that is itself a copy, whose leader has a copy too).
+/// What the panel's switch button does (plan I7: a follower duplicated together with its leader).
 enum FollowerSwitchAction: Equatable {
   /// Send this follow (`option.command`; `FollowRequest(option)` for `FollowAttempt`).
   case follow(FollowOption)
-  /// Open the picker on the leader with this id: no single lane of the copy matches.
+  /// No single lane of the copy matches: the view draws the button as a menu over the copy's entries,
+  /// `FollowOptions.group(leader:in:)` with this leader id (the copy is always offered when this case is given).
   case choose(leader: String)
 
   /// The lane a `.follow` sends; nil for `.choose`.
@@ -48,38 +49,48 @@ struct FollowerSwitchOffer: Equatable {
 }
 
 /// Everything the follower's window shows (plan section 5, the read-only panel), as plain values, from the link
-/// state: the headline, the status line and its repairs, the switch to a copy, and the fixed notes. A pure function
-/// of `following` (and `leaders`, for the current names and labels); the view draws it and sends what it says.
+/// state and the instance's own snapshot: the headline, the status line, the two actions, the switch to a copy, and
+/// the notes. The view draws it and sends what it says; it draws `actions` and no other Change… or Stop following.
 ///
 /// Names: the followed track's name and role come from the leader's current lanes when it lists the lane (a rename in
 /// the leader shows at once), else from the follow's stored hints; an empty track name is its role's name (the lane
-/// tab row's rule). The other ChordLab's label is `following.leaderLabel`, else the listed leader's. Any of them may be
-/// missing: "a track" / "the track", and "another ChordLab" (in a possessive, "the other ChordLab").
+/// tab row's rule). The other ChordLab's label is `following.leaderLabel` (the bound leader's current label, the stored
+/// one while waiting), else the listed leader's. Missing names read "a track" / "the track" and "another ChordLab"
+/// (in a possessive, "the other ChordLab"). Labels are given by load order, so while waiting a stored label may now
+/// name a different instance: when a listed leader carries it, the sentences say "the other ChordLab" instead.
 ///
 /// The switch (`switchTo`, plan I7): a copy loads its original's lane table and document id, so it lists the same
 /// lane uids. The button follows, in this order, the copy's lane with the followed lane's uid; else the one lane of
-/// the copy with the same name and role (role ignored while unknown); else, when there is none or several, it opens
-/// the picker on the copy. The chords lane is the copy's chords lane. A copy that is not offered (it has published
-/// nothing yet, `FollowOptions`) opens the picker too.
+/// the copy with the same name and role (role ignored while unknown); else, when there is none or several,
+/// `.choose` (a menu over the copy's entries). The chords lane is the copy's chords lane. A copy the picker does not
+/// offer (it has published nothing yet) gives no switch offer: there is nothing to open.
 ///
 /// Nothing here mentions auditions: they are not routed to a follower yet (plan Task 9).
 struct FollowerPanelModel: Equatable {
   static let changeTitle = "Change…"
   static let stopTitle = "Stop following"
-  /// The Live routing reminder (plan section 2).
-  static let routingReminder =
-    "On the instrument's track choose MIDI From: this track, then this ChordLab, and set Monitor to In."
+  /// The Live routing reminder (plan section 2): in the recommended set-up the follower is a chain of the main
+  /// ChordLab's Instrument Rack, so the instrument picks it by its chain's name.
+  static let routingReminder = "On the instrument's track, set MIDI From to the track this ChordLab is on, choose this "
+    + "ChordLab below it (in a rack, by its chain's name), and set Monitor to In."
   /// The instance's own document is kept while it follows (plan I1); no confirmation is asked, this line says it.
-  static let keptNote = "This ChordLab's own chords and tracks are kept. They come back when you stop following."
+  static let keptText = "This ChordLab's own chords and tracks are kept. They come back when you stop following."
 
   let headline: [TextRun]
   let role: TrackRole?
   let status: LinkStatus
   let statusLine: String
-  let repairs: [FollowerRepairButton]
+  /// Change (titled for the status) and Stop following, each exactly once, in that order, in every status.
+  let actions: [FollowerRepairButton]
+  /// The action the status asks for (drawn prominent): change while waiting, the track is missing, the project
+  /// changed or the status is unknown; none while playing or muted.
+  let emphasised: FollowerRepair?
   let switchOffer: FollowerSwitchOffer?
-  /// "Edit in ChordLab A's window."
-  let editNote: String
+  /// "Edit in ChordLab A's window."; nil while waiting (it is not there to edit in).
+  let editNote: String?
+  /// `keptText` when this instance holds chords or tracks of its own; nil when it was empty or its snapshot has not
+  /// arrived (nothing to promise).
+  let keptNote: String?
 
   /// The headline as one plain string.
   var headlineText: String { headline.map(\.text).joined() }
@@ -87,8 +98,8 @@ struct FollowerPanelModel: Equatable {
   /// The role's colour mark (`TrackStyle`); nil for the chords lane and an unknown role.
   var roleColor: Color? { role.map(TrackStyle.color(role:)) }
 
-  /// The panel for `state`; nil when this instance does not follow.
-  init?(_ state: LinkStateJSON?) {
+  /// The panel for `state`, with `snapshot` the instance's own; nil when this instance does not follow.
+  init?(_ state: LinkStateJSON?, snapshot: Snapshot?) {
     guard let state, let following = state.following else { return nil }
     let listedLeader = state.leader(id: following.leader)
     let current = listedLeader?.lanes.first { $0.lane == following.lane }
@@ -99,11 +110,15 @@ struct FollowerPanelModel: Equatable {
       if !following.laneName.isEmpty { return following.laneName }
       return role?.displayName
     }()
-    let label = [following.leaderLabel, listedLeader?.label ?? ""].first { !$0.isEmpty }
+    let waiting = following.status == .waiting
+    let staleLabel = waiting && !following.leaderLabel.isEmpty
+      && state.leaders.contains { $0.label == following.leaderLabel && $0.id != following.leader }
+    let label = staleLabel ? nil : [following.leaderLabel, listedLeader?.label ?? ""].first { !$0.isEmpty }
+    let leader = label ?? (staleLabel ? "the other ChordLab" : "another ChordLab")
 
     self.role = role
     self.status = following.status
-    let leaderRun = label.map { TextRun($0, bold: true) } ?? TextRun("another ChordLab")
+    let leaderRun = label.map { TextRun($0, bold: true) } ?? TextRun(leader)
     if following.isChords {
       headline = Self.merged([TextRun("Plays the "), TextRun("chords", bold: true), TextRun(" of "), leaderRun])
     } else if let name {
@@ -112,59 +127,63 @@ struct FollowerPanelModel: Equatable {
       headline = Self.merged([TextRun("Plays a track of "), leaderRun])
     }
 
-    let leader = label ?? "another ChordLab"
     let subject: (noun: String, isAre: String, wasWere: String) =
       following.isChords ? ("The chords", "are", "were") : (name.map { ($0, "is", "was") } ?? ("The track", "is", "was"))
     switch following.status {
     case .playing:
       statusLine = "Playing."
-      repairs = []
     case .muted:
       let soloed = following.isChords ? "a track" : "another track"
       statusLine = "\(subject.noun) \(subject.isAre) muted in \(leader) (or \(soloed) is soloed)."
-      repairs = []
     case .waiting:
-      statusLine = "Waiting for \(leader). It is not in this set right now."
-      repairs = [FollowerRepairButton(repair: .change, title: Self.changeTitle),
-                 FollowerRepairButton(repair: .stopFollowing, title: Self.stopTitle)]
+      statusLine = "Waiting for \(leader). It is not in this set, or it now plays from another ChordLab."
     case .laneMissing:
       statusLine = "\(subject.noun) \(subject.wasWere) deleted in \(leader). Undo there brings it back."
-      repairs = [FollowerRepairButton(repair: .change, title: Self.changeTitle)]
     case .projectChanged:
       statusLine = "\(Self.capitalized(leader)) holds a different project now."
-      repairs = [FollowerRepairButton(repair: .change, title: "Pick a track…")]
     case .unknown:
       statusLine = "Not playing."
-      repairs = [FollowerRepairButton(repair: .change, title: Self.changeTitle)]
     }
-    editNote = "Edit in \(label ?? "the other ChordLab")'s window."
+    let changeTitle = following.status == .projectChanged ? "Pick a track…" : Self.changeTitle
+    actions = [FollowerRepairButton(repair: .change, title: changeTitle),
+               FollowerRepairButton(repair: .stopFollowing, title: Self.stopTitle)]
+    switch following.status {
+    case .playing, .muted: emphasised = nil
+    case .waiting, .laneMissing, .projectChanged, .unknown: emphasised = .change
+    }
+    editNote = waiting ? nil : "Edit in \(label ?? "the other ChordLab")'s window."
+    if let snapshot, !FollowOffer.isFresh(snapshot) {
+      keptNote = Self.keptText
+    } else {
+      keptNote = nil
+    }
 
-    if let copy = following.switchTo {
+    if let copy = following.switchTo,
+       let group = FollowOptions.group(leader: copy.leader, in: FollowOptions.groups(state)) {
       let copyName = copy.label.isEmpty ? nil : copy.label
-      let line = copyName.map { "\($0) is a copy of \(leader)." } ?? "There is a copy of \(leader) in this set."
+      let line = "\(copyName ?? "Another ChordLab") was copied together with this one, but this one still plays from "
+        + "\(leader)."
       let what = following.isChords ? "the chords" : (name ?? "the same track")
       let button = "Play \(what) of \(copyName ?? "the copy") instead"
-      let action = Self.switchAction(state: state, following: following, copy: copy.leader, name: name, role: role)
-      switchOffer = FollowerSwitchOffer(line: line, button: button, action: action)
+      switchOffer = FollowerSwitchOffer(line: line, button: button,
+                                        action: Self.switchAction(group: group, following: following, name: name,
+                                                                  role: role))
     } else {
       switchOffer = nil
     }
   }
 
   /// The switch button's action: the copy's lane with the same uid, else the one with the same name and role, else
-  /// the picker on the copy.
-  private static func switchAction(state: LinkStateJSON, following: LinkFollowingJSON, copy: String, name: String?,
+  /// a menu over the copy's entries.
+  private static func switchAction(group: FollowGroup, following: LinkFollowingJSON, name: String?,
                                    role: TrackRole?) -> FollowerSwitchAction {
-    guard let group = FollowOptions.group(leader: copy, in: FollowOptions.groups(state)) else {
-      return .choose(leader: copy)
-    }
     if let same = group.options.first(where: { $0.lane == following.lane }) { return .follow(same) }
-    guard !following.isChords, let name else { return .choose(leader: copy) }
+    guard !following.isChords, let name else { return .choose(leader: group.leader) }
     let matches = group.options.filter { $0.role != nil && $0.name == name && (role == nil || $0.role == role) }
-    return matches.count == 1 ? .follow(matches[0]) : .choose(leader: copy)
+    return matches.count == 1 ? .follow(matches[0]) : .choose(leader: group.leader)
   }
 
-  /// Adjacent plain runs joined, so a fallback headline is one run.
+  /// Adjacent plain runs joined, so a fallback headline ends in one run.
   private static func merged(_ runs: [TextRun]) -> [TextRun] {
     var out: [TextRun] = []
     for run in runs {
