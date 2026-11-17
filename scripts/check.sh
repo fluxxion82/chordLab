@@ -13,8 +13,9 @@
 #                               (the project installs into ~/Library/Audio/Plug-Ins/VST3 and ~/Applications)
 #   scripts/check.sh --shell    ... plus the same two schemes built into a scratch directory, installing nothing:
 #                               DSTROOT, SYMROOT, OBJROOT and -derivedDataPath under $CHORDLAB_SHELL_OUT (default
-#                               ${TMPDIR:-/tmp}/chordlab-shell-gate; only inside $TMPDIR, /private/tmp or
-#                               /private/var/folders); fails if the installed VST3 or app binary changes. Then
+#                               ${TMPDIR:-/tmp}/chordlab-shell-gate; refused unless it lies inside /private/tmp or
+#                               /private/var/folders, where macOS's own $TMPDIR is; $TMPDIR itself is no allowed
+#                               root); fails if the installed VST3 or app binary changes. Then
 #                               builds ChordLab/Tests/vst3host there and runs it against the scratch ChordLab.vst3
 #   scripts/check.sh --all      everything but --shell (--shell with --plugin or --all is refused)
 #   scripts/check.sh --release  ... plus the release script's preflight, in report mode
@@ -240,11 +241,13 @@ physical_dir() {
 }
 
 # shell_out_allowed <physical path>: true when the path lies strictly inside one of the scratch roots --shell may
-# write to: the resolved $TMPDIR, /private/tmp or /private/var/folders (all resolved physically too). An allow-list,
-# so a path in ~/Library or ~/Applications, however spelled (another case, a firmlink, `..`, a symlink), is refused.
+# write to: /private/tmp or /private/var/folders (resolved physically too). An allow-list, so a path in ~/Library or
+# ~/Applications, however spelled (another case, a firmlink, `..`, a symlink), is refused. $TMPDIR is deliberately no
+# root of its own: TMPDIR=~/Library/Audio/Plug-Ins/VST3 would otherwise allow the installed plug-in's folder; on macOS
+# the system's $TMPDIR lies under /private/var/folders and so stays allowed.
 shell_out_allowed() {
     local root
-    for root in "${TMPDIR:-}" /private/tmp /private/var/folders; do
+    for root in /private/tmp /private/var/folders; do
         [ -n "$root" ] && [ -d "$root" ] || continue
         root="$(cd -P "$root" 2>/dev/null && pwd -P)" || continue
         root="${root%/}"
@@ -271,14 +274,14 @@ shell_out_dir() {
         return 1
     fi
     if ! shell_out_allowed "$candidate"; then
-        echo "check.sh: --shell refuses the scratch directory '$out' (resolves to '$candidate'): it must lie inside \$TMPDIR, /private/tmp or /private/var/folders" >&2
+        echo "check.sh: --shell refuses the scratch directory '$out' (resolves to '$candidate'): it must lie inside /private/tmp or /private/var/folders" >&2
         return 1
     fi
     mkdir -p "$candidate" || return 1
     local resolved
     resolved="$(cd -P "$candidate" 2>/dev/null && pwd -P)" || return 1
     if ! shell_out_allowed "$resolved"; then
-        echo "check.sh: --shell refuses the scratch directory '$out' (created as '$resolved'): it must lie inside \$TMPDIR, /private/tmp or /private/var/folders" >&2
+        echo "check.sh: --shell refuses the scratch directory '$out' (created as '$resolved'): it must lie inside /private/tmp or /private/var/folders" >&2
         return 1
     fi
     echo "$resolved"

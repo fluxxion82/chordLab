@@ -73,6 +73,16 @@ for args in "--shell --plugin" "--plugin --shell" "--shell --all" "--all --shell
     fi
 done
 
+# --- $TMPDIR is no allowed root ---------------------------------------------------------------------------------------
+mkdir -p "$OUTSIDE"
+run TMPDIR="$OUTSIDE" CHORDLAB_SHELL_OUT= -- --shell
+if [ "$RC" -ne 0 ] && echo "$OUT" | grep -q "refuses the scratch directory" && ! called xcodebuild && empty_dir "$OUTSIDE"; then
+    ok "TMPDIR outside /private/tmp and /private/var/folders: the default scratch directory is refused, nothing written"
+else
+    bad "TMPDIR=$OUTSIDE: status $RC, xcodebuild called: $(called xcodebuild && echo yes || echo no), written: $(ls -A "$OUTSIDE" | tr '\n' ' ')"
+fi
+rm -rf "$OUTSIDE"
+
 echo
 if [ "$FAILURES" -eq 0 ]; then
     echo "check_shell_probes: ALL PASS"
