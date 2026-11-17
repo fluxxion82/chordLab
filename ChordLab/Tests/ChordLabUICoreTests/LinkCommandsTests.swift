@@ -38,7 +38,21 @@ final class LinkCommandsTests: XCTestCase {
     let chords = try wire(LinkCommands.follow(leader: "leader-1", lane: "chords", leaderLineage: "l"), lineage: "t")
     XCTAssertEqual(chords, try object(
       #"{"schema":1,"op":"follow","leader":"leader-1","lane":"chords","leaderLineage":"l","lineage":"t"}"#))
-    XCTAssertEqual(sent["schema"] as? Int, 1)                      // an integer, as boundedIntField requires
+  }
+
+  /// The serialized text itself, keys sorted: an `NSDictionary` comparison cannot tell `schema: 1` from
+  /// `schema: true`, the bridge can (boundedIntField wants an integer).
+  func testTheSerializedTextCarriesSchemaAsTheInteger1() throws {
+    for (fields, expected) in [
+      (LinkCommands.follow(leader: "leader-1", lane: "uid-7", leaderLineage: "lineage-3"),
+       #"{"lane":"uid-7","leader":"leader-1","leaderLineage":"lineage-3","lineage":"own-token","op":"follow","schema":1}"#),
+      (LinkCommands.unfollow(), #"{"lineage":"own-token","op":"unfollow","schema":1}"#),
+    ] {
+      var message = CommandLineage.stamp(fields, token: "own-token")
+      message["schema"] = 1
+      let data = try JSONSerialization.data(withJSONObject: message, options: [.sortedKeys])
+      XCTAssertEqual(String(decoding: data, as: UTF8.self), expected)
+    }
   }
 
   func testAnUnfollowRoundTripMatchesTheBridgeTestsAcceptedText() throws {
@@ -63,6 +77,7 @@ final class LinkCommandsTests: XCTestCase {
   // MARK: - FollowAttempt
 
   private let bass = FollowRequest(leader: "a", lane: "uid-bass", leaderLabel: "ChordLab A")
+  private let refusedByA = "ChordLab A changed while you were choosing. Pick again."
 
   private func state(following leader: String?, lane: String = "uid-bass") -> LinkStateJSON {
     LinkStateJSON(
@@ -74,115 +89,149 @@ final class LinkCommandsTests: XCTestCase {
       leaders: [], routed: [])
   }
 
+  /// One send as `ChordLabState` makes it: `sent`, then whatever the shell answers inside the send, then
+  /// `sendReturned`. Returns the verdict the answers gave.
+  @discardableResult
+  private func send(_ attempt: FollowAttempt, _ request: FollowRequest,
+                    answers: (FollowAttempt) -> FollowVerdict?) -> FollowVerdict? {
+    attempt.sent(request)
+    let verdict = answers(attempt)
+    attempt.sendReturned()
+    return verdict
+  }
+
   func testAFollowThatTookEffectIsApplied() {
-    var attempt = FollowAttempt()
+    let attempt = FollowAttempt()
     attempt.sent(bass)
     XCTAssertEqual(attempt.pending, bass)
     XCTAssertEqual(attempt.received(state(following: "a")), .applied)
+    attempt.sendReturned()
     XCTAssertNil(attempt.pending)
     XCTAssertNil(attempt.notice)
   }
 
   func testAnAnswerThatStillFollowsNothingIsARefusal() {
-    var attempt = FollowAttempt()
-    attempt.sent(bass)
-    XCTAssertEqual(attempt.received(state(following: nil)), .refused)
+    let attempt = FollowAttempt()
+    XCTAssertEqual(send(attempt, bass) { $0.received(self.state(following: nil)) }, .refused)
     XCTAssertNil(attempt.pending)
-    XCTAssertEqual(attempt.notice, "ChordLab A changed while you were choosing. Pick again.")
+    XCTAssertEqual(attempt.notice, refusedByA)
   }
 
   func testAnotherLaneOfTheSameLeaderIsARefusal() {
-    var attempt = FollowAttempt()
-    attempt.sent(bass)
-    XCTAssertEqual(attempt.received(state(following: "a", lane: "uid-lead")), .refused)
+    XCTAssertEqual(send(FollowAttempt(), bass) { $0.received(self.state(following: "a", lane: "uid-lead")) }, .refused)
   }
 
   func testTheSameLaneUidOfAnotherLeaderIsARefusal() {
-    var attempt = FollowAttempt()
-    attempt.sent(bass)
-    XCTAssertEqual(attempt.received(state(following: "b")), .refused)
+    XCTAssertEqual(send(FollowAttempt(), bass) { $0.received(self.state(following: "b")) }, .refused)
   }
 
-  /// A stale own lineage: the shell answers with a snapshot and the link state, nothing applied, so the previous
-  /// follow is still there; the same text.
-  func testAStaleOwnLineageLeavesThePreviousFollowAndIsARefusal() {
-    var attempt = FollowAttempt()
-    attempt.sent(FollowRequest(leader: "a", lane: "uid-lead", leaderLabel: "ChordLab A"))
-    XCTAssertEqual(attempt.received(state(following: "a", lane: "uid-bass")), .refused)
-    XCTAssertEqual(attempt.notice, "ChordLab A changed while you were choosing. Pick again.")
+  /// A stale own lineage: the shell answers with a snapshot (a new token) and the link state, nothing applied. The
+  /// state passes `ownDocumentChanged`: the sentence names this ChordLab, not the other one.
+  func testAStaleOwnDocumentNamesThisChordLab() {
+    let attempt = FollowAttempt()
+    let lead = FollowRequest(leader: "a", lane: "uid-lead", leaderLabel: "ChordLab A")
+    let verdict = send(attempt, lead) { $0.received(self.state(following: "a", lane: "uid-bass"), ownDocumentChanged: true) }
+    XCTAssertEqual(verdict, .refused)
+    XCTAssertEqual(attempt.notice, "This ChordLab changed while you were choosing. Pick again.")
   }
 
   func testAnEmptyLabelNamesTheOtherChordLab() {
-    var attempt = FollowAttempt()
-    attempt.sent(FollowRequest(leader: "a", lane: "chords", leaderLabel: ""))
-    attempt.received(state(following: nil))
+    let attempt = FollowAttempt()
+    send(attempt, FollowRequest(leader: "a", lane: "chords", leaderLabel: "")) { $0.received(self.state(following: nil)) }
     XCTAssertEqual(attempt.notice, "The other ChordLab changed while you were choosing. Pick again.")
   }
 
-  func testALinkStateBeforeAnyRequestJudgesNothing() {
-    var attempt = FollowAttempt()
+  func testALinkStateOutsideAnySendIsNotJudged() {
+    let attempt = FollowAttempt()
+    XCTAssertNil(attempt.received(state(following: nil)))
+    XCTAssertNil(attempt.notice)
+    attempt.sent(bass)
+    attempt.sendReturned()                                          // no answer inside the send
+    XCTAssertNil(attempt.received(state(following: nil)))           // a later push, for another reason
+    XCTAssertNil(attempt.notice)
+  }
+
+  func testNoAnswerInsideTheSendLeavesNothingPending() {
+    let attempt = FollowAttempt()
+    send(attempt, bass) { _ in nil }
+    XCTAssertNil(attempt.pending)
+    XCTAssertNil(attempt.notice)
+  }
+
+  /// A message the shell cannot parse is answered with an error and no link state: the error is the answer, and
+  /// the next link state, whenever it comes, is not judged.
+  func testAnErrorAloneThenALaterLinkStateGivesNoVerdictAndNoNotice() {
+    let attempt = FollowAttempt()
+    attempt.sent(bass)
+    XCTAssertTrue(attempt.receivedError())
+    attempt.sendReturned()
+    XCTAssertNil(attempt.pending)
     XCTAssertNil(attempt.received(state(following: nil)))
     XCTAssertNil(attempt.notice)
   }
 
-  /// The shell answers inside the send, so the first link state after the request is the answer; one that arrives
-  /// later, for another reason (an idle push, another instance's change), is not judged again.
-  func testTheAttemptIsJudgedOnceOnTheFirstLinkStateAfterTheRequest() {
-    var attempt = FollowAttempt()
-    attempt.sent(bass)
-    XCTAssertEqual(attempt.received(state(following: nil)), .refused)
-    XCTAssertNil(attempt.received(state(following: nil)))
-    XCTAssertEqual(attempt.notice, "ChordLab A changed while you were choosing. Pick again.")
+  /// A malformed or missing own lineage: an error and a link state in the same send. The error is the answer; no
+  /// notice blames the other ChordLab.
+  func testAnErrorAndALinkStateInOneSendGiveNoNotice() {
+    let attempt = FollowAttempt()
+    let verdict = send(attempt, bass) { a in
+      XCTAssertTrue(a.receivedError())
+      return a.received(self.state(following: nil))
+    }
+    XCTAssertNil(verdict)
+    XCTAssertNil(attempt.notice)
   }
 
-  func testAnAppliedAttemptIsNotJudgedAgainWhenALaterStateFollowsNothing() {
-    var attempt = FollowAttempt()
-    attempt.sent(bass)
-    XCTAssertEqual(attempt.received(state(following: "a")), .applied)
+  func testAnErrorOutsideASendIsNotTheAttempts() {
+    XCTAssertFalse(FollowAttempt().receivedError())
+  }
+
+  /// The shell answers inside the send; only the first link state of the send is the answer.
+  func testTheAttemptIsJudgedOnceInsideTheSend() {
+    let attempt = FollowAttempt()
+    send(attempt, bass) { a in
+      XCTAssertEqual(a.received(self.state(following: nil)), .refused)
+      XCTAssertNil(a.received(self.state(following: "a")))
+      return nil
+    }
+    XCTAssertNil(attempt.received(state(following: nil)))
+  }
+
+  func testAnAppliedAttemptLeavesNoNoticeWhenALaterStateFollowsNothing() {
+    let attempt = FollowAttempt()
+    XCTAssertEqual(send(attempt, bass) { $0.received(self.state(following: "a")) }, .applied)
     XCTAssertNil(attempt.received(state(following: nil)))         // stopped following later: no refusal text
     XCTAssertNil(attempt.notice)
   }
 
   func testTheNextChoiceClearsTheNotice() {
-    var attempt = FollowAttempt()
-    attempt.sent(bass)
-    attempt.received(state(following: nil))
+    let attempt = FollowAttempt()
+    send(attempt, bass) { $0.received(self.state(following: nil)) }
     attempt.sent(FollowRequest(leader: "a", lane: "chords", leaderLabel: "ChordLab A"))
     XCTAssertNil(attempt.notice)
   }
 
   func testTheUserClearsTheNotice() {
-    var attempt = FollowAttempt()
-    attempt.sent(bass)
-    attempt.received(state(following: nil))
+    let attempt = FollowAttempt()
+    send(attempt, bass) { $0.received(self.state(following: nil)) }
     attempt.dismiss()
     XCTAssertNil(attempt.notice)
-    XCTAssertNil(attempt.pending)
   }
 
   func testStartingToFollowByAnyRouteClearsTheNotice() {
-    var attempt = FollowAttempt()
-    attempt.sent(bass)
-    attempt.received(state(following: nil))
+    let attempt = FollowAttempt()
+    send(attempt, bass) { $0.received(self.state(following: nil)) }
     XCTAssertNil(attempt.received(state(following: "a", lane: "chords")))   // e.g. a state load made it follow
     XCTAssertNil(attempt.notice)
   }
 
   func testStoppingToFollowAfterARefusedChangeClearsTheNotice() {
-    var attempt = FollowAttempt()
-    attempt.sent(FollowRequest(leader: "a", lane: "uid-lead", leaderLabel: "ChordLab A"))
-    attempt.received(state(following: "a", lane: "uid-bass"))
+    let attempt = FollowAttempt()
+    send(attempt, FollowRequest(leader: "a", lane: "uid-lead", leaderLabel: "ChordLab A")) {
+      $0.received(self.state(following: "a", lane: "uid-bass"))
+    }
     XCTAssertNil(attempt.received(state(following: "a", lane: "uid-bass")))  // an idle push, nothing changed
-    XCTAssertNotNil(attempt.notice)
-    XCTAssertNil(attempt.received(state(following: nil)))
-    XCTAssertNil(attempt.notice)
-  }
-
-  func testARequestThatCouldNotBeSentIsNotJudged() {
-    var attempt = FollowAttempt()
-    attempt.sent(bass)
-    attempt.notSent()
-    XCTAssertNil(attempt.pending)
+    XCTAssertEqual(attempt.notice, refusedByA)
     XCTAssertNil(attempt.received(state(following: nil)))
     XCTAssertNil(attempt.notice)
   }

@@ -49,19 +49,34 @@ enum FollowVerdict: Equatable {
 }
 
 /// A follow request and the sentence its refusal leaves for the user (plan I9, M2 as built: a refused follow is not
-/// an error; the shell answers it with a fresh link state and nothing else, inside the send). `ChordLabState` keeps
-/// one: `sent` before the request goes out, `received` with every decoded link state. The attempt is judged once, on
-/// the first link state after the request (the shell answers inside the send, so that one is the answer); later link
-/// states are not judged again. A refusal's `notice` stays (in the picker or the banner) until the next choice
-/// (`sent`), until the user clears it (`dismiss`), or until a later link state shows that what this instance follows
-/// has changed since the refusal (it started or stopped following, or follows another lane: the sentence is about a
-/// choice that no longer stands). A refused Change… in the follower's panel leaves the previous follow in place, so
-/// the answer itself still follows something and still shows the sentence.
-struct FollowAttempt: Equatable {
-  /// The request that has not been judged yet; nil when there is none.
+/// an error; the shell answers it with a fresh link state and nothing else). The shell answers a link message inline,
+/// inside the send (`ChordLab::OnMessage` runs synchronously on the main thread), so, as `ClipExportExchange` does for
+/// exports, only an answer that arrives while the send is in flight belongs to the request; a link state outside a send
+/// (an idle push, another instance's change) is never judged. A class, because the answer re-enters during the send:
+/// the state calls `received` / `receivedError` from inside the call that sends.
+///
+/// The sequence `ChordLabState.follow` follows: `sent(request)`; the send; `sendReturned()`. Inside the send, its
+/// `applyLinkState` calls `received(_:ownDocumentChanged:)` (true when a snapshot with a new lineage token arrived
+/// earlier in the same send: the shell's answer to a stale own lineage) and its `applyError` calls `receivedError()`.
+/// Outside a send it calls `received` too (verdict nil), which only clears a notice that no longer applies.
+///
+/// - The first link state inside the send is the answer: **applied** when `following` names the requested leader and
+///   lane, otherwise **refused** with `notice` set. Later link states of the same send are not judged.
+/// - An error inside the send is the answer (a message the shell could not parse is answered with an error and no
+///   link state; a malformed or missing own lineage with an error and then a link state): no verdict, no notice, and a
+///   link state that follows in the same send is not judged. The state shows the error as it shows any.
+/// - No answer inside the send: `sendReturned` forgets the request; no verdict, no notice.
+/// - The notice stays (in the picker or the banner) until the next choice (`sent`), until the user clears it
+///   (`dismiss`), or until a later link state shows that what this instance follows has changed since the refusal
+///   (it started or stopped following, or follows another lane). A refused Change… in the follower's panel leaves the
+///   previous follow in place, so the answer itself still follows something and still shows the sentence.
+final class FollowAttempt {
+  /// The request of the send in flight that has not been answered yet; nil otherwise.
   private(set) var pending: FollowRequest?
   /// The refusal text, until cleared; nil when there is none.
   private(set) var notice: String?
+  /// True between `sent` and `sendReturned`.
+  private var inFlight = false
   /// What this instance followed (leader id and lane key) in the answer that refused, nil for nothing.
   private var followedAtRefusal: Followed?
 
@@ -71,34 +86,45 @@ struct FollowAttempt: Equatable {
     let lane: String
   }
 
-  /// The one sentence a refusal shows: "ChordLab A changed while you were choosing. Pick again."; with no label,
-  /// "The other ChordLab".
-  static func refusalText(leaderLabel: String) -> String {
-    "\(leaderLabel.isEmpty ? "The other ChordLab" : leaderLabel) changed while you were choosing. Pick again."
+  /// The sentence a refusal shows: "ChordLab A changed while you were choosing. Pick again."; with no label, "The
+  /// other ChordLab"; when this instance's own document changed (`ownDocumentChanged`), "This ChordLab".
+  static func refusalText(leaderLabel: String, ownDocumentChanged: Bool = false) -> String {
+    let who = ownDocumentChanged ? "This ChordLab" : (leaderLabel.isEmpty ? "The other ChordLab" : leaderLabel)
+    return "\(who) changed while you were choosing. Pick again."
   }
 
-  /// A follow request is about to be sent: it is the one the next link state judges, and the old notice goes.
-  mutating func sent(_ request: FollowRequest) {
+  /// Right before the follow request is sent: it is the one an answer inside the send judges, and the old notice goes.
+  func sent(_ request: FollowRequest) {
     pending = request
+    inFlight = true
     notice = nil
   }
 
-  /// The request could not be sent (the message was not valid JSON): nothing will answer it.
-  mutating func notSent() {
+  /// Right after the send returned, whether or not anything answered (or the message could not be sent at all): an
+  /// unanswered request is forgotten without a notice.
+  func sendReturned() {
     pending = nil
+    inFlight = false
   }
 
   /// The user cleared the notice.
-  mutating func dismiss() {
+  func dismiss() {
     notice = nil
-    pending = nil
   }
 
-  /// A link state arrived: the verdict on the pending request, or nil when none was pending (it is then not an
-  /// answer, and it clears the notice when what this instance follows differs from the refusing answer's).
-  @discardableResult mutating func received(_ state: LinkStateJSON) -> FollowVerdict? {
+  /// `kMsgTagError`: true when it answers the send in flight (the error is the request's answer, no notice follows);
+  /// false outside a send.
+  @discardableResult func receivedError() -> Bool {
+    guard inFlight else { return false }
+    pending = nil
+    return true
+  }
+
+  /// A link state arrived. Inside a send with an unanswered request: the verdict. Otherwise nil (not an answer), and
+  /// the notice is cleared when what this instance follows differs from the refusing answer's.
+  @discardableResult func received(_ state: LinkStateJSON, ownDocumentChanged: Bool = false) -> FollowVerdict? {
     let followed = state.following.map { Followed(leader: $0.leader, lane: $0.lane) }
-    guard let request = pending else {
+    guard inFlight, let request = pending else {
       if notice != nil, followed != followedAtRefusal { notice = nil }
       return nil
     }
@@ -107,7 +133,7 @@ struct FollowAttempt: Equatable {
       notice = nil
       return .applied
     }
-    notice = Self.refusalText(leaderLabel: request.leaderLabel)
+    notice = Self.refusalText(leaderLabel: request.leaderLabel, ownDocumentChanged: ownDocumentChanged)
     followedAtRefusal = followed
     return .refused
   }
