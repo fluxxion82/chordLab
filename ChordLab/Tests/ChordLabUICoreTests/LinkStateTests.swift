@@ -82,6 +82,21 @@ final class LinkStateTests: XCTestCase {
     XCTAssertEqual(state.leaders[0].lanes[1].trackRole, .other)
   }
 
+  /// A copy nobody plays from: `copyOf` names its original, `routed` is empty.
+  func testCopyFixture() throws {
+    let state = try Self.fixture("link-state-copy.json")
+    XCTAssertEqual(state.instance, LinkSelfJSON(id: "uid-5", label: "ChordLab B",
+                                                copyOf: LinkInstanceJSON(leader: "id-original", label: "ChordLab A")))
+    XCTAssertNil(state.following)
+    XCTAssertEqual(state.routed, [])
+    XCTAssertEqual(state.leaders.map(\.id), ["id-original"])
+    XCTAssertEqual(state.leaders[0].lanes.map(\.followers), [0, 1, 0])
+  }
+
+  func testTheLeaderFixtureIsNoCopyNow() throws {
+    XCTAssertNil(try Self.fixture("link-state-leader.json").instance.copyOf)
+  }
+
   // MARK: - Statuses
 
   func testEveryStatusString() throws {
@@ -174,16 +189,16 @@ final class LinkStateTests: XCTestCase {
 
   func testTheLeaderFixtureMarksTheChordsTabAndTrackTwo() throws {
     let marks = RoutedMarks.marks(try Self.fixture("link-state-leader.json"), tabs: tabs(trackIds: [1, 2]))
-    XCTAssertEqual(marks[.chords], RoutedMark(followers: 1, tooltip: "Plays on its own track"))
-    XCTAssertEqual(marks[.track(2)], RoutedMark(followers: 1, tooltip: "Plays on its own track"))
+    XCTAssertEqual(marks[.chords], RoutedMark(followers: 1, tooltip: "Not played here: another ChordLab plays it on its own instrument."))
+    XCTAssertEqual(marks[.track(2)], RoutedMark(followers: 1, tooltip: "Not played here: another ChordLab plays it on its own instrument."))
     XCTAssertNil(marks[.track(1)])
     XCTAssertEqual(marks.count, 2)
   }
 
   func testTooltipCountsTheTracks() {
-    XCTAssertEqual(RoutedMarks.tooltip(followers: 1), "Plays on its own track")
-    XCTAssertEqual(RoutedMarks.tooltip(followers: 2), "Plays on 2 tracks of its own")
-    XCTAssertEqual(RoutedMarks.tooltip(followers: 5), "Plays on 5 tracks of its own")
+    XCTAssertEqual(RoutedMarks.tooltip(followers: 1), "Not played here: another ChordLab plays it on its own instrument.")
+    XCTAssertEqual(RoutedMarks.tooltip(followers: 2), "Not played here: 2 other ChordLabs play it on their own instruments.")
+    XCTAssertEqual(RoutedMarks.tooltip(followers: 5), "Not played here: 5 other ChordLabs play it on their own instruments.")
   }
 
   func testAnEntryWithoutTrackIdMarksNothing() throws {
@@ -199,7 +214,7 @@ final class LinkStateTests: XCTestCase {
   func testTheChordsLaneIsMarkedByItsKeyNotByTrackId() {
     let withoutId = state(routed: [LinkRoutedJSON(lane: "chords", followers: 2, trackId: nil)])
     XCTAssertEqual(RoutedMarks.marks(withoutId, tabs: tabs(trackIds: [])),
-                   [.chords: RoutedMark(followers: 2, tooltip: "Plays on 2 tracks of its own")])
+                   [.chords: RoutedMark(followers: 2, tooltip: "Not played here: 2 other ChordLabs play it on their own instruments.")])
   }
 
   func testNoFollowersAndNoLinkStateMarkNothing() {

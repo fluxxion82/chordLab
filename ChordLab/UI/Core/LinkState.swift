@@ -132,8 +132,8 @@ struct LinkStateJSON: Codable, Equatable {
   func leader(id: String) -> LinkLeaderJSON? { leaders.first { $0.id == id } }
 }
 
-/// The mark on a followed lane's tab (plan section 5, "In the leader"): how many other tracks play the lane, and the
-/// tab's tooltip.
+/// The mark on a followed lane's tab (plan section 5, "In the leader"): how many other ChordLabs play the lane, and
+/// the tab's tooltip.
 struct RoutedMark: Equatable {
   let followers: Int
   let tooltip: String
@@ -145,9 +145,13 @@ struct RoutedMark: Equatable {
 /// the instance's table does not hold) or with no tab of that number marks nothing, and nothing is ever matched by a
 /// name or a position. A following instance marks nothing (its window is the panel).
 enum RoutedMarks {
-  /// The tooltip for `followers` tracks: "Plays on its own track", "Plays on 2 tracks of its own".
+  /// The tooltip for `followers` other ChordLabs playing the lane on their own instruments (it leaves this one's
+  /// output): "Not played here: another ChordLab plays it on its own instrument.", "Not played here: 2 other
+  /// ChordLabs play it on their own instruments.".
   static func tooltip(followers: Int) -> String {
-    followers == 1 ? "Plays on its own track" : "Plays on \(followers) tracks of its own"
+    followers == 1
+      ? "Not played here: another ChordLab plays it on its own instrument."
+      : "Not played here: \(followers) other ChordLabs play it on their own instruments."
   }
 
   /// The marked tabs of `tabs`, by lane.
