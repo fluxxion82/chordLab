@@ -89,7 +89,51 @@ Compiled compile(const Document& doc);
 /// shortened or dropped, and the events are re-emitted bit for bit in the same order). At most
 /// `kMaxSnapshotEvents` events: `kMaxChordEvents` for the chords, two per track note, and the merge only removes.
 /// Same preconditions as `compile`; the tracks must satisfy `validateTracks` (every anchor a chord of `doc`).
+///
+/// This is `compilePlaybackFor` with every lane selected (`LaneSelection{}`).
 Compiled compilePlayback(const Document& doc);
+
+/// A lane of a document: the chords, or one track by its id (`Track::id`, which is never reused).
+struct LaneKey {
+    bool chords = true;  // true: the chords lane (`trackId` is ignored); false: the track with id `trackId`
+    int trackId = 0;
+};
+/// Two chords keys are equal whatever their `trackId`; a chords key never equals a track key; two track keys are
+/// equal when their ids are.
+bool operator==(const LaneKey& a, const LaneKey& b) noexcept;
+bool operator!=(const LaneKey& a, const LaneKey& b) noexcept;
+/// The chords lane's key.
+LaneKey chordsLane() noexcept;
+/// The key of the track with id `trackId`.
+LaneKey trackLane(int trackId) noexcept;
+
+/// The lanes one output plays: every lane except the listed ones (`AllExcept`, the default; with an empty list
+/// every lane), or only the listed ones (`Only`).
+struct LaneSelection {
+    enum class Mode { AllExcept, Only };
+    Mode mode = Mode::AllExcept;
+    std::vector<LaneKey> lanes;
+    /// `AllExcept`: `lane` is not in `lanes`; `Only`: it is. Keys are compared with `operator==`.
+    bool includes(const LaneKey& lane) const noexcept;
+};
+
+/// `compilePlayback`'s computation for the lanes `selection` includes: a lane contributes notes only when it is
+/// audible **and** `selection.includes` its key. Audibility is decided over the whole document (`chordsAudible(doc)`,
+/// `trackAudible(doc, i)`: mute and solo across all lanes, selected or not), so soloing a lane that is not selected
+/// silences the selected ones, and a lane that is muted and soloed sounds in a selection that includes it.
+///
+/// The chords lane is keyed `chordsLane()`, track `i` by `trackLane(doc.tracks[i].id)`. A listed key that names no
+/// lane of `doc` (an unknown track id) is ignored: it includes nothing, and an `AllExcept` list holding only such
+/// keys selects every lane.
+///
+/// `endBeat` and `feelLimited` are `compile(doc)`'s whatever is selected. The paired merge, the drop rule for
+/// notes the merge shortened, the clipping of track notes at `endBeat` (a note clipped to under `kMinNoteTicks`
+/// is kept, unlike in the export), the emitted events and their order are exactly `compilePlayback`'s, applied to
+/// the contributing lanes only: notes of one pitch merge or retrigger among those lanes and never against a lane
+/// that is not selected. The `lane` index given to the merge stays the document position (0 the chords, 1 + i
+/// track i), so the tie order among contributing lanes is unchanged. With only the chords lane contributing, the
+/// events equal `compile(doc).events` exactly. Same preconditions as `compilePlayback`.
+Compiled compilePlaybackFor(const Document& doc, const LaneSelection& selection);
 
 /// Compiles the `count` chords from `firstEvent` on, as they sound in the whole document, re-based to 0:
 /// each chord takes the voicing `voicings(doc)` gives it in the whole progression (the context of auto
