@@ -1014,7 +1014,10 @@ void ChordLab::HandleLink(std::string_view json)
   }
   if (outcome.error)
     PushError(outcome.error);
-  PushLinkState();                                               // always: for a refused follow it is the answer
+  // Always: for a refused follow it is the answer. The serial first (as OnUIOpen does), so the state built inline
+  // below is at least that recent and the next OnIdle does not push the same state again.
+  mReportedLinkSerial = LinkSerial();
+  PushLinkState();
 }
 
 void ChordLab::HandlePreview(std::string_view text)

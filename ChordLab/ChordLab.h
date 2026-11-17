@@ -262,7 +262,7 @@ private:
   uint32_t mAppliedEpoch = 0;                                  // render thread only: the last epoch whose reset the drain performed
 #endif
   uint32_t mReportedDroppedHeard = 0;                          // main thread: last value pushed to the UI
-  uint64_t mReportedLinkSerial = 0;                            // main thread: LinkSerial() when a link state was last pushed (OnUIOpen, OnIdle)
+  uint64_t mReportedLinkSerial = 0;                            // main thread: LinkSerial() when a link state was last pushed (OnUIOpen, OnIdle, HandleLink)
   chordlab::Listener mListener;                                // main thread only (it may allocate)
   std::chrono::steady_clock::time_point mLastHeardTick{};      // main thread: the last mListener.advance
   static constexpr std::chrono::milliseconds kHeardInterval{67};   // key evaluation and heard pushes, at most ~15 Hz
