@@ -95,6 +95,8 @@ Per-track instruments, on `main`, not in the 1.0.0 release (run in Ableton Live 
   main ChordLab marks the tabs of tracks that play elsewhere.
 - Links are saved with the set and come back in any loading order; a deleted main ChordLab leaves the others
   waiting, and undoing the deletion relinks them.
+- A note pressed, drawn or moved in a track's piano roll sounds on that track's own instrument when another
+  ChordLab plays the track; Panic in the main ChordLab reaches those notes too.
 
 ## Install
 
@@ -291,8 +293,10 @@ binaries.
   leave no note hanging. Live refuses to freeze a track routed this way (record the line and set Monitor to Auto
   first), and a note can hang when a ChordLab device is switched off while it sounds (Panic ends it). Not
   checked yet: modifier clicks, pasted groups, the sound of a change while playing, the Audio Unit and the app
-  with the editor's new hosting, Logic. Not built: auditions from a track's piano roll sounding on that track's
-  own instrument; the Audio Unit and the app do not link.
+  with the editor's new hosting, Logic. Since then, not yet run in Live: labels that stay with a main ChordLab
+  (only a ChordLab that others play from gets a letter), and auditions on the track's own instrument (a note
+  pressed in a track's piano roll sounds on the instrument of the ChordLab that plays that track). The Audio Unit
+  and the app do not link.
 - Not yet: a lead generator, feel on
   tracks; chords are contiguous; one suggestion style (pop); macOS only (VST3, Audio Unit, app). The Xcode project still carries
   iPlug2's AUv3, AAX, VST2 and iOS targets and Windows project files from the template; they are not
