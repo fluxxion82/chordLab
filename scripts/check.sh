@@ -27,8 +27,8 @@
 #                               validated scratch directory as --shell ($CHORDLAB_SHELL_OUT, same allow-list and
 #                               refusals): in the run directory --shell made in this invocation, else in a fresh
 #                               run.XXXXXX of its own; the PNGs go to <run>/views/png. Installs nothing; fails if either
-#                               installed binary changes (section 5v)
-#   scripts/check.sh --all      everything but --shell and --views (--shell with --plugin or --all is refused)
+#                               installed binary changes (section 5v); refused with --plugin or --all
+#   scripts/check.sh --all      everything but --shell and --views (either with --plugin or --all is refused)
 #   scripts/check.sh --release  ... plus the release script's preflight, in report mode
 # Flags combine; section 1 always runs first.
 #
@@ -67,6 +67,12 @@ done
 # runs first: --shell's before/after hashes would then compare the overwritten installation with itself.
 if [ "$want_shell" -eq 1 ] && [ "$want_plugin" -eq 1 ]; then
     echo "check.sh: --shell cannot be combined with --plugin or --all: their installing build would run first, and --shell would compare the overwritten installation with itself" >&2
+    exit 2
+fi
+# --views hashes the installed binaries around its own section too; an installing section before it would leave it
+# comparing the overwritten installation with itself, and it has no business next to an install anyway.
+if [ "$want_views" -eq 1 ] && [ "$want_plugin" -eq 1 ]; then
+    echo "check.sh: --views cannot be combined with --plugin or --all: their installing build would run first, and --views would compare the overwritten installation with itself" >&2
     exit 2
 fi
 
