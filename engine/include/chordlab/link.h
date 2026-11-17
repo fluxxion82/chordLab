@@ -2,6 +2,7 @@
 
 #include "chordlab/compiler.h"
 #include "chordlab/document.h"
+#include "chordlab/link_state.h"
 #include "chordlab/note_event.h"
 #include "chordlab/publication.h"
 #include "chordlab/scheduler.h"
@@ -129,20 +130,7 @@ bool fillSlotFromFeed(const LinkFeed* feed, std::string_view laneUid, std::strin
 /// An instance's registration with a `LinkRegistry`. 0 is none; a registry never hands out one token twice.
 using LinkToken = std::uint64_t;
 
-/// What a follower follows: persisted with the follower (plan I11). `leaderId`, `documentId` and `laneUid` name
-/// the link; the other three are hints for messages only and never decide anything.
-struct LinkFollow {
-    std::string leaderId;      // the leader instance's persistent id
-    std::string documentId;    // the document the link was made in
-    std::string laneUid;       // kChordsLaneUid or a lane uid of that document
-    std::string laneName;      // hints for messages only
-    std::string laneRole;
-    std::string leaderLabel;
-};
-
-/// All six fields equal.
-bool operator==(const LinkFollow& a, const LinkFollow& b) noexcept;
-bool operator!=(const LinkFollow& a, const LinkFollow& b) noexcept;
+// `LinkFollow` (what a follower follows) and `InstanceState` (what an instance saves) are plain data in link_state.h.
 
 /// Where an instance stands as a follower (`LinkRegistry` rule 7). `NotFollowing` for a leader.
 enum class LinkStatus { NotFollowing, Waiting, ProjectChanged, LaneMissing, Muted, Playing };
@@ -400,13 +388,9 @@ public:
     /// `LinkFollowResult`, under the name the endpoint's callers use.
     using LinkResult = LinkFollowResult;
 
-    /// What an instance saves and loads of its link (plan I11; Task 6 gives it its JSON).
-    struct State {
-        std::string id;                       // the instance's persistent id
-        std::string documentId;               // its document's id
-        std::map<int, std::string> lanes;     // track number -> lane uid (`LaneUids::entries`)
-        std::optional<LinkFollow> follow;     // set: it follows
-    };
+    /// What an instance saves and loads of its link (plan I11): `InstanceState` (link_state.h), the state's
+    /// `instance` block (`stateJson` / `loadStateJson`, json_api.h).
+    using State = InstanceState;
 
     /// Registers a new instance with `registry` under `instanceId` (assumed unique), a leader following nothing,
     /// with a fresh document id from `makeUid` and an empty lane uid table. Allocates its link buffer on the heap

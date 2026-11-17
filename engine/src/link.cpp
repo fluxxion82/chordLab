@@ -169,15 +169,6 @@ bool fillSlotFromFeed(const LinkFeed* feed, std::string_view laneUid, std::strin
 
 // --- the registry ---------------------------------------------------------------------------------------------
 
-bool operator==(const LinkFollow& a, const LinkFollow& b) noexcept {
-    return a.leaderId == b.leaderId && a.documentId == b.documentId && a.laneUid == b.laneUid &&
-           a.laneName == b.laneName && a.laneRole == b.laneRole && a.leaderLabel == b.leaderLabel;
-}
-
-bool operator!=(const LinkFollow& a, const LinkFollow& b) noexcept {
-    return !(a == b);
-}
-
 namespace {
 
 /// Rule 9: the label of the `n`th instance added (from 1).
