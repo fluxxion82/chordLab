@@ -48,7 +48,12 @@ constexpr std::size_t kMaxInstanceLanes =
 /// entries share a uid (`cover` takes fresh uids from its generator, `replace` asserts it of a loaded table).
 class LaneUids {
 public:
-    /// A fresh, never-before-returned uid (a UUID in the shell); never empty, never `kChordsLaneUid`.
+    /// A uid that no call has returned before, in this process or an earlier one, for this instance or another (a
+    /// random UUID in the shell); never empty, never `kChordsLaneUid`. That uniqueness is the generator's duty and
+    /// nothing here can stand in for it: the table forgets a track's uid once no undo can bring the track back
+    /// (`cover`), so a generator that returned a forgotten uid again would hand the lane a follower still names to
+    /// another track, and no bounded table could remember every retired uid. `cover` only guarantees that the
+    /// table never holds one uid twice.
     using Generator = std::function<std::string()>;
 
     /// First erases every entry whose track is neither in `doc` nor in `historyTrackIds` (ascending:
@@ -57,9 +62,9 @@ public:
     /// every track of `doc` without an entry a uid from `make`, in document order. `kChordsLaneUid` (or an empty
     /// string) is never given to a track: `make` returning one is a programming error (asserted); without asserts
     /// such a value is skipped and `make` asked again. Nor is a uid the table already holds (an entry kept, or one
-    /// given to an earlier track in this call): `make` is asked again, since a generator that restarted, a
-    /// per-process counter against a table loaded from a set, repeats them, and two entries with one uid would make
-    /// the saved state unloadable. Pruning comes first, so answers never collide with entries about to go. For one
+    /// given to an earlier track in this call): `make` is asked again, because two entries with one uid would make
+    /// the saved state unloadable. That is a guard for the table, not leave for a generator to repeat itself (see
+    /// `Generator`). Pruning comes first, so an answer is checked against the entries that stay only. For one
     /// track `make` is asked at most as many times as the table then holds entries, plus 64: a generator that never
     /// returns one answer twice can collide with each held uid at most once, so it always covers the track. Only a
     /// generator that repeats itself can run out; then, as defined behaviour (no assertion), the track gets no
@@ -401,7 +406,9 @@ private:
 class LinkEndpoint {
 public:
     /// Makes uids: instance ids for copies, document ids and lane uids. Each call returns a string never returned
-    /// before (a UUID in the shell), never empty and never `kChordsLaneUid`.
+    /// before, in this process or an earlier one, for this instance or another (a random UUID in the shell, and
+    /// nothing weaker: `LaneUids::Generator` says what a repeated uid would do), never empty and never
+    /// `kChordsLaneUid`.
     using UidGenerator = std::function<std::string()>;
 
     /// `LinkFollowResult`, under the name the endpoint's callers use.
@@ -493,7 +500,8 @@ public:
     /// A state load whose state has the instance block (`loadStateJson` returned one; for a state without one the
     /// shell calls `adoptWithoutBlock`). Call it in the same model-mutex section as the store's replace, after the
     /// replace: otherwise another instance's hook could run `publishOwn` with the new document and the old document
-    /// id and lane table, or the old document and the new ones. `publishOwn` may follow in that same section, as well as after the hooks.
+    /// id and lane table, or the old document and the new ones. `publishOwn` may follow in that same section, as
+    /// well as after the hooks.
     /// The registry decides the id (`LinkRegistry::adoptState` rule 3, a fresh uid from `makeUid` for a copy) and
     /// replaces the follow atomically under its mutex; the document id and the lane uid table become the loaded
     /// ones; `following()` follows the loaded follow. `hooks` receives what the caller must run after releasing

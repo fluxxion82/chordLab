@@ -31,7 +31,7 @@ bool LaneUids::cover(const Document& doc, const std::vector<int>& historyTrackId
     assert(std::is_sorted(historyTrackIds.begin(), historyTrackIds.end()) && "LaneUids::cover: history ascending");
     bool changed = false;
     // First the entries no undo or redo can use any more: an entry stays while its track is in the document or in
-    // the history. Before covering, so that a restarted counter's answers never collide with uids about to go.
+    // the history. Before covering, so that an answer is checked against the entries that stay only.
     for (auto it = entries_.begin(); it != entries_.end();) {
         if (holdsTrack(doc, it->first) ||
             std::binary_search(historyTrackIds.begin(), historyTrackIds.end(), it->first)) {
@@ -52,8 +52,8 @@ bool LaneUids::cover(const Document& doc, const std::vector<int>& historyTrackId
             std::string candidate = make();
             const bool usable = !candidate.empty() && candidate != kChordsLaneUid;
             assert(usable && "a lane uid generator never returns kChordsLaneUid or an empty string");
-            // A uid the table holds is not an error of the generator's: a per-process counter restarted against a
-            // table loaded from a set repeats them. Ask again; two entries with one uid would make the save unloadable.
+            // The table never holds one uid twice, whatever the generator does: two entries with one uid would make
+            // the saved state unloadable. Ask again. A guard only: a generator must never repeat (`Generator`).
             const bool held = std::any_of(entries_.begin(), entries_.end(),
                                           [&](const auto& entry) { return entry.second == candidate; });
             if (usable && !held) uid = std::move(candidate);
