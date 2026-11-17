@@ -22,7 +22,13 @@
 #                               directory and runs it against the scratch ChordLab.vst3 (section 5t). Test seams:
 #                               CHORDLAB_INSTALLED_VST3_BIN / CHORDLAB_INSTALLED_APP_BIN add a binary each to the
 #                               installed set checked (never replacing the real two)
-#   scripts/check.sh --all      everything but --shell (--shell with --plugin or --all is refused)
+#   scripts/check.sh --views    ... plus the editor's render harness (ChordLab/Tests/viewharness): built with swiftc and
+#                               run under `caffeinate -d -u` (it renders only while the display is awake) in the same
+#                               validated scratch directory as --shell ($CHORDLAB_SHELL_OUT, same allow-list and
+#                               refusals): in the run directory --shell made in this invocation, else in a fresh
+#                               run.XXXXXX of its own; the PNGs go to <run>/views/png. Installs nothing; fails if either
+#                               installed binary changes (section 5v)
+#   scripts/check.sh --all      everything but --shell and --views (--shell with --plugin or --all is refused)
 #   scripts/check.sh --release  ... plus the release script's preflight, in report mode
 # Flags combine; section 1 always runs first.
 #
@@ -40,7 +46,7 @@ DEFAULT_TIMEOUT=300
 UBSAN_TIMEOUT=600
 PLUGIN_TIMEOUT=600   # a cold xcodebuild of the plug-in exceeds the default
 
-want_ubsan=0 want_asan=0 want_tsan=0 want_swift=0 want_bridge=0 want_plugin=0 want_shell=0 want_release=0
+want_ubsan=0 want_asan=0 want_tsan=0 want_swift=0 want_bridge=0 want_plugin=0 want_shell=0 want_views=0 want_release=0
 for arg in "$@"; do
     case "$arg" in
         --ubsan) want_ubsan=1 ;;
@@ -50,6 +56,7 @@ for arg in "$@"; do
         --bridge) want_bridge=1 ;;
         --plugin) want_plugin=1 ;;
         --shell) want_shell=1 ;;
+        --views) want_views=1 ;;
         --release) want_release=1 ;;
         --all) want_ubsan=1 want_asan=1 want_tsan=1 want_swift=1 want_bridge=1 want_plugin=1 want_release=1 ;;
         -h|--help) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$SELF"; exit 0 ;;   # the header comment
@@ -274,7 +281,7 @@ installed_outside() {
             phys="$(installed_physical "$path")"
             case "$phys" in
                 "$out"|"$out"/*)
-                    echo "check.sh: --shell refuses to run: the installed plug-in points into the gate's scratch directory: '$path' is '$phys', inside '$out'; removing old runs would delete it" >&2
+                    echo "check.sh: $SCRATCH_GATE refuses to run: the installed plug-in points into the gate's scratch directory: '$path' is '$phys', inside '$out'; removing old runs would delete it" >&2
                     return 1 ;;
             esac
         done
@@ -333,25 +340,28 @@ shell_out_dir() {
     esac
     local candidate
     if ! candidate="$(physical_dir "$out")"; then
-        echo "check.sh: --shell cannot resolve the scratch directory '$out' (no '.' or '..' in the part that does not exist yet)" >&2
+        echo "check.sh: $SCRATCH_GATE cannot resolve the scratch directory '$out' (no '.' or '..' in the part that does not exist yet)" >&2
         return 1
     fi
     if ! shell_out_allowed "$candidate"; then
-        echo "check.sh: --shell refuses the scratch directory '$out' (resolves to '$candidate'): it must lie inside /private/tmp or /private/var/folders" >&2
+        echo "check.sh: $SCRATCH_GATE refuses the scratch directory '$out' (resolves to '$candidate'): it must lie inside /private/tmp or /private/var/folders" >&2
         return 1
     fi
     mkdir -p "$candidate" || return 1
     local resolved
     resolved="$(cd -P "$candidate" 2>/dev/null && pwd -P)" || return 1
     if ! shell_out_allowed "$resolved"; then
-        echo "check.sh: --shell refuses the scratch directory '$out' (created as '$resolved'): it must lie inside /private/tmp or /private/var/folders" >&2
+        echo "check.sh: $SCRATCH_GATE refuses the scratch directory '$out' (created as '$resolved'): it must lie inside /private/tmp or /private/var/folders" >&2
         return 1
     fi
     echo "$resolved"
 }
 
-# The run directory of this --shell invocation: set by section 5s (shell_run_dir), read by section 5t. Empty until then.
+# The run directory of this --shell invocation: set by section 5s (shell_run_dir), read by section 5t and reused by
+# section 5v. Empty until then.
 SHELL_RUN=""
+# The gate the scratch-directory helpers name in their messages: --shell, or --views while section 5v runs alone.
+SCRATCH_GATE="--shell"
 
 # shell_run_dir <out>: prints a FRESH private directory for this invocation, $out/run.XXXXXX (mktemp -d: created new,
 # mode 0700, never an existing path), after checking that it is a real directory whose physical path lies inside the
@@ -366,17 +376,17 @@ shell_run_dir() {
     local out="$1" entry run phys
     for entry in "$out"/run.*; do
         [ -d "$entry" ] && [ ! -L "$entry" ] || continue
-        rm -rf "$entry" || { echo "check.sh: --shell could not remove the previous run '$entry'" >&2; return 1; }
+        rm -rf "$entry" || { echo "check.sh: $SCRATCH_GATE could not remove the previous run '$entry'" >&2; return 1; }
     done
-    run="$(mktemp -d "$out/run.XXXXXX")" || { echo "check.sh: --shell could not create a run directory in '$out'" >&2; return 1; }
+    run="$(mktemp -d "$out/run.XXXXXX")" || { echo "check.sh: $SCRATCH_GATE could not create a run directory in '$out'" >&2; return 1; }
     if [ -L "$run" ] || [ ! -d "$run" ]; then
-        echo "check.sh: --shell refuses the run directory '$run': not a real directory" >&2
+        echo "check.sh: $SCRATCH_GATE refuses the run directory '$run': not a real directory" >&2
         return 1
     fi
-    phys="$(cd -P "$run" 2>/dev/null && pwd -P)" || { echo "check.sh: --shell cannot resolve the run directory '$run'" >&2; return 1; }
+    phys="$(cd -P "$run" 2>/dev/null && pwd -P)" || { echo "check.sh: $SCRATCH_GATE cannot resolve the run directory '$run'" >&2; return 1; }
     case "$phys" in
         "$out"/run.?*) ;;
-        *) echo "check.sh: --shell refuses the run directory '$run': it resolves to '$phys', outside '$out'" >&2; return 1 ;;
+        *) echo "check.sh: $SCRATCH_GATE refuses the run directory '$run': it resolves to '$phys', outside '$out'" >&2; return 1 ;;
     esac
     echo "$phys"
 }
@@ -464,6 +474,41 @@ shell_host_test() {
     return "$rc"
 }
 
+# Section 5v: the editor's render harness (ChordLab/Tests/viewharness/README.md). Builds it with its build.sh into
+# <run>/views/build and runs it under `caffeinate -d -u` with the PNGs going to <run>/views/png, where <run> is the run
+# directory section 5s made in this invocation, or else a fresh one made exactly as --shell makes its own (shell_out_dir's
+# allow-list, installed_outside, shell_run_dir, which removes the previous runs). Both directories are created new
+# (mkdir, never -p) inside that private run directory, so nothing planted there can redirect a write. Fails on a failed
+# build, a failed check (exit 1), a usage error (2), a crash or a timeout, or if the installed VST3 or app binary changes.
+views_harness() {
+    local before after out run rc=0
+    before="$(installed_shas)" || return 1
+    if [ -n "$SHELL_RUN" ]; then
+        run="$SHELL_RUN"
+    else
+        SCRATCH_GATE="--views"
+        out="$(shell_out_dir)" || return 1
+        installed_outside "$out" || return 1
+        run="$(shell_run_dir "$out")" || return 1
+        SHELL_RUN="$run"
+        echo "scratch directory: $out"
+    fi
+    echo "run directory:     $run"
+    mkdir "$run/views" "$run/views/build" "$run/views/png" || { echo "check.sh: --views could not create its directories in '$run'" >&2; return 1; }
+    step "$PLUGIN_TIMEOUT" ChordLab/Tests/viewharness/build.sh "$run/views/build" || rc=1
+    [ "$rc" -eq 0 ] && { step "$DEFAULT_TIMEOUT" caffeinate -d -u "$run/views/build/viewharness" \
+        --fixtures engine/tests/fixtures "$run/views/png" || rc=1; }
+    after="$(installed_shas)" || return 1
+    echo "installed before/after the render harness:"
+    echo "$after" | sed 's/^/  /'
+    if [ "$before" != "$after" ]; then
+        echo "check.sh: an installed binary changed during --views" >&2
+        return 1
+    fi
+    [ "$rc" -eq 0 ] && echo "PNGs: $run/views/png"
+    return "$rc"
+}
+
 release_preflight() {
     step "$DEFAULT_TIMEOUT" scripts/release.sh preflight --report || return 1
 }
@@ -527,6 +572,10 @@ if [ "$FAILED" -eq 0 ] && [ "$want_shell" -eq 1 ]; then
 fi
 if [ "$FAILED" -eq 0 ] && [ "$want_shell" -eq 1 ]; then
     section "5t shell host test" shell_host_test
+fi
+
+if [ "$FAILED" -eq 0 ] && [ "$want_views" -eq 1 ]; then
+    section "5v views (render harness)" views_harness
 fi
 
 if [ "$FAILED" -eq 0 ] && [ "$want_release" -eq 1 ]; then
