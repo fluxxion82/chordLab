@@ -13,7 +13,8 @@
 #                               (the project installs into ~/Library/Audio/Plug-Ins/VST3 and ~/Applications)
 #   scripts/check.sh --shell    ... plus the same two schemes built into a scratch directory, installing nothing:
 #                               DSTROOT, SYMROOT, OBJROOT and -derivedDataPath under $CHORDLAB_SHELL_OUT (default
-#                               ${TMPDIR:-/tmp}/chordlab-shell-gate); fails if the installed VST3 binary changes
+#                               ${TMPDIR:-/tmp}/chordlab-shell-gate; only inside $TMPDIR, /private/tmp or
+#                               /private/var/folders); fails if the installed VST3 or app binary changes
 #   scripts/check.sh --all      everything but --shell
 #   scripts/check.sh --release  ... plus the release script's preflight, in report mode
 # Flags combine; section 1 always runs first.
@@ -44,7 +45,7 @@ for arg in "$@"; do
         --shell) want_shell=1 ;;
         --release) want_release=1 ;;
         --all) want_ubsan=1 want_asan=1 want_tsan=1 want_swift=1 want_bridge=1 want_plugin=1 want_release=1 ;;
-        -h|--help) sed -n '2,24p' "$SELF" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,25p' "$SELF" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "check.sh: unknown option '$arg' (try --help)" >&2; exit 2 ;;
     esac
 done
@@ -152,7 +153,7 @@ bridge_tests() {
 plugin_scheme() {
     local scheme="$1" log="$2"
     shift 2
-    echo "+ xcodebuild -scheme $scheme $* (log: $log)"
+    echo "+ xcodebuild -scheme $scheme${*:+ $*} (log: $log)"
     "$TIMEOUT_CMD" "$PLUGIN_TIMEOUT" xcodebuild -project ChordLab/projects/ChordLab-macOS.xcodeproj \
         -scheme "$scheme" -configuration Debug "$@" \
         CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM= PROVISIONING_PROFILE_SPECIFIER= \
@@ -191,57 +192,130 @@ plugin_builds() {
     plugin_scheme macOS-APP "$LOG_DIR/chordlab-xcodebuild-macOS-APP.log" || return 1
 }
 
-# The bundle Ableton Live loads; --shell must leave it exactly as it was.
+# The installed builds --shell must leave exactly as they were: the VST3 Ableton Live loads, and the app.
 INSTALLED_VST3_BIN="$HOME/Library/Audio/Plug-Ins/VST3/ChordLab.vst3/Contents/MacOS/ChordLab"
+INSTALLED_APP_BIN="$HOME/Applications/ChordLab.app/Contents/MacOS/ChordLab"
 
-installed_vst3_sha() {  # the sha256 of the installed VST3 binary, or "absent"
-    if [ -f "$INSTALLED_VST3_BIN" ]; then
-        shasum -a 256 "$INSTALLED_VST3_BIN" | cut -d' ' -f1
-    else
+# installed_sha <file>: prints the file's sha256, or "absent" when there is no such file. Fails (status 1, nothing
+# printed) when the file exists but could not be hashed: an empty hash must never read as "unchanged".
+installed_sha() {
+    if [ ! -e "$1" ]; then
         echo absent
+        return 0
     fi
+    local sha
+    sha="$(shasum -a 256 "$1" 2>/dev/null | cut -d' ' -f1)"
+    case "$sha" in
+        [0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) echo "$sha" ;;
+        *) echo "check.sh: could not hash $1" >&2; return 1 ;;
+    esac
+}
+
+# physical_dir <path>: the absolute physical path of `path` (symlinks and `..` resolved, the case as stored) without
+# creating anything: its deepest existing ancestor is resolved with `cd -P`, and the components that do not exist
+# yet are appended as given. Fails for a component "." or ".." among those, or when the ancestor cannot be entered.
+physical_dir() {
+    local p="$1" rest="" base parent
+    while [ ! -d "$p" ]; do
+        base="$(basename "$p")"
+        case "$base" in
+            .|..) return 1 ;;
+        esac
+        rest="/$base$rest"
+        parent="$(dirname "$p")"
+        [ "$parent" != "$p" ] || return 1
+        p="$parent"
+    done
+    p="$(cd -P "$p" 2>/dev/null && pwd -P)" || return 1
+    [ -n "$p" ] || return 1
+    p="${p%/}"
+    echo "$p$rest"
+}
+
+# shell_out_allowed <physical path>: true when the path lies strictly inside one of the scratch roots --shell may
+# write to: the resolved $TMPDIR, /private/tmp or /private/var/folders (all resolved physically too). An allow-list,
+# so a path in ~/Library or ~/Applications, however spelled (another case, a firmlink, `..`, a symlink), is refused.
+shell_out_allowed() {
+    local root
+    for root in "${TMPDIR:-}" /private/tmp /private/var/folders; do
+        [ -n "$root" ] && [ -d "$root" ] || continue
+        root="$(cd -P "$root" 2>/dev/null && pwd -P)" || continue
+        root="${root%/}"
+        [ -n "$root" ] || continue
+        case "$1" in
+            "$root"/?*) return 0 ;;
+        esac
+    done
+    return 1
+}
+
+# shell_out_dir: prints the --shell scratch directory, physical and created, or fails with a message on stderr. The
+# allow-list is checked before anything is created and again on the created directory's physical path.
+shell_out_dir() {
+    local tmp="${TMPDIR:-/tmp}"
+    local out="${CHORDLAB_SHELL_OUT:-${tmp%/}/chordlab-shell-gate}"
+    case "$out" in
+        /*) ;;
+        *) out="$ROOT/$out" ;;
+    esac
+    local candidate
+    if ! candidate="$(physical_dir "$out")"; then
+        echo "check.sh: --shell cannot resolve the scratch directory '$out' (no '.' or '..' in the part that does not exist yet)" >&2
+        return 1
+    fi
+    if ! shell_out_allowed "$candidate"; then
+        echo "check.sh: --shell refuses the scratch directory '$out' (resolves to '$candidate'): it must lie inside \$TMPDIR, /private/tmp or /private/var/folders" >&2
+        return 1
+    fi
+    mkdir -p "$candidate" || return 1
+    local resolved
+    resolved="$(cd -P "$candidate" 2>/dev/null && pwd -P)" || return 1
+    if ! shell_out_allowed "$resolved"; then
+        echo "check.sh: --shell refuses the scratch directory '$out' (created as '$resolved'): it must lie inside \$TMPDIR, /private/tmp or /private/var/folders" >&2
+        return 1
+    fi
+    echo "$resolved"
 }
 
 # Section 5s: both schemes as --plugin builds them (Debug, unsigned), but into a scratch directory. The project sets
 # DEPLOYMENT_LOCATION=YES, INSTALL_PATH=/ and a per-target DSTROOT of ~/Library/Audio/Plug-Ins/VST3 (VST3) or
 # ~/Applications (APP); a DSTROOT on the command line overrides it (scripts/release.sh does the same), SYMROOT and
 # OBJROOT replace the project's ChordLab/build-mac, and -derivedDataPath keeps Xcode's own derived data (module
-# caches, logs) out of ~/Library/Developer. Fails if a build fails, if the VST3 binary is not under the scratch
-# DSTROOT, or if the installed VST3 binary's sha256 differs before and after.
+# caches, logs) out of ~/Library/Developer. The scratch directory must pass shell_out_dir's allow-list before
+# anything is deleted or built. Fails if a build fails, if the VST3 binary is not under the scratch DSTROOT, or if
+# the installed VST3 or app binary cannot be hashed or its sha256 differs before and after.
 shell_builds() {
     if [ ! -d ChordLab/projects/ChordLab-macOS.xcodeproj ]; then
         echo "check.sh: ChordLab/projects/ChordLab-macOS.xcodeproj not found" >&2
         return 1
     fi
-    local tmp="${TMPDIR:-/tmp}"
-    local out="${CHORDLAB_SHELL_OUT:-${tmp%/}/chordlab-shell-gate}"
-    out="${out%/}"
-    case "$out" in
-        /*) ;;
-        *) out="$ROOT/$out" ;;
-    esac
-    case "$out/" in
-        "$HOME/Library/"*|"$HOME/Applications/"*|/Library/*|/Applications/*)
-            echo "check.sh: --shell refuses a scratch directory under Library or Applications: $out" >&2
-            return 1 ;;
-    esac
+    local out
+    out="$(shell_out_dir)" || return 1
+    echo "scratch directory: $out"
     local dst="$out/dst"
     local product="$dst/ChordLab.vst3/Contents/MacOS/ChordLab"
-    local before after
-    before="$(installed_vst3_sha)"
-    echo "installed VST3 before: $before ($INSTALLED_VST3_BIN)"
+    local vst3Before vst3After appBefore appAfter
+    vst3Before="$(installed_sha "$INSTALLED_VST3_BIN")" || return 1
+    appBefore="$(installed_sha "$INSTALLED_APP_BIN")" || return 1
+    echo "installed VST3 before: $vst3Before ($INSTALLED_VST3_BIN)"
+    echo "installed app before:  $appBefore ($INSTALLED_APP_BIN)"
     rm -rf "$dst"   # a product left by an earlier run must not pass the check below
-    mkdir -p "$out" || return 1
     local rc=0 scheme
     for scheme in macOS-VST3 macOS-APP; do
         plugin_scheme "$scheme" "$LOG_DIR/chordlab-xcodebuild-shell-$scheme.log" \
             -derivedDataPath "$out/DerivedData" \
             DSTROOT="$dst" SYMROOT="$out/build" OBJROOT="$out/build/obj" || { rc=1; break; }
     done
-    after="$(installed_vst3_sha)"
-    echo "installed VST3 after:  $after"
-    if [ "$before" != "$after" ]; then
-        echo "check.sh: the installed VST3 binary changed during --shell ($before -> $after)" >&2
+    vst3After="$(installed_sha "$INSTALLED_VST3_BIN")" || return 1
+    appAfter="$(installed_sha "$INSTALLED_APP_BIN")" || return 1
+    echo "installed VST3 after:  $vst3After"
+    echo "installed app after:   $appAfter"
+    if [ "$vst3Before" != "$vst3After" ]; then
+        echo "check.sh: the installed VST3 binary changed during --shell ($vst3Before -> $vst3After)" >&2
+        return 1
+    fi
+    if [ "$appBefore" != "$appAfter" ]; then
+        echo "check.sh: the installed app binary changed during --shell ($appBefore -> $appAfter)" >&2
         return 1
     fi
     [ "$rc" -eq 0 ] || return 1
