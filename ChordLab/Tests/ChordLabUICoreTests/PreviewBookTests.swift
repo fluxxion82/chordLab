@@ -15,7 +15,7 @@ final class PreviewBookTests: XCTestCase {
     var started = Set<Int>()
     for message in messages {
       switch message {
-      case .start(let id, _, _):
+      case .start(let id, _, _, _):
         XCTAssertFalse(started.contains(id), "id \(id) started twice", file: file, line: line)
         started.insert(id)
         sounding.insert(id)
@@ -42,9 +42,53 @@ final class PreviewBookTests: XCTestCase {
     func json(_ message: PreviewMessage) throws -> String {
       String(decoding: try JSONSerialization.data(withJSONObject: message.json, options: [.sortedKeys]), as: UTF8.self)
     }
-    XCTAssertEqual(try json(.start(id: 3, pitches: [45], velocity: 90)), #"{"id":3,"on":true,"pitches":[45],"velocity":90}"#)
+    XCTAssertEqual(try json(.start(id: 3, pitches: [45], velocity: 90, lane: .chords)),
+                   #"{"id":3,"on":true,"pitches":[45],"velocity":90}"#, "a chords Start says no track")
+    XCTAssertEqual(try json(.start(id: 4, pitches: [60, 64, 67], velocity: 100, lane: .chords)),
+                   #"{"id":4,"on":true,"pitches":[60,64,67],"velocity":100}"#)
+    XCTAssertEqual(try json(.start(id: 5, pitches: [45], velocity: 90, lane: .track(3))),
+                   #"{"id":5,"on":true,"pitches":[45],"track":3,"velocity":90}"#, "a track's Start says its id")
+    XCTAssertEqual(try json(.start(id: 6, pitches: [72], velocity: 80, lane: .track(1))),
+                   #"{"id":6,"on":true,"pitches":[72],"track":1,"velocity":80}"#)
     XCTAssertEqual(try json(.stop(id: 3)), #"{"id":3,"on":false}"#)
     XCTAssertEqual(try json(.extend(id: 3)), #"{"extend":true,"id":3}"#)
+  }
+
+  /// Extend and Stop follow their Start (M5 design D1, D4): neither says a lane, whoever started the id.
+  func testExtendAndStopCarryNoTrack() {
+    var book = PreviewBook()
+    let outputs = book.perform([.previewStart(pitch: 45, velocity: 90)], trackId: 3) + book.endHold()
+    XCTAssertEqual(previews(outputs), [.start(id: 1, pitches: [45], velocity: 90, lane: .track(3)), .stop(id: 1)])
+    XCTAssertNil(PreviewMessage.stop(id: 1).json["track"])
+    XCTAssertNil(PreviewMessage.extend(id: 1).json["track"])
+  }
+
+  // MARK: - The lane a Start belongs to (M5 design D1)
+
+  /// A roll's previews belong to that track (its note press, a one-shot after drawing or moving a note); a palette
+  /// cell's to the chords.
+  func testARollPreviewOfTrack3SaysThreeAndACellSaysNothing() {
+    var book = PreviewBook()
+    XCTAssertEqual(previews(book.perform([.previewStart(pitch: 45, velocity: 90)], trackId: 3)),
+                   [.start(id: 1, pitches: [45], velocity: 90, lane: .track(3))])
+    XCTAssertEqual(previews(book.perform([.previewStop, .previewOneShot(pitch: 47, velocity: 70)], trackId: 3)),
+                   [.stop(id: 1), .start(id: 2, pitches: [47], velocity: 70, lane: .track(3))], "a one-shot too")
+    XCTAssertEqual(book.hold(.cell("c"), pitches: [60, 64], velocity: 100).outputs,
+                   [.preview(.start(id: 3, pitches: [60, 64], velocity: 100, lane: .chords))])
+    XCTAssertEqual(book.held?.owner.lane, .chords)
+    let starts = previews(book.perform([.previewStart(pitch: 40, velocity: 100)], trackId: 3))
+    XCTAssertEqual(starts.last, .start(id: 4, pitches: [40], velocity: 100, lane: .track(3)))
+    XCTAssertEqual(book.held?.owner.lane, .track(3))
+  }
+
+  /// A key of a roll's keyboard column belongs to that roll's track.
+  func testAHeldKeyInARollSaysItsTrack() {
+    var book = PreviewBook()
+    let key = book.hold(.key(pitch: 50, trackId: 2), pitches: [50], velocity: 100)
+    XCTAssertEqual(key.outputs, [.preview(.start(id: 1, pitches: [50], velocity: 100, lane: .track(2)))])
+    XCTAssertEqual(book.held, PreviewHold(id: 1, owner: .key(pitch: 50, trackId: 2)))
+    XCTAssertEqual(book.held?.owner.lane, .track(2))
+    XCTAssertEqual(book.endHold(id: key.id), [.preview(.stop(id: 1))])
   }
 
   // MARK: - Holds a view starts (a cell, a key)
@@ -53,13 +97,13 @@ final class PreviewBookTests: XCTestCase {
     var book = PreviewBook()
     let cell = book.hold(.cell("c"), pitches: [60, 64], velocity: 100)
     XCTAssertEqual(cell.id, 1)
-    XCTAssertEqual(cell.outputs, [.preview(.start(id: 1, pitches: [60, 64], velocity: 100))])
+    XCTAssertEqual(cell.outputs, [.preview(.start(id: 1, pitches: [60, 64], velocity: 100, lane: .chords))])
     XCTAssertEqual(book.held, PreviewHold(id: 1, owner: .cell("c")))
     XCTAssertEqual(book.heldCellId, "c")
     XCTAssertEqual(book.endHold(), [.preview(.stop(id: 1))])
     XCTAssertNil(book.held)
     XCTAssertEqual(book.endHold(), [], "nothing held, nothing stopped")
-    let key = book.hold(.key(pitch: 48), pitches: [48], velocity: 100)
+    let key = book.hold(.key(pitch: 48, trackId: 1), pitches: [48], velocity: 100)
     XCTAssertEqual(key.id, 2)
     XCTAssertNil(book.heldCellId)
     XCTAssertEqual(book.endHold(id: 1), [], "an older press's end does not stop this hold")
@@ -70,8 +114,8 @@ final class PreviewBookTests: XCTestCase {
   func testAHoldOverACellOrKeyHoldStopsItFirst() {
     var book = PreviewBook()
     _ = book.hold(.cell("a"), pitches: [60], velocity: 100)
-    XCTAssertEqual(book.hold(.key(pitch: 50), pitches: [50], velocity: 100).outputs,
-                   [.preview(.stop(id: 1)), .preview(.start(id: 2, pitches: [50], velocity: 100))])
+    XCTAssertEqual(book.hold(.key(pitch: 50, trackId: 1), pitches: [50], velocity: 100).outputs,
+                   [.preview(.stop(id: 1)), .preview(.start(id: 2, pitches: [50], velocity: 100, lane: .track(1)))])
   }
 
   func testAHoldOverARollHoldStopsItAndCancelsThatGesture() {
@@ -79,8 +123,9 @@ final class PreviewBookTests: XCTestCase {
     // cancelled machine's own stop finds no hold.
     var book = PreviewBook()
     _ = book.perform([.previewStart(pitch: 45, velocity: 90)], trackId: 3)
-    XCTAssertEqual(book.hold(.key(pitch: 50), pitches: [50], velocity: 100).outputs,
-                   [.preview(.stop(id: 1)), .cancelRoll(trackId: 3), .preview(.start(id: 2, pitches: [50], velocity: 100))])
+    XCTAssertEqual(book.hold(.key(pitch: 50, trackId: 3), pitches: [50], velocity: 100).outputs,
+                   [.preview(.stop(id: 1)), .cancelRoll(trackId: 3),
+                    .preview(.start(id: 2, pitches: [50], velocity: 100, lane: .track(3)))])
     XCTAssertEqual(book.perform([.previewStop], trackId: 3), [], "the cancelled machine's stop sends nothing")
     _ = book.endHold()
     _ = book.perform([.previewStart(pitch: 45, velocity: 90)], trackId: 3)
@@ -94,11 +139,12 @@ final class PreviewBookTests: XCTestCase {
   func testAPressMoveAndUpBecomeCommandsAndPairedPreviews() {
     var book = PreviewBook()
     var out = book.perform([.send(select), .previewStart(pitch: 45, velocity: 90)], trackId: 1)
-    XCTAssertEqual(out, [.command(select), .preview(.start(id: 1, pitches: [45], velocity: 90))])
+    XCTAssertEqual(out, [.command(select), .preview(.start(id: 1, pitches: [45], velocity: 90, lane: .track(1)))])
     XCTAssertEqual(book.held, PreviewHold(id: 1, owner: .roll(trackId: 1)))
     out += book.perform([.previewStop, .previewStart(pitch: 46, velocity: 90)], trackId: 1)
     out += book.perform([.previewStop, .send(update)], trackId: 1)
-    XCTAssertEqual(Array(out.suffix(4)), [.preview(.stop(id: 1)), .preview(.start(id: 2, pitches: [46], velocity: 90)),
+    XCTAssertEqual(Array(out.suffix(4)), [.preview(.stop(id: 1)),
+                                          .preview(.start(id: 2, pitches: [46], velocity: 90, lane: .track(1))),
                                           .preview(.stop(id: 2)), .command(update)])
     XCTAssertNil(book.held)
     assertPaired(previews(out))
@@ -108,14 +154,15 @@ final class PreviewBookTests: XCTestCase {
     var book = PreviewBook()
     _ = book.hold(.cell("a"), pitches: [60], velocity: 100)
     XCTAssertEqual(book.perform([.previewStart(pitch: 40, velocity: 100)], trackId: 1),
-                   [.preview(.stop(id: 1)), .preview(.start(id: 2, pitches: [40], velocity: 100))])
+                   [.preview(.stop(id: 1)), .preview(.start(id: 2, pitches: [40], velocity: 100, lane: .track(1)))])
     XCTAssertEqual(book.perform([.previewStart(pitch: 41, velocity: 100)], trackId: 2),
-                   [.preview(.stop(id: 2)), .cancelRoll(trackId: 1), .preview(.start(id: 3, pitches: [41], velocity: 100))],
+                   [.preview(.stop(id: 2)), .cancelRoll(trackId: 1),
+                    .preview(.start(id: 3, pitches: [41], velocity: 100, lane: .track(2)))],
                    "another track's roll hold: stopped and its gesture cancelled")
     // The same track starting over its own hold breaks the machine's contract (it always stops first): the old id is
     // stopped so the pairing holds, and its gesture is NOT cancelled (that would drop the press just made).
     XCTAssertEqual(book.perform([.previewStart(pitch: 42, velocity: 100)], trackId: 2),
-                   [.preview(.stop(id: 3)), .preview(.start(id: 4, pitches: [42], velocity: 100))])
+                   [.preview(.stop(id: 3)), .preview(.start(id: 4, pitches: [42], velocity: 100, lane: .track(2)))])
   }
 
   func testAStopWithNothingHeldOrAnotherOwnersHoldSendsNothing() {
@@ -134,8 +181,8 @@ final class PreviewBookTests: XCTestCase {
     // cell sounding behind it while the button stays down.
     var book = PreviewBook()
     XCTAssertEqual(book.rollPressed(trackId: 1), [])
-    _ = book.hold(.key(pitch: 50), pitches: [50], velocity: 100)
-    XCTAssertEqual(book.rollPressed(trackId: 1), [.preview(.stop(id: 1))])
+    _ = book.hold(.key(pitch: 50, trackId: 1), pitches: [50], velocity: 100)
+    XCTAssertEqual(book.rollPressed(trackId: 1), [.preview(.stop(id: 1))], "a key of this track's roll is not its machine's")
     _ = book.hold(.cell("c"), pitches: [60], velocity: 100)
     XCTAssertEqual(book.rollPressed(trackId: 1), [.preview(.stop(id: 2))])
     _ = book.perform([.previewStart(pitch: 40, velocity: 100)], trackId: 2)
@@ -167,7 +214,8 @@ final class PreviewBookTests: XCTestCase {
     let insert = RollCommand.insertNotes(trackId: 1, notes: [RollNoteSpec(pitch: 48, start: 4800, length: 480, velocity: 100)],
                                          baseRevision: 15)
     var out = book.perform([.send(insert), .previewOneShot(pitch: 48, velocity: 100)], trackId: 1)
-    XCTAssertEqual(out, [.command(insert), .preview(.start(id: 1, pitches: [48], velocity: 100)), .scheduleOneShotEnd(id: 1)])
+    XCTAssertEqual(out, [.command(insert), .preview(.start(id: 1, pitches: [48], velocity: 100, lane: .track(1))),
+                         .scheduleOneShotEnd(id: 1)])
     XCTAssertNil(book.held, "a one-shot is not the held preview")
     XCTAssertEqual(book.oneShots, [1])
     out += book.perform([.previewStart(pitch: 50, velocity: 80)], trackId: 1)
@@ -192,29 +240,63 @@ final class PreviewBookTests: XCTestCase {
     var pendingOneShots: [Int] = []
     var keyIds: [Int] = []
     var cancelledStopsThatSent: [String] = []
+    /// Starts whose lane is not their owner's: a cell's the chords, a roll's or a key's its track, a one-shot its roll's.
+    var wrongLanes: [String] = []
     let contexts: [Int: RollContext]
 
     mutating func route(_ outputs: [PreviewOutput]) {
       for output in outputs {
         switch output {
         case .command: break
-        case .preview(let message): messages.append(message)
-        case .scheduleOneShotEnd(let id): pendingOneShots.append(id)
+        case .preview(let message):
+          messages.append(message)
+          if case .start(let id, _, _, let lane) = message, let held = book.held, held.id == id, Self.expectedLane(held.owner) != lane {
+            wrongLanes.append("\(message) held by \(held.owner)")
+          }
+        case .scheduleOneShotEnd(let id):
+          pendingOneShots.append(id)
+          if let track = currentTrack {
+            if case .start(_, _, _, let lane)? = messages.last, lane != .track(track) {
+              wrongLanes.append("one-shot \(id) of track \(track) says \(lane)")
+            }
+          } else {
+            wrongLanes.append("one-shot \(id) routed outside a roll's effects")
+          }
         case .cancelRoll(let trackId):
           let (next, effects) = RollEditLogic.cancel(machines[trackId]!)
           machines[trackId] = next
           let more = book.perform(effects, trackId: trackId)
           if !more.isEmpty { cancelledStopsThatSent.append("track \(trackId): \(more)") }
-          route(more)
+          route(more, of: trackId)
         }
       }
+    }
+
+    static func expectedLane(_ owner: PreviewOwner) -> Lane {
+      switch owner {
+      case .cell: return .chords
+      case .roll(let trackId), .key(_, let trackId): return .track(trackId)
+      }
+    }
+
+    /// The track whose roll effects are being routed, for the one-shot check.
+    var currentTrack: Int?
+
+    /// Routes what the book made of track `trackId`'s roll effects, with `currentTrack` set to that track; every path
+    /// that performs effects comes here. The outer track comes back after, so a cancel routed inside (a `.cancelRoll`
+    /// of another track) is checked against its own track and the rest of the outer outputs against theirs.
+    mutating func route(_ outputs: [PreviewOutput], of trackId: Int) {
+      let outer = currentTrack
+      currentTrack = trackId
+      route(outputs)
+      currentTrack = outer
     }
 
     mutating func roll(_ event: RollPointerEvent, _ trackId: Int) {
       if event.phase == .down { route(book.rollPressed(trackId: trackId)) }
       let (next, effects) = RollEditLogic.handle(event, state: machines[trackId]!, context: contexts[trackId]!)
       machines[trackId] = next
-      route(book.perform(effects, trackId: trackId))
+      route(book.perform(effects, trackId: trackId), of: trackId)
     }
 
     /// The machine believes it holds a pitch exactly when the book holds for that track.
@@ -269,9 +351,9 @@ final class PreviewBookTests: XCTestCase {
         case 7:
           let (next, effects) = RollEditLogic.snapshotChanged(revision: 6 + UInt64(round), state: rig.machines[t]!)
           rig.machines[t] = next
-          rig.route(rig.book.perform(effects, trackId: t))
+          rig.route(rig.book.perform(effects, trackId: t), of: t)
         case 8:
-          let held = rig.book.hold(.key(pitch: 40 + t), pitches: [40 + t], velocity: 100)
+          let held = rig.book.hold(.key(pitch: 40 + t, trackId: t), pitches: [40 + t], velocity: 100)
           rig.keyIds.append(held.id)
           rig.route(held.outputs)
         case 9:
@@ -293,6 +375,8 @@ final class PreviewBookTests: XCTestCase {
       for id in rig.pendingOneShots { rig.route(rig.book.oneShotEnded(id: id)) }
       assertPaired(rig.messages)
       XCTAssertEqual(rig.cancelledStopsThatSent, [], "a cancelled gesture's stop never sends a second Stop")
+      XCTAssertEqual(rig.wrongLanes, [], "every Start says its owner's lane")
+      if !rig.wrongLanes.isEmpty { return }
       XCTAssertNil(rig.book.held)
       XCTAssertTrue(rig.book.oneShots.isEmpty)
     }

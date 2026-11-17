@@ -148,10 +148,13 @@ public:
         lineage_ = "lineage-" + uids_();
         lifeline_->instance = this;
         const std::shared_ptr<Lifeline> life = lifeline_;
-        endpoint_ = std::make_unique<LinkEndpoint>(registry, std::move(id), uids_, [life] {
-            const std::lock_guard<std::mutex> guard(life->mutex);
-            if (life->instance != nullptr) life->instance->republish();
-        });
+        endpoint_ = std::make_unique<LinkEndpoint>(
+            registry, std::move(id), uids_,
+            [life] {
+                const std::lock_guard<std::mutex> guard(life->mutex);
+                if (life->instance != nullptr) life->instance->republish();
+            },
+            LinkPreviewSink{scheduler_.get(), &panic_});
         endpoint_->setPublicationProbe([this] {
             if (probe) probe();
         });
@@ -256,6 +259,45 @@ public:
         republish();
     }
 
+    /// The shell's HandlePreview (Task 9b): the command offered to the endpoint in the model-mutex section, and
+    /// pushed into its own scheduler when it was not forwarded; a forwarded Start also gives its own scheduler a Stop
+    /// for its id (Task 9d, the shell's OfferPreview). Main thread. With `lenientPreviews`, a command refused for a
+    /// full ring (its own, or every follower's: `QueueFull`) is counted in `refusedPreviews` instead of failing a
+    /// check: for a test whose audio threads drain on their own schedule, where any ring may fill.
+    LinkForward preview(std::optional<int> trackId, const PreviewCmd& cmd) {
+        const std::lock_guard<std::mutex> lock(model_);
+        const LinkForward result = endpoint_->forwardPreview(trackId, cmd);
+        if (result == LinkForward::NotForwarded) {
+            const bool pushed = scheduler_->pushPreview(cmd);
+            if (lenientPreviews) {
+                refusedPreviews += pushed ? 0 : 1;
+            } else {
+                CHECK(pushed);
+            }
+        } else if (result == LinkForward::QueueFull && lenientPreviews) {
+            ++refusedPreviews;
+        }
+        if (result == LinkForward::Forwarded && cmd.kind == PreviewCmd::Start) {
+            // As the shell's OfferPreview: an earlier Start of this id played here ends (a full ring: the watchdog).
+            PreviewCmd stop{};
+            stop.kind = PreviewCmd::Stop;
+            stop.id = cmd.id;
+            scheduler_->pushPreview(stop);
+        }
+        return result;
+    }
+    bool lenientPreviews = false;
+    int refusedPreviews = 0;
+    /// Blocks the scheduler reported incomplete while `lenientPreviews` was set (see `block`). Written by the thread
+    /// that runs the blocks: read it only after that thread is joined, and set `lenientPreviews` only while none runs.
+    int overloads = 0;
+    /// The shell's Panic message: its own panic flag, and its followers'. Returns how many followers were flagged.
+    int panicButton() {
+        const std::lock_guard<std::mutex> lock(model_);
+        panic_.store(true, std::memory_order_release);
+        return endpoint_->panicFollowers();
+    }
+
     /// What its hook does: publishOwn and the own buffer's publish under the model mutex.
     void republish() {
         const std::lock_guard<std::mutex> lock(model_);
@@ -280,8 +322,10 @@ public:
 
     // --- audio thread -------------------------------------------------------------------------------------
 
-    /// ProcessBlock: LinkSource::select, then Scheduler::process with the flags it returned.
+    /// ProcessBlock: a pending panic (its own Panic, or rule 12's from the registry), LinkSource::select, then
+    /// Scheduler::process with the flags it returned.
     Midi block(double ppq, int frames, double bpm = kBpm, bool playing = true) {
+        if (panic_.exchange(false, std::memory_order_acq_rel)) scheduler_->panic();
         const LinkSource::Flags flags =
             source_.select(*own_, endpoint_->linkBuffer(), endpoint_->following(), *scheduler_);
         lastFlags = flags;
@@ -289,7 +333,11 @@ public:
         std::size_t written = 0;
         complete_ = scheduler_->process(info, out_.data(), out_.size(), written);
         if (quiet) {
-            faults += complete_ ? 0 : 1;
+            // An incomplete block is a fault, except while a stress run lets its rings and preview slots fill
+            // (`lenientPreviews`): a Start whose Stop was refused holds a slot until the watchdog, eight of them
+            // exhaust the slots, and the scheduler then drops attacks and reports the block, as its overload policy
+            // says. That is counted apart; a note-on of a sounding pitch or a note-off of a silent one never is.
+            if (!complete_) ++(lenientPreviews ? overloads : faults);
         } else {
             CHECK(complete_);
         }
@@ -350,12 +398,26 @@ private:
     Publication ownPublication_;
     std::unique_ptr<Scheduler> scheduler_;
     LinkSource source_;
+    std::atomic<bool> panic_{false};  // the shell's mPanicPending: set by Panic and by the registry (rule 12)
     std::shared_ptr<Lifeline> lifeline_;
     std::unique_ptr<LinkEndpoint> endpoint_;
     std::array<MidiOut, kOutCapacity> out_{};
     std::array<bool, 128> on_{};
     bool complete_ = true;
 };
+
+/// A preview command of the editor: `pitch` for a Start.
+PreviewCmd simPreview(PreviewCmd::Kind kind, int id, int pitch = 0) {
+    PreviewCmd cmd{};
+    cmd.kind = kind;
+    cmd.id = id;
+    cmd.velocity = 100;
+    if (kind == PreviewCmd::Start) {
+        cmd.count = 1;
+        cmd.pitches[0] = static_cast<std::uint8_t>(pitch);
+    }
+    return cmd;
+}
 
 /// A registry and the uid source of one test. Instances are declared after it, so they go first.
 struct World {
@@ -1264,8 +1326,15 @@ TEST_CASE("link sim: link, unlink and a document replacement with audio blocks b
 
 TEST_CASE("link sim: audio threads keep running while links change and the leader edits (TSan)") {
     // The shell's threads: each instance's audio thread runs its blocks (select, process) without a lock while
-    // the main thread follows, unfollows and edits. Nothing here waits for anything; at the end the last
-    // operation's result plays.
+    // the main thread follows, unfollows, edits and sends previews. Nothing here waits for anything, so any ring
+    // may fill whatever the schedule: the loop counts the preview commands refused for a full ring instead of
+    // checking them, and the blocks count an overload (preview slots exhausted by Starts whose Stops were refused)
+    // apart from a fault (`lenientPreviews`); a wrong note-on or note-off is a fault throughout. Once the audio
+    // threads have stopped the leader's Panic ends whatever a refused Stop left sounding, here and on the follower,
+    // before the final checks, which are strict again. At the end the last operation's result plays.
+    bool heldBack = false;
+    SUBCASE("the audio threads run throughout") {}
+    SUBCASE("the audio threads start only after the loop, so the rings fill") { heldBack = true; }
     const Song s = song();
     World w;
     auto leader = w.make("L");
@@ -1274,10 +1343,14 @@ TEST_CASE("link sim: audio threads keep running while links change and the leade
     follower->loadDocument(followerOwn());
     leader->quiet = true;
     follower->quiet = true;
+    leader->lenientPreviews = true;
+    follower->lenientPreviews = true;  // its blocks may overload too: a forwarded Stop refused leaves a slot taken
     const std::string bassUid = leader->laneUid(s.bass);
     const std::string leadUid = leader->laneUid(s.lead);
+    std::atomic<bool> go{!heldBack};
     std::atomic<bool> stop{false};
-    const auto audio = [&stop](FakeInstance& inst) {
+    const auto audio = [&go, &stop](FakeInstance& inst) {
+        while (!go.load(std::memory_order_acquire) && !stop.load(std::memory_order_acquire)) std::this_thread::yield();
         long position = 0;
         while (!stop.load(std::memory_order_acquire)) {
             inst.block(static_cast<double>(position) / kSamplesPerBeat, 256);
@@ -1294,7 +1367,14 @@ TEST_CASE("link sim: audio threads keep running while links change and the leade
             case 3: leader->edit([&](DocumentStore& d) { d.setVelocity(d.doc().events[0].id, 60 + i % 40); }); break;
             default: follower->unfollow(); break;
         }
+        // A preview of the bass track, stopped one step later: forwarded while the follower plays the bass (pushed
+        // into its ring while its audio thread drains it), the leader's own otherwise, and its follower panicked
+        // by the registry when the follow changes in between (rule 12).
+        if (i > 0) leader->preview(std::nullopt, simPreview(PreviewCmd::Stop, 999 + i));
+        leader->preview(s.bass, simPreview(PreviewCmd::Start, 1000 + i, 50));
     }
+    go.store(true, std::memory_order_release);
+    leader->preview(std::nullopt, simPreview(PreviewCmd::Stop, 1299));
     leader->edit([&](DocumentStore& d) { d.setTrackMute(s.bass, false); });
     REQUIRE(follower->follow("L", bassUid, lineageOf(*follower, "L")) == Result::Applied);
     stop.store(true, std::memory_order_release);
@@ -1302,7 +1382,14 @@ TEST_CASE("link sim: audio threads keep running while links change and the leade
     followerAudio.join();
     CHECK(leader->faults == 0);
     CHECK(follower->faults == 0);
+    if (heldBack) CHECK(leader->refusedPreviews > 0);  // the leader's own ring did fill
 
+    // Deterministic from here: no audio thread runs. A Stop refused above left its preview to the watchdog; the
+    // leader's Panic ends everything (its own flag, and the follower's, bound to it: rule 12), so from its block on
+    // an incomplete block is a fault again.
+    leader->lenientPreviews = false;
+    follower->lenientPreviews = false;
+    CHECK(leader->panicButton() == 1);
     leader->block(1000.0, 256);
     follower->block(1000.0, 256);
     const Bits bass = pitches({kBass1, kBass2});
@@ -2094,4 +2181,216 @@ TEST_CASE("link sim: a duplicate of a leader names its original until a state wi
         original.reset();
         CHECK_FALSE(copy->view().copyOf.has_value());
     }
+}
+
+// --- previews on the track's own instrument (LinkRegistry rule 12, M5 Task 9a) -------------------------------------
+
+namespace {
+
+constexpr int kAudition = 50;  // a pitch no lane of the song or the follower's own document plays
+constexpr int kOneShot = 53;
+
+/// A leader on the song and a follower of its bass lane, with the transport stopped (so only previews sound), and
+/// both run one block at a time.
+struct Audition {
+    World w;
+    Song s = song();
+    std::unique_ptr<FakeInstance> leader;
+    std::unique_ptr<FakeInstance> follower;
+    Midi leaderOut;
+    Midi followerOut;
+
+    Audition() {
+        REQUIRE_FALSE((chordPitches(s.state.doc) | chordPitches(followerOwn().doc) |
+                       pitches({kBass1, kBass2, kLead1, kLead2}))[kAudition]);
+        REQUIRE_FALSE((chordPitches(s.state.doc) | chordPitches(followerOwn().doc) |
+                       pitches({kBass1, kBass2, kLead1, kLead2}))[kOneShot]);
+        leader = w.make("L");
+        leader->loadDocument(s.state);
+        follower = w.make("F");
+        follower->loadDocument(followerOwn());
+        REQUIRE(follower->follow("L", leader->laneUid(s.bass), lineageOf(*follower, "L")) == Result::Applied);
+        blocks();
+    }
+    /// One block of each, the transport stopped.
+    void blocks() {
+        leaderOut = leader->block(0.0, kFrames, kBpm, false);
+        followerOut = follower->block(0.0, kFrames, kBpm, false);
+    }
+};
+
+Msg on(int pitch) { return Msg{0, 0x90, pitch, 100}; }
+Msg off(int pitch) { return Msg{0, 0x80, pitch, 0}; }
+
+}  // namespace
+
+TEST_CASE("link sim: a held preview of a followed track sounds on the follower's output, not the leader's, until its "
+          "Stop") {
+    Audition a;
+    CHECK(a.leader->preview(a.s.bass, simPreview(PreviewCmd::Start, 1, kAudition)) == LinkForward::Forwarded);
+    a.blocks();
+    CHECK(a.followerOut == Midi{on(kAudition)});
+    CHECK(a.leaderOut.empty());
+    for (int i = 0; i < 8; ++i) {  // held, with an Extend now and then as the editor sends them
+        if (i % 4 == 0) {
+            CHECK(a.leader->preview(a.s.bass, simPreview(PreviewCmd::Extend, 1)) == LinkForward::Forwarded);
+        }
+        a.blocks();
+        CHECK(a.followerOut.empty());
+        CHECK(a.leaderOut.empty());
+    }
+    CHECK(a.follower->sounding()[kAudition]);
+    CHECK(a.leader->preview(std::nullopt, simPreview(PreviewCmd::Stop, 1)) == LinkForward::Forwarded);
+    a.blocks();
+    CHECK(a.followerOut == Midi{off(kAudition)});
+    CHECK(a.leaderOut.empty());
+
+    // A chords preview (no track) and one of the lead track are the leader's own: nobody follows those lanes.
+    CHECK(a.leader->preview(std::nullopt, simPreview(PreviewCmd::Start, 2, kAudition)) == LinkForward::NotForwarded);
+    CHECK(a.leader->preview(a.s.lead, simPreview(PreviewCmd::Start, 3, kOneShot)) == LinkForward::NotForwarded);
+    a.blocks();
+    CHECK(a.leaderOut == (Midi{on(kAudition), on(kOneShot)}));
+    CHECK(a.followerOut.empty());
+    CHECK(a.leader->preview(std::nullopt, simPreview(PreviewCmd::Stop, 2)) == LinkForward::NotForwarded);
+    CHECK(a.leader->preview(std::nullopt, simPreview(PreviewCmd::Stop, 3)) == LinkForward::NotForwarded);
+    a.blocks();
+    CHECK(a.leaderOut == (Midi{off(kAudition), off(kOneShot)}));
+    CHECK(a.followerOut.empty());
+}
+
+TEST_CASE("link sim: a forwarded one-shot ends with its Stop, under a held preview that goes on") {
+    Audition a;
+    REQUIRE(a.leader->preview(a.s.bass, simPreview(PreviewCmd::Start, 1, kAudition)) == LinkForward::Forwarded);
+    a.blocks();
+    CHECK(a.leader->preview(a.s.bass, simPreview(PreviewCmd::Start, 2, kOneShot)) == LinkForward::Forwarded);
+    a.blocks();
+    CHECK(a.followerOut == Midi{on(kOneShot)});
+    CHECK(a.leader->preview(a.s.bass, simPreview(PreviewCmd::Stop, 2)) == LinkForward::Forwarded);
+    a.blocks();
+    CHECK(a.followerOut == Midi{off(kOneShot)});
+    CHECK(a.follower->sounding()[kAudition]);
+    CHECK(a.leader->preview(a.s.bass, simPreview(PreviewCmd::Stop, 1)) == LinkForward::Forwarded);
+    a.blocks();
+    CHECK(a.followerOut == Midi{off(kAudition)});
+    CHECK(a.leader->silent());
+    CHECK(a.follower->silent());
+}
+
+TEST_CASE("link sim: a held forwarded preview is released on the follower's next block when the link ends") {
+    Audition a;
+    REQUIRE(a.leader->preview(a.s.bass, simPreview(PreviewCmd::Start, 1, kAudition)) == LinkForward::Forwarded);
+    a.blocks();
+    REQUIRE(a.followerOut == Midi{on(kAudition)});
+
+    SUBCASE("the follower unlinks") { a.follower->unfollow(); }
+    SUBCASE("the follower takes another lane of the same leader") {
+        REQUIRE(a.follower->follow("L", a.leader->laneUid(a.s.lead), lineageOf(*a.follower, "L")) == Result::Applied);
+    }
+    SUBCASE("the follower loads its own state again") { a.follower->load(a.follower->save()); }
+    SUBCASE("the leader starts following another instance") {
+        const Song o = otherSong();
+        auto other = a.w.make("M");
+        other->loadDocument(o.state);
+        REQUIRE(a.leader->follow("M", other->laneUid(o.bass), lineageOf(*a.leader, "M")) == Result::Applied);
+        a.blocks();
+        CHECK(a.followerOut == Midi{off(kAudition)});
+        other.reset();
+        CHECK(a.leader->preview(std::nullopt, simPreview(PreviewCmd::Stop, 1)) == LinkForward::NotForwarded);
+        return;
+    }
+    SUBCASE("the leader's Panic") { CHECK(a.leader->panicButton() == 1); }
+    a.blocks();
+    CHECK(a.followerOut == Midi{off(kAudition)});
+    CHECK(a.leaderOut.empty());
+    // The Stop that comes later finds no record: the leader's own scheduler takes it, where it ends nothing.
+    CHECK(a.leader->preview(std::nullopt, simPreview(PreviewCmd::Stop, 1)) == LinkForward::NotForwarded);
+    a.blocks();
+    CHECK(a.followerOut.empty());
+    CHECK(a.leaderOut.empty());
+    CHECK(a.follower->silent());
+}
+
+TEST_CASE("link sim: a Start forwarded after a cleanup flagged the follower and before its next block never sounds") {
+    Audition a;
+    REQUIRE(a.leader->preview(a.s.bass, simPreview(PreviewCmd::Start, 1, kAudition)) == LinkForward::Forwarded);
+    a.blocks();
+    REQUIRE(a.followerOut == Midi{on(kAudition)});
+    // The follower takes the lead lane: the cleanup flags it. Before its next block the leader forwards a Start of
+    // the lead track, which reaches it on its new lane and sits in its ring before the panic runs.
+    REQUIRE(a.follower->follow("L", a.leader->laneUid(a.s.lead), lineageOf(*a.follower, "L")) == Result::Applied);
+    CHECK(a.leader->preview(a.s.lead, simPreview(PreviewCmd::Start, 2, kOneShot)) == LinkForward::Forwarded);
+    a.blocks();
+    CHECK(a.followerOut == Midi{off(kAudition)});  // the panic releases the old preview and discards the new Start
+    CHECK(a.leaderOut.empty());
+    for (int i = 0; i < 4; ++i) {
+        a.blocks();
+        CHECK(a.followerOut.empty());
+        CHECK(a.leaderOut.empty());
+    }
+    // Its Stop still goes where the Start went, and ends nothing there.
+    CHECK(a.leader->preview(std::nullopt, simPreview(PreviewCmd::Stop, 2)) == LinkForward::Forwarded);
+    a.blocks();
+    CHECK(a.followerOut.empty());
+    CHECK(a.follower->silent());
+    // A Start forwarded after that block sounds as usual.
+    CHECK(a.leader->preview(a.s.lead, simPreview(PreviewCmd::Start, 3, kOneShot)) == LinkForward::Forwarded);
+    a.blocks();
+    CHECK(a.followerOut == Midi{on(kOneShot)});
+    CHECK(a.leader->preview(std::nullopt, simPreview(PreviewCmd::Stop, 3)) == LinkForward::Forwarded);
+    a.blocks();
+    CHECK(a.followerOut == Midi{off(kOneShot)});
+}
+
+TEST_CASE("link sim: a leader that loads another project leaves a held forwarded preview to its Stop") {
+    // Rule 12's choice: another document id unbinds no one, so the record stays and the Stop still reaches it.
+    Audition a;
+    REQUIRE(a.leader->preview(a.s.bass, simPreview(PreviewCmd::Start, 1, kAudition)) == LinkForward::Forwarded);
+    a.blocks();
+    Saved other;
+    other.doc = otherSong().state;
+    other.link.id = "another-instance";
+    other.link.documentId = "another-document";
+    a.leader->load(other);
+    REQUIRE(a.follower->view().status == LinkStatus::ProjectChanged);
+    a.blocks();
+    CHECK(a.followerOut.empty());  // no panic: still held
+    CHECK(a.follower->sounding()[kAudition]);
+    CHECK(a.leader->preview(std::nullopt, simPreview(PreviewCmd::Stop, 1)) == LinkForward::Forwarded);
+    a.blocks();
+    CHECK(a.followerOut == Midi{off(kAudition)});
+    CHECK(a.leaderOut.empty());
+    // The leader's bass track is its own again: a new audition of it plays there.
+    CHECK(a.leader->preview(a.s.bass, simPreview(PreviewCmd::Start, 2, kAudition)) == LinkForward::NotForwarded);
+    a.blocks();
+    CHECK(a.leaderOut == Midi{on(kAudition)});
+    CHECK(a.followerOut.empty());
+}
+
+TEST_CASE("link sim: a forwarded preview plays on the follower while its lane plays, the leader's lanes untouched") {
+    const Song s = song();
+    const std::vector<Span> spans = steady(60);
+    const auto soloBass = reference(s.state, [&](DocumentStore& d) { d.setTrackSolo(s.bass, true); }, spans);
+    const auto mutedBass = reference(s.state, [&](DocumentStore& d) { d.setTrackMute(s.bass, true); }, spans);
+    World w;
+    auto leader = w.make("L");
+    leader->loadDocument(s.state);
+    auto follower = w.make("F");
+    follower->loadDocument(followerOwn());
+    REQUIRE(follower->follow("L", leader->laneUid(s.bass), lineageOf(*follower, "L")) == Result::Applied);
+    Player pl(*leader, spans);
+    Player pf(*follower, spans);
+    rounds(pl, pf, 20);
+    REQUIRE(leader->preview(s.bass, simPreview(PreviewCmd::Start, 1, kAudition)) == LinkForward::Forwarded);
+    rounds(pl, pf, 21);
+    REQUIRE(leader->preview(s.bass, simPreview(PreviewCmd::Stop, 1)) == LinkForward::Forwarded);
+    rounds(pl, pf, spans.size());
+    checkExact(pl, *mutedBass, 0, spans.size(), "leader");
+    checkExact(pf, *soloBass, 0, 20, "follower before");
+    Midi expected20 = soloBass->out[20];
+    expected20.insert(expected20.begin(), on(kAudition));  // preview commands come before the timeline at a sample
+    CHECK_MESSAGE(pf.out[20] == expected20, describe(pf.out[20]) << " expected " << describe(expected20));
+    Midi expected21 = soloBass->out[21];
+    expected21.insert(expected21.begin(), off(kAudition));
+    CHECK_MESSAGE(pf.out[21] == expected21, describe(pf.out[21]) << " expected " << describe(expected21));
+    checkExact(pf, *soloBass, 22, spans.size(), "follower after");
 }

@@ -21,6 +21,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -104,8 +105,15 @@ private:
   void OnMain(std::function<void()> fn);
   // Main thread: adopts a restored editor size, asking the host to resize an open editor.
   void RestoreEditorSize(int width, int height);
-  // Main thread: parses a kMsgTagPreview payload and queues it for the scheduler.
+  // Main thread: parses a kMsgTagPreview payload and offers it (OfferPreview), remembering the last Start for
+  // CloseWindow.
   void HandlePreview(std::string_view json);
+  // A preview command of this instance's editor (`track`: a Start's lane, empty for the chords lane): VST3 on the main
+  // thread first offers it to the instances that play its lane (LinkEndpoint::forwardPreview, under mModelMutex), and
+  // unless they took it pushes it into mScheduler, as every other format and thread always does. False when it was
+  // dropped for a full ring (this scheduler's, or every follower's it was for). The caller holds no lock. See
+  // "Previews on followers" in ChordLab.mm.
+  bool OfferPreview(std::optional<int> track, const chordlab::PreviewCmd& cmd);
   // Main thread: pushes {"schema":1,"incompleteBlocks":n,"droppedHeard":n} to the editor (droppedHeard:
   // heard-ring overflows, plus raw MIDI ring overflows under AU).
   void PushStatus(uint32_t incompleteBlocks, uint32_t droppedHeard);
@@ -208,7 +216,11 @@ private:
 
   // The scheduler belongs to the audio thread (process, reset, panic, and pushThru from HandleMidiIn);
   // pushPreview is its one other-thread entry and is called from the main thread only (OnMessage,
-  // CloseWindow). OnReset and panic requests are flagged here and consumed at the top of ProcessBlock; under
+  // CloseWindow; the AU's CloseWindow may also run from an off-main destructor) and, VST3 only, by the link registry
+  // when a leader forwards a preview of the lane this instance plays (its preview sink, given at the registration),
+  // from that leader's OnMessage or CloseWindow on the same main thread: one producer. Declared before mLink, as
+  // mPanicPending is: the registry may use both until the destructor's mLink.reset(). OnReset and panic requests are
+  // flagged here and consumed at the top of ProcessBlock; under
   // VST3 and the APP a pending reset is consumed earlier, by the callback's first HandleMidiIn, when MIDI
   // arrives (bypassed or not). Under AU_API OnReset bumps mInputEpoch instead and DrainRawMidiIn applies the
   // reset in FIFO order (before the first message queued after it, or at the end of the drain).
@@ -241,7 +253,7 @@ private:
   std::atomic<bool> mAUBypassed{false};                        // the bypass snapshot the property thread publishes with the epoch (OnReset); the producer reads it instead of iPlug2's plain bool
 #endif
   std::atomic<double> mResetSampleRate{44100.0};
-  std::atomic<bool> mPanicPending{false};
+  std::atomic<bool> mPanicPending{false};                      // the editor's Panic; VST3: also set by the link registry (a leader's Panic, a broken link)
   std::atomic<uint32_t> mIncompleteBlocks{0};                  // blocks whose process() returned false
   uint32_t mReportedIncompleteBlocks = 0;                      // main thread: last value pushed to the UI
 
@@ -289,7 +301,7 @@ private:
   double mPushedPpq = std::numeric_limits<double>::quiet_NaN();              // main thread; NaN: nothing pushed yet
   bool mPushedPlaying = false;                                              // main thread
   double mPushedBpm = std::numeric_limits<double>::quiet_NaN();               // main thread; NaN: nothing pushed yet
-  int mOpenPreviewId = -1;                                     // main thread: Start without a Stop yet
+  int mOpenPreviewId = -1;                                     // main thread: Start without a Stop yet, here or forwarded
 
   // Whether an editor is attached: set at the end of OpenWindow, cleared in CloseWindow (both main
   // thread). Any thread may read it; mViewController itself is only touched on the main thread.
@@ -327,8 +339,9 @@ private:
   std::unique_ptr<chordlab::LinkRegistry> mPrivateRegistry;
   // The instance's link endpoint: its registration, document id, lane uids, link buffer and feed. Made in the
   // constructor (under mModelMutex, before the first publish) and non-null from then until the destructor's
-  // mLink.reset(), which ends that guarantee (after retiring mLifeline; PushLinkState checks it, OnIdle never reads
-  // it: LinkSerial). Every call is made under mModelMutex (main thread, the host's state thread), except following()
-  // and linkBuffer(), the audio thread's (ProcessBlock).
+  // mLink.reset(), which ends that guarantee (after retiring mLifeline; PushLinkState and OfferPreview check it,
+  // OnIdle never reads it: LinkSerial). Every call is made under mModelMutex (main thread, the host's state thread),
+  // except following() and linkBuffer(), the audio thread's (ProcessBlock). VST3: its registration holds the preview
+  // sink (&mScheduler, &mPanicPending, declared above, so they outlive it).
   std::unique_ptr<chordlab::LinkEndpoint> mLink;
 };

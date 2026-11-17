@@ -8,6 +8,7 @@
 
 using chordlab::PreviewCmd;
 using chordlab::bridge::parsePreviewRequest;
+using chordlab::bridge::PreviewRequest;
 
 namespace {
 
@@ -15,6 +16,7 @@ const std::string kHeaderProblem = "preview message needs schema 1, an id and on
 const std::string kStartProblem = "preview start needs 1..8 pitches and a velocity in 1..127";
 const std::string kPitchProblem = "preview pitches must be integers in 0..127";
 const std::string kExtendProblem = "preview extend needs extend:true and no on";
+const std::string kTrackProblem = "preview track must be an integer of 1 or more";
 
 // The problem text for a payload parsePreviewRequest refuses; fails the test if it was accepted.
 std::string problemOf(const std::string& json) {
@@ -25,13 +27,18 @@ std::string problemOf(const std::string& json) {
     return problem;
 }
 
-// The command for a payload parsePreviewRequest accepts, leaving `problem` untouched.
-PreviewCmd accepted(const std::string& json) {
+// The request for a payload parsePreviewRequest accepts, leaving `problem` untouched.
+PreviewRequest request(const std::string& json) {
     std::string problem = "untouched";
-    const auto cmd = parsePreviewRequest(json, &problem);
-    REQUIRE(cmd.has_value());
+    const auto parsed = parsePreviewRequest(json, &problem);
+    REQUIRE(parsed.has_value());
     CHECK(problem == "untouched");
-    return *cmd;
+    return *parsed;
+}
+
+// Its command.
+PreviewCmd accepted(const std::string& json) {
+    return request(json).cmd;
 }
 
 }  // namespace
@@ -79,9 +86,9 @@ TEST_CASE("parsePreviewRequest: schema must be the integer 1") {
     CHECK(problemOf(R"({"id":0,"on":false})") == kHeaderProblem);
 }
 
-TEST_CASE("parsePreviewRequest: id must be in 0..INT_MAX") {
+TEST_CASE("parsePreviewRequest: id must be in 0..kForwardedPreviewIdFirst - 1") {
     CHECK(accepted(R"({"schema":1,"id":0,"on":false})").id == 0);
-    CHECK(accepted(R"({"schema":1,"id":2147483647,"on":false})").id == 2147483647);
+    CHECK(accepted(R"({"schema":1,"id":2146435070,"on":false})").id == 2146435070);
     CHECK(problemOf(R"({"schema":1,"id":-1,"on":false})") == kHeaderProblem);
     CHECK(problemOf(R"({"schema":1,"id":2147483648,"on":false})") == kHeaderProblem);
     CHECK(problemOf(R"({"schema":1,"id":18446744073709551615,"on":false})") == kHeaderProblem);
@@ -204,4 +211,61 @@ TEST_CASE("parsePreviewRequest: extend must be true, alone, with schema and id")
     CHECK(problemOf(R"({"schema":1,"id":4,"extend":true,"on":false})") == kExtendProblem);
     CHECK(problemOf(R"({"schema":1,"extend":true})") == kHeaderProblem);
     CHECK(problemOf(R"({"id":4,"extend":true})") == kHeaderProblem);
+}
+
+TEST_CASE("parsePreviewRequest: the ids a link registry forwards under are refused, whatever the kind") {
+    // D5: an editor can never produce an id of the reserved range, so a forwarded id never meets an editor's.
+    static_assert(chordlab::kForwardedPreviewIdFirst == 2146435070 + 1, "the bound the payloads below spell out");
+    static_assert(chordlab::kForwardedPreviewIdLast == 2147483647, "the bound the payloads below spell out");
+    CHECK(problemOf(R"({"schema":1,"id":2146435071,"on":false})") == kHeaderProblem);          // the first
+    CHECK(problemOf(R"({"schema":1,"id":2147000000,"on":false})") == kHeaderProblem);
+    CHECK(problemOf(R"({"schema":1,"id":2147483647,"on":false})") == kHeaderProblem);          // the last, INT_MAX
+    CHECK(problemOf(R"({"schema":1,"id":2146435071,"on":true,"pitches":[60]})") == kHeaderProblem);
+    CHECK(problemOf(R"({"schema":1,"id":2146435071,"on":true,"pitches":[60],"track":2})") == kHeaderProblem);
+    CHECK(problemOf(R"({"schema":1,"id":2147483647,"extend":true})") == kHeaderProblem);
+}
+
+TEST_CASE("parsePreviewRequest: a Start without track belongs to the chords lane") {
+    const PreviewRequest r = request(R"({"schema":1,"id":4,"on":true,"pitches":[60]})");
+    CHECK(r.cmd.kind == PreviewCmd::Start);
+    CHECK_FALSE(r.track.has_value());
+}
+
+TEST_CASE("parsePreviewRequest: a Start's track is the lane of that track") {
+    const PreviewRequest r = request(R"({"schema":1,"id":4,"on":true,"velocity":90,"pitches":[36,43],"track":3})");
+    CHECK(r.cmd.kind == PreviewCmd::Start);
+    CHECK(r.cmd.id == 4);
+    CHECK(r.cmd.velocity == 90);
+    CHECK(r.cmd.count == 2);
+    REQUIRE(r.track.has_value());
+    CHECK(*r.track == 3);
+    CHECK(*request(R"({"schema":1,"id":4,"on":true,"pitches":[60],"track":1})").track == 1);
+    CHECK(*request(R"({"schema":1,"id":4,"on":true,"pitches":[60],"track":2147483647})").track == 2147483647);
+}
+
+TEST_CASE("parsePreviewRequest: a Start's track must be an integer of 1 or more") {
+    CHECK(problemOf(R"({"schema":1,"id":4,"on":true,"pitches":[60],"track":0})") == kTrackProblem);
+    CHECK(problemOf(R"({"schema":1,"id":4,"on":true,"pitches":[60],"track":-1})") == kTrackProblem);
+    CHECK(problemOf(R"({"schema":1,"id":4,"on":true,"pitches":[60],"track":2147483648})") == kTrackProblem);
+    CHECK(problemOf(R"({"schema":1,"id":4,"on":true,"pitches":[60],"track":18446744073709551615})") == kTrackProblem);
+    CHECK(problemOf(R"({"schema":1,"id":4,"on":true,"pitches":[60],"track":4294967297})") == kTrackProblem);   // 2^32 + 1
+    CHECK(problemOf(R"({"schema":1,"id":4,"on":true,"pitches":[60],"track":2.0})") == kTrackProblem);
+    CHECK(problemOf(R"({"schema":1,"id":4,"on":true,"pitches":[60],"track":"2"})") == kTrackProblem);
+    CHECK(problemOf(R"({"schema":1,"id":4,"on":true,"pitches":[60],"track":null})") == kTrackProblem);
+    CHECK(problemOf(R"({"schema":1,"id":4,"on":true,"pitches":[60],"track":true})") == kTrackProblem);
+    CHECK(problemOf(R"({"schema":1,"id":4,"on":true,"pitches":[60],"track":[2]})") == kTrackProblem);
+    // Checked after the Start's other rules: a bad pitch or a bad velocity decides first.
+    CHECK(problemOf(R"({"schema":1,"id":4,"on":true,"pitches":[200],"track":0})") == kPitchProblem);
+    CHECK(problemOf(R"({"schema":1,"id":4,"on":true,"velocity":0,"pitches":[60],"track":0})") == kStartProblem);
+}
+
+TEST_CASE("parsePreviewRequest: an Extend or a Stop reads no track") {
+    const PreviewRequest stop = request(R"({"schema":1,"id":4,"on":false,"track":3})");
+    CHECK(stop.cmd.kind == PreviewCmd::Stop);
+    CHECK_FALSE(stop.track.has_value());
+    CHECK(request(R"({"schema":1,"id":4,"on":false,"track":"bad"})").cmd.kind == PreviewCmd::Stop);
+    const PreviewRequest extend = request(R"({"schema":1,"id":4,"extend":true,"track":3})");
+    CHECK(extend.cmd.kind == PreviewCmd::Extend);
+    CHECK_FALSE(extend.track.has_value());
+    CHECK(request(R"({"schema":1,"id":4,"extend":true,"track":0})").cmd.kind == PreviewCmd::Extend);
 }

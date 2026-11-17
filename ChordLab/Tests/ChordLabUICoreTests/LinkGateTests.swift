@@ -29,11 +29,14 @@ final class LinkGateTests: XCTestCase {
   }
 
   func testNoPreviewStartsWhileFollowingButStopsAndExtendsPass() {
-    let start = PreviewMessage.start(id: 1, pitches: [60], velocity: 100).json
+    let start = PreviewMessage.start(id: 1, pitches: [60], velocity: 100, lane: .chords).json
+    let trackStart = PreviewMessage.start(id: 2, pitches: [40], velocity: 100, lane: .track(2)).json
     let stop = PreviewMessage.stop(id: 1).json
     let extend = PreviewMessage.extend(id: 1).json
     XCTAssertTrue(LinkGate.allowsPreview(start, following: false))
     XCTAssertFalse(LinkGate.allowsPreview(start, following: true))
+    XCTAssertTrue(LinkGate.allowsPreview(trackStart, following: false))
+    XCTAssertFalse(LinkGate.allowsPreview(trackStart, following: true), "a track's start is a start too")
     XCTAssertTrue(LinkGate.allowsPreview(stop, following: true))
     XCTAssertTrue(LinkGate.allowsPreview(extend, following: true))
   }

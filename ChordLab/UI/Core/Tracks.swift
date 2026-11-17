@@ -1,7 +1,8 @@
 import Foundation
 
 /// A lane of the editor (tracks design D13): the open tab is `chords` (suggestions, palette, home row) or one
-/// track's piano roll. UI state in `ChordLabState`, never saved; a removed track falls back to `chords`.
+/// track's piano roll. UI state in `ChordLabState`, never saved; a removed track falls back to `chords`. Also the lane
+/// a preview start belongs to (`PreviewMessage.start`, per-track instruments M5 design D1).
 enum Lane: Hashable {
   case chords
   case track(Int)

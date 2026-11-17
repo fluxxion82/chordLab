@@ -2,11 +2,21 @@ import CoreGraphics
 import Foundation
 
 /// Who holds the editor's one held preview (`PreviewBook`): a pressed palette cell (its id), the roll's gesture
-/// machine of one track (a note press, design D15 "Preview"), or a pressed key of the roll's keyboard column (D14).
+/// machine of one track (a note press, design D15 "Preview"), or a pressed key of one track's roll keyboard column
+/// (D14; the column is drawn only beside that track's roll).
 enum PreviewOwner: Equatable {
   case cell(String)
   case roll(trackId: Int)
-  case key(pitch: Int)
+  case key(pitch: Int, trackId: Int)
+
+  /// The lane its previews belong to (per-track instruments M5, design D1): a cell's the chords (a palette or home-row
+  /// cell), a roll's or a keyboard key's that track.
+  var lane: Lane {
+    switch self {
+    case .cell: return .chords
+    case .roll(let trackId), .key(_, let trackId): return .track(trackId)
+    }
+  }
 }
 
 /// The held preview: its scheduler id and its owner.
@@ -17,31 +27,37 @@ struct PreviewHold: Equatable {
 
 /// One `kMsgTagPreview` message to the engine's scheduler: `start` sounds `pitches` under `id` until the `stop` with
 /// the same id (or the scheduler's four-second watchdog), `extend` renews a held one's watchdog. `json` is the payload
-/// `ChordLabState` sends (it adds `schema`).
+/// `ChordLabState` sends (it adds `schema`). A start says which lane it belongs to (per-track instruments M5, design
+/// D1): a track's carries `track` (that track's id), so the plug-in can sound it on the instrument that plays that
+/// track; one of the chords carries none. A stop and an extend carry no lane: they follow their start's id.
 enum PreviewMessage: Equatable {
-  case start(id: Int, pitches: [Int], velocity: Int)
+  case start(id: Int, pitches: [Int], velocity: Int, lane: Lane)
   case stop(id: Int)
   case extend(id: Int)
 
   var json: [String: Any] {
     switch self {
-    case .start(let id, let pitches, let velocity): return ["id": id, "on": true, "velocity": velocity, "pitches": pitches]
+    case .start(let id, let pitches, let velocity, .track(let trackId)):
+      return ["id": id, "on": true, "velocity": velocity, "pitches": pitches, "track": trackId]
+    case .start(let id, let pitches, let velocity, .chords):
+      return ["id": id, "on": true, "velocity": velocity, "pitches": pitches]
     case .stop(let id): return ["id": id, "on": false]
     case .extend(let id): return ["id": id, "extend": true]
     }
   }
 }
 
-/// A hold a view starts itself (`PreviewBook.hold`): a palette cell or a keyboard key. A roll hold comes only from the
-/// roll's effects (`PreviewBook.perform`), so no caller can start one behind its gesture machine.
+/// A hold a view starts itself (`PreviewBook.hold`): a palette cell or a key of track `trackId`'s keyboard column. A
+/// roll hold comes only from the roll's effects (`PreviewBook.perform`), so no caller can start one behind its gesture
+/// machine.
 enum PreviewHoldRequest: Equatable {
   case cell(String)
-  case key(pitch: Int)
+  case key(pitch: Int, trackId: Int)
 
   var owner: PreviewOwner {
     switch self {
     case .cell(let id): return .cell(id)
-    case .key(let pitch): return .key(pitch: pitch)
+    case .key(let pitch, let trackId): return .key(pitch: pitch, trackId: trackId)
     }
   }
 }
@@ -61,7 +77,8 @@ enum PreviewOutput: Equatable {
 /// presses, inserts and key clicks use the existing preview path, one pitch, paired Start/Stop with keep-alive): one
 /// id counter, AT MOST ONE held preview whoever holds it (a palette cell, the roll, a keyboard key; `ChordLabState`
 /// keeps it alive with `extend`s), and the short one-shot previews (an insert, a velocity drag's release), each
-/// ended by its own timer. Every decision lives here; `ChordLabState` only routes the `PreviewOutput`s.
+/// ended by its own timer. Every start says its lane (`PreviewOwner.lane`; a one-shot its roll's track). Every
+/// decision lives here; `ChordLabState` only routes the `PreviewOutput`s.
 ///
 /// The invariants: every `start` is followed by exactly one `stop` with the same id, and a `stop` goes out only for an
 /// id that is sounding; and a track's gesture machine (`RollEditLogic`: a held `previewStart` is always followed by
@@ -106,7 +123,7 @@ struct PreviewBook: Equatable {
   private mutating func start(_ owner: PreviewOwner, pitches: [Int], velocity: Int) -> (id: Int, output: PreviewOutput) {
     let id = nextId()
     held = PreviewHold(id: id, owner: owner)
-    return (id, .preview(.start(id: id, pitches: pitches, velocity: velocity)))
+    return (id, .preview(.start(id: id, pitches: pitches, velocity: velocity, lane: owner.lane)))
   }
 
   /// A cell or key press holds `pitches`: the held preview ends first (a roll hold with its gesture's cancel), then the
@@ -145,6 +162,7 @@ struct PreviewBook: Equatable {
   /// command; a `previewStart` ends the held preview (another owner's with `.cancelRoll` for a roll; this track's own,
   /// which its machine always stops first, without) and holds as `.roll(trackId)`; a `previewStop` stops this track's
   /// roll hold and nothing else (never a second stop); a `previewOneShot` starts under a new id and schedules its end.
+  /// Every start here is track `trackId`'s (`Lane.track`).
   /// Without `startsAllowed` (`LinkGate.allowsHold`: this instance follows another ChordLab) a `previewStart` or a
   /// `previewOneShot` changes nothing and sends nothing; commands and stops go on as ever.
   mutating func perform(_ effects: [RollEffect], trackId: Int, startsAllowed: Bool = true) -> [PreviewOutput] {
@@ -163,7 +181,8 @@ struct PreviewBook: Equatable {
       case .previewOneShot(let pitch, let velocity):
         let id = nextId()
         oneShots.insert(id)
-        outputs += [.preview(.start(id: id, pitches: [pitch], velocity: velocity)), .scheduleOneShotEnd(id: id)]
+        outputs += [.preview(.start(id: id, pitches: [pitch], velocity: velocity, lane: .track(trackId))),
+                    .scheduleOneShotEnd(id: id)]
       }
     }
     return outputs
