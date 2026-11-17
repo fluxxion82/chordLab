@@ -52,9 +52,10 @@ struct PianoKeyboardView: View {
 
 /// The keyboard column's press input (tracks design D14: clicking a key previews it; plan Task 19): an AppKit view over
 /// the column only. A left press on a key holds that pitch through the editor's preview path (`ChordLabState.pressKey`,
-/// one held preview with keep-alive) and its up stops it (`releaseKey`); a drag does not change the key. The press also
-/// ends on the window resigning key, the application resigning active and the view leaving its window; a lost up is
-/// ended by the keep-alive (no button down releases the hold). A ⌃-click or right-click does nothing.
+/// one held preview with keep-alive, a preview of track `trackId`) and its up stops it (`releaseKey`); a drag does not
+/// change the key. The press also ends on the window resigning key, the application resigning active and the view
+/// leaving its window; a lost up is ended by the keep-alive (no button down releases the hold). A ⌃-click or
+/// right-click does nothing.
 struct PianoKeyInputView: NSViewRepresentable {
   let trackId: Int
   let state: ChordLabState
@@ -82,7 +83,7 @@ struct PianoKeyInputView: NSViewRepresentable {
       return PianoKeys.pitch(atViewY: point.y, geometry: roll.geometry(ticksPerBeat: state.rollTiming?.ticksPerBeat ?? 960),
                              scrollY: roll.scroll.y)
     }
-    view.press = { [weak state] pitch in state?.pressKey(pitch: pitch) }
+    view.press = { [weak state] pitch in state?.pressKey(pitch: pitch, trackId: trackId) }
     view.release = { [weak state] id in state?.releaseKey(id: id) }
   }
 }

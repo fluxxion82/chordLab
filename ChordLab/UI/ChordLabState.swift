@@ -243,12 +243,13 @@ class ChordLabState: NSObject, ObservableObject {
     send(command: RecordLength.command(root: cell.root, type: cell.type, beats: beats, index: index))
   }
 
-  /// A press on the roll's keyboard column (tracks design D14: clicking a key previews it): holds `pitch` until
-  /// `releaseKey(id:)` with the id returned (or a lost release, which the keep-alive ends), ending any other hold
-  /// first. Nil for a pitch outside 0...127, and while this instance follows another ChordLab (`LinkGate.allowsHold`).
-  @MainActor func pressKey(pitch: Int) -> Int? {
+  /// A press on track `trackId`'s roll keyboard column (tracks design D14: clicking a key previews it): holds `pitch`
+  /// until `releaseKey(id:)` with the id returned (or a lost release, which the keep-alive ends), ending any other hold
+  /// first; its start belongs to that track (`PreviewOwner.lane`). Nil for a pitch outside 0...127, and while this
+  /// instance follows another ChordLab (`LinkGate.allowsHold`).
+  @MainActor func pressKey(pitch: Int, trackId: Int) -> Int? {
     guard (0...127).contains(pitch), LinkGate.allowsHold(following: LinkKeys.isFollowing(linkState)) else { return nil }
-    let held = previews.hold(.key(pitch: pitch), pitches: [pitch], velocity: PianoKeys.velocity)
+    let held = previews.hold(.key(pitch: pitch, trackId: trackId), pitches: [pitch], velocity: PianoKeys.velocity)
     route(held.outputs)
     return held.id
   }
