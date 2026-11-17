@@ -142,14 +142,17 @@
 // changed, and always PushLinkState (chordlab::bridge::linkOutcome decides which). A refused follow (the leader's
 // lineage stale, an unknown leader or lane) changes nothing and sends no error: the fresh link state is the answer.
 // The plug-in sends kMsgTagLinkState (26), linkStateJson(mLink->view()) built under mModelMutex inside an OnMain
-// hop, so only ever from the main thread: from OnUIOpen (after the snapshot), after every parsed kMsgTagLink, and
-// from OnIdle when the registry's serial() (an atomic, read without a lock) differs from mReportedLinkSerial. It is
-// display only; nothing that plays waits for it. OnIdle checks mLink first: the destructor resets it, and iPlug2
-// stops the idle timer only in ~IPlugAPIBase, after ~ChordLab. That check suffices because the host destroys the
-// plug-in on the main thread (VST3: the UI thread, where OnIdle runs), so the two never interleave; a host that
-// destroyed it on another thread while the timer ran would race far more than mLink (assumed not to happen, as
-// for the rest of OnIdle's state). A queued PushLinkState hop runs under the Lifeline, which is retired before
-// mLink.reset(), so it never sees mLink gone.
+// hop, so only ever from the main thread: from OnUIOpen (after the snapshot), after every parsed kMsgTagLink, and,
+// for an instance that links only (kLinks, the VST3), from OnIdle when the shared registry's serial() (an atomic,
+// read without a lock) differs from mReportedLinkSerial. It is display only; nothing that plays waits for it. OnIdle
+// never touches mLink: it reads the serial from chordlab::LinkRegistry::shared(), which is never destroyed, so an
+// idle callback that overlaps a destructor on another thread (an AU host may destroy the plug-in off the main
+// thread, plan V6; iPlug2 stops the idle timer only in ~IPlugAPIBase, after ~ChordLab) reads nothing that goes
+// away. An AU or app instance gets its one link state on OnUIOpen and nothing from OnIdle (its registry is its own:
+// nothing there ever changes for it to show). The push OnIdle makes, PushLinkState inline on the main thread, does
+// read mLink under mModelMutex: that rests on the VST3's destructor running on the main thread, the thread of
+// OnIdle (plan V14), so the two never interleave. A queued PushLinkState hop runs under the Lifeline, which is
+// retired before mLink.reset(), so it never sees mLink gone.
 //
 // MIDI in (listening design D1, D2, D4, D5): (VST3 and the APP; the Audio Unit's path is described at the end
 // of this note) HandleMidiIn runs on the audio thread once per incoming event (ProcessMidiMsg calls it),
@@ -750,8 +753,7 @@ void ChordLab::OnUIOpen()
   mPushedBpm = std::numeric_limits<double>::quiet_NaN();         // ...and the tempo
   // ...and the link state, after the snapshot: the serial first, so the state built inline below is at least that
   // recent and OnIdle pushes again only when something moved after it.
-  if (mLink)
-    mReportedLinkSerial = mLink->serial();
+  mReportedLinkSerial = LinkSerial();
   PushLinkState();
 }
 
@@ -827,14 +829,14 @@ void ChordLab::OnIdle()
     }
   }
 
-  // The link state, to an open editor, whenever the registry's serial moved (a link, a load, an instance added or
-  // removed anywhere in the process, a leader's publish). serial() is an atomic read. mLink is checked because the
-  // destructor resets it and iPlug2 stops this timer only in ~IPlugAPIBase, after ~ChordLab; that check is enough
-  // on the assumption the host destroys the plug-in on the main thread, as VST3 hosts do, so this can never run
-  // concurrently with the destructor (see "Links" at the top).
-  if (mEditorOpen.load() && mLink)
+  // The link state, to an open editor of an instance that links (the VST3), whenever the shared registry's serial
+  // moved (a link, a load, an instance added or removed anywhere in the process, a leader's publish). Never mLink:
+  // the serial comes from the registry that is never destroyed (LinkSerial), so this reads nothing a destructor on
+  // another thread could take away; the push below relies on the VST3's destructor running on this, the main, thread
+  // (see "Links" at the top). An AU or app instance pushes its link state on OnUIOpen only.
+  if (kLinks && mEditorOpen.load())
   {
-    const uint64_t serial = mLink->serial();
+    const uint64_t serial = LinkSerial();
     if (serial != mReportedLinkSerial)
     {
       mReportedLinkSerial = serial;                              // before the build: a later move is pushed next time
@@ -1279,6 +1281,13 @@ std::string ChordLab::MakeUid()
   return uid;
 }
 
+uint64_t ChordLab::LinkSerial()
+{
+  // The shared registry is heap-allocated on first use and never destroyed: safe from any thread at any time, and
+  // the VST3's registry is that one (mLink->serial() would read the same counter, through an instance member).
+  return kLinks ? chordlab::LinkRegistry::shared().serial() : 0;
+}
+
 void ChordLab::OnMain(std::function<void()> fn)
 {
   if ([NSThread isMainThread])
@@ -1409,8 +1418,9 @@ void ChordLab::PushLinkState()
     {
       // Order: this hop's Lifeline (when queued), mModelMutex, then the registry's mutex inside view(). mLink is
       // valid here: a queued hop runs under the Lifeline and the destructor retires it before mLink.reset(), so a
-      // hop either finishes first or does nothing; the inline path runs on the main thread from OnUIOpen, OnIdle
-      // (which checks mLink) and HandleLink, never during the destructor. The check is belt and braces.
+      // hop either finishes first or does nothing; the inline path runs on the main thread from OnUIOpen, OnIdle (an
+      // instance that links only) and HandleLink, and the VST3's destructor runs on the main thread too (plan V14),
+      // so never during it. The check is belt and braces.
       std::lock_guard<std::mutex> lock(mModelMutex);
       if (!mLink)
         return;

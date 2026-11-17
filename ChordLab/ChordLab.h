@@ -87,6 +87,10 @@ private:
   // copy). Nothing weaker may ever replace it: the engine relies on a uid never being returned twice, across
   // instances and processes (LinkEndpoint::UidGenerator, LaneUids::Generator).
   static std::string MakeUid();
+  // The serial of the process's shared link registry (chordlab::LinkRegistry::shared(), never destroyed) for an
+  // instance that links (kLinks, the VST3), else 0. Any thread; touches no member, so OnIdle may call it whatever a
+  // destructor on another thread is doing.
+  static uint64_t LinkSerial();
   // Pushes snapshotJson(doc, palette) to the editor, on the main thread; a no-op when no editor is open.
   void PushSnapshot();
   // Pushes {"schema":1,"error":message} to the editor, on the main thread.
@@ -258,7 +262,7 @@ private:
   uint32_t mAppliedEpoch = 0;                                  // render thread only: the last epoch whose reset the drain performed
 #endif
   uint32_t mReportedDroppedHeard = 0;                          // main thread: last value pushed to the UI
-  uint64_t mReportedLinkSerial = 0;                            // main thread: the registry serial of the last link state OnIdle or OnUIOpen pushed
+  uint64_t mReportedLinkSerial = 0;                            // main thread: LinkSerial() when a link state was last pushed (OnUIOpen, OnIdle)
   chordlab::Listener mListener;                                // main thread only (it may allocate)
   std::chrono::steady_clock::time_point mLastHeardTick{};      // main thread: the last mListener.advance
   static constexpr std::chrono::milliseconds kHeardInterval{67};   // key evaluation and heard pushes, at most ~15 Hz
@@ -323,8 +327,8 @@ private:
   std::unique_ptr<chordlab::LinkRegistry> mPrivateRegistry;
   // The instance's link endpoint: its registration, document id, lane uids, link buffer and feed. Made in the
   // constructor (under mModelMutex, before the first publish) and non-null from then until the destructor's
-  // mLink.reset(), which ends that guarantee (after retiring mLifeline; OnIdle and PushLinkState check it). Every
-  // call is made under mModelMutex (main thread, the host's state thread), except following() and linkBuffer(), the
-  // audio thread's (ProcessBlock), and serial().
+  // mLink.reset(), which ends that guarantee (after retiring mLifeline; PushLinkState checks it, OnIdle never reads
+  // it: LinkSerial). Every call is made under mModelMutex (main thread, the host's state thread), except following()
+  // and linkBuffer(), the audio thread's (ProcessBlock).
   std::unique_ptr<chordlab::LinkEndpoint> mLink;
 };
