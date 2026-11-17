@@ -120,7 +120,9 @@
 // ran in that window would wait on mModelMutex until mLink exists and the first publish is done. No such hook can
 // exist today (another instance gets this one's hook only through a follow, which needs a stored feed with a
 // matching lineage, i.e. after the first publish, and no follower can be waiting for a fresh uid): the lock closes
-// nothing that is open now; it keeps the constructor safe whatever the registry learns to do later.
+// nothing that is open now; it keeps the constructor safe whatever the registry learns to do later. Only after that
+// section, with the lock released, does the constructor call iPlug2's MakeDefaultPreset, which runs SerializeState
+// (mLink and mModelMutex both): it is the constructor's last call.
 // Destruction, in this order: the AU editor close; chordlab::retire(*mLifeline), which waits for a hop or hook in
 // flight and makes later ones no-ops, so no other instance enters this one any more; mLink.reset(), which removes
 // the registration (followers are emptied and wait for this id, the registry never writes this link buffer
@@ -287,8 +289,6 @@ ChordLab::ChordLab(const InstanceInfo& info)
 : Plugin(info, MakeConfig(kNumParams, kNumPresets))
 {
   GetParam(kParamGain)->InitDouble("Gain", 100., 0., 100.0, 0.01, "%");
-  
-  MakeDefaultPreset();
 
   mClipboardToken = MakeUid();
 
@@ -303,14 +303,23 @@ ChordLab::ChordLab(const InstanceInfo& info)
   // before mLink is assigned, and a hook that reached this instance in that window would publish through a null
   // mLink. The hook takes mModelMutex, so it waits until the instance is whole (order: model, then the registry's,
   // which LinkRegistry::add takes; add and the endpoint's constructor call no hook, they return none).
-  std::lock_guard<std::mutex> lock(mModelMutex);
-  mLink = std::make_unique<chordlab::LinkEndpoint>(registry, MakeUid(), &ChordLab::MakeUid,
-                                                   chordlab::guardedHook(mLifeline, [this] {
-                                                     std::lock_guard<std::mutex> lock(mModelMutex);
-                                                     PublishSnapshotLocked();
-                                                   }));
-  RebuildPaletteLocked();
-  PublishSnapshotLocked();                                       // the empty progression, generation 1
+  {
+    std::lock_guard<std::mutex> lock(mModelMutex);
+    mLink = std::make_unique<chordlab::LinkEndpoint>(registry, MakeUid(), &ChordLab::MakeUid,
+                                                     chordlab::guardedHook(mLifeline, [this] {
+                                                       std::lock_guard<std::mutex> lock(mModelMutex);
+                                                       PublishSnapshotLocked();
+                                                     }));
+    RebuildPaletteLocked();
+    PublishSnapshotLocked();                                     // the empty progression, generation 1
+  }
+
+  // Last, and outside the section above: iPlug2's MakeDefaultPreset calls the virtual SerializeState, which reads
+  // the instance block from mLink (so mLink must exist: called first, as it used to be, it crashed every format
+  // while the host constructed the plug-in) and takes mModelMutex itself (so the constructor's lock must be released:
+  // the mutex is not recursive). The default preset is the state as constructed: the empty document and this
+  // instance's block. The host test (ChordLab/Tests/vst3host) constructs the plug-in and fails if this regresses.
+  MakeDefaultPreset();
 }
 
 ChordLab::~ChordLab()
