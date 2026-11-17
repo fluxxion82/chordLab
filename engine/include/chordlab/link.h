@@ -157,8 +157,8 @@ using LinkToken = std::uint64_t;
 /// Where an instance stands as a follower (`LinkRegistry` rule 7). `NotFollowing` for a leader.
 enum class LinkStatus { NotFollowing, Waiting, ProjectChanged, LaneMissing, Muted, Playing };
 
-// `LinkFollowResult` (the outcome of `LinkRegistry::follow`) is in link_state.h too, so that the shell's header-only
-// helpers can name it without this header.
+// `LinkFollowResult` (the outcome of `LinkRegistry::follow`) is in link_state.h, so that the shell's header-only helpers
+// can name it without this header.
 
 /// What `LinkRegistry::followedLanes` returns: the followed lanes, and the leader's binding counter read in the same
 /// critical section.
