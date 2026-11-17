@@ -577,7 +577,7 @@ LinkRegistry::Hooks LinkRegistry::remove(LinkToken token) {
     dead.emplace(std::move(it->second));
     s.entries.erase(it);
     s.resolve();  // its followers are unbound and emptied
-    s.dropBrokenForwards();  // rule 12: its records, and it from others' (its own sink is gone: never touched)
+    s.dropBrokenForwards();  // rule 12: its records, and it from others' (no longer in entries: its sink untouched)
     s.moved();
     return hooks;
 }
