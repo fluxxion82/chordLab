@@ -6,6 +6,9 @@
 //     CHORDLAB_UPDATE_FIXTURES=1 build/engine_tests -tc="golden fixtures*"
 // (the test rewrites the files, still passes, and a second run without the variable proves equality).
 //
+// The three link-state-*.json files are `linkStateJson` of views of real registries and endpoints (link.h), built
+// with fixed instance ids, fixed lineages and a counting uid generator, so they are the same on every run.
+//
 // The two *-legacy-phase1.json files are hand-written Phase 1 shapes, state-legacy-feel.json a pre-arpeggio feel,
 // state-legacy-length.json a state from before the new-chord length and state-legacy-tracks.json a state from before
 // tracks (a copy of state-progression.json as it was then); they are never rewritten.
@@ -15,17 +18,22 @@
 #include "chordlab/chord.h"
 #include "chordlab/document.h"
 #include "chordlab/json_api.h"
+#include "chordlab/link.h"
 #include "chordlab/palette.h"
 #include "chordlab/pitch.h"
 #include "chordlab/relatedness.h"
 #include "chordlab/scale.h"
+#include "chordlab/tracks.h"
+#include "chordlab/triple_buffer.h"
 
 #include <nlohmann/json.hpp>
 
 #include <cstddef>
 #include <cstdlib>
 #include <fstream>
+#include <functional>
 #include <iterator>
+#include <memory>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -551,4 +559,259 @@ TEST_CASE("golden fixtures: every state fixture loads as before without an insta
     std::string onDisk;
     REQUIRE(readFile("state-tracks.json", onDisk));
     CHECK(stateJson(tracksStore(), 900, 600, nullptr) == onDisk);
+}
+
+// ---- The link state (per-track instruments plan I12): what the editor's Follow controls read ----
+
+namespace {
+
+/// The uids of one fixture world, shared by its instances: "uid-1", "uid-2", ... in the order they are asked for
+/// (document ids, lane uids, a copy's fresh id).
+LinkEndpoint::UidGenerator fixtureUids() {
+    auto n = std::make_shared<int>(0);
+    return [n] { return "uid-" + std::to_string(++*n); };
+}
+
+/// One instance as the shell drives its link, reduced to that: a store, its own buffer and publication, a lineage
+/// (a fixed string per load), and its endpoint, whose hook republishes. Each operation runs the hooks it returned
+/// and then publishes for itself, as the shell does. Held by unique_ptr: the hook keeps `this`.
+struct LinkInstance {
+    DocumentStore store;
+    std::unique_ptr<TripleBuffer<SnapshotSlot>> own = std::make_unique<TripleBuffer<SnapshotSlot>>();
+    Publication publication;
+    std::string lineage;
+    std::unique_ptr<LinkEndpoint> endpoint;  // last: destroyed first, while the rest still lives
+
+    LinkInstance(LinkRegistry& registry, const std::string& id, LinkEndpoint::UidGenerator uids)
+        : lineage("lineage-" + id) {
+        endpoint = std::make_unique<LinkEndpoint>(registry, id, std::move(uids), [this] { publish(); });
+        publish();  // the shell's constructor publishes its empty document
+    }
+    LinkInstance(const LinkInstance&) = delete;
+    LinkInstance& operator=(const LinkInstance&) = delete;
+
+    void publish() { endpoint->publishOwn(store, lineage, *own, publication); }
+
+    static void run(const LinkRegistry::Hooks& hooks) {
+        for (const auto& hook : hooks) {
+            REQUIRE(hook != nullptr);
+            (*hook)();
+        }
+    }
+
+    /// A command: `fn` on the store, then a publish.
+    void edit(const std::function<void(DocumentStore&)>& fn) {
+        fn(store);
+        publish();
+    }
+
+    /// A document of its own (no state load): replaced, then a publish.
+    void open(const DocumentStore& doc) {
+        store.replace(doc.doc(), doc.nextId(), doc.nextSectionId(), doc.nextTrackId(), doc.nextNoteId());
+        publish();
+    }
+
+    /// A state load with the instance block: the document replaced, a new lineage, then `adopt`.
+    void load(const DocumentStore& doc, const InstanceState& link, std::string newLineage) {
+        store.replace(doc.doc(), doc.nextId(), doc.nextSectionId(), doc.nextTrackId(), doc.nextNoteId());
+        lineage = std::move(newLineage);
+        LinkRegistry::Hooks hooks;
+        endpoint->adopt(link, hooks);
+        run(hooks);
+        publish();
+    }
+
+    /// A follow by command, with the leader's lineage as this instance's view shows it.
+    void follow(const std::string& leaderId, const std::string& laneUid) {
+        std::string leaderLineage;
+        for (const LinkLeaderView& leader : endpoint->view().leaders) {
+            if (leader.id == leaderId) leaderLineage = leader.lineage;
+        }
+        REQUIRE_FALSE(leaderLineage.empty());
+        LinkRegistry::Hooks hooks;
+        REQUIRE(endpoint->follow(leaderId, laneUid, leaderLineage, hooks) == LinkFollowResult::Applied);
+        run(hooks);
+        publish();
+    }
+
+    /// The lane uid this instance gave track `trackId`.
+    std::string laneUid(int trackId) const {
+        const std::string uid = endpoint->state().lanes.at(trackId);
+        REQUIRE_FALSE(uid.empty());
+        return uid;
+    }
+};
+
+/// The progression fixture with track 1 "Bass" (bass) and track 2 "Lead" (lead), a few notes each.
+DocumentStore linkSongStore() {
+    DocumentStore store = progressionStore(nullptr);
+    REQUIRE(store.addTrack(TrackRole::Bass, std::string("Bass")) == 1);
+    REQUIRE(store.addTrack(TrackRole::Lead, std::string("Lead")) == 2);
+    REQUIRE(store.insertNotes(1, {NoteSpec{36, 0, 960, 100}, NoteSpec{45, 3840, 960, 100}}).size() == 2);
+    REQUIRE(store.insertNotes(2, {NoteSpec{72, 960, 480, 100}}).size() == 1);
+    return store;
+}
+
+/// Another project: one chord and track 1 "Keys" (other).
+DocumentStore linkOtherStore() {
+    DocumentStore store;
+    store.appendChord(chordOf(2, "m7"), 8.0, 100);
+    REQUIRE(store.addTrack(TrackRole::Other, std::string("Keys")) == 1);
+    return store;
+}
+
+/// link-state-leader.json: ChordLab B, a duplicate of ChordLab A (it loaded A's state while A lived, so it is a
+/// copy under a fresh id), sees A (chords and two tracks; A muted its Lead after the copy was made, and C follows
+/// A's Bass) and leads two followers of its own: D plays its chords, E its Lead (track 2).
+std::string linkStateLeader() {
+    LinkRegistry registry;
+    const LinkEndpoint::UidGenerator uids = fixtureUids();
+    auto a = std::make_unique<LinkInstance>(registry, "id-original", uids);
+    a->open(linkSongStore());
+    auto b = std::make_unique<LinkInstance>(registry, "id-ctor-b", uids);
+    b->load(a->store, a->endpoint->state(), "lineage-copy-1");  // Live's duplicate of A's chain
+    a->edit([](DocumentStore& d) { REQUIRE(d.setTrackMute(2, true)); });
+    auto c = std::make_unique<LinkInstance>(registry, "id-follower-c", uids);
+    auto d = std::make_unique<LinkInstance>(registry, "id-follower-d", uids);
+    auto e = std::make_unique<LinkInstance>(registry, "id-follower-e", uids);
+    const std::string copyId = b->endpoint->view().id;
+    c->follow("id-original", a->laneUid(1));
+    d->follow(copyId, std::string(kChordsLaneUid));
+    e->follow(copyId, b->laneUid(2));
+    return linkStateJson(b->endpoint->view());
+}
+
+/// link-state-follower.json: a duplicated group. ChordLab B follows the Bass of ChordLab A; then both were
+/// duplicated (C is A's copy, D is B's copy and so follows A's Bass too). D's view: playing, offered C instead.
+std::string linkStateFollower() {
+    LinkRegistry registry;
+    const LinkEndpoint::UidGenerator uids = fixtureUids();
+    auto a = std::make_unique<LinkInstance>(registry, "id-leader", uids);
+    a->open(linkSongStore());
+    auto b = std::make_unique<LinkInstance>(registry, "id-follower", uids);
+    b->follow("id-leader", a->laneUid(1));
+    auto c = std::make_unique<LinkInstance>(registry, "id-ctor-c", uids);
+    c->load(a->store, a->endpoint->state(), "lineage-leader-copy-1");
+    auto d = std::make_unique<LinkInstance>(registry, "id-ctor-d", uids);
+    d->load(b->store, b->endpoint->state(), "lineage-follower-copy-1");
+    return linkStateJson(d->endpoint->view());
+}
+
+/// link-state-waiting.json: ChordLab B followed the Bass of ChordLab A and was saved; B and A are gone, and
+/// ChordLab D loads B's saved state (B's id, its follow with the hints saved then) while A is missing. D sees
+/// ChordLab C, another leader, and waits.
+std::string linkStateWaiting() {
+    LinkRegistry registry;
+    const LinkEndpoint::UidGenerator uids = fixtureUids();
+    auto a = std::make_unique<LinkInstance>(registry, "id-leader", uids);
+    a->open(linkSongStore());
+    auto b = std::make_unique<LinkInstance>(registry, "id-follower", uids);
+    b->follow("id-leader", a->laneUid(1));
+    auto c = std::make_unique<LinkInstance>(registry, "id-other", uids);
+    c->open(linkOtherStore());
+    const DocumentStore savedDoc = b->store;
+    const InstanceState savedLink = b->endpoint->state();
+    b.reset();
+    a.reset();
+    auto d = std::make_unique<LinkInstance>(registry, "id-ctor-d", uids);
+    d->load(savedDoc, savedLink, "lineage-follower-2");
+    return linkStateJson(d->endpoint->view());
+}
+
+/// Every member of `object` by name.
+std::set<std::string> keysOf(const json& object) {
+    std::set<std::string> keys;
+    for (auto it = object.begin(); it != object.end(); ++it) keys.insert(it.key());
+    return keys;
+}
+
+using Keys = std::set<std::string>;
+
+/// The members linkStateJson documents (json_api.h), at every level of `text`.
+void checkLinkStateShape(const std::string& text) {
+    const json j = json::parse(text);
+    CHECK(keysOf(j) == Keys{"schema", "self", "following", "leaders", "routed"});
+    CHECK(j.at("schema") == kJsonSchema);
+    CHECK(keysOf(j.at("self")) == Keys{"id", "label", "copyOf"});
+    if (!j.at("self").at("copyOf").is_null()) CHECK(keysOf(j.at("self").at("copyOf")) == Keys{"leader", "label"});
+    if (!j.at("following").is_null()) {
+        CHECK(keysOf(j.at("following")) ==
+              Keys{"leader", "leaderLabel", "lane", "laneName", "role", "status", "switchTo"});
+        if (!j.at("following").at("switchTo").is_null()) {
+            CHECK(keysOf(j.at("following").at("switchTo")) == Keys{"leader", "label"});
+        }
+    }
+    for (const json& leader : j.at("leaders")) {
+        CHECK(keysOf(leader) == Keys{"id", "label", "lineage", "lanes"});
+        for (const json& lane : leader.at("lanes")) {
+            CHECK(keysOf(lane) == Keys{"lane", "name", "role", "chords", "audible", "followers"});
+        }
+    }
+    for (const json& lane : j.at("routed")) CHECK(keysOf(lane) == Keys{"lane", "followers", "trackId"});
+}
+
+}  // namespace
+
+TEST_CASE("golden fixtures: the link states match the committed files byte for byte, and are the same every run") {
+    const std::string leader = linkStateLeader();
+    const std::string follower = linkStateFollower();
+    const std::string waiting = linkStateWaiting();
+    CHECK(linkStateLeader() == leader);
+    CHECK(linkStateFollower() == follower);
+    CHECK(linkStateWaiting() == waiting);
+    checkGolden("link-state-leader.json", leader);
+    checkGolden("link-state-follower.json", follower);
+    checkGolden("link-state-waiting.json", waiting);
+}
+
+TEST_CASE("golden fixtures: the link states carry the documented members and what each one is for") {
+    for (const std::string& text : {linkStateLeader(), linkStateFollower(), linkStateWaiting()}) {
+        checkLinkStateShape(text);
+    }
+
+    const json leader = json::parse(linkStateLeader());
+    CHECK(leader.at("self").at("label") == "ChordLab B");
+    CHECK(leader.at("self").at("id") != "id-original");
+    CHECK(leader.at("self").at("copyOf") == json({{"leader", "id-original"}, {"label", "ChordLab A"}}));
+    CHECK(leader.at("following").is_null());
+    REQUIRE(leader.at("leaders").size() == 1);  // followers are never listed
+    const json& original = leader.at("leaders").at(0);
+    CHECK(original.at("id") == "id-original");
+    CHECK(original.at("lineage") == "lineage-id-original");
+    REQUIRE(original.at("lanes").size() == 3);
+    CHECK(original.at("lanes").at(0).at("lane") == kChordsLaneUid);
+    CHECK(original.at("lanes").at(1).at("name") == "Bass");
+    CHECK(original.at("lanes").at(1).at("followers") == 1);
+    CHECK(original.at("lanes").at(2).at("name") == "Lead");
+    CHECK(original.at("lanes").at(2).at("audible") == false);
+    REQUIRE(leader.at("routed").size() == 2);
+    CHECK(leader.at("routed").at(0) == json({{"lane", kChordsLaneUid}, {"followers", 1}, {"trackId", 0}}));
+    CHECK(leader.at("routed").at(1).at("trackId") == 2);
+    CHECK(leader.at("routed").at(1).at("followers") == 1);
+
+    const json follower = json::parse(linkStateFollower());
+    CHECK(follower.at("self").at("copyOf").is_null());  // a follower that is a copy has switchTo instead
+    const json& following = follower.at("following");
+    CHECK(following.at("leader") == "id-leader");
+    CHECK(following.at("leaderLabel") == "ChordLab A");
+    CHECK(following.at("laneName") == "Bass");
+    CHECK(following.at("role") == "bass");
+    CHECK(following.at("status") == "playing");
+    CHECK(following.at("switchTo").at("label") == "ChordLab C");
+    REQUIRE(follower.at("leaders").size() == 2);
+    CHECK(follower.at("leaders").at(0).at("lanes").at(1).at("followers") == 2);  // B and D play A's Bass
+    CHECK(following.at("switchTo").at("leader") == follower.at("leaders").at(1).at("id"));
+    CHECK(follower.at("routed") == json::array());
+
+    const json waiting = json::parse(linkStateWaiting());
+    CHECK(waiting.at("self") == json({{"id", "id-follower"}, {"label", "ChordLab D"}, {"copyOf", nullptr}}));
+    CHECK(waiting.at("following").at("status") == "waiting");
+    CHECK(waiting.at("following").at("leader") == "id-leader");
+    CHECK(waiting.at("following").at("leaderLabel") == "ChordLab A");  // the hints saved with the follow
+    CHECK(waiting.at("following").at("laneName") == "Bass");
+    CHECK(waiting.at("following").at("role") == "bass");
+    CHECK(waiting.at("following").at("switchTo").is_null());
+    REQUIRE(waiting.at("leaders").size() == 1);
+    CHECK(waiting.at("leaders").at(0).at("label") == "ChordLab C");
+    CHECK(waiting.at("routed") == json::array());
 }
