@@ -9,6 +9,9 @@ import Foundation
 ///   command, edits, selections, the transport switches and the key hint's flag among them, stays in the editor;
 /// - previews: no start (`"on": true`) passes; stops (`"on": false`) and extends pass, so a hold that was sounding
 ///   when the panel appeared still ends.
+/// - holds: no new one starts (`allowsHold`): the state asks before the preview book changes, so a press the editor
+///   left outstanding records nothing (no held cell, no keep-alive, nothing for its release or Record to act on); a
+///   hold begun before following still ends with its stop.
 /// Not gated, because the panel needs them or they do not touch the document: Panic, the snapshot request, the link
 /// messages, the heard group's clear, and an export request (it only reads the document).
 ///
@@ -31,5 +34,10 @@ enum LinkGate {
   static func allowsPreview(_ fields: [String: Any], following: Bool) -> Bool {
     guard following else { return true }
     return (fields["on"] as? Bool) != true
+  }
+
+  /// Whether a new hold (a palette cell, a key of the roll's keyboard, a roll note, a one-shot) may start.
+  static func allowsHold(following: Bool) -> Bool {
+    !following
   }
 }

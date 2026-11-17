@@ -145,6 +145,23 @@ final class PreviewBookTests: XCTestCase {
     XCTAssertEqual(book.held?.owner, .roll(trackId: 1))
   }
 
+  /// While the instance follows another ChordLab (`LinkGate.allowsHold` false) the roll starts nothing: no start, no
+  /// hold, no one-shot; its commands still go to the state's sender (which gates them), and the stop of a hold begun
+  /// before still goes out.
+  func testWithoutStartsTheRollNeitherHoldsNorSoundsButStillStops() {
+    var book = PreviewBook()
+    _ = book.perform([.previewStart(pitch: 40, velocity: 100)], trackId: 1)                       // begun before
+    XCTAssertEqual(book.perform([.send(select), .previewStart(pitch: 41, velocity: 100),
+                                 .previewOneShot(pitch: 42, velocity: 100)], trackId: 2, startsAllowed: false),
+                   [.command(select)])
+    XCTAssertEqual(book.held, PreviewHold(id: 1, owner: .roll(trackId: 1)), "the earlier hold is untouched")
+    XCTAssertEqual(book.oneShots, [])
+    XCTAssertEqual(book.perform([.previewStop], trackId: 1, startsAllowed: false), [.preview(.stop(id: 1))])
+    XCTAssertNil(book.held)
+    XCTAssertEqual(book.perform([.previewStart(pitch: 43, velocity: 100)], trackId: 1, startsAllowed: false), [])
+    XCTAssertNil(book.held)
+  }
+
   func testAOneShotStartsAtOnceAndStopsOnceWhenItEnds() {
     var book = PreviewBook()
     let insert = RollCommand.insertNotes(trackId: 1, notes: [RollNoteSpec(pitch: 48, start: 4800, length: 480, velocity: 100)],

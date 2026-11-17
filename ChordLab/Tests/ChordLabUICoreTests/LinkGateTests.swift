@@ -37,4 +37,12 @@ final class LinkGateTests: XCTestCase {
     XCTAssertTrue(LinkGate.allowsPreview(stop, following: true))
     XCTAssertTrue(LinkGate.allowsPreview(extend, following: true))
   }
+
+  /// A new hold (a palette cell, a key of the roll's keyboard, a roll note, a one-shot) starts only while not
+  /// following: the state asks before any preview bookkeeping changes, so a refused press leaves nothing for its
+  /// release (no held cell, no keep-alive, no Record insert).
+  func testNoNewHoldWhileFollowing() {
+    XCTAssertTrue(LinkGate.allowsHold(following: false))
+    XCTAssertFalse(LinkGate.allowsHold(following: true))
+  }
 }

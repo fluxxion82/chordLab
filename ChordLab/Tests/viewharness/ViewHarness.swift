@@ -379,7 +379,9 @@ struct Scenario {
     }),
     Scenario(name: "gate-retained-callbacks", setup: { h, state, shell in
       // Callbacks the editor left outstanding when the panel appeared: a roll menu choice, a rename commit, an append,
-      // a cell press. None of them may leave; the panel's Thru and Panic do.
+      // a cell press with Record on. None of them may leave, and the press may leave nothing behind for its release:
+      // the instance stops following before the button comes up. The panel's Thru and Panic do leave. (No explicit
+      // releaseHeld here: it would hide a press the book recorded.)
       state.applySnapshot(json: h.data("snapshot-tracks.json"))
       state.applyLinkState(json: follower(h, status: "playing"))
       shell.clear()
@@ -387,17 +389,31 @@ struct Scenario {
                                                      notesOnPasteboard: false))
       state.renameTrack(id: 1, draft: "Renamed")
       state.send(command: ["cmd": "appendChord", "root": 0, "type": "maj"])
-      if let cell = state.snapshot?.palette.cells.first { state.pressCell(cell) }
-      state.releaseHeld()
       state.thru.wrappedValue = false
-      state.panic()
+      state.panic()                                                    // before the presses: Panic ends any hold
+      _ = state.pressKey(pitch: 60)                                    // a keyboard-column press of the roll
+      state.performRollEffects([.previewStart(pitch: 40, velocity: 100), .previewOneShot(pitch: 41, velocity: 100)],
+                               trackId: 1)                             // a roll note press and an inserted note's sound
+      h.observed["key held while following"] = state.isKeepingPreviewAlive
+      state.recording = true
+      let cell = state.snapshot?.palette.cells.first
+      if let cell { state.pressCell(cell) }
+      h.observed["held while following"] = state.heldCellId != nil
+      h.observed["kept alive while following"] = state.isKeepingPreviewAlive
+      state.applyLinkState(json: h.json("link-state-follower.json") { $0["following"] = NSNull() })
+      if let cell { state.releaseCell(cell, PressRelease(reason: .buttonUp, heldSeconds: 0.6)) }
+      h.observed["held at the end"] = state.heldCellId != nil
     }, checks: { h, r in
-      h.checkPanel(r, rows: ["status", "actions", "controls", "notes"], absent: ["switch"])
+      h.checkEditor(r, banner: false, followMenu: true)
       let commands = r.shell.sent.filter { $0.tag == kMsgTagCommand }.compactMap { $0.json?["cmd"] as? String }
-      h.check(commands == ["setMidiThru"], "only the panel's Thru command left (\(commands))")
+      h.check(commands == ["setMidiThru"], "only the panel's Thru command left, no insertChords for the press (\(commands))")
       let starts = r.shell.sent.filter { $0.tag == kMsgTagPreview && $0.json?["on"] as? Bool == true }
       h.check(starts.isEmpty, "no preview start left")
       h.check(r.shell.sent.contains { $0.tag == kMsgTagPanic }, "Panic left")
+      h.check(h.observed["held while following"] == false, "the retained press held no cell")
+      h.check(h.observed["kept alive while following"] == false && h.observed["key held while following"] == false,
+              "no keep-alive timer ran for a refused hold (a cell, a key, a roll note)")
+      h.check(h.observed["held at the end"] == false, "nothing is held after the release")
     }),
     Scenario(name: "dismiss-reopen", setup: { h, state, _ in
       // Not now, then the window closed and opened again: a new state of the same instance and document.
@@ -594,6 +610,8 @@ struct Render {
   private var passed = 0
   private var failures: [String] = []
   private var current = ""
+  /// What a scenario's setup saw on the way (for its checks); emptied before every run.
+  var observed: [String: Bool] = [:]
 
   init(fixtures: URL, out: URL, header: URL) {
     self.fixtures = fixtures
@@ -692,6 +710,7 @@ struct Render {
   func run(_ scenario: Scenario, size: CGSize) {
     current = "\(scenario.name) \(Int(size.width))x\(Int(size.height))"
     print("== \(current)")
+    observed = [:]
     let defaults = MemoryDefaults()
     let shell = ShellStub()
     let state = ChordLabState(sendCommand: { tag, data in shell.receive(tag: tag, data: data) },

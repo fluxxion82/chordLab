@@ -208,8 +208,10 @@ class ChordLabState: NSObject, ObservableObject {
   /// Sounds `cell`'s voicing. At most one preview is held (`PreviewBook`): pressing a cell first ends the held one
   /// (a roll's with its gesture's cancel), so every Start this object sends is matched by exactly one Stop with the
   /// same id (and the scheduler's 4 s watchdog ends a preview whose Stop never arrived; `extend`s every second keep a
-  /// held one alive).
+  /// held one alive). While this instance follows another ChordLab nothing happens (`LinkGate.allowsHold`): a press the
+  /// editor left outstanding holds no cell, runs no keep-alive and leaves nothing for its release or Record.
   @MainActor func pressCell(_ cell: CellJSON) {
+    guard LinkGate.allowsHold(following: LinkKeys.isFollowing(linkState)) else { return }
     targetChords()
     route(previews.hold(.cell(cell.id), pitches: Array(cell.voicing.filter { (0...127).contains($0) }.prefix(8)),
                         velocity: 100).outputs)
@@ -243,9 +245,9 @@ class ChordLabState: NSObject, ObservableObject {
 
   /// A press on the roll's keyboard column (tracks design D14: clicking a key previews it): holds `pitch` until
   /// `releaseKey(id:)` with the id returned (or a lost release, which the keep-alive ends), ending any other hold
-  /// first. Nil for a pitch outside 0...127.
+  /// first. Nil for a pitch outside 0...127, and while this instance follows another ChordLab (`LinkGate.allowsHold`).
   @MainActor func pressKey(pitch: Int) -> Int? {
-    guard (0...127).contains(pitch) else { return nil }
+    guard (0...127).contains(pitch), LinkGate.allowsHold(following: LinkKeys.isFollowing(linkState)) else { return nil }
     let held = previews.hold(.key(pitch: pitch), pitches: [pitch], velocity: PianoKeys.velocity)
     route(held.outputs)
     return held.id
@@ -336,6 +338,10 @@ class ChordLabState: NSObject, ObservableObject {
     keepAlive = timer
     keepAliveId = id
   }
+
+  /// Whether the keep-alive timer runs (a preview is held): for the render harness, which checks that a refused hold
+  /// leaves none.
+  var isKeepingPreviewAlive: Bool { keepAlive != nil }
 
   @MainActor private func stopKeepAlive() {
     keepAlive?.invalidate()
@@ -747,10 +753,12 @@ class ChordLabState: NSObject, ObservableObject {
   /// selection echo or a commit's new revision reaches the roll here, after the effects' state was published.
   ///
   /// `rollEffectsObserver` (nil in production) sees every call first, so a test or the harness can check what reaches
-  /// the seam.
+  /// the seam. While this instance follows another ChordLab no roll preview starts (`LinkGate.allowsHold`, passed to
+  /// `PreviewBook.perform`); the stop of a hold begun before still goes out.
   @MainActor func performRollEffects(_ effects: [RollEffect], trackId: Int) {
     rollEffectsObserver?(effects, trackId)
-    route(previews.perform(effects, trackId: trackId))
+    route(previews.perform(effects, trackId: trackId,
+                           startsAllowed: LinkGate.allowsHold(following: LinkKeys.isFollowing(linkState))))
   }
 
   /// The toolbar's nudge ◀ ▶ ▲ ▼ for track `trackId` (`RollNudge.command`): one `updateNotes` of the selected notes

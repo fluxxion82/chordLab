@@ -145,12 +145,16 @@ struct PreviewBook: Equatable {
   /// command; a `previewStart` ends the held preview (another owner's with `.cancelRoll` for a roll; this track's own,
   /// which its machine always stops first, without) and holds as `.roll(trackId)`; a `previewStop` stops this track's
   /// roll hold and nothing else (never a second stop); a `previewOneShot` starts under a new id and schedules its end.
-  mutating func perform(_ effects: [RollEffect], trackId: Int) -> [PreviewOutput] {
+  /// Without `startsAllowed` (`LinkGate.allowsHold`: this instance follows another ChordLab) a `previewStart` or a
+  /// `previewOneShot` changes nothing and sends nothing; commands and stops go on as ever.
+  mutating func perform(_ effects: [RollEffect], trackId: Int, startsAllowed: Bool = true) -> [PreviewOutput] {
     var outputs: [PreviewOutput] = []
     for effect in effects {
       switch effect {
       case .send(let command):
         outputs.append(.command(command))
+      case .previewStart where !startsAllowed, .previewOneShot where !startsAllowed:
+        continue
       case .previewStart(let pitch, let velocity):
         outputs += stopHeld(keepingGesture: held?.owner == .roll(trackId: trackId))
         outputs.append(start(.roll(trackId: trackId), pitches: [pitch], velocity: velocity).output)
