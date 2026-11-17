@@ -49,7 +49,8 @@ struct LinkRequest
 ///  4. An exception (in practice only std::bad_alloc) is "link message could not be parsed".
 /// Other members are ignored, and in particular the message's own `lineage` (the editor's document lineage, on
 /// every command): the shell reads it separately with readLineage (command_lineage.h), so it is neither required,
-/// parsed nor rejected here, whatever its type. Duplicate members are nlohmann's call: the last one wins.
+/// parsed nor rejected here, whatever its type; a missing one is refused after that, by linkOutcome (link_outcome.h,
+/// kMissingLinkLineageError). Duplicate members are nlohmann's call: the last one wins.
 /// On success `*problem` is left untouched.
 inline std::optional<LinkRequest> parseLinkRequest(std::string_view json, std::string* problem = nullptr)
 {

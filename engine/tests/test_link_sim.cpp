@@ -1895,3 +1895,77 @@ TEST_CASE("link sim: transport histories") {
         checkWithin(pf.absolute(46), ref->absolute(46), bound, "follower after its first block");
     }
 }
+
+// The shell's dirty decision for a link message (ChordLab::HandleLink): the follow the state would save,
+// `LinkEndpoint::state().follow`, read before and after the follow or unfollow in the same model-mutex section,
+// differs. The host is marked dirty only then (for a follow, only when it was Applied too: bridge/link_outcome.h).
+TEST_CASE("link sim: the saved follow changes exactly when a link message changes what the follower would save") {
+    const Song s = song();
+    World w;
+    auto leader = w.make("L");
+    leader->loadDocument(s.state);
+    auto follower = w.make("F");
+    follower->loadDocument(followerOwn());
+    const std::string lane = leader->laneUid(s.bass);
+    REQUIRE_FALSE(lane.empty());
+
+    // HandleLink's step: the comparison around the endpoint call, under the model mutex; then, holding nothing, the
+    // hooks and the instance's own republish.
+    Result result = Result::Applied;
+    auto follow = [&](const std::string& leaderLineage, const std::string& uid) {
+        Hooks hooks;
+        const std::optional<LinkFollow> before = follower->endpoint().state().follow;
+        result = follower->followStep("L", uid, leaderLineage, hooks);
+        const bool changed = follower->endpoint().state().follow != before;
+        FakeInstance::run(hooks);
+        follower->republish();
+        return changed;
+    };
+    auto unfollow = [&] {
+        const std::optional<LinkFollow> before = follower->endpoint().state().follow;
+        const Hooks hooks = follower->unfollowStep();
+        const bool changed = follower->endpoint().state().follow != before;
+        FakeInstance::run(hooks);
+        follower->republish();
+        return changed;
+    };
+
+    // Not following, then a follow: changed.
+    CHECK(follow(lineageOf(*follower, "L"), lane));
+    CHECK(result == Result::Applied);
+    REQUIRE(follower->view().status == LinkStatus::Playing);
+
+    // The same follow again: Applied, nothing the state saves changed.
+    CHECK_FALSE(follow(lineageOf(*follower, "L"), lane));
+    CHECK(result == Result::Applied);
+
+    // A refused follow (the leader's lineage is stale): unchanged.
+    CHECK_FALSE(follow("a-stale-lineage", lane));
+    CHECK(result == Result::StaleLeader);
+
+    // A loaded state whose follow carries an old leaderLabel hint while it binds to the same leader: what the state
+    // saves shows the bound leader's current label, so a re-follow of the same lane changes nothing.
+    Saved saved = follower->save();
+    REQUIRE(saved.link.follow.has_value());
+    const std::string label = saved.link.follow->leaderLabel;
+    saved.link.follow->leaderLabel = "ChordLab Z";
+    follower->load(saved);
+    REQUIRE(follower->view().status == LinkStatus::Playing);
+    CHECK(follower->endpoint().state().follow->leaderLabel == label);   // replaced while bound
+    CHECK_FALSE(follow(lineageOf(*follower, "L"), lane));
+    CHECK(result == Result::Applied);
+
+    // A follow of another lane of the same leader: changed (the link, not only whether there is one).
+    CHECK(follow(lineageOf(*follower, "L"), std::string(kChordsLaneUid)));
+    CHECK(result == Result::Applied);
+
+    // The leader destroyed: the follower waits and still saves its follow; an unfollow then changes it.
+    leader.reset();
+    REQUIRE(follower->view().status == LinkStatus::Waiting);
+    REQUIRE(follower->endpoint().state().follow.has_value());
+    CHECK(unfollow());
+    CHECK_FALSE(follower->endpoint().state().follow.has_value());
+
+    // An unfollow when not following: unchanged.
+    CHECK_FALSE(unfollow());
+}

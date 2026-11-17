@@ -3,6 +3,8 @@
 #include "IPlug_include_in_plug_hdr.h"
 
 #include "chordlab/document.h"
+#include "chordlab/lifeline.h"
+#include "chordlab/link.h"
 #include "chordlab/listener.h"
 #include "chordlab/midi_in.h"
 #include "chordlab/palette.h"
@@ -68,10 +70,27 @@ private:
   // Palette of the browsed key annotated against the project key; call after anything that may have
   // changed either key (commands, undo/redo, a state load). The caller holds mModelMutex.
   void RebuildPaletteLocked();
-  // Compiles the document and, when anything a slot carries changed (content, followHost or midiThru), publishes
-  // it to the audio thread (see "Playback snapshots" in ChordLab.mm). Call after every accepted command
-  // and state load. The caller holds mModelMutex, which is what makes it a single producer.
+  // The instance's publish, through its link endpoint (LinkEndpoint::publishOwn): compiles the document and, when
+  // anything a slot carries changed (content, followHost or midiThru), publishes it to the audio thread, without
+  // the lanes other instances follow, and hands those lanes to their followers (see "Playback snapshots" and
+  // "Links" in ChordLab.mm). Call after every accepted command and state load, after a state load's hooks, and from
+  // the republish hook other instances run. The caller holds mModelMutex, which is what makes it the own buffer's
+  // single producer.
   void PublishSnapshotLocked();
+  // Runs the hooks a link operation returned (LinkEndpoint::adopt and adoptWithoutBlock today, follow and unfollow
+  // with the link messages), in order, skipping a null or empty one. The caller holds NO lock: not mModelMutex and
+  // not this instance's Lifeline mutex (so never from inside an OnMain hop); each hook enters its own instance
+  // through that instance's Lifeline, then its mModelMutex (see "Links" in ChordLab.mm). Any non-audio thread.
+  static void RunHooks(const chordlab::LinkRegistry::Hooks& hooks);
+  // A fresh random UUID string ([NSUUID UUID]), in its own autorelease pool, so any thread may call it: the
+  // instance id, the clipboard token, and the link endpoint's uid generator (document ids, lane uids, the id of a
+  // copy). Nothing weaker may ever replace it: the engine relies on a uid never being returned twice, across
+  // instances and processes (LinkEndpoint::UidGenerator, LaneUids::Generator).
+  static std::string MakeUid();
+  // The serial of the process's shared link registry (chordlab::LinkRegistry::shared(), never destroyed) for an
+  // instance that links (kLinks, the VST3), else 0. Any thread; touches no member, so OnIdle may call it whatever a
+  // destructor on another thread is doing.
+  static uint64_t LinkSerial();
   // Pushes snapshotJson(doc, palette) to the editor, on the main thread; a no-op when no editor is open.
   void PushSnapshot();
   // Pushes {"schema":1,"error":message} to the editor, on the main thread.
@@ -148,6 +167,18 @@ private:
   void WriteExport(const std::vector<uint8_t>& bytes, const std::string& label);
   // Main thread: pushes {"schema":1,"path":path} to the editor.
   void PushExportReady(const std::string& path);
+  // A kMsgTagLink payload (follow a leader's lane, or stop following; plan I9, I12). Main thread, called only inline
+  // from OnMessage, never from inside an OnMain hop, so it holds no Lifeline lock when it runs the hooks. Parsed
+  // (parseLinkRequest; a failure is a kMsgTagError), its "lineage" read before mModelMutex and compared under it as
+  // a command's, except that an absent one is refused (kMissingLinkLineageError); when it is current,
+  // LinkEndpoint::follow / unfollow in that section, then the hooks with nothing held,
+  // then the own republish. What follows (dirty, snapshot, error) is chordlab::bridge::linkOutcome; the fresh link
+  // state is pushed after every parsed message.
+  void HandleLink(std::string_view json);
+  // Pushes linkStateJson(mLink->view()) as kMsgTagLinkState to an open editor, on the main thread (queued when called
+  // elsewhere); the JSON is built inside the hop under mModelMutex (order: Lifeline, model, the registry's). A no-op
+  // without an editor. Display only: nothing that plays depends on it.
+  void PushLinkState();
 
   static constexpr uint8_t kStateVersion = 2;   // 1 was the M0 spike payload; it is not migrated
 
@@ -158,18 +189,22 @@ private:
   chordlab::DocumentStore mStore;
   chordlab::Palette mPalette;
 
-  // Playback snapshots. PublishSnapshotLocked (the producer, under mModelMutex) runs chordlab::fillSlot
-  // on the back slot of mSnapshots and publishes it when anything changed; ProcessBlock (the consumer)
-  // acquires the newest slot at the top of every block and hands the scheduler a Snapshot pointing into
-  // it, which the triple buffer keeps unmodified until the next acquire: exactly the lifetime adopt
-  // requires. Every slot is preallocated, so the handoff never allocates, locks or blocks either thread.
+  // Playback snapshots, the instance's own buffer. PublishSnapshotLocked (the producer, under mModelMutex) has
+  // mLink->publishOwn run chordlab::fillSlot on the back slot of mSnapshots and publish it when anything changed;
+  // ProcessBlock (the consumer, through mLinkSource.select) acquires the newest slot at the top of every block and
+  // hands the scheduler a Snapshot pointing into it, which the triple buffer keeps unmodified until the next
+  // acquire: exactly the lifetime adopt requires. The link buffer (mLink->linkBuffer()) works the same way with
+  // the registry as its producer; see "Links" in ChordLab.mm. Every slot is preallocated, so the handoff never allocates, locks or blocks either thread.
   // The generation (mPublication.generation) moves only with the content, so the scheduler's rule "same
   // generation, same content" holds; followHost and midiThru travel in the slot outside the generation, so
   // a block always gates the progression it is playing (and its thru) with the flags that were saved with
   // it, and a flag-only change costs the scheduler nothing (publication.h). mPublication belongs to the
-  // producer.
+  // producer (under mModelMutex) and is never reset, not even by a state load.
   chordlab::TripleBuffer<chordlab::SnapshotSlot> mSnapshots;
   chordlab::Publication mPublication;
+  // Audio thread only (ProcessBlock): which of the two buffers the scheduler plays, mSnapshots or the link buffer,
+  // and the adopt that switches between them (LinkSource::select). No lock, no allocation.
+  chordlab::LinkSource mLinkSource;
 
   // The scheduler belongs to the audio thread (process, reset, panic, and pushThru from HandleMidiIn);
   // pushPreview is its one other-thread entry and is called from the main thread only (OnMessage,
@@ -227,6 +262,7 @@ private:
   uint32_t mAppliedEpoch = 0;                                  // render thread only: the last epoch whose reset the drain performed
 #endif
   uint32_t mReportedDroppedHeard = 0;                          // main thread: last value pushed to the UI
+  uint64_t mReportedLinkSerial = 0;                            // main thread: LinkSerial() when a link state was last pushed (OnUIOpen, OnIdle, HandleLink, a snapshot request)
   chordlab::Listener mListener;                                // main thread only (it may allocate)
   std::chrono::steady_clock::time_point mLastHeardTick{};      // main thread: the last mListener.advance
   static constexpr std::chrono::milliseconds kHeardInterval{67};   // key evaluation and heard pushes, at most ~15 Hz
@@ -264,13 +300,35 @@ private:
   void* mAUHostView = nullptr;
 #endif
 
-  // Shared with the main-thread hops OnMain queues. A hop runs under `mutex` and skips `fn` once `alive`
-  // is false; the destructor flips `alive` under the same mutex, so it waits for a hop that is running
-  // and makes later ones no-ops. Lock order: Lifeline::mutex, then mModelMutex (see ChordLab.mm).
-  struct Lifeline
-  {
-    std::mutex mutex;
-    bool alive = true;
-  };
+  // Shared with the main-thread hops OnMain queues and with the republish hook other instances hold
+  // (chordlab::guardedHook). A hop or a hook runs under `mutex` and does nothing once `alive` is false; the
+  // destructor retires it (chordlab::retire: `alive` false under the same mutex), so it waits for a hop or hook
+  // that is running and makes later ones no-ops. Lock order: Lifeline::mutex, then mModelMutex, then the
+  // registry's mutex (see ChordLab.mm).
+  using Lifeline = chordlab::Lifeline;
   std::shared_ptr<Lifeline> mLifeline = std::make_shared<Lifeline>();
+
+  // Linking (per-track instruments plan I4 to I7, I15; "Links" in ChordLab.mm). Declared after mModelMutex, mStore,
+  // mSnapshots, mPublication and mLifeline, so destroyed before them; the destructor resets mLink explicitly anyway,
+  // after retiring mLifeline.
+  // Whether this instance links (plan I15): only the VST3 joins the process's shared registry, where other
+  // instances can see it. The one format conditional of linking: the constructor picks the registry by it,
+  // UnserializeState drops a loaded follow when it is false (chordlab::bridge::adoptableState: a follow that can never
+  // bind would leave the instance playing an empty link buffer), and HandleLink applies no link message when it is
+  // false (chordlab::bridge::linkApplies / linkOutcome).
+#if defined(VST3_API)
+  static constexpr bool kLinks = true;
+#else
+  static constexpr bool kLinks = false;
+#endif
+  // Not VST3 only: the registry of this instance alone, made in the constructor before mLink and destroyed after it
+  // (declared first); no other instance can see it, so the AU and the app run the same code and never link. Null
+  // under VST3, which joins chordlab::LinkRegistry::shared(). Touched by the constructor and the destructor only.
+  std::unique_ptr<chordlab::LinkRegistry> mPrivateRegistry;
+  // The instance's link endpoint: its registration, document id, lane uids, link buffer and feed. Made in the
+  // constructor (under mModelMutex, before the first publish) and non-null from then until the destructor's
+  // mLink.reset(), which ends that guarantee (after retiring mLifeline; PushLinkState checks it, OnIdle never reads
+  // it: LinkSerial). Every call is made under mModelMutex (main thread, the host's state thread), except following()
+  // and linkBuffer(), the audio thread's (ProcessBlock).
+  std::unique_ptr<chordlab::LinkEndpoint> mLink;
 };
