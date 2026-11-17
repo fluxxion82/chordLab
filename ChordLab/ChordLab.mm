@@ -1043,14 +1043,14 @@ void ChordLab::HandlePreview(std::string_view text)
   // Main thread, never real-time: nlohmann parses here (parsePreviewRequest, which owns the validation
   // rules and the error texts), the scheduler only ever sees plain PreviewCmd.
   std::string problem;
-  const std::optional<chordlab::PreviewCmd> parsed = chordlab::bridge::parsePreviewRequest(text, &problem);
+  const std::optional<chordlab::bridge::PreviewRequest> parsed = chordlab::bridge::parsePreviewRequest(text, &problem);
   if (!parsed)
   {
     DBGMSG("ChordLab: %s\n", problem.c_str());
     PushError(problem);
     return;
   }
-  const chordlab::PreviewCmd& cmd = *parsed;
+  const chordlab::PreviewCmd& cmd = parsed->cmd;
 #ifndef NDEBUG
   // NSLog rather than DBGMSG (a printf to the host's stdout): the Live test reads these in Console.app.
   NSLog(@"ChordLab: preview %s id %d",

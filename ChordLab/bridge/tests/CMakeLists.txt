@@ -1,6 +1,6 @@
 # Unit tests for the plug-in shell's pure C++ helpers (ChordLab/bridge). Standalone: the helpers are
-# header-only and need only the engine's headers (PreviewCmd, kJsonSchema), nlohmann and doctest, so
-# nothing from the engine is compiled or linked here.
+# header-only and need only the engine's headers (PreviewCmd, kJsonSchema, kForwardedPreviewIdFirst), nlohmann
+# and doctest, so nothing from the engine is compiled or linked here.
 #   cmake -S ChordLab/bridge/tests -B ChordLab/build-bridge-tests && cmake --build ChordLab/build-bridge-tests
 #   (cd ChordLab/build-bridge-tests && ctest --output-on-failure)
 cmake_minimum_required(VERSION 3.20)
