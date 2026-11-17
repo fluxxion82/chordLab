@@ -14,7 +14,9 @@
 // a no-op. That matters because destruction is not always on the main thread (AUv3's dealloc deletes the
 // plug-in on whatever thread releases the audio unit, IPlugAUAudioUnit.mm). No deadlock: the destructor
 // never runs inside a queued hop, the inline main-thread path takes no Lifeline lock (so a hop calling
-// PushSnapshot does not re-enter it), and the lock order is always Lifeline::mutex then mModelMutex.
+// PushSnapshot does not re-enter it), and the lock order is always Lifeline::mutex then mModelMutex (then the
+// link registry's mutex, a leaf; see "Links" below). The same Lifeline guards the republish hook other instances
+// run (chordlab::guardedHook), and the destructor retires it (chordlab::retire) before it leaves the registry.
 // Assumption: the host never destroys the plug-in re-entrantly from inside one of these hops (a resize
 // request or a snapshot push calling back into a host that deletes the plug-in on the spot); that would
 // run the destructor on the thread that already holds the non-recursive Lifeline mutex and deadlock.
@@ -59,24 +61,66 @@
 // stays armed and is released once blocks run again.
 //
 // Playback snapshots: the audio thread never reads the document; it plays a compiled copy. After every
-// accepted command and every state load (and once at construction), PublishSnapshotLocked runs
-// chordlab::fillSlot under mModelMutex on the back slot of a chordlab::TripleBuffer (three preallocated
-// chordlab::SnapshotSlots) and publishes it when anything changed; ProcessBlock acquires the newest
-// publish at the top of the block and calls Scheduler::adopt with a Snapshot that points into the front
-// slot. The buffer guarantees the front slot is not written until the next acquire, and the scheduler
+// accepted command and every state load (and once at construction, and whenever another instance runs this
+// one's republish hook; see "Links" below), PublishSnapshotLocked has the link endpoint
+// (LinkEndpoint::publishOwn) run chordlab::fillSlot under mModelMutex on the back slot of a
+// chordlab::TripleBuffer (three preallocated chordlab::SnapshotSlots, mSnapshots, the own buffer) and publish it
+// when anything changed; ProcessBlock (LinkSource::select) acquires the newest publish at the top of the block
+// and calls Scheduler::adopt with a Snapshot that points into the front slot. The buffer guarantees the front slot is not written until the next acquire, and the scheduler
 // never reads the previous array once the adopt that replaces it is entered (Snapshot in scheduler.h),
 // so the array stays valid and unchanged for exactly as long as adopt requires even though acquire has
 // already handed the old slot back to the producer. The producer side belongs to whoever holds mModelMutex (main thread for
-// commands, the host's state thread for UnserializeState); the consumer side belongs to ProcessBlock.
+// commands, the host's state thread for UnserializeState, any thread running this instance's republish hook); the
+// consumer side belongs to ProcessBlock.
 // Rapid edits coalesce: an unacquired publish is simply replaced by the next. The generation only moves
 // when the compiled content moved, so a browsed-key change or a followHost or midiThru toggle does not make
 // the scheduler flush and re-chase the sounding chord. followHost and midiThru travel inside the slot,
-// outside the generation (publication.h): ProcessBlock ANDs the acquired slot's followHost into
-// BlockInfo.playing and passes its midiThru as BlockInfo.thru, so the progression and the flags that were
-// saved with it always arrive together (a separate atomic could let a block chase an old progression with
-// a newly loaded flag). The other way, ProcessBlock stores the
+// outside the generation (publication.h): ProcessBlock ANDs the played slot's followHost into
+// BlockInfo.playing and passes the own slot's midiThru as BlockInfo.thru (the same slot unless the instance
+// follows: a follower keeps its own Thru switch and takes Follow Live from its leader's feed), so the
+// progression and the flags that were saved with it always arrive together (a separate atomic could let a
+// block chase an old progression with a newly loaded flag). The other way, ProcessBlock stores the
 // block's host position and playing flag in atomics (mTransportPpq, mTransportPlaying) and OnIdle, on
 // the main thread, pushes them, with the tempo, to the editor as the playhead at ~15 Hz when they change (the tempo also reaches Record, strip editing design D4).
+//
+// Links (per-track instruments plan I4 to I9, I11, I15): every instance has a link endpoint (mLink, engine
+// chordlab::LinkEndpoint) registered with a chordlab::LinkRegistry under a persistent instance id (MakeUid, a
+// random UUID; the endpoint draws document ids and lane uids from the same helper). Only the VST3 joins the
+// process's shared registry, where instances find each other and a follower plays one lane of a leader; the AU
+// and the app register with a registry of their own (mPrivateRegistry) that no other instance sees, so they run
+// the same code and behave as before. Two buffers feed the scheduler:
+// - the own buffer (mSnapshots): written only by LinkEndpoint::publishOwn, called only from
+//   PublishSnapshotLocked, so its producer is the holder of mModelMutex. A leading instance publishes there
+//   every lane nobody follows, and in the same call hands the registry a feed from which the registry writes its
+//   bound followers' link buffers; a following instance publishes its whole document there (not played, but its
+//   Thru rides in it and an unfollow returns to it). The shell never fills or publishes a buffer itself.
+// - the link buffer (mLink->linkBuffer()): written only by the registry, under the registry's mutex, from
+//   whichever instance's call is holding it (a leader's publish, a follow, an unfollow, a removal); never by this
+//   instance's code directly.
+// The audio thread reads mLink->following() (an atomic) and its two buffers, through LinkSource::select at the top
+// of ProcessBlock, and nothing else of the endpoint or the registry; HandleMidiIn, OnReset and the AU drain have no
+// link role. Every other endpoint call is made under mModelMutex. Lock order: Lifeline::mutex, then mModelMutex,
+// then the registry's mutex (a leaf: the registry calls nothing while holding it and never takes a model mutex),
+// and no thread holds two instances' model mutexes.
+// Hooks: an operation that changes who follows what (a state load's adopt or adoptWithoutBlock here; follow and
+// unfollow with the link messages) returns the republish hooks of the leaders it affected. The caller runs them
+// (RunHooks) after releasing every lock it holds, mModelMutex and its own Lifeline both (so never from inside an
+// OnMain hop), and then republishes itself (PublishSnapshotLocked under mModelMutex again), as UnserializeState
+// does: every buffer is right before the operation returns, with or without an idle timer. A hook
+// (chordlab::guardedHook) holds the target's Lifeline, not the target: it takes that instance's Lifeline mutex,
+// does nothing once it is retired, else takes its mModelMutex and calls PublishSnapshotLocked, and nothing else
+// (no editor, no host call; editors refresh from the idle timer). An instance never receives its own hook. A hook
+// may run on any non-audio thread: the main thread of another instance, a host's state thread, or a destructor's.
+// Destruction, in this order: the AU editor close; chordlab::retire(*mLifeline), which waits for a hop or hook in
+// flight and makes later ones no-ops, so no other instance enters this one any more; mLink.reset(), which removes
+// the registration (followers are emptied and wait for this id, the registry never writes this link buffer
+// again) and runs the hook of the leader this instance was bound to, holding no lock of this instance; then the
+// export cleanup; mPrivateRegistry goes after mLink, with the members. State: SerializeState writes the endpoint's
+// instance block (id, document id, lane uids, follow) with the document, read in one mModelMutex section;
+// UnserializeState replaces the document, renews the clipboard token and adopts the loaded block (or, for a state
+// without one, resets the link identity) in one mModelMutex section, then runs the hooks and republishes as above.
+// Assumption, as for the hops above: a host never calls UnserializeState from inside one of this instance's OnMain
+// hops (it would run other instances' hooks with this instance's Lifeline held, outside the lock order above).
 //
 // MIDI in (listening design D1, D2, D4, D5): (VST3 and the APP; the Audio Unit's path is described at the end
 // of this note) HandleMidiIn runs on the audio thread once per incoming event (ProcessMidiMsg calls it),
@@ -218,10 +262,23 @@ ChordLab::ChordLab(const InstanceInfo& info)
   
   MakeDefaultPreset();
 
-  @autoreleasepool   // ARC is off here: the UUID and its string are autoreleased
-  {
-    mClipboardToken = [[[NSUUID UUID] UUIDString] UTF8String];
-  }
+  mClipboardToken = MakeUid();
+
+  // The instance joins the registry (see "Links" at the top): the VST3 the process's shared one, every other
+  // format a registry of its own that no other instance sees. A fresh id, so no follower waits for it yet. The
+  // hook is what other instances run to make this one republish: it holds mLifeline, not `this` alone, and does
+  // nothing once the destructor retired it; it only republishes (no editor, no host call).
+#if defined(VST3_API)
+  chordlab::LinkRegistry& registry = chordlab::LinkRegistry::shared();
+#else
+  mPrivateRegistry = std::make_unique<chordlab::LinkRegistry>();
+  chordlab::LinkRegistry& registry = *mPrivateRegistry;
+#endif
+  mLink = std::make_unique<chordlab::LinkEndpoint>(registry, MakeUid(), &ChordLab::MakeUid,
+                                                   chordlab::guardedHook(mLifeline, [this] {
+                                                     std::lock_guard<std::mutex> lock(mModelMutex);
+                                                     PublishSnapshotLocked();
+                                                   }));
 
   std::lock_guard<std::mutex> lock(mModelMutex);
   RebuildPaletteLocked();
@@ -241,10 +298,13 @@ ChordLab::~ChordLab()
     CloseWindow();
   }
 #endif
-  {
-    std::lock_guard<std::mutex> guard(mLifeline->mutex);       // waits for a hop in flight; later hops do nothing
-    mLifeline->alive = false;
-  }
+  // Waits for a hop or another instance's republish hook in flight; later ones do nothing. From here on no other
+  // instance enters this one.
+  chordlab::retire(*mLifeline);
+  // Leaves the registry: this instance's followers are emptied and wait for its id, its link buffer is never
+  // written again, and the hook of the leader it followed (if bound) runs here, on this thread, with no lock of
+  // this instance held. mPrivateRegistry, if any, goes after it, with the members.
+  mLink.reset();
   // This instance's exports that are old enough to be certainly unused; younger ones stay for the next
   // purge or the OS (see the cleanup note above). May run off the main thread (AUv3), hence the pool.
   @autoreleasepool
@@ -587,24 +647,24 @@ void ChordLab::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
   // before pressing Panic never sounds, while commands pushed after the panic are served as usual.
   if (mPanicPending.exchange(false, std::memory_order_acq_rel))
     mScheduler.panic();
-  // The newest published progression, if any arrived since the last block. The pointer stays valid and
-  // unchanged until the next acquire, which is the next block's, after which the scheduler no longer
-  // reads it (Scheduler::adopt); a changed generation makes the scheduler release and re-chase.
-  if (const chordlab::SnapshotSlot* s = mSnapshots.acquire())
-    mScheduler.adopt(chordlab::Snapshot{s->events.data(), s->count, s->endBeat, s->loop, mSnapshots.currentGeneration()});
-
+  // The newest published progression of the buffer this instance plays: its own (mSnapshots) or, while it
+  // follows, its link buffer (a leader's lane, written by the registry), adopted when it delivered a fresh slot
+  // or when the source changed (see "Links" at the top). The pointer stays valid and unchanged until the next
+  // acquire of that buffer, after which the scheduler no longer reads it (Scheduler::adopt); a changed
+  // generation makes the scheduler release and re-chase. following() is an atomic and linkBuffer() a plain
+  // reference: the only things of the endpoint this thread touches.
+  //
   // Follow Live gates the progression only: previews are independent of the transport, and the scheduler
   // releases the progression on the playing -> stopped edge, so turning it off mid-chord is clean. The
-  // flag comes from the slot the scheduler is playing (the front slot; the document's default before the
-  // first acquire), never from somewhere the progression could outrun. Thru comes from the same slot; a
-  // bypass end is a releaseThru above, not a block with thru off (see "MIDI in" at the top).
-  const chordlab::SnapshotSlot* front = mSnapshots.current();
-  const bool followHost = front ? front->followHost : true;
-  const bool thru = front ? front->midiThru : true;
+  // flag comes from the slot the scheduler is playing (the default before the first publication), never from
+  // somewhere the progression could outrun. Thru always comes from the own buffer's slot (a follower keeps its
+  // own Thru switch); a bypass end is a releaseThru above, not a block with thru off (see "MIDI in" at the top).
+  const chordlab::LinkSource::Flags flags =
+    mLinkSource.select(mSnapshots, mLink->linkBuffer(), mLink->following(), mScheduler);
   const double ppq = GetPPQPos();
   const double bpm = GetTempo();
-  const bool playing = GetTransportIsRunning() && followHost;
-  const chordlab::BlockInfo block{ppq, nFrames, GetSampleRate(), bpm, playing, thru};
+  const bool playing = GetTransportIsRunning() && flags.followHost;
+  const chordlab::BlockInfo block{ppq, nFrames, GetSampleRate(), bpm, playing, flags.thru};
   mTransportPpq.store(ppq, std::memory_order_relaxed);             // the playhead, read by OnIdle
   mTransportPlaying.store(playing, std::memory_order_relaxed);
   mHostBpm.store(bpm, std::memory_order_relaxed);                  // the export's tempo
@@ -1066,12 +1126,37 @@ void ChordLab::RebuildPaletteLocked()
 
 void ChordLab::PublishSnapshotLocked()
 {
-  // Caller holds mModelMutex: that serializes the producer side of mSnapshots across the main thread and
-  // the hosts' state threads (the mutex hand-off orders one publish before the next). Never the audio
-  // thread: fillSlot compiles, which allocates. fillSlot decides what counts as a change and whether the
-  // generation moves (content yes, followHost no); an unchanged document publishes nothing.
-  if (chordlab::fillSlot(mStore.doc(), mSnapshots.beginWrite(), mPublication))
-    mSnapshots.publish(mPublication.generation);
+  // Caller holds mModelMutex: that serializes the producer side of mSnapshots across the main thread, the
+  // hosts' state threads and the threads that run this instance's republish hook (the mutex hand-off orders
+  // one publish before the next). Never the audio thread: it compiles, which allocates. The endpoint is the
+  // own buffer's only writer and owns the order of the publications (the own buffer, the feed to the followers,
+  // the own buffer again when a lane comes back; LinkEndpoint::publishOwn); fillSlot inside it decides what
+  // counts as a change and whether the generation moves (content yes, followHost no), so an unchanged document
+  // publishes nothing. The lineage is the document's clipboard token, which a follow by command names.
+  mLink->publishOwn(mStore, mClipboardToken, mSnapshots, mPublication);
+}
+
+void ChordLab::RunHooks(const chordlab::LinkRegistry::Hooks& hooks)
+{
+  // The caller holds nothing: not mModelMutex, not this instance's Lifeline mutex (never inside an OnMain hop).
+  // A hook takes its instance's Lifeline mutex, then that instance's mModelMutex (then the registry's, inside
+  // publishOwn), and an instance never receives its own hook, so this cannot deadlock against itself or against
+  // another instance doing the same.
+  for (const auto& hook : hooks)
+  {
+    if (hook && *hook)
+      (*hook)();
+  }
+}
+
+std::string ChordLab::MakeUid()
+{
+  std::string uid;
+  @autoreleasepool                                               // ARC is off, and this may run off the main thread
+  {
+    uid = [[[NSUUID UUID] UUIDString] UTF8String];               // 36 characters: hex digits and '-'
+  }
+  return uid;
 }
 
 void ChordLab::OnMain(std::function<void()> fn)
@@ -1231,7 +1316,10 @@ bool ChordLab::SerializeState(IByteChunk& chunk) const
   std::string json;
   {
     std::lock_guard<std::mutex> lock(mModelMutex);
-    json = chordlab::stateJson(mStore, GetEditorWidth(), GetEditorHeight());
+    // The instance block (plan I11): the instance id, the document id and lane uids, and the follow with the
+    // bound leader's current id, read in the same section as the document they belong to.
+    const chordlab::InstanceState instance = mLink->state();
+    json = chordlab::stateJson(mStore, GetEditorWidth(), GetEditorHeight(), &instance);
   }
   const int32_t len = (int32_t) json.size();
   chunk.Put(&len);
@@ -1264,19 +1352,25 @@ int ChordLab::UnserializeState(const IByteChunk& chunk, int startPos)
     int width = 0;
     int height = 0;
     bool editorOpen = false;
-    std::string renewedToken;                                    // made outside the lock; used only if the load succeeds
-    @autoreleasepool                                             // ARC is off, and this may run off the main thread
-    {
-      renewedToken = [[[NSUUID UUID] UUIDString] UTF8String];
-    }
+    std::string renewedToken = MakeUid();                        // made outside the lock; used only if the load succeeds
+    chordlab::LinkRegistry::Hooks hooks;                         // what the link change asks of other instances
     {
       std::lock_guard<std::mutex> lock(mModelMutex);
-      loaded = chordlab::loadStateJson(mStore, json, error, &width, &height);   // atomic: a failure changes nothing
+      std::optional<chordlab::InstanceState> instance;
+      loaded = chordlab::loadStateJson(mStore, json, error, &width, &height, &instance);   // atomic: a failure changes nothing
       if (loaded)
       {
         // A new document lineage (D21): its track ids are not the old document's, so a chord copy made before
         // this load must paste as foreign. PushSnapshot below hands the token to an open editor with the snapshot.
         mClipboardToken = std::move(renewedToken);
+        // The link identity goes with the document, in this same section (plan I11; "Links" at the top): the
+        // loaded instance block, or, for a state without one, a fresh document id, no lane uids and no follow.
+        // One of the two on every successful load, never neither; a failed load or another version changes
+        // nothing of the link.
+        if (instance)
+          mLink->adopt(*instance, hooks);
+        else
+          mLink->adoptWithoutBlock(hooks);
         ConstrainEditorResize(width, height);                    // the state stores the size verbatim: a set saved under
                                                                  // an older, smaller minimum (700x480) opens at today's
         RebuildPaletteLocked();
@@ -1285,6 +1379,16 @@ int ChordLab::UnserializeState(const IByteChunk& chunk, int startPos)
         if (!editorOpen)
           SetEditorSize(width, height);                          // synchronous: a save right after this load sees it
       }
+    }
+    if (loaded)
+    {
+      // Holding nothing (no mModelMutex, no Lifeline: this is never an OnMain hop), possibly off the main thread:
+      // the old and the new leader republish, then this instance once more, since its role may have changed
+      // through what the hooks did (a leader it now follows has written its link buffer; followers that wait for
+      // its id are bound). Every buffer is right before this function returns.
+      RunHooks(hooks);
+      std::lock_guard<std::mutex> lock(mModelMutex);
+      PublishSnapshotLocked();
     }
     if (loaded && editorOpen)
       OnMain([this, width, height] { RestoreEditorSize(width, height); });
