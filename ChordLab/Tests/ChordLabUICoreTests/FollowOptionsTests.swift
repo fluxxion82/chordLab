@@ -37,8 +37,8 @@ final class FollowOptionsTests: XCTestCase {
     XCTAssertEqual(groups[0].options.map(\.leaderLineage), ["lineage-id-original", "lineage-id-original",
                                                             "lineage-id-original"])
     XCTAssertEqual(groups[0].options.map(\.isCurrent), [false, false, false])
-    XCTAssertEqual(groups[0].options[2].detail, "(on 1 other track)")
-    XCTAssertEqual(groups[0].options[2].menuTitle, "Bass  (on 1 other track)")
+    XCTAssertEqual(groups[0].options[2].detail, "(1 other ChordLab plays it)")
+    XCTAssertEqual(groups[0].options[2].menuTitle, "Bass  (1 other ChordLab plays it)")
     XCTAssertNil(groups[0].options[0].detail)
     XCTAssertEqual(groups[0].options[0].menuTitle, "Chords")
   }
@@ -51,7 +51,7 @@ final class FollowOptionsTests: XCTestCase {
     XCTAssertEqual(current.map(\.lane), ["uid-2"])
     XCTAssertEqual(groups[0].options.map(\.name), ["Chords", "Lead", "Bass"])
     XCTAssertEqual(current[0].otherTracks, 1)                       // two follow it, this one among them
-    XCTAssertEqual(current[0].menuTitle, "Bass  ✓  (on 1 other track)")
+    XCTAssertEqual(current[0].menuTitle, "Bass  ✓  (1 other ChordLab plays it)")
     XCTAssertEqual(groups[1].options.map(\.isCurrent), [false, false, false])  // the copy's uid-2 is another lane
     XCTAssertEqual(groups[1].options.map(\.name), ["Chords", "Bass", "Lead"])
   }
@@ -105,8 +105,52 @@ final class FollowOptionsTests: XCTestCase {
       lane("u3", "Three", "other"), lane("u4", "Four", "bass", followers: 1),
     ])]))
     XCTAssertEqual(groups[0].options.map(\.lane), ["u1", "u3", "chords", "u2", "u4"])
-    XCTAssertEqual(groups[0].options.map(\.detail), [nil, nil, "(on 1 other track)", "(on 2 other tracks)",
-                                                     "(on 1 other track)"])
+    XCTAssertEqual(groups[0].options.map(\.detail), [nil, nil, "(1 other ChordLab plays it)", "(2 other ChordLabs play it)",
+                                                     "(1 other ChordLab plays it)"])
+  }
+
+  /// The lane this instance plays, when nobody else plays it, stays among the free ones.
+  func testTheOrderIsNobodyElsePlaysItFirst() {
+    let groups = FollowOptions.groups(state([leader("a", "ChordLab A", lanes: [
+      lane("chords", "Chords", "", followers: 1), lane("u1", "One", "bass", followers: 1),
+      lane("u2", "Two", "lead", followers: 2), lane("u3", "Three", "other"),
+    ])], following: ("a", "u1")))
+    XCTAssertEqual(groups[0].options.map(\.lane), ["u1", "u3", "chords", "u2"])
+    XCTAssertEqual(groups[0].options.map(\.otherTracks), [0, 0, 1, 2])
+  }
+
+  /// Identities are keys of the views' `ForEach`: a repeated lane uid inside a leader, or a repeated leader id, keeps
+  /// its first entry.
+  func testARepeatedLaneOrLeaderKeepsTheFirst() {
+    let groups = FollowOptions.groups(state([
+      leader("a", "ChordLab A", lanes: [lane("chords", "Chords", ""), lane("u", "Bass", "bass"), lane("u", "Lead", "lead"),
+                                        lane("chords", "Chords", "")]),
+      leader("a", "ChordLab A again", lanes: [lane("v", "Keys", "other")]),
+      leader("b", "ChordLab B"),
+    ]))
+    XCTAssertEqual(groups.map(\.leader), ["a", "b"])
+    XCTAssertEqual(groups[0].title, "ChordLab A")
+    XCTAssertEqual(groups[0].options.map(\.lane), ["chords", "u"])
+    XCTAssertEqual(groups[0].options.map(\.name), ["Chords", "Bass"])
+  }
+
+  // MARK: - The menu's warning
+
+  func testTheMenuWarnsWhenOtherTracksPlayFromThisChordLab() throws {
+    XCTAssertEqual(FollowOptions.warning(try LinkStateTests.fixture("link-state-leader.json")),
+                   "Tracks that play from this ChordLab will stop.")
+    XCTAssertNil(FollowOptions.warning(try LinkStateTests.fixture("link-state-copy.json")))
+    XCTAssertNil(FollowOptions.warning(state([leader("a", "ChordLab A")])))
+    XCTAssertNil(FollowOptions.warning(nil))
+  }
+
+  // MARK: - The copy fixture
+
+  func testTheCopyFixtureOffersItsOriginalFirstWithBassPlayedByOneOther() throws {
+    let groups = FollowOptions.groups(try LinkStateTests.fixture("link-state-copy.json"))
+    XCTAssertEqual(groups.map(\.leader), ["id-original"])
+    XCTAssertEqual(groups[0].options.map(\.name), ["Chords", "Lead", "Bass"])
+    XCTAssertEqual(groups[0].options[2].detail, "(1 other ChordLab plays it)")
   }
 
   func testLeadersKeepTheirOrderAndACopysOriginalComesFirst() {

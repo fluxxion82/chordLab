@@ -28,15 +28,15 @@ struct FollowOption: Equatable, Identifiable {
 
   var id: FollowTarget { FollowTarget(leader: leader, lane: lane) }
 
-  /// How many other tracks play this lane already: `followers` without this instance.
+  /// How many other ChordLabs play this lane already: `followers` without this instance.
   var otherTracks: Int { max(0, followers - (isCurrent ? 1 : 0)) }
 
-  /// "(on 1 other track)", "(on 2 other tracks)"; nil when no other track plays it.
+  /// "(1 other ChordLab plays it)", "(2 other ChordLabs play it)"; nil when no other ChordLab plays it.
   var detail: String? {
     switch otherTracks {
     case 0: return nil
-    case 1: return "(on 1 other track)"
-    default: return "(on \(otherTracks) other tracks)"
+    case 1: return "(1 other ChordLab plays it)"
+    default: return "(\(otherTracks) other ChordLabs play it)"
     }
   }
 
@@ -70,8 +70,10 @@ struct FollowGroup: Equatable, Identifiable {
 
 /// What the Follow picker (the transport bar's menu, the banner, the follower panel's Change…) offers, from the link
 /// state (plan section 5, "Picking"): one group per leader, by id, in the order the link state lists them, except
-/// that the leader this instance is a copy of (`self.copyOf`) comes first. Inside a group, the lanes nobody follows
-/// first, then the others, each in the leader's own order (chords first, then its tracks).
+/// that the leader this instance is a copy of (`self.copyOf`) comes first. Inside a group, the lanes nobody else plays
+/// (`otherTracks == 0`: the lane this instance plays stays among them when it is the only one) first, then the others,
+/// each in the leader's own order (chords first, then its tracks). Identities are the views' `ForEach` keys, so a
+/// repeated leader id, or a repeated lane key inside one leader, keeps its first entry.
 ///
 /// A leader whose `lineage` or `lanes` are empty has not published yet and is not offered (a request would carry an
 /// empty lineage, which the bridge refuses with an error); nor is an entry whose leader id, lane key or lineage the
@@ -83,21 +85,33 @@ enum FollowOptions {
   /// A group's title when the leader's label is empty.
   static let untitledLeader = "Another ChordLab"
 
+  /// The Follow menu's first, disabled entry while other tracks play from this instance (`routed` is not empty):
+  /// following would silence them. The banner stays away then (`FollowOffer`); the menu, the user's explicit choice,
+  /// says so instead. Nil otherwise.
+  static func warning(_ state: LinkStateJSON?) -> String? {
+    guard let state, !state.routed.isEmpty else { return nil }
+    return "Tracks that play from this ChordLab will stop."
+  }
+
   static func groups(_ state: LinkStateJSON?) -> [FollowGroup] {
     guard let state else { return [] }
     let current = state.following.map { FollowTarget(leader: $0.leader, lane: $0.lane) }
     var groups: [FollowGroup] = []
+    var seenLeaders = Set<String>()
     for leader in state.leaders {
-      guard LinkCommands.isSendable(leader.id), LinkCommands.isSendable(leader.lineage), !leader.lanes.isEmpty else {
+      guard LinkCommands.isSendable(leader.id), LinkCommands.isSendable(leader.lineage), !leader.lanes.isEmpty,
+            seenLeaders.insert(leader.id).inserted else {
         continue
       }
-      let options = leader.lanes.filter { LinkCommands.isSendable($0.lane) }.map { lane in
+      var seenLanes = Set<String>()
+      let lanes = leader.lanes.filter { LinkCommands.isSendable($0.lane) && seenLanes.insert($0.lane).inserted }
+      let options = lanes.map { lane in
         FollowOption(leader: leader.id, lane: lane.lane, leaderLineage: leader.lineage, leaderLabel: leader.label,
                      name: displayName(lane), role: lane.trackRole, followers: lane.followers,
                      isCurrent: current == FollowTarget(leader: leader.id, lane: lane.lane))
       }
       guard !options.isEmpty else { continue }
-      let ordered = options.filter { $0.followers == 0 } + options.filter { $0.followers != 0 }
+      let ordered = options.filter { $0.otherTracks == 0 } + options.filter { $0.otherTracks != 0 }
       groups.append(FollowGroup(leader: leader.id, title: leader.label.isEmpty ? untitledLeader : leader.label,
                                 options: ordered))
     }
