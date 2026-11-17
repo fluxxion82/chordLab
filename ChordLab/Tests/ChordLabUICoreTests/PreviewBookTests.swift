@@ -255,15 +255,19 @@ final class PreviewBookTests: XCTestCase {
           }
         case .scheduleOneShotEnd(let id):
           pendingOneShots.append(id)
-          if case .start(_, _, _, let lane)? = messages.last, lane != .track(currentTrack ?? 0) {
-            wrongLanes.append("one-shot \(id) of track \(currentTrack ?? 0) says \(lane)")
+          if let track = currentTrack {
+            if case .start(_, _, _, let lane)? = messages.last, lane != .track(track) {
+              wrongLanes.append("one-shot \(id) of track \(track) says \(lane)")
+            }
+          } else {
+            wrongLanes.append("one-shot \(id) routed outside a roll's effects")
           }
         case .cancelRoll(let trackId):
           let (next, effects) = RollEditLogic.cancel(machines[trackId]!)
           machines[trackId] = next
           let more = book.perform(effects, trackId: trackId)
           if !more.isEmpty { cancelledStopsThatSent.append("track \(trackId): \(more)") }
-          route(more)
+          route(more, of: trackId)
         }
       }
     }
@@ -278,13 +282,21 @@ final class PreviewBookTests: XCTestCase {
     /// The track whose roll effects are being routed, for the one-shot check.
     var currentTrack: Int?
 
+    /// Routes what the book made of track `trackId`'s roll effects, with `currentTrack` set to that track; every path
+    /// that performs effects comes here. The outer track comes back after, so a cancel routed inside (a `.cancelRoll`
+    /// of another track) is checked against its own track and the rest of the outer outputs against theirs.
+    mutating func route(_ outputs: [PreviewOutput], of trackId: Int) {
+      let outer = currentTrack
+      currentTrack = trackId
+      route(outputs)
+      currentTrack = outer
+    }
+
     mutating func roll(_ event: RollPointerEvent, _ trackId: Int) {
       if event.phase == .down { route(book.rollPressed(trackId: trackId)) }
       let (next, effects) = RollEditLogic.handle(event, state: machines[trackId]!, context: contexts[trackId]!)
       machines[trackId] = next
-      currentTrack = trackId
-      route(book.perform(effects, trackId: trackId))
-      currentTrack = nil
+      route(book.perform(effects, trackId: trackId), of: trackId)
     }
 
     /// The machine believes it holds a pitch exactly when the book holds for that track.
@@ -339,7 +351,7 @@ final class PreviewBookTests: XCTestCase {
         case 7:
           let (next, effects) = RollEditLogic.snapshotChanged(revision: 6 + UInt64(round), state: rig.machines[t]!)
           rig.machines[t] = next
-          rig.route(rig.book.perform(effects, trackId: t))
+          rig.route(rig.book.perform(effects, trackId: t), of: t)
         case 8:
           let held = rig.book.hold(.key(pitch: 40 + t, trackId: t), pitches: [40 + t], velocity: 100)
           rig.keyIds.append(held.id)
