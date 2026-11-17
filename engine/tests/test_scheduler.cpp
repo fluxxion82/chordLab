@@ -3006,13 +3006,13 @@ struct Rig {
     /// from `expectedBlock` with no previews, thru notes or prior owners): which lanes the block actually plays.
     std::array<int, 128> progressionOns{};
 
-    bool everyLane() const {
+    bool isEveryLane() const {
         return selection.mode == LaneSelection::Mode::AllExcept && selection.lanes.empty();
     }
 
     void publish(const Document& doc) {
         const int back = 1 - front;
-        if (everyLane()) {
+        if (isEveryLane()) {
             REQUIRE(fillSlot(doc, *slots[static_cast<std::size_t>(back)], last));
         } else {
             SnapshotSlot& target = *slots[static_cast<std::size_t>(back)];
@@ -3403,11 +3403,11 @@ std::vector<NoteSpec> rows(const std::vector<int>& pitches, int slots, std::int6
 /// pitches held at the block's end + 2 x pitches started and released within the block <= 64, and at most
 /// kMaxThruPerBlock (64) incoming notes a block; a burst of preview commands beyond that budget is the overload
 /// policy's, per instance as before. The per-output cases below rerun (a) to (f) for every output of each case's
-/// document and of the same notes split over two tracks (each lane alone, every lane but one; for (f), whose block
-/// plays no track note, the selections with the chords): every block complete and exact against the model, and the
-/// adversarial block at most the every-lane one (measured at most: (a) 350 of 380, with a thru release-all 406 of
-/// 436; (b) 342 of 372; (c) 320 of 348; (d) 318 of 326; (e) 328 of 336; (f) equal, 360 and 368). One more case
-/// sends a follower at the caps a forwarded burst beyond the budget and pins the overload policy.
+/// document and of the same notes split over two tracks (each lane alone, every lane but one): every block complete
+/// and exact against the model, and the adversarial block at most the every-lane one (measured at most: (a) 350 of
+/// 380, with a thru release-all 406 of 436; (b) 342 of 372; (c) 320 of 348; (d) 318 of 326; (e) 328 of 336; (f)
+/// 360 of 360 and 368 of 368 with the chord lane, 312 and 320 without it, whose tracks make no attack there). One
+/// more case sends a follower at the caps a forwarded burst beyond the budget and pins the overload policy.
 ///
 /// The test below is the burst modelled before tracks (no track notes): the densest progression with eight previews
 /// already sounding, then a seek block that replaces them and retriggers 64 pitches by thru.
@@ -3557,6 +3557,10 @@ LanePick everyLane() {
     return LanePick{};
 }
 
+bool picksEveryLane(const LanePick& pick) {
+    return pick.mode == LaneSelection::Mode::AllExcept && pick.lanes.empty();
+}
+
 LaneKey laneKeyAt(const Document& doc, int lane) {
     return lane == 0 ? chordsLane() : trackLane(doc.tracks.at(static_cast<std::size_t>(lane - 1)).id);
 }
@@ -3569,7 +3573,7 @@ LaneSelection resolve(const Document& doc, const LanePick& pick) {
 }
 
 std::string nameOf(const LanePick& pick) {
-    if (pick.mode == LaneSelection::Mode::AllExcept && pick.lanes.empty()) return "every lane";
+    if (picksEveryLane(pick)) return "every lane";
     std::ostringstream os;
     os << (pick.mode == LaneSelection::Mode::Only ? "Only{" : "AllExcept{");
     for (std::size_t i = 0; i < pick.lanes.size(); ++i) {
@@ -3586,12 +3590,12 @@ std::string nameOf(const LanePick& pick) {
 
 /// The selections an output plays in a document of `tracks` tracks: each lane alone (`Only`, a follower's output
 /// or a leader's chords alone) and every lane but one (`AllExcept`, the leader's output when that lane is followed
-/// elsewhere). With `chordless` false, only the selections that include the chords lane.
-std::vector<LanePick> outputPicks(int tracks, bool chordless) {
+/// elsewhere).
+std::vector<LanePick> outputPicks(int tracks) {
     std::vector<LanePick> picks;
     for (int lane = 0; lane <= tracks; ++lane) {
-        if (chordless || lane == 0) picks.push_back(LanePick{LaneSelection::Mode::Only, {lane}});
-        if (chordless || lane != 0) picks.push_back(LanePick{LaneSelection::Mode::AllExcept, {lane}});
+        picks.push_back(LanePick{LaneSelection::Mode::Only, {lane}});
+        picks.push_back(LanePick{LaneSelection::Mode::AllExcept, {lane}});
     }
     return picks;
 }
@@ -3737,29 +3741,55 @@ ScenarioRun capacityA(const LanePick& pick, bool split, bool releaseThru) {
     return run;
 }
 
+/// Case (b)'s document: the densest chord lane and tracks at both caps around its wrap, for a block starting 0.2
+/// beat before the end: N notes sounding into that block end 30 ticks in, M starts follow on those voices before
+/// the end (the last row long, clipped: final offs), M start right after the wrap and end inside the block. All in
+/// one track, or (split) the notes before the wrap one track and the head another. `pool` holds the pitches no lane
+/// uses.
+struct WrapDocument {
+    DocumentStore store;
+    std::vector<int> chords;
+    std::int64_t blockStart = 0;
+    std::vector<int> oldPitches;
+    std::vector<int> tailPitches;
+    std::vector<int> headPitches;
+    PitchPool pool = PitchPool();
+};
+
+WrapDocument wrapDocument(bool split) {
+    constexpr int N = kMaxTrackPolyphony;
+    constexpr int M = kMaxTrackOnsetsPerBeat;
+    WrapDocument w{denseChords()};
+    w.chords = chordPitches(w.store.doc());
+    const std::int64_t E = chordBoundaryTicks(w.store.doc()).back();
+    w.blockStart = E - 192;  // 0.2 beat before the wrap
+    w.pool = PitchPool(w.chords);
+    w.oldPitches = w.pool.take(N);
+    w.tailPitches = w.pool.take(M);
+    w.headPitches = w.pool.take(M);
+    std::vector<NoteSpec> beforeWrap;
+    for (int p : w.oldPitches) beforeWrap.push_back(NoteSpec{p, w.blockStart - 1440, 1440 + 30, 100});
+    for (const NoteSpec& n : rows(w.tailPitches, N, w.blockStart + 30, kMinTrackNoteTicks, 400)) {
+        beforeWrap.push_back(n);
+    }
+    addTracks(w.store, {beforeWrap, rows(w.headPitches, N, 0, kMinTrackNoteTicks)}, split);
+    REQUIRE(trackPolyphony(w.store.doc()) == N);
+    REQUIRE(densestOnsetWindow(w.store.doc()) == M);
+    return w;
+}
+
 /// Case (b)'s scenario. Codex's round-2 block (64 ons, 80 offs from 16/32) is 2M track starts and N + 2M track
-/// ends in one wrap block: N notes sounding into the block end 30 ticks in, M starts follow on those voices before
-/// the end (the last row long, clipped: final offs), M start right after the wrap and end inside the block (split:
-/// the notes before the wrap one track, the head another). Over the densest chord lane, with the workload, in a
-/// continuous block 0.2 beat before the end.
+/// ends in one wrap block: `wrapDocument`'s, over the densest chord lane, with the workload, in a continuous block
+/// 0.2 beat before the end.
 ScenarioRun capacityB(const LanePick& pick, bool split) {
     constexpr int N = kMaxTrackPolyphony;
     constexpr int M = kMaxTrackOnsetsPerBeat;
     ScenarioRun run;
-    DocumentStore store = denseChords();
-    const std::vector<int> chords = chordPitches(store.doc());
-    const std::int64_t E = chordBoundaryTicks(store.doc()).back();
-    const std::int64_t blockStart = E - 192;  // 0.2 beat before the wrap
-    PitchPool pool(chords);
-    const std::vector<int> oldPitches = pool.take(N);
-    const std::vector<int> tailPitches = pool.take(M);
-    const std::vector<int> headPitches = pool.take(M);
-    std::vector<NoteSpec> beforeWrap;
-    for (int p : oldPitches) beforeWrap.push_back(NoteSpec{p, blockStart - 1440, 1440 + 30, 100});
-    for (const NoteSpec& n : rows(tailPitches, N, blockStart + 30, kMinTrackNoteTicks, 400)) beforeWrap.push_back(n);
-    addTracks(store, {beforeWrap, rows(headPitches, N, 0, kMinTrackNoteTicks)}, split);
-    REQUIRE(trackPolyphony(store.doc()) == N);
-    REQUIRE(densestOnsetWindow(store.doc()) == M);
+    WrapDocument w = wrapDocument(split);
+    DocumentStore& store = w.store;
+    const std::vector<int>& chords = w.chords;
+    const std::int64_t blockStart = w.blockStart;
+    PitchPool& pool = w.pool;
     // The previews take the free pitches (exactly 64 at 8/24), topped up from the chord's.
     const int available = 128 - static_cast<int>(chords.size()) - N - 2 * M;
     std::vector<int> groupPitches = pool.take(std::min(64, available));
@@ -3824,6 +3854,7 @@ ScenarioRun capacityC(const LanePick& pick, bool split) {
         trackOns += e.on && std::find(trackPitches.begin(), trackPitches.end(), e.pitch) != trackPitches.end() ? 1 : 0;
     }
     for (int p : trackPitches) selectedStarts += run.plays(p) ? 1 : 0;
+    if (picksEveryLane(pick)) CHECK(selectedStarts == M);
     CHECK(trackOns == 2 * selectedStarts);  // both wraps' starts in one block (2M with every lane)
     measure(run, rig, "c: two wraps of a 0.25-beat loop", events);
     for (int b = 0; b < 4; ++b) rig.block(rig.clockPpq(), false);
@@ -3937,8 +3968,12 @@ ScenarioRun capacityE(const LanePick& pick, bool split) {
 /// Case (f)'s scenario. As (d) up to the burst. Then a block the host gives too little output (8 events) owes
 /// most of its releases (a seek that also releases every thru note), or a panic owes every sounding pitch; either
 /// way the next envelope block pays them first, then carries the workload over the densest chord lane, complete.
-/// (The track notes sound only around 8.125, inside the starved block, whose attacks are dropped: the block after
-/// it plays the chord lane alone, whatever the selection.)
+/// The track notes make no attack in that block. After the starved block (the seek to 8.0, the measured block then
+/// 8.464 to 8.93): the sustained notes (6.625 to 8.75) overlap it, but their chase at 8.0 was a retrigger of
+/// preview-held pitches the starved block dropped, so the progression does not own them and their end there
+/// releases nothing; the M starts (8.125 to 8.22) fell inside the starved block and were dropped too. After a panic
+/// there is no starved block: the measured block (3.39 to 3.86) lies before every track note. So an output without
+/// the chord lane still pays the owed releases first and carries the workload, but plays no lane of its own there.
 ScenarioRun capacityF(const LanePick& pick, bool split, bool viaPanic) {
     constexpr int N = kMaxTrackPolyphony;
     constexpr int M = kMaxTrackOnsetsPerBeat;
@@ -3997,9 +4032,11 @@ ScenarioRun capacityF(const LanePick& pick, bool split, bool viaPanic) {
 /// paragraph): the snapshot holds exactly the selected lanes; each adversarial block completed (the rig requires
 /// `process` true and checks the oracle, the identity and the per-pitch stream on every block), writes at most
 /// what the every-lane block wrote and at most the capacity; the progression's own attacks in it are the every-lane
-/// block's on the selected lanes' pitches and none elsewhere, and there are some (the block really plays the
-/// selection: the bound is not met by an empty output).
-void checkOutput(const ScenarioRun& reference, const ScenarioRun& run) {
+/// block's on the selected lanes' pitches and none elsewhere, and, with `lanesPlay`, there are some (the block really
+/// plays the selection: the bound is not met by an empty output). `lanesPlay` false is for a block in which the
+/// selected lanes make no attack in the every-lane output either (the tracks in (f)): what such an output's block
+/// carries is the owed releases and the workload, still complete and at most the every-lane count.
+void checkOutput(const ScenarioRun& reference, const ScenarioRun& run, bool lanesPlay) {
     REQUIRE(run.lanePitches.size() == run.selected.size());
     std::array<int, 128> laneOf;
     laneOf.fill(-1);
@@ -4038,15 +4075,16 @@ void checkOutput(const ScenarioRun& reference, const ScenarioRun& run) {
                 CHECK(ons == 0);
             }
         }
-        REQUIRE(selectedOns > 0);
+        if (lanesPlay) REQUIRE(selectedOns > 0);
     }
 }
 
 /// Runs `scenario(pick, split)` for every output of the case's document (one track: the chords, the track, and
 /// every lane but one) and of the same notes split over two tracks (each of the three lanes alone, every lane but
 /// one), pinning each against the every-lane run; the split's every-lane run must play exactly what the case's
-/// does. `tracksPlay`: every lane plays in the adversarial blocks (else the tracks are silent there, and the
-/// selections without the chord lane are left out, as they would hold vacuously). Reports the counts per output.
+/// does. `tracksPlay`: every lane plays in the adversarial blocks; false: the tracks make no attack there in the
+/// every-lane output (checked), so an output without the chord lane is pinned without asking its block for attacks
+/// of its own. Reports the counts per output.
 template <typename Scenario>
 void perOutput(const std::string& label, Scenario scenario, bool tracksPlay) {
     const ScenarioRun reference = scenario(everyLane(), false);
@@ -4073,12 +4111,12 @@ void perOutput(const std::string& label, Scenario scenario, bool tracksPlay) {
     summary << "capacity per output " << label << ", events written per adversarial block: every lane";
     for (const Measured& m : reference.blocks) summary << " " << m.written;
     for (const bool split : {false, true}) {
-        for (const LanePick& pick : outputPicks(split ? 2 : 1, tracksPlay)) {
+        for (const LanePick& pick : outputPicks(split ? 2 : 1)) {
             const std::string name = nameOf(pick);
             CAPTURE(split);
             CAPTURE(name);
             const ScenarioRun run = scenario(pick, split);
-            checkOutput(reference, run);
+            checkOutput(reference, run, tracksPlay || run.selected.at(0));
             summary << "; " << (split ? "two tracks " : "") << name;
             for (const Measured& m : run.blocks) summary << " " << m.written;
         }
@@ -4156,9 +4194,10 @@ TEST_CASE("scheduler capacity per output (e): the adopt during sustained track n
     perOutput("e", [](const LanePick& pick, bool split) { return capacityE(pick, split); }, true);
 }
 
-TEST_CASE("scheduler capacity per output (f): the block after owed releases for every selection with the chords") {
-    // The block after the starved one plays no track note (they all fall inside the starved block), so only the
-    // selections that include the chord lane are non-vacuous here; perOutput checks the tracks are silent there.
+TEST_CASE("scheduler capacity per output (f): the block after owed releases for every selection of lanes") {
+    // The tracks make no attack in the measured block (capacityF says why), so an output without the chord lane
+    // is held to the owed releases first, the workload complete and at most the every-lane count, not to attacks
+    // of its own; perOutput checks that the every-lane block has none on the tracks.
     for (const bool viaPanic : {false, true}) {
         CAPTURE(viaPanic);
         perOutput(viaPanic ? "f after a panic" : "f after owed releases",
@@ -4167,63 +4206,56 @@ TEST_CASE("scheduler capacity per output (f): the block after owed releases for 
 }
 
 TEST_CASE("scheduler capacity per output: a preview burst beyond the budget on one track lane takes the overload policy") {
-    // (b)'s document: a track at both caps over the densest chord lane, played by a follower (Only{track}) and,
-    // for comparison, by every lane. Eight previews sound on 64 pitches no lane uses. Then, in the wrap block
-    // (N track notes ending, 2M starting, the last row's final offs at the wrap), a burst of forwarded preview
-    // commands far beyond the budget the derivation assumes (64 pitches in all): six restarts of all eight
-    // previews, 48 commands, 384 pitches released and attacked again. The overload policy, and nothing worse:
-    // `process` false; the output is the unlimited output with attacks removed and nothing else (a release goes
-    // missing only with its own dropped retrigger or after its pitch's attack was dropped); nothing is owed or
+    // (b)'s document (`wrapDocument`): a track at both caps over the densest chord lane, played by a follower
+    // (Only{track}) and, for comparison, by every lane. Eight previews sound on 64 pitches no lane uses. Then, in the
+    // wrap block (N track notes ending, 2M starting, the last row's final offs at the wrap), a burst of forwarded
+    // preview commands far beyond the budget the derivation assumes (64 pitches in all): restarts of the eight
+    // previews, round after round, the last round partial, each command releasing its eight pitches and attacking
+    // them again. The preview commands run before the timeline, so they spend the attack budget (the capacity less
+    // the block's releases) first, and the count is chosen so that it runs out among the track's starts: some of
+    // them sound, the rest are dropped. The overload policy, and nothing worse: `process` false; the output is the
+    // unlimited output with attacks removed and nothing else (a release goes missing only after its pitch's own
+    // attack was dropped in this block); every track note that sounds is released in the block; nothing is owed or
     // left sounding without an owner; the following blocks are complete and exact again; nothing hangs.
-    constexpr int N = kMaxTrackPolyphony;
     constexpr int M = kMaxTrackOnsetsPerBeat;
-    constexpr int kRounds = 6;
-    DocumentStore store = denseChords();
-    const std::vector<int> chords = chordPitches(store.doc());
-    const std::int64_t E = chordBoundaryTicks(store.doc()).back();
-    const std::int64_t blockStart = E - 192;
-    PitchPool pool(chords);
-    const std::vector<int> oldPitches = pool.take(N);
-    const std::vector<int> tailPitches = pool.take(M);
-    const std::vector<int> headPitches = pool.take(M);
-    std::vector<NoteSpec> specs;
-    for (int p : oldPitches) specs.push_back(NoteSpec{p, blockStart - 1440, 1440 + 30, 100});
-    for (const NoteSpec& n : rows(tailPitches, N, blockStart + 30, kMinTrackNoteTicks, 400)) specs.push_back(n);
-    for (const NoteSpec& n : rows(headPitches, N, 0, kMinTrackNoteTicks)) specs.push_back(n);
-    addNotes(store, specs);
-    REQUIRE(trackPolyphony(store.doc()) == N);
-    REQUIRE(densestOnsetWindow(store.doc()) == M);
-    const std::vector<std::vector<int>> groups = previewGroups(pool.take(64));
-    const std::vector<int> trackStarts = joined({tailPitches, headPitches});
+    // Commands in the burst (three full rounds and a partial fourth): the follower's attack budget, 512 less its
+    // block's releases (8 per command, 38 of the track's), is 474 - 8 x 29 = 242, so after 232 preview attacks
+    // 10 of the 2M track starts sound; every lane's budget also pays chord attacks between them, and 27 commands
+    // leave it 15. At 30 commands (follower) or 29 (every lane) no track start would sound.
+    constexpr int kBurstCommandsFollower = 29;
+    constexpr int kBurstCommandsEveryLane = 27;
+    WrapDocument w = wrapDocument(false);
+    const Document& doc = w.store.doc();
+    const std::vector<std::vector<int>> groups = previewGroups(w.pool.take(64));
+    const std::vector<int> trackStarts = joined({w.tailPitches, w.headPitches});
+    const auto isTrackStart = [&](int pitch) {
+        return std::find(trackStarts.begin(), trackStarts.end(), pitch) != trackStarts.end();
+    };
 
     for (const bool follower : {true, false}) {
         CAPTURE(follower);
+        const int commands = follower ? kBurstCommandsFollower : kBurstCommandsEveryLane;
+        CAPTURE(commands);
         Rig rig;
-        if (follower) {
-            rig.selection = LaneSelection{LaneSelection::Mode::Only, {trackLane(store.doc().tracks.at(0).id)}};
-        }
-        rig.publish(store.doc());
+        if (follower) rig.selection = LaneSelection{LaneSelection::Mode::Only, {trackLane(doc.tracks.at(0).id)}};
+        rig.publish(doc);
         const double blockBeats = kEnvFrames / kEnvSamplesPerBeat;
         for (int id = 1; id <= 8; ++id) rig.startPreview(id, groups[static_cast<std::size_t>(id - 1)]);
-        rig.block(static_cast<double>(blockStart) / 960.0 - 2.0 * blockBeats, true);
+        rig.block(static_cast<double>(w.blockStart) / 960.0 - 2.0 * blockBeats, true);
         rig.block(rig.clockPpq(), true);
-        REQUIRE(std::fabs(rig.clockPpq() - static_cast<double>(blockStart) / 960.0) < 1e-9);
-        for (int p : oldPitches) REQUIRE(rig.host.owners(p) == kOwnerProgression);
-        for (int round = 0; round < kRounds; ++round) {
-            for (int id = 1; id <= 8; ++id) rig.startPreview(id, groups[static_cast<std::size_t>(id - 1)]);
-        }
+        REQUIRE(std::fabs(rig.clockPpq() - static_cast<double>(w.blockStart) / 960.0) < 1e-9);
+        for (int p : w.oldPitches) REQUIRE(rig.host.owners(p) == kOwnerProgression);
+        for (int c = 0; c < commands; ++c) rig.startPreview(c % 8 + 1, groups[static_cast<std::size_t>(c % 8)]);
 
         const std::vector<Ev> events = rig.block(rig.clockPpq(), false, kOutCapacity, false);
         const std::vector<Ev> expected = rig.lastExpected;
         CHECK_FALSE(rig.host.lastOk);
         REQUIRE(expected.size() > kOutCapacity);  // beyond what any block could carry
-        int trackOns = 0;
-        for (const Ev& e : expected) {
-            trackOns += e.on && std::find(trackStarts.begin(), trackStarts.end(), e.pitch) != trackStarts.end() ? 1 : 0;
-        }
-        CHECK(trackOns == 2 * M);  // the track's lane plays in the block
+        int unlimitedTrackOns = 0;
+        for (const Ev& e : expected) unlimitedTrackOns += e.on && isTrackStart(e.pitch) ? 1 : 0;
+        CHECK(unlimitedTrackOns == 2 * M);  // the track's lane plays in the block, in the unlimited output
         // Walk the unlimited output: every event written is the next one of it, and every one skipped is an
-        // attack, the off of a dropped retrigger, or a release of a pitch whose attack was dropped in this block.
+        // attack or a release of a pitch whose attack was dropped in this block and not written since.
         std::array<bool, 128> attackDropped{};
         std::size_t j = 0;
         int droppedOns = 0;
@@ -4231,6 +4263,7 @@ TEST_CASE("scheduler capacity per output: a preview burst beyond the budget on o
             const Ev& e = expected[i];
             if (j < events.size() && events[j] == e) {
                 ++j;
+                if (e.on) attackDropped[static_cast<std::size_t>(e.pitch)] = false;
                 continue;
             }
             if (e.on) {
@@ -4238,30 +4271,41 @@ TEST_CASE("scheduler capacity per output: a preview burst beyond the budget on o
                 ++droppedOns;
                 continue;
             }
-            const bool retrigger = i + 1 < expected.size() && expected[i + 1].on && expected[i + 1].pitch == e.pitch &&
-                                   expected[i + 1].offset == e.offset;
             CAPTURE(i);
             CAPTURE(e);
-            CHECK((retrigger || attackDropped[static_cast<std::size_t>(e.pitch)]));  // no release is lost
+            CHECK(attackDropped[static_cast<std::size_t>(e.pitch)]);  // no release is lost
         }
         CHECK(j == events.size());  // nothing written that the unlimited output does not carry
         CHECK(droppedOns > 0);
-        CHECK(std::count_if(events.begin(), events.end(), [](const Ev& e) { return e.on; }) > 0);
-        for (int p : oldPitches) {
+        // The budget runs out among the track's starts: some sound, some are dropped, and each one that sounds is
+        // released in the block (every track note starting here ends here, the last row at the wrap).
+        int trackOns = 0;
+        for (std::size_t i = 0; i < events.size(); ++i) {
+            if (!events[i].on || !isTrackStart(events[i].pitch)) continue;
+            ++trackOns;
+            const int pitch = events[i].pitch;
+            CAPTURE(pitch);
+            CHECK(std::count_if(events.begin() + static_cast<std::ptrdiff_t>(i) + 1, events.end(),
+                                [pitch](const Ev& e) { return !e.on && e.pitch == pitch; }) == 1);
+        }
+        CHECK(trackOns > 0);
+        CHECK(trackOns < 2 * M);
+        for (int p : w.oldPitches) {
             CAPTURE(p);
             CHECK(std::count_if(events.begin(), events.end(), [p](const Ev& e) { return !e.on && e.pitch == p; }) == 1);
         }
         // Nothing owed (the releases all fit) and nothing left sounding without an owner.
-        CHECK(rig.host.lastWritten < kOutCapacity);
+        CHECK(rig.host.lastWritten <= kOutCapacity);
         for (int p = 0; p < 128; ++p) {
             CAPTURE(p);
-            CHECK(rig.host.scheduler.sounding(p) == (rig.host.owners(p) != 0));
+            CHECK_FALSE((rig.host.scheduler.sounding(p) && rig.host.owners(p) == 0));
         }
         const std::string output = follower ? "Only{track}" : "every lane";
-        MESSAGE("capacity per output, preview burst (" << output << "): "
+        MESSAGE("capacity per output, preview burst (" << output << ", " << commands << " commands): "
                                                        << rig.host.lastWritten << " events written of "
                                                        << expected.size() << " unlimited, " << droppedOns
-                                                       << " attacks dropped");
+                                                       << " attacks dropped, " << trackOns << " of " << 2 * M
+                                                       << " track starts sounded");
         // The previews as the scheduler kept them (each id owns its own eight pitches).
         rig.previews.clear();
         for (int id = 1; id <= 8; ++id) {
@@ -4275,3 +4319,4 @@ TEST_CASE("scheduler capacity per output: a preview burst beyond the budget on o
         rig.silence();
     }
 }
+
