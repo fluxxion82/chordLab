@@ -175,7 +175,11 @@
 // does not play it. OfferPreview, for a Start, Extend or Stop alike (HandlePreview, CloseWindow's fallback Stop),
 // first calls LinkEndpoint::forwardPreview under mModelMutex (the endpoint reads its lane uids and document id, which
 // publishOwn and the state loads write under that mutex; order: model, then the registry's) and falls back to its
-// own scheduler only on NotForwarded; QueueFull is reported like its own full ring. CloseWindow first calls
+// own scheduler only on NotForwarded; QueueFull is reported like its own full ring. A Start that comes back Forwarded
+// also gives the own scheduler a Stop for its id: an earlier Start of that id may still sound here (played here while
+// its lane had no follower; editor ids restart when the editor reopens), and the scheduler's restart-by-id never sees
+// the forwarded Start (a Stop for an id it does not hold is harmless; a full ring leaves that note to the watchdog).
+// The other way round the registry stops what an id forwarded when a Start reuses it. CloseWindow first calls
 // LinkEndpoint::stopForwards (same guard and lock), which ends every preview this instance forwarded, then gives its
 // fallback Stop for mOpenPreviewId to the own scheduler. The registry pushes into a
 // follower's scheduler under its mutex, from the leader's call, and a scheduler's preview ring has ONE producer: so
@@ -1154,6 +1158,18 @@ bool ChordLab::OfferPreview(std::optional<int> track, const chordlab::PreviewCmd
     std::lock_guard<std::mutex> lock(mModelMutex);
     if (mLink)
       forward = mLink->forwardPreview(track, cmd);
+  }
+  if (forward == chordlab::LinkForward::Forwarded && cmd.kind == chordlab::PreviewCmd::Start)
+  {
+    // An earlier Start of this id may still sound here (played here while its lane had no follower; the editor's ids
+    // restart when it reopens, and a one-shot whose Stop never came still sounds), and this scheduler never sees the
+    // forwarded Start that would have restarted it by id: so it gets a Stop for the id. One it does not hold is
+    // harmless; a full ring leaves that note to the watchdog, as for any Stop. (The other way round, a Start played
+    // here that reuses a forwarded id, the registry stops the forwards: LinkRegistry rule 12.)
+    chordlab::PreviewCmd stop{};
+    stop.kind = chordlab::PreviewCmd::Stop;
+    stop.id = cmd.id;
+    mScheduler.pushPreview(stop);
   }
   switch (forward)
   {
