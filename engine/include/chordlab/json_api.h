@@ -1,21 +1,25 @@
 #pragma once
 
+#include "chordlab/link_state.h"
 #include "chordlab/tracks.h"
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
 
 namespace chordlab {
 
-// Only references cross this interface, so the definitions (document.h, palette.h) are not needed here; tracks.h is
-// included for `NoteSelection`, which `SnapshotExtras` holds by value.
+// Only references cross this interface, so the definitions (document.h, palette.h, link.h) are not needed here;
+// tracks.h is included for `NoteSelection`, which `SnapshotExtras` holds by value, and link_state.h for
+// `InstanceState`, which `loadStateJson` fills through an optional.
 struct Document;
 class DocumentStore;
 struct Key;
 class Listener;
+struct LinkView;
 struct Palette;
 
 /// Version of the wire format. Every message (snapshot, command, state) carries `"schema": kJsonSchema`;
@@ -582,8 +586,29 @@ bool applyCommandJson(DocumentStore& store, std::string_view json, std::string& 
 /// its byte bound of control characters, which escape to six bytes each, `kMaxTracks` tracks of `kMaxNotesPerTrack`
 /// inactive notes with eight-digit offsets and seven-digit lengths, every id ten digits) is pinned by
 /// test_json_api.cpp under `kMaxJsonBytes`, so a saved state always loads.
+///
+/// The instance block (per-track instruments plan I11). With `instance == nullptr` the text is exactly the above,
+/// byte for byte. With an instance it is that text with one more top-level member appended after everything else
+/// (the closing brace moves after it; every other byte stays as it is, so removing `,"instance":{...}` gives the text
+/// without it):
+/// ```
+/// "instance":{"doc":"<documentId>","follow":null,"id":"<id>","lanes":{"1":"<uid>","2":"<uid>"}}
+/// "instance":{"doc":"...","follow":{"doc":"<documentId>","lane":"chords"|"<uid>","laneName":"...",
+///             "leader":"<leaderId>","leaderLabel":"...","role":"..."},"id":"...","lanes":{}}
+/// ```
+/// Inside the block members are in nlohmann's order (sorted by name), as in every other object here; `lanes` maps
+/// each track number, as a decimal string, to its uid (`InstanceState::lanes`); `follow` is null without a follow
+/// and otherwise writes all six fields of `LinkFollow` (`laneRole` as `role`). A saved state always loads, whatever
+/// block the caller passes: what is written is `writableInstanceState(*instance)` (below), so a hint that is too long
+/// or not valid UTF-8 is written as an empty string (hints decide nothing), and a block that still breaks a rule of
+/// `validInstanceState` after that (an id, a lane, a follow's required field) is left out entirely, the state written
+/// as with `instance == nullptr`: losing a link is recoverable, losing the document is not. That case is a bug of the
+/// caller's (`LinkEndpoint::state` gives a valid block when its uid generator keeps to the rules; a track it could not
+/// cover simply has no entry), so a debug build
+/// asserts; a release build writes the state without the block. The block never makes this throw. Size: the largest
+/// valid block on the largest state is pinned by test_json_api.cpp under `kMaxJsonBytes`.
 std::string stateJson(const DocumentStore& store, int editorWidth = kDefaultEditorWidth,
-                      int editorHeight = kDefaultEditorHeight);
+                      int editorHeight = kDefaultEditorHeight, const InstanceState* instance = nullptr);
 
 /// Restores a document saved by `stateJson`. Atomic: the whole text is parsed and validated first; on any
 /// problem (malformed JSON, wrong schema, a missing or mistyped field, an unknown chord type or mode, a
@@ -619,7 +644,74 @@ std::string stateJson(const DocumentStore& store, int editorWidth = kDefaultEdit
 /// outside D1's domain, repeated ids, notes out of their (start, pitch, id) order, a name over `kMaxTrackNameBytes`,
 /// more than `kMaxTracks` tracks or `kMaxNotesPerTrack` notes, or the playback limits over the active notes of every
 /// track, muted ones included) rejects the whole state as `"tracks" rejected: <validateTracks' reason>`.
+///
+/// The instance block (`instance`, optional; see `stateJson`). On success `*instance` (when `instance` is non-null)
+/// is set: to the block when the state has one, else to empty (a state saved before linking, or by a caller that
+/// gave none: the caller then resets the link identity with `LinkEndpoint::adoptWithoutBlock`, link.h, a fresh
+/// document id, an empty lane table and no follow, never keeping what it had). A block is validated whether or not `instance` is
+/// given, and an invalid one rejects the whole state like every other malformed field (false, an error naming the
+/// field, the store and every out-param untouched). Valid means, with every error naming the field as shown:
+/// - `instance` an object (`"instance" must be an object`);
+/// - `id` and `doc` (into `documentId`) required ids: a string of 1..`kMaxLinkIdBytes` bytes, each printable ASCII
+///   0x21..0x7E, so no space and no control character (`missing instance.id`, `instance.id must be a string of 1..64
+///   printable ASCII characters (0x21..0x7E)`, likewise `instance.doc`);
+/// - `lanes` a required object (`instance.lanes must be an object`) of at most `kMaxInstanceLanes` (link.h)
+///   members (`instance.lanes must hold at most 804 entries`) whose keys are track numbers written canonically,
+///   decimal digits only, no sign, no leading zero, in 1..INT_MAX-1 (`instance.lanes keys must be track numbers in
+///   1..2147483646, decimal without sign or leading zeros`: "01", "-1", "+1", "1.0", " 1", "x", "0" and
+///   "2147483647" are all refused) and whose values are ids as above (`instance.lanes.<n> must be a string of ...`),
+///   never `"chords"` (`instance.lanes.<n> must not be "chords"`) and pairwise different (`instance.lanes.<n>
+///   repeats the uid of instance.lanes.<m>`, members visited in nlohmann's order, by key string);
+/// - `follow` null or an object (`instance.follow must be null or an object`), absent meaning null (not following,
+///   so a writer that leaves a null follow out stays readable): `leader` (into `leaderId`),
+///   `doc` (into `documentId`) and `lane` (into `laneUid`; `"chords"` passes as an id) required ids as above
+///   (`missing instance.follow.leader`, `instance.follow.leader must be a string of ...`); `laneName`, `role` (into
+///   `laneRole`) and `leaderLabel` optional strings, empty when absent, of at most `kMaxTrackNameBytes`, 16 and
+///   `kMaxLinkLabelBytes` bytes (`instance.follow.laneName must be a string of at most 64 bytes`, and so on); the
+///   hints are not checked further (any UTF-8 the parser accepted).
+/// These are the rules of `validInstanceState` (below), shared with the writer: every block this accepts passes it.
+/// Members the block, or its `follow`, does not know are ignored (forward compatibility), as elsewhere. Member order
+/// means nothing to the reader; a member given twice takes its last value (nlohmann's policy, as above), so two
+/// `instance` members are the last one, and a track number written twice in `lanes` is its last uid.
 bool loadStateJson(DocumentStore& store, std::string_view json, std::string& error, int* editorWidth = nullptr,
-                   int* editorHeight = nullptr) noexcept;
+                   int* editorHeight = nullptr, std::optional<InstanceState>* instance = nullptr) noexcept;
+
+/// The rules of the state's instance block (`loadStateJson` lists them with its messages), on plain data, shared by
+/// the reader and the writer: `id` and `documentId` 1..`kMaxLinkIdBytes` bytes of printable ASCII 0x21..0x7E; at most
+/// `kMaxInstanceLanes` (link.h) lanes, each keyed by a track number in 1..INT_MAX-1, with a uid that is such an
+/// id, never `"chords"`, all uids pairwise different; a follow's `leaderId`, `documentId` and `laneUid` such ids, its
+/// `laneName`, `laneRole` and `leaderLabel` valid UTF-8 of at most `kMaxTrackNameBytes`, 16 and `kMaxLinkLabelBytes`
+/// bytes. Returns true when `instance` keeps every one; otherwise false, with a short reason naming the field in
+/// `*why` when `why` is non-null ("lanes.2 repeats the uid of lanes.1"). Never throws but for allocation.
+bool validInstanceState(const InstanceState& instance, std::string* why = nullptr);
+
+/// What `stateJson` writes of `instance`: `instance` with each follow hint (`laneName`, `laneRole`, `leaderLabel`)
+/// that is over its byte bound or not valid UTF-8 replaced by an empty string, when the result is
+/// `validInstanceState`; nothing when it is not (a bad id, lane or required follow field: the state is then written
+/// without the block). A valid block comes back unchanged. The decision `stateJson` makes, as a function of its own,
+/// so that it can be tested without the debug assertion `stateJson` adds for the "nothing" case.
+std::optional<InstanceState> writableInstanceState(const InstanceState& instance);
+
+/// The link as the editor shows it (per-track instruments plan I12), from one `LinkView` (link.h):
+/// ```
+/// {"schema":1,
+///  "self":{"id":"<id>","label":"ChordLab A"},
+///  "following":null | {"leader":"<id>","leaderLabel":"...","lane":"chords"|"<uid>","laneName":"...","role":"...",
+///                      "status":"playing"|"muted"|"waiting"|"laneMissing"|"projectChanged",
+///                      "switchTo":null|{"leader":"<id>","label":"..."}},
+///  "leaders":[{"id":"...","label":"...","lineage":"...",
+///              "lanes":[{"lane":"chords"|"<uid>","name":"...","role":"...","chords":true,"audible":true,
+///                        "followers":0}, ...]}, ...],
+///  "routed":[{"lane":"<uid>","followers":2}, ...]}
+/// ```
+/// `self` is `view.id` and `view.label`. `following` is null when `view.follow` is empty or `view.status` is
+/// `NotFollowing` (no registry view has one without the other); otherwise its fields are the follow's `leaderId`,
+/// `leaderLabel`, `laneUid`, `laneName` and `laneRole`, `status` names `view.status`, and `switchTo` is
+/// `view.switchTo` (its `id` as `leader`) or null. `leaders` and `routed` are `view.leaders` and `view.routed` in
+/// their order, each lane's `lane` its uid and `role` its `trackRoleName`, empty for the chords lane (whose role
+/// means nothing, as the registry's hints have it). Member order inside objects is nlohmann's (sorted by name).
+/// Strings are written as UTF-8; invalid UTF-8 in any of them (a name, a label) is replaced by U+FFFD, never thrown
+/// on (`error_handler_t::replace`, as the shell's error messages). Allocates: the UI/message thread only.
+std::string linkStateJson(const LinkView& view);
 
 }  // namespace chordlab

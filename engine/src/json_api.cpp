@@ -10,6 +10,8 @@
 #include "chordlab/guide.h"
 #include "chordlab/harmony.h"
 #include "chordlab/identify.h"
+#include "chordlab/link.h"
+#include "chordlab/link_state.h"
 #include "chordlab/listener.h"
 #include "chordlab/meter.h"
 #include "chordlab/palette.h"
@@ -27,11 +29,13 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cassert>
 #include <climits>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <map>
 #include <optional>
 #include <set>
 #include <string>
@@ -2295,11 +2299,230 @@ bool parseCounter(Fields& fields, const char* name, int maxId, const char* what,
     return true;
 }
 
+// --- The instance block (per-track instruments plan I11) --------------------------------------------------------
+
+// The rules live in the small predicates below, used by the reader (`parseInstance`, with its messages) and by
+// `validInstanceState` (the writer's check, with its reasons) alike.
+
+/// The longest `role` hint of a follow in the instance block, in bytes ("bass", "lead" and "other" today).
+constexpr std::size_t kMaxLinkRoleBytes = 16;
+
+/// Whether `track` can key a block's lane: 1..INT_MAX-1, as a track id.
+bool isLaneTrack(int track) {
+    return track >= 1 && track <= INT_MAX - 1;
+}
+
+/// Whether `s` is well-formed UTF-8 as nlohmann's parser and writer require it: no stray continuation byte, no
+/// truncated sequence, no overlong form, no UTF-16 surrogate, nothing above U+10FFFF.
+bool isValidUtf8(const std::string& s) {
+    std::size_t i = 0;
+    while (i < s.size()) {
+        const auto lead = static_cast<unsigned char>(s[i]);
+        if (lead < 0x80) {
+            ++i;
+            continue;
+        }
+        std::size_t length = 0;
+        unsigned char low = 0x80;   // the range of the byte after the lead (narrower for some leads)
+        unsigned char high = 0xBF;
+        if (lead >= 0xC2 && lead <= 0xDF) {
+            length = 2;
+        } else if (lead == 0xE0) {
+            length = 3;
+            low = 0xA0;
+        } else if ((lead >= 0xE1 && lead <= 0xEC) || lead == 0xEE || lead == 0xEF) {
+            length = 3;
+        } else if (lead == 0xED) {
+            length = 3;
+            high = 0x9F;
+        } else if (lead == 0xF0) {
+            length = 4;
+            low = 0x90;
+        } else if (lead >= 0xF1 && lead <= 0xF3) {
+            length = 4;
+        } else if (lead == 0xF4) {
+            length = 4;
+            high = 0x8F;
+        } else {
+            return false;
+        }
+        if (s.size() - i < length) {
+            return false;
+        }
+        const auto second = static_cast<unsigned char>(s[i + 1]);
+        if (second < low || second > high) {
+            return false;
+        }
+        for (std::size_t k = 2; k < length; ++k) {
+            const auto next = static_cast<unsigned char>(s[i + k]);
+            if (next < 0x80 || next > 0xBF) {
+                return false;
+            }
+        }
+        i += length;
+    }
+    return true;
+}
+
+/// Whether `s` can be a follow hint bounded by `maxBytes`: valid UTF-8 of at most that many bytes.
+bool isLinkHint(const std::string& s, std::size_t maxBytes) {
+    return s.size() <= maxBytes && isValidUtf8(s);
+}
+
+/// Whether `s` is an id of the instance block: 1..`kMaxLinkIdBytes` bytes, each printable ASCII 0x21..0x7E (no
+/// space, no control character, no byte of a multi-byte UTF-8 sequence).
+bool isLinkId(const std::string& s) {
+    if (s.empty() || s.size() > kMaxLinkIdBytes) {
+        return false;
+    }
+    return std::all_of(s.begin(), s.end(), [](char c) {
+        const auto byte = static_cast<unsigned char>(c);
+        return byte >= 0x21 && byte <= 0x7E;
+    });
+}
+
+/// Reads the required id `name` of `fields` into `out` (`isLinkId`); one message for every way it can be wrong.
+bool getLinkId(Fields& fields, const char* name, std::string& out) {
+    const json* v = fields.require(name);
+    if (v == nullptr) {
+        return false;
+    }
+    if (!v->is_string() || !isLinkId(v->get_ref<const std::string&>())) {
+        return fields.fail(name, "must be a string of 1.." + std::to_string(kMaxLinkIdBytes) +
+                                     " printable ASCII characters (0x21..0x7E)");
+    }
+    out = v->get<std::string>();
+    return true;
+}
+
+/// Reads the optional string `name` of `fields` into `out`: empty when absent, else a string of at most `maxBytes`
+/// bytes (a follow's hints, which decide nothing and are not checked further).
+bool getLinkHint(Fields& fields, const char* name, std::size_t maxBytes, std::string& out) {
+    out.clear();
+    const json* v = fields.find(name);
+    if (v == nullptr) {
+        return true;
+    }
+    if (!v->is_string() || !isLinkHint(v->get_ref<const std::string&>(), maxBytes)) {  // parsed: always UTF-8
+        return fields.fail(name, "must be a string of at most " + std::to_string(maxBytes) + " bytes");
+    }
+    out = v->get<std::string>();
+    return true;
+}
+
+/// A track number as `lanes` keys it: decimal digits only, no sign, no leading zero, in 1..INT_MAX-1, so that one
+/// number has one spelling and a repeated member is the only way to name a track twice. The digits are summed at 64
+/// bits after a length check, so nothing overflows before the range check.
+bool parseLaneKey(const std::string& key, int& out) {
+    if (key.empty() || key.size() > 10 || key[0] == '0') {
+        return false;
+    }
+    std::int64_t value = 0;
+    for (const char c : key) {
+        if (c < '0' || c > '9') {
+            return false;
+        }
+        value = value * 10 + (c - '0');
+    }
+    if (value > INT_MAX || !isLaneTrack(static_cast<int>(value))) {
+        return false;
+    }
+    out = static_cast<int>(value);
+    return true;
+}
+
+/// Reads the optional `instance` block of a state (json_api.h, `loadStateJson`, lists the rules and the messages):
+/// absent leaves `out` empty; present it must be valid as a whole, or the state is rejected. Unknown members of the
+/// block and of its `follow` are ignored. `out` is written only when everything was read.
+bool parseInstance(Fields& fields, std::optional<InstanceState>& out, std::string& error) {
+    if (!fields.has("instance")) {
+        out.reset();
+        return true;
+    }
+    const json* object = fields.getObject("instance");
+    if (object == nullptr) {
+        return false;
+    }
+    Fields block(*object, "instance", error);
+    InstanceState state;
+    if (!getLinkId(block, "id", state.id) || !getLinkId(block, "doc", state.documentId)) {
+        return false;
+    }
+
+    const json* lanes = block.getObject("lanes");
+    if (lanes == nullptr) {
+        return false;
+    }
+    if (lanes->size() > kMaxInstanceLanes) {
+        return block.fail("lanes", "must hold at most " + std::to_string(kMaxInstanceLanes) + " entries");
+    }
+    Fields laneFields(*lanes, block.label("lanes"), error);
+    std::map<std::string, std::string> keyOfUid;  // each uid read so far -> the key it came with
+    for (auto it = lanes->begin(); it != lanes->end(); ++it) {  // nlohmann's order: by key string
+        int track = 0;
+        if (!parseLaneKey(it.key(), track)) {
+            error = block.label("lanes") + " keys must be track numbers in 1.." + std::to_string(INT_MAX - 1) +
+                    ", decimal without sign or leading zeros";
+            return false;
+        }
+        const char* key = it.key().c_str();  // canonical digits: safe to name in a message
+        std::string uid;
+        if (!getLinkId(laneFields, key, uid)) {
+            return false;
+        }
+        if (uid == kChordsLaneUid) {
+            return laneFields.fail(key, "must not be \"" + std::string(kChordsLaneUid) + "\"");
+        }
+        const auto repeat = keyOfUid.find(uid);
+        if (repeat != keyOfUid.end()) {
+            return laneFields.fail(key, "repeats the uid of " + laneFields.label(repeat->second.c_str()));
+        }
+        keyOfUid.emplace(uid, it.key());
+        state.lanes.emplace(track, std::move(uid));
+    }
+
+    const json* follow = block.find("follow");  // absent is null: not following
+    if (follow != nullptr && !follow->is_null()) {
+        if (!follow->is_object()) {
+            return block.fail("follow", "must be null or an object");
+        }
+        Fields followFields(*follow, block.label("follow"), error);
+        LinkFollow link;
+        if (!getLinkId(followFields, "leader", link.leaderId) || !getLinkId(followFields, "doc", link.documentId) ||
+            !getLinkId(followFields, "lane", link.laneUid) ||
+            !getLinkHint(followFields, "laneName", static_cast<std::size_t>(kMaxTrackNameBytes), link.laneName) ||
+            !getLinkHint(followFields, "role", kMaxLinkRoleBytes, link.laneRole) ||
+            !getLinkHint(followFields, "leaderLabel", kMaxLinkLabelBytes, link.leaderLabel)) {
+            return false;
+        }
+        state.follow = std::move(link);
+    }
+    assert(validInstanceState(state) && "the reader and validInstanceState share their rules");
+    out = std::move(state);
+    return true;
+}
+
+/// The state's `instance` block as `stateJson` writes it: every field, `follow` null without one.
+json instanceJson(const InstanceState& instance) {
+    json lanes = json::object();
+    for (const auto& [track, uid] : instance.lanes) {
+        lanes[std::to_string(track)] = uid;
+    }
+    json follow;  // null
+    if (instance.follow.has_value()) {
+        const LinkFollow& f = *instance.follow;
+        follow = {{"leader", f.leaderId},     {"doc", f.documentId}, {"lane", f.laneUid},
+                  {"laneName", f.laneName},   {"role", f.laneRole},  {"leaderLabel", f.leaderLabel}};
+    }
+    return {{"id", instance.id}, {"doc", instance.documentId}, {"lanes", std::move(lanes)}, {"follow", std::move(follow)}};
+}
+
 /// Phase A of `loadStateJson`: parses and validates `text` into a document, the four id counters and an
 /// editor size. `Document` holds vectors and strings, whose destruction frees but never allocates.
 /// `nextSectionId`, `nextTrackId` and `nextNoteId` are 0 when the state carries none: `replace` then derives them.
+/// `instance` is the state's instance block, empty without one.
 bool parseState(std::string_view text, Document& doc, int& nextId, int& nextSectionId, int& nextTrackId,
-                int& nextNoteId, int& width, int& height, std::string& error) {
+                int& nextNoteId, int& width, int& height, std::optional<InstanceState>& instance, std::string& error) {
     json message;
     if (!parseMessage(text, message, error)) {
         return false;
@@ -2466,7 +2689,8 @@ bool parseState(std::string_view text, Document& doc, int& nextId, int& nextSect
         }
     }
 
-    return true;
+    // The instance block (optional: states saved before linking, or without a link, have none). Present means valid.
+    return parseInstance(fields, instance, error);
 }
 
 /// Records the failure of a reader that threw: an allocation failure, or a nlohmann exception that the
@@ -2713,7 +2937,7 @@ json stateTracksJson(const Document& doc) {
 
 }  // namespace
 
-std::string stateJson(const DocumentStore& store, int editorWidth, int editorHeight) {
+std::string stateJson(const DocumentStore& store, int editorWidth, int editorHeight, const InstanceState* instance) {
     const Document& doc = store.doc();
     json events = json::array();
     for (const ChordEvent& e : doc.events) {
@@ -2750,7 +2974,22 @@ std::string stateJson(const DocumentStore& store, int editorWidth, int editorHei
                         {"nextTrackId", store.nextTrackId()},
                         {"nextNoteId", store.nextNoteId()},
                         {"editor", {{"width", editorWidth}, {"height", editorHeight}}}};
-    return state.dump();
+    std::string text = state.dump();
+    if (instance != nullptr) {
+        // A saved state must always load: hints that break their rule are emptied, and a block that still breaks
+        // one is left out (the caller's bug, so a debug build stops here) rather than make the document unloadable.
+        const std::optional<InstanceState> block = writableInstanceState(*instance);
+        assert(block.has_value() && "stateJson was given an instance block that breaks a rule; it is left out");
+        if (block.has_value()) {
+            // One more member after everything above, so the text without it is exactly the text above: the closing
+            // brace moves behind the block (nlohmann would otherwise sort it in among the other members).
+            text.pop_back();
+            text += ",\"instance\":";
+            text += instanceJson(*block).dump();
+            text += '}';
+        }
+    }
+    return text;
 }
 
 bool applyCommandJson(DocumentStore& store, std::string_view text, std::string& error,
@@ -2822,7 +3061,10 @@ bool applyCommandJson(DocumentStore& store, std::string_view text, std::string& 
 }
 
 bool loadStateJson(DocumentStore& store, std::string_view text, std::string& error, int* editorWidth,
-                   int* editorHeight) noexcept {
+                   int* editorHeight, std::optional<InstanceState>* instance) noexcept {
+    // Phase B moves the block into the caller's optional after the store's replace: neither may throw.
+    static_assert(std::is_nothrow_move_assignable_v<std::optional<InstanceState>>,
+                  "handing over the instance block must not throw after the store changed");
     try {
         error.clear();
         Document doc;
@@ -2832,8 +3074,9 @@ bool loadStateJson(DocumentStore& store, std::string_view text, std::string& err
         int nextNoteId = 0;
         int width = kDefaultEditorWidth;
         int height = kDefaultEditorHeight;
+        std::optional<InstanceState> block;  // plain strings and a map: destroying it frees, never allocates
         // Phase A: the tree is destroyed on return; the tracks have passed validateTracks with the counters below.
-        if (!parseState(text, doc, nextId, nextSectionId, nextTrackId, nextNoteId, width, height, error)) {
+        if (!parseState(text, doc, nextId, nextSectionId, nextTrackId, nextNoteId, width, height, block, error)) {
             return false;
         }
         // Phase B: cannot throw, nor can the writes below
@@ -2844,11 +3087,163 @@ bool loadStateJson(DocumentStore& store, std::string_view text, std::string& err
         if (editorHeight != nullptr) {
             *editorHeight = height;
         }
+        if (instance != nullptr) {
+            *instance = std::move(block);
+        }
         return true;
     } catch (...) {
         setInternalError(error);
         return false;
     }
+}
+
+namespace {
+
+/// The `status` of `linkStateJson`'s `following`. `NotFollowing` never reaches it (`following` is null then).
+const char* linkStatusName(LinkStatus status) {
+    switch (status) {
+        case LinkStatus::Playing:
+            return "playing";
+        case LinkStatus::Muted:
+            return "muted";
+        case LinkStatus::Waiting:
+            return "waiting";
+        case LinkStatus::LaneMissing:
+            return "laneMissing";
+        case LinkStatus::ProjectChanged:
+            return "projectChanged";
+        case LinkStatus::NotFollowing:
+            break;
+    }
+    return "notFollowing";
+}
+
+}  // namespace
+
+bool validInstanceState(const InstanceState& instance, std::string* why) {
+    const auto fail = [why](std::string reason) {
+        if (why != nullptr) {
+            *why = std::move(reason);
+        }
+        return false;
+    };
+    const std::string idRule =
+        " must be a string of 1.." + std::to_string(kMaxLinkIdBytes) + " printable ASCII characters (0x21..0x7E)";
+    if (!isLinkId(instance.id)) {
+        return fail("id" + idRule);
+    }
+    if (!isLinkId(instance.documentId)) {
+        return fail("doc" + idRule);
+    }
+    if (instance.lanes.size() > kMaxInstanceLanes) {
+        return fail("lanes must hold at most " + std::to_string(kMaxInstanceLanes) + " entries");
+    }
+    std::map<std::string, int> trackOfUid;
+    for (const auto& [track, uid] : instance.lanes) {
+        if (!isLaneTrack(track)) {
+            return fail("lanes keys must be track numbers in 1.." + std::to_string(INT_MAX - 1) + " (" +
+                        std::to_string(track) + ")");
+        }
+        const std::string field = "lanes." + std::to_string(track);
+        if (!isLinkId(uid)) {
+            return fail(field + idRule);
+        }
+        if (uid == kChordsLaneUid) {
+            return fail(field + " must not be \"" + std::string(kChordsLaneUid) + "\"");
+        }
+        const auto repeat = trackOfUid.find(uid);
+        if (repeat != trackOfUid.end()) {
+            return fail(field + " repeats the uid of lanes." + std::to_string(repeat->second));
+        }
+        trackOfUid.emplace(uid, track);
+    }
+    if (instance.follow.has_value()) {
+        const LinkFollow& f = *instance.follow;
+        if (!isLinkId(f.leaderId)) {
+            return fail("follow.leader" + idRule);
+        }
+        if (!isLinkId(f.documentId)) {
+            return fail("follow.doc" + idRule);
+        }
+        if (!isLinkId(f.laneUid)) {
+            return fail("follow.lane" + idRule);
+        }
+        const std::pair<const char*, std::pair<const std::string*, std::size_t>> hints[] = {
+            {"laneName", {&f.laneName, static_cast<std::size_t>(kMaxTrackNameBytes)}},
+            {"role", {&f.laneRole, kMaxLinkRoleBytes}},
+            {"leaderLabel", {&f.leaderLabel, kMaxLinkLabelBytes}}};
+        for (const auto& [name, hint] : hints) {
+            if (!isLinkHint(*hint.first, hint.second)) {
+                return fail(std::string("follow.") + name + " must be valid UTF-8 of at most " +
+                            std::to_string(hint.second) + " bytes");
+            }
+        }
+    }
+    return true;
+}
+
+std::optional<InstanceState> writableInstanceState(const InstanceState& instance) {
+    InstanceState block = instance;
+    if (block.follow.has_value()) {
+        LinkFollow& f = *block.follow;
+        // Hints decide nothing: one that breaks its rule is written empty, which is always valid.
+        if (!isLinkHint(f.laneName, static_cast<std::size_t>(kMaxTrackNameBytes))) {
+            f.laneName.clear();
+        }
+        if (!isLinkHint(f.laneRole, kMaxLinkRoleBytes)) {
+            f.laneRole.clear();
+        }
+        if (!isLinkHint(f.leaderLabel, kMaxLinkLabelBytes)) {
+            f.leaderLabel.clear();
+        }
+    }
+    if (!validInstanceState(block)) {
+        return std::nullopt;
+    }
+    return block;
+}
+
+std::string linkStateJson(const LinkView& view) {
+    json following;  // null
+    if (view.follow.has_value() && view.status != LinkStatus::NotFollowing) {
+        const LinkFollow& f = *view.follow;
+        json switchTo;  // null
+        if (view.switchTo.has_value()) {
+            switchTo = {{"leader", view.switchTo->id}, {"label", view.switchTo->label}};
+        }
+        following = {{"leader", f.leaderId},
+                     {"leaderLabel", f.leaderLabel},
+                     {"lane", f.laneUid},
+                     {"laneName", f.laneName},
+                     {"role", f.laneRole},
+                     {"status", linkStatusName(view.status)},
+                     {"switchTo", std::move(switchTo)}};
+    }
+    json leaders = json::array();
+    for (const LinkLeaderView& leader : view.leaders) {
+        json lanes = json::array();
+        for (const LinkLaneView& lane : leader.lanes) {
+            lanes.push_back({{"lane", lane.uid},
+                             {"name", lane.name},
+                             {"role", lane.chords ? "" : trackRoleName(lane.role)},
+                             {"chords", lane.chords},
+                             {"audible", lane.audible},
+                             {"followers", lane.followers}});
+        }
+        leaders.push_back(
+            {{"id", leader.id}, {"label", leader.label}, {"lineage", leader.lineage}, {"lanes", std::move(lanes)}});
+    }
+    json routed = json::array();
+    for (const LinkLaneView& lane : view.routed) {
+        routed.push_back({{"lane", lane.uid}, {"followers", lane.followers}});
+    }
+    const json state = {{"schema", kJsonSchema},
+                        {"self", {{"id", view.id}, {"label", view.label}}},
+                        {"following", std::move(following)},
+                        {"leaders", std::move(leaders)},
+                        {"routed", std::move(routed)}};
+    // Names and labels come from documents and the registry: invalid UTF-8 is replaced, never thrown on.
+    return state.dump(-1, ' ', false, json::error_handler_t::replace);
 }
 
 }  // namespace chordlab

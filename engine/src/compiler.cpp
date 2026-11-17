@@ -180,25 +180,45 @@ void pairChordNotes(const std::vector<NoteEvent>& events, std::vector<LaneNote>&
 
 }  // namespace
 
-Compiled compilePlayback(const Document& doc) {
-    const Compiled chords = compile(doc);
+bool operator==(const LaneKey& a, const LaneKey& b) noexcept {
+    return a.chords == b.chords && (a.chords || a.trackId == b.trackId);
+}
+bool operator!=(const LaneKey& a, const LaneKey& b) noexcept { return !(a == b); }
+LaneKey chordsLane() noexcept { return LaneKey{true, 0}; }
+LaneKey trackLane(int trackId) noexcept { return LaneKey{false, trackId}; }
+
+bool LaneSelection::includes(const LaneKey& lane) const noexcept {
+    const bool listed = std::find(lanes.begin(), lanes.end(), lane) != lanes.end();
+    return mode == Mode::Only ? listed : !listed;
+}
+
+Compiled compilePlayback(const Document& doc) { return compilePlaybackFor(doc, LaneSelection{}); }
+
+Compiled compilePlaybackFor(const Document& doc, const LaneSelection& selection) {
+    return compilePlaybackFor(doc, selection, compile(doc));
+}
+
+Compiled compilePlaybackFor(const Document& doc, const LaneSelection& selection, const Compiled& chords) {
     Compiled playback;
     playback.endBeat = chords.endBeat;
     playback.feelLimited = chords.feelLimited;
 
     std::vector<LaneNote> notes;
-    if (chordsAudible(doc)) {
+    if (chordsAudible(doc) && selection.includes(chordsLane())) {
         notes.reserve(chords.events.size() / 2);
         pairChordNotes(chords.events, notes);
     }
+    const auto trackContributes = [&](std::size_t i) {
+        return trackAudible(doc, i) && selection.includes(trackLane(doc.tracks[i].id));
+    };
     bool anyTrack = false;
     for (std::size_t i = 0; i < doc.tracks.size(); ++i) {
-        anyTrack = anyTrack || (trackAudible(doc, i) && !doc.tracks[i].notes.empty());
+        anyTrack = anyTrack || (trackContributes(i) && !doc.tracks[i].notes.empty());
     }
     if (anyTrack) {
         const ChordTimeline timeline = chordTimeline(doc);
         for (std::size_t i = 0; i < doc.tracks.size(); ++i) {
-            if (!trackAudible(doc, i)) continue;
+            if (!trackContributes(i)) continue;
             for (const TrackNote& note : doc.tracks[i].notes) {
                 if (!noteActive(timeline, note)) continue;
                 const std::int64_t start = noteStart(timeline, note);

@@ -26,6 +26,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <iterator>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <string>
@@ -509,4 +510,45 @@ TEST_CASE("golden fixtures: the legacy Phase 1 snapshot is well formed and a sub
     // The constant tables are exactly the engine's.
     CHECK(legacy.at("modes") == current.at("modes"));
     CHECK(legacy.at("tonics") == current.at("tonics"));
+}
+
+// ---- The instance block (per-track instruments plan I11): no fixture carries one ----
+
+TEST_CASE("golden fixtures: every state fixture loads as before without an instance block and empties the out-parameter") {
+    // Read only: none of these files is rewritten here, whatever CHORDLAB_UPDATE_FIXTURES says.
+    for (const char* name : {"state-progression.json", "state-feel.json", "state-tracks.json", "state-legacy-phase1.json",
+                             "state-legacy-feel.json", "state-legacy-length.json", "state-legacy-tracks.json"}) {
+        CAPTURE(name);
+        std::string text;
+        REQUIRE_MESSAGE(readFile(name, text), name << " missing");
+        CHECK_FALSE(json::parse(text).contains("instance"));
+
+        DocumentStore plain;
+        std::string error;
+        int plainWidth = 0;
+        int plainHeight = 0;
+        REQUIRE_MESSAGE(loadStateJson(plain, text, error, &plainWidth, &plainHeight), error);
+
+        DocumentStore withOut;
+        std::optional<InstanceState> instance = InstanceState{"stale-id", "stale-doc", {{1, "stale-lane"}}, {}};
+        int width = 0;
+        int height = 0;
+        REQUIRE_MESSAGE(loadStateJson(withOut, text, error, &width, &height, &instance), error);
+        CHECK(error.empty());
+        CHECK_FALSE(instance.has_value());
+        CHECK(withOut.doc() == plain.doc());
+        CHECK(withOut.nextId() == plain.nextId());
+        CHECK(withOut.nextSectionId() == plain.nextSectionId());
+        CHECK(withOut.nextTrackId() == plain.nextTrackId());
+        CHECK(withOut.nextNoteId() == plain.nextNoteId());
+        CHECK(width == plainWidth);
+        CHECK(height == plainHeight);
+    }
+    // The generated ones are still the engine's output with no instance given, the default spelled out.
+    CHECK(stateJson(progressionStore(nullptr), 900, 600, nullptr) == stateProgression());
+    CHECK(stateJson(feelStore(), 900, 600, nullptr) == stateFeel());
+    CHECK(stateJson(tracksStore(), 900, 600, nullptr) == stateTracks());
+    std::string onDisk;
+    REQUIRE(readFile("state-tracks.json", onDisk));
+    CHECK(stateJson(tracksStore(), 900, 600, nullptr) == onDisk);
 }

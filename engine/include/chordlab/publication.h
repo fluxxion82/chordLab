@@ -57,6 +57,16 @@ struct Publication {
 /// an off per track note (`kMaxTracks` x `kMaxNotesPerTrack`), which is `kMaxSnapshotEvents`, the merge only
 /// removing events. A document that did not fit would be adopted as empty by the scheduler anyway, so it is
 /// published as empty, not truncated (and asserts). Allocates (compilePlayback): main thread only.
+/// This is the four-argument `fillSlot` with every lane selected (`LaneSelection{}`).
 bool fillSlot(const Document& doc, SnapshotSlot& slot, Publication& last);
+
+/// The leader's own fill (per-track instruments plan I5): the three-argument `fillSlot` with
+/// `compilePlaybackFor(doc, own)` in place of `compilePlayback(doc)`, so the slot carries only the lanes `own`
+/// selects (with linked instances, `AllExcept` the lanes that followers play). Everything else is that
+/// `fillSlot`'s contract: a change of `own` alone that changes the compiled events is content and bumps the
+/// generation; one that changes nothing publishes nothing. Generations count up by one from 1 with every change
+/// of content, so they stay below `kLinkGenerationBase` (link.h, 2^31), where a follower's link generations
+/// start: reaching it would take 2^31 - 1 content changes. Allocates: main thread only.
+bool fillSlot(const Document& doc, const LaneSelection& own, SnapshotSlot& slot, Publication& last);
 
 }  // namespace chordlab

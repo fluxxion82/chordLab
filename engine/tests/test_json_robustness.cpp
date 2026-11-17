@@ -13,6 +13,7 @@
 #include "chordlab/document.h"
 #include "chordlab/feel.h"
 #include "chordlab/json_api.h"
+#include "chordlab/link.h"
 #include "chordlab/meter.h"
 #include "chordlab/palette.h"
 #include "chordlab/pitch.h"
@@ -24,6 +25,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <climits>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -1163,4 +1165,266 @@ TEST_CASE("json robustness: the depth limit is exactly kMaxJsonDepth levels") {
     CHECK_MESSAGE(applyCommandJson(store, withArrays(kMaxJsonDepth - 1), error), error);
     CHECK_FALSE(applyCommandJson(store, withArrays(kMaxJsonDepth), error));
     CHECK_FALSE(error.empty());
+}
+
+// ---- states carrying the instance block (per-track instruments plan I11) ----
+
+namespace {
+
+/// An id as the instance block's rules have it (json_api.h), restated here independently of the reader.
+bool validLinkId(const std::string& s) {
+    return !s.empty() && s.size() <= kMaxLinkIdBytes &&
+           std::all_of(s.begin(), s.end(), [](char c) { return c >= 0x21 && c <= 0x7E; });
+}
+
+/// Whether `s` keeps every rule of the instance block: the fuzz's oracle for what an accepted block may hold.
+bool instanceValid(const InstanceState& s) {
+    if (!validLinkId(s.id) || !validLinkId(s.documentId) || s.lanes.size() > kMaxInstanceLanes) {
+        return false;
+    }
+    std::set<std::string> uids;
+    for (const auto& [track, uid] : s.lanes) {
+        if (track < 1 || track > INT_MAX - 1 || !validLinkId(uid) || uid == kChordsLaneUid || !uids.insert(uid).second) {
+            return false;
+        }
+    }
+    if (s.follow.has_value()) {
+        const LinkFollow& f = *s.follow;
+        if (!validLinkId(f.leaderId) || !validLinkId(f.documentId) || !validLinkId(f.laneUid) ||
+            f.laneName.size() > static_cast<std::size_t>(kMaxTrackNameBytes) || f.laneRole.size() > 16 ||
+            f.leaderLabel.size() > kMaxLinkLabelBytes) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// Valid states that carry the block, on `prefilledTrackStore()`: a follow with every hint and three lanes; no follow
+/// and one lane; the chords lane followed and no lanes; vanished tracks' lanes kept and no follow.
+std::vector<std::string> instanceCorpus() {
+    const DocumentStore store = prefilledTrackStore(false);
+    const std::vector<InstanceState> blocks = {
+        InstanceState{"inst-A", "doc-A", {{1, "uid-1"}, {2, "uid-2"}, {3, "uid-3"}},
+                      LinkFollow{"inst-B", "doc-B", "uid-9", "Bass", "bass", "ChordLab B"}},
+        InstanceState{"inst-A", "doc-A", {{1, "uid-1"}}, std::nullopt},
+        InstanceState{"inst-C", "doc-C", {}, LinkFollow{"inst-A", "doc-A", "chords", "Chords", "", "ChordLab A"}},
+        InstanceState{"inst-D", "doc-D", {{1, "u1"}, {2, "u2"}, {3, "u3"}, {7, "u7"}, {12, "u12"}}, std::nullopt},
+    };
+    std::vector<std::string> out;
+    for (const InstanceState& block : blocks) {
+        out.push_back(stateJson(store, 900, 620, &block));
+    }
+    return out;
+}
+
+/// Loads `text` into `store` with every out-param and checks every promise of `loadStateJson`, the block's included;
+/// returns the first broken one. A rejection touches nothing (the store, its history, the editor size, the block);
+/// an acceptance sets the block, to empty or to one that keeps every rule, and what it accepted saves and loads again
+/// equal, block and all.
+/// `accepted` and `withBlock`, when given, report whether the load succeeded and whether it found a block.
+std::string feedInstanceState(DocumentStore& store, const std::string& text, bool* accepted = nullptr,
+                              bool* withBlock = nullptr) {
+    const Observable before(store);
+    const DocumentStore storeBefore = store;
+    const std::optional<InstanceState> sentinel = InstanceState{"sentinel-id", "sentinel-doc", {{5, "sentinel"}}, {}};
+    std::optional<InstanceState> instance = sentinel;
+    std::string error = "stale";
+    int w = -7;
+    int h = -7;
+    bool ok = false;
+    try {
+        ok = loadStateJson(store, text, error, &w, &h, &instance);
+    } catch (...) {
+        return "loadStateJson let an exception escape";
+    }
+    if (ok && !error.empty()) {
+        return "loadStateJson accepted but left error \"" + error + "\"";
+    }
+    if (!ok && (error.empty() || error == "stale")) {
+        return "loadStateJson rejected without setting error";
+    }
+    if (!ok && (w != -7 || h != -7 || instance != sentinel || !(Observable(store) == before))) {
+        return "loadStateJson rejected but touched the store or an out-param";
+    }
+    if (!ok) {
+        const std::string difference = historyDifference(storeBefore, store);
+        if (!difference.empty()) {
+            return "loadStateJson rejected but changed the undo/redo history: " + difference;
+        }
+    }
+    const std::string problem = invariantProblem(store, false);
+    if (!problem.empty()) {
+        return "after loadStateJson: " + problem;
+    }
+    if (accepted != nullptr) {
+        *accepted = ok;
+    }
+    if (withBlock != nullptr) {
+        *withBlock = ok && instance.has_value();
+    }
+    if (ok) {
+        if (instance == sentinel) {
+            return "loadStateJson accepted but left the block's out-param as it was";
+        }
+        if (instance.has_value() && !instanceValid(*instance)) {
+            return "loadStateJson accepted a block that breaks a rule";
+        }
+        if (instance.has_value() && !validInstanceState(*instance)) {
+            return "loadStateJson accepted a block that validInstanceState refuses";
+        }
+        if (instance.has_value()) {
+            // Every distinct member of the accepted `lanes` (nlohmann keeps the last of a repeated one, as the reader
+            // does) is one entry: a reader that collapsed two keys into one track would show here.
+            const json parsed = json::parse(text);
+            if (parsed.at("instance").at("lanes").size() != instance->lanes.size()) {
+                return "the accepted block's lanes do not have one entry per member";
+            }
+        }
+        DocumentStore again;
+        std::optional<InstanceState> back;
+        std::string e2;
+        if (!loadStateJson(again, stateJson(store, w, h, instance ? &*instance : nullptr), e2, nullptr, nullptr, &back) ||
+            !(again.doc() == store.doc()) || back != instance) {
+            return "an accepted state with its block does not round-trip: " + e2;
+        }
+    }
+    return {};
+}
+
+/// The JSON pointer of every value inside `value` (itself included), depth first.
+void collectPointers(const json& value, const json::json_pointer& at, std::vector<json::json_pointer>& out) {
+    out.push_back(at);
+    if (value.is_object()) {
+        for (auto it = value.begin(); it != value.end(); ++it) {
+            collectPointers(it.value(), at / it.key(), out);
+        }
+    }
+}
+
+/// Whether two JSON values have the same type, the three number types counting as one.
+bool sameJsonType(const json& a, const json& b) {
+    return a.type() == b.type() || (a.is_number() && b.is_number());
+}
+
+}  // namespace
+
+TEST_CASE("json robustness: states carrying the instance block are accepted and every truncation of them is rejected cleanly") {
+    const std::vector<std::string> corpus = instanceCorpus();
+    for (const std::string& text : corpus) {
+        DocumentStore store = prefilledTrackStore(true);
+        const std::string problem = feedInstanceState(store, text);
+        CHECK_MESSAGE(problem.empty(), problem << " input=" << escaped(text));
+        std::optional<InstanceState> instance;
+        std::string error;
+        DocumentStore fresh;
+        REQUIRE_MESSAGE(loadStateJson(fresh, text, error, nullptr, nullptr, &instance), error);
+        CHECK(instance.has_value());
+    }
+    // Every proper prefix from a little before the block to the last byte: never accepted, nothing touched.
+    int truncations = 0;
+    for (const std::string& text : corpus) {
+        const std::size_t block = text.rfind(",\"instance\":");
+        REQUIRE(block != std::string::npos);
+        for (std::size_t length = block - 8; length < text.size(); ++length) {
+            const std::string prefix = text.substr(0, length);
+            DocumentStore store = prefilledTrackStore(length % 2 == 0);
+            const std::optional<InstanceState> sentinel = InstanceState{"s", "s", {}, {}};
+            std::optional<InstanceState> instance = sentinel;
+            const Observable before(store);
+            std::string error;
+            int w = -7;
+            int h = -7;
+            const bool ok = loadStateJson(store, prefix, error, &w, &h, &instance);
+            if (ok || error.empty() || w != -7 || h != -7 || instance != sentinel || !(Observable(store) == before)) {
+                FAIL_CHECK("a truncated state was accepted or touched something: " << escaped(prefix));
+                break;
+            }
+            ++truncations;
+        }
+    }
+    MESSAGE("instance block truncations: " << truncations);
+}
+
+TEST_CASE("json robustness: a value of another type at any position of the instance block rejects the whole state") {
+    const std::vector<json> replacements = {nullptr,          true,  0,  -1, 1.5,  "",
+                                            "two words",      json::array(), json::array({"uid-1"}),
+                                            json::object(),   json{{"id", "x"}}};
+    int rejected = 0;
+    int checked = 0;
+    for (const std::string& text : instanceCorpus()) {
+        const json state = json::parse(text);
+        std::vector<json::json_pointer> pointers;
+        collectPointers(state.at("instance"), json::json_pointer("/instance"), pointers);
+        for (const json::json_pointer& at : pointers) {
+            const json& original = state.at(at);
+            for (const json& replacement : replacements) {
+                json mutated = state;
+                mutated.at(at) = replacement;
+                const std::string mutant = mutated.dump();
+                CAPTURE(at.to_string());
+                CAPTURE(replacement.dump());
+                DocumentStore store = prefilledTrackStore(checked % 2 == 0);
+                const std::string problem = feedInstanceState(store, mutant);
+                CHECK_MESSAGE(problem.empty(), problem);
+                ++checked;
+                // `follow` may be null; anything else of another type than the value it replaces is refused.
+                const bool nullFollow = at.to_string() == "/instance/follow" && replacement.is_null();
+                if (!sameJsonType(original, replacement) && !nullFollow) {
+                    std::string error;
+                    DocumentStore probe;
+                    CHECK_FALSE(loadStateJson(probe, mutant, error));
+                    CHECK(error.find(at.to_string() == "/instance" ? std::string("\"instance\"") : std::string("instance.")) !=
+                          std::string::npos);
+                    ++rejected;
+                }
+            }
+        }
+    }
+    MESSAGE("instance block retyped: " << checked << " mutants, " << rejected << " of another type");
+    CHECK(rejected > 100);
+}
+
+TEST_CASE("json robustness: seeded mutation fuzz of states carrying the instance block keeps every promise") {
+    constexpr int kInstanceIterations = 1500;
+    const std::vector<std::string> corpus = instanceCorpus();
+    Rng rng{0xC2B2AE3D27D4EB4Full};
+    DocumentStore store = prefilledTrackStore(true);
+    int accepted = 0;
+    int withBlock = 0;
+    for (int i = 0; i < kInstanceIterations; ++i) {
+        if (i % 25 == 0) {
+            store = prefilledTrackStore((i / 25) % 2 == 0);
+        }
+        std::string m = corpus[rng.below(corpus.size())];
+        // Most mutations land in the document part, which is long; half the mutants are cut down to the block first
+        // (the state up to the block plus the mutated block), so the block's own bytes are hit often.
+        const std::size_t mutations = 1 + rng.below(3);
+        if (rng.below(2) == 0) {
+            const std::size_t block = m.rfind(",\"instance\":");
+            std::string head = m.substr(0, block);
+            std::string tail = m.substr(block);
+            for (std::size_t k = 0; k < mutations; ++k) {
+                mutateOnce(tail, rng);
+            }
+            m = head + tail;
+        } else {
+            for (std::size_t k = 0; k < mutations; ++k) {
+                mutateOnce(m, rng);
+            }
+        }
+        bool ok = false;
+        bool block = false;
+        const std::string problem = feedInstanceState(store, m, &ok, &block);
+        if (!problem.empty()) {
+            FAIL_CHECK(problem << " [iteration " << i << ", input=" << escaped(m) << "]");
+            break;
+        }
+        accepted += ok ? 1 : 0;
+        withBlock += block ? 1 : 0;
+    }
+    MESSAGE("instance block fuzz: " << kInstanceIterations << " mutants, " << accepted << " accepted, " << withBlock
+                                    << " of them with a block");
+    CHECK(accepted > 50);
+    CHECK(withBlock > 20);
+    CHECK(accepted < kInstanceIterations);
 }
