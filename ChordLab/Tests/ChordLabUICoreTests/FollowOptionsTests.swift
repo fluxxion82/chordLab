@@ -27,7 +27,7 @@ final class FollowOptionsTests: XCTestCase {
 
   // MARK: - Fixtures
 
-  func testTheLeaderFixtureOffersItsOriginalUnfollowedLanesFirst() throws {
+  func testTheLeaderFixtureOffersTheOtherLeadersUnfollowedLanesFirst() throws {
     let groups = FollowOptions.groups(try LinkStateTests.fixture("link-state-leader.json"))
     XCTAssertEqual(groups.map(\.leader), ["id-original"])
     XCTAssertEqual(groups[0].title, "ChordLab A")

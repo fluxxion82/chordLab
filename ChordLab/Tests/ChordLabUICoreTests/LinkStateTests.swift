@@ -40,8 +40,8 @@ final class LinkStateTests: XCTestCase {
   func testLeaderFixture() throws {
     let state = try Self.fixture("link-state-leader.json")
     XCTAssertEqual(state.schema, 1)
-    XCTAssertEqual(state.instance, LinkSelfJSON(id: "uid-5", label: "ChordLab B",
-                                                copyOf: LinkInstanceJSON(leader: "id-original", label: "ChordLab A")))
+    XCTAssertEqual(state.instance.id, "uid-5")                  // copyOf is tested inline: this fixture's will change
+    XCTAssertEqual(state.instance.label, "ChordLab B")
     XCTAssertNil(state.following)
     XCTAssertEqual(state.leaders.count, 1)
     let leader = state.leaders[0]
@@ -109,6 +109,16 @@ final class LinkStateTests: XCTestCase {
     let state = try decode(Self.older)
     XCTAssertNil(state.instance.copyOf)
     XCTAssertEqual(state.routed, [LinkRoutedJSON(lane: "uid-1", followers: 1, trackId: nil)])
+  }
+
+  func testCopyOfDecodesAndNullIsNil() throws {
+    let copy = """
+      {"schema":1,"self":{"id":"me","label":"ChordLab B","copyOf":{"leader":"a","label":"ChordLab A"}},
+       "following":null,"leaders":[],"routed":[]}
+      """
+    XCTAssertEqual(try decode(copy).instance.copyOf, LinkInstanceJSON(leader: "a", label: "ChordLab A"))
+    let none = copy.replacingOccurrences(of: #"{"leader":"a","label":"ChordLab A"}"#, with: "null")
+    XCTAssertNil(try decode(none).instance.copyOf)
   }
 
   func testAFollowingWithoutSwitchToDecodes() throws {
