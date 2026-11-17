@@ -142,7 +142,8 @@
 // changed, and always PushLinkState (chordlab::bridge::linkOutcome decides which). A refused follow (the leader's
 // lineage stale, an unknown leader or lane) changes nothing and sends no error: the fresh link state is the answer.
 // The plug-in sends kMsgTagLinkState (26), linkStateJson(mLink->view()) built under mModelMutex inside an OnMain
-// hop, so only ever from the main thread: from OnUIOpen (after the snapshot), after every parsed kMsgTagLink, and,
+// hop, so only ever from the main thread: from OnUIOpen (after the snapshot), on kMsgTagRequestSnapshot (the editor
+// asks for it when its view appears; after the snapshot too), after every parsed kMsgTagLink, and,
 // for an instance that links only (kLinks, the VST3), from OnIdle when the shared registry's serial() (an atomic,
 // read without a lock) differs from mReportedLinkSerial. It is display only; nothing that plays waits for it. OnIdle
 // never touches mLink: it reads the serial from chordlab::LinkRegistry::shared(), which is never destroyed, so an
@@ -918,6 +919,8 @@ bool ChordLab::OnMessage(int msgTag, int ctrlTag, int dataSize, const void* pDat
   {
     PushSnapshot();
     PushHeard();                                                 // as OnUIOpen: replays, or hides the group
+    mReportedLinkSerial = LinkSerial();                          // ...and the link state, the serial first (as OnUIOpen)
+    PushLinkState();
     return true;
   }
 
