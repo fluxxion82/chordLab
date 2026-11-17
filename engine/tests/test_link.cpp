@@ -376,6 +376,94 @@ TEST_CASE("link uids: 64 stale entries never push out a track that undo can brin
     CHECK(uids.uidOf(1) == "live-1");
 }
 
+namespace {
+
+/// A per-process counter that restarted ("uid-1", "uid-2", ...), counting how often it was asked.
+struct Restarted {
+    int asked = 0;
+    LaneUids::Generator make() {
+        return [this] { return "uid-" + std::to_string(++asked); };
+    }
+};
+
+/// A table of `count` entries "uid-1" ... "uid-<count>" for tracks 1001, 1002, ...
+std::map<int, std::string> heldUids(int count) {
+    std::map<int, std::string> table;
+    for (int i = 1; i <= count; ++i) table[1000 + i] = "uid-" + std::to_string(i);
+    return table;
+}
+
+std::vector<int> heldTracks(int count) {
+    std::vector<int> ids;
+    for (int i = 1; i <= count; ++i) ids.push_back(1000 + i);
+    return ids;
+}
+
+}  // namespace
+
+TEST_CASE("link uids: stale entries are pruned before a track is covered, so they never use up the answers") {
+    // Codex's case: 100 vanished entries uid-1..uid-100 that neither the document nor the history holds, a track
+    // without an entry, and a restarted counter whose first 100 answers are exactly those uids.
+    LaneUids uids;
+    uids.replace(heldUids(100));
+    Restarted counter;
+    CHECK(uids.cover(docWithTracks({1}), {}, counter.make()));
+    CHECK(uids.entries() == std::map<int, std::string>{{1, "uid-1"}});  // the stale ones went first
+    CHECK(counter.asked == 1);
+}
+
+TEST_CASE("link uids: a non-repeating generator always covers a track, however many held uids it repeats first") {
+    SUBCASE("100 reachable entries: the 101st answer") {
+        LaneUids uids;
+        uids.replace(heldUids(100));
+        Restarted counter;
+        CHECK(uids.cover(docWithTracks({1}), heldTracks(100), counter.make()));
+        CHECK(uids.uidOf(1) == "uid-101");
+        CHECK(counter.asked == 101);
+        CHECK(uids.entries().size() == 101);
+    }
+    SUBCASE("kMaxInstanceLanes - 1 reachable entries, the most a covered table can hold beside the track") {
+        const int held = static_cast<int>(kMaxInstanceLanes) - 1;
+        LaneUids uids;
+        uids.replace(heldUids(held));
+        Restarted counter;
+        CHECK(uids.cover(docWithTracks({1}), heldTracks(held), counter.make()));
+        CHECK(uids.uidOf(1) == "uid-" + std::to_string(held + 1));
+        CHECK(uids.entries().size() == kMaxInstanceLanes);
+    }
+}
+
+TEST_CASE("link uids: a generator that repeats itself leaves the track uncovered for this call, and nothing aborts") {
+    LaneUids uids;
+    uids.replace({{2, "held"}});
+    int asked = 0;
+    const LaneUids::Generator stuck = [&] {
+        ++asked;
+        return std::string("held");
+    };
+    CHECK_FALSE(uids.cover(docWithTracks({1, 2}), {}, stuck));
+    CHECK(uids.uidOf(1).empty());
+    CHECK(uids.entries() == std::map<int, std::string>{{2, "held"}});
+    CHECK(asked > 1);  // it was asked again, a bounded number of times
+    CHECK(static_cast<std::size_t>(asked) <= uids.entries().size() + 64);
+    // A later cover with a working generator covers it.
+    Restarted counter;
+    CHECK(uids.cover(docWithTracks({1, 2}), {}, counter.make()));
+    CHECK(uids.uidOf(1) == "uid-1");
+}
+
+TEST_CASE("link feed: a track without a uid is left out of the feed, never listed with an empty uid") {
+    Linked d;
+    LaneUids partial;
+    partial.replace({{d.a, d.uidA}});  // track b uncovered
+    const auto feed = buildLinkFeed(d.store.doc(), "doc-1", partial, "lineage-1", "ChordLab A", {d.uidA});
+    REQUIRE(feed->lanes.size() == 2);  // the chords and track a
+    CHECK(feed->lanes[0].uid == kChordsLaneUid);
+    CHECK(feed->lanes[1].uid == d.uidA);
+    CHECK(feed->lanes[1].compiled);
+    for (const LinkLane& lane : feed->lanes) CHECK_FALSE(lane.uid.empty());
+}
+
 TEST_CASE("link uids: a deleted track keeps its uid while 65 others come and go, then comes back by undo") {
     // Codex's case: delete track 1, create and delete 65 tracks, undo 131 times. The history holds every one of
     // them throughout (131 snapshots, under DocumentStore::kMaxUndoDepth).

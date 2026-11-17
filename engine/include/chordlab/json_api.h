@@ -603,7 +603,8 @@ bool applyCommandJson(DocumentStore& store, std::string_view json, std::string& 
 /// or not valid UTF-8 is written as an empty string (hints decide nothing), and a block that still breaks a rule of
 /// `validInstanceState` after that (an id, a lane, a follow's required field) is left out entirely, the state written
 /// as with `instance == nullptr`: losing a link is recoverable, losing the document is not. That case is a bug of the
-/// caller's (`LinkEndpoint::state` gives a valid block when its uid generator keeps to the rules), so a debug build
+/// caller's (`LinkEndpoint::state` gives a valid block when its uid generator keeps to the rules; a track it could not
+/// cover simply has no entry), so a debug build
 /// asserts; a release build writes the state without the block. The block never makes this throw. Size: the largest
 /// valid block on the largest state is pinned by test_json_api.cpp under `kMaxJsonBytes`.
 std::string stateJson(const DocumentStore& store, int editorWidth = kDefaultEditorWidth,

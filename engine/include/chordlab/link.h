@@ -51,17 +51,21 @@ public:
     /// A fresh, never-before-returned uid (a UUID in the shell); never empty, never `kChordsLaneUid`.
     using Generator = std::function<std::string()>;
 
-    /// Gives every track of `doc` without an entry a uid from `make`, in document order, and keeps exactly the
-    /// entries of the tracks of `doc` and of `historyTrackIds` (ascending: `DocumentStore::historyTrackIds`, the
-    /// tracks an undo or a redo can bring back with their number, and so with their uid); every other entry is
-    /// erased, whatever its number. So the table never holds more than `kMaxInstanceLanes` entries. `kChordsLaneUid` (or an empty string) is never
-    /// given to a track: `make` returning one is a programming error (asserted); without asserts such a value is
-    /// skipped and `make` asked again. Nor is a uid the table already holds (an entry kept from before, or one given
-    /// to an earlier track in this call): `make` is asked again, since a generator that restarted, a per-process
-    /// counter against a table loaded from a set, repeats them, and two entries with one uid would make the saved
-    /// state unloadable. At most 64 answers are asked for one track; after that it gets no entry in this call (a
-    /// debug build asserts) and the next `cover` tries again. Returns whether the table changed (an entry added or
-    /// removed).
+    /// First erases every entry whose track is neither in `doc` nor in `historyTrackIds` (ascending:
+    /// `DocumentStore::historyTrackIds`, the tracks an undo or a redo can bring back with their number, and so with
+    /// their uid), whatever its number; so the table never holds more than `kMaxInstanceLanes` entries. Then gives
+    /// every track of `doc` without an entry a uid from `make`, in document order. `kChordsLaneUid` (or an empty
+    /// string) is never given to a track: `make` returning one is a programming error (asserted); without asserts
+    /// such a value is skipped and `make` asked again. Nor is a uid the table already holds (an entry kept, or one
+    /// given to an earlier track in this call): `make` is asked again, since a generator that restarted, a
+    /// per-process counter against a table loaded from a set, repeats them, and two entries with one uid would make
+    /// the saved state unloadable. Pruning comes first, so answers never collide with entries about to go. For one
+    /// track `make` is asked at most as many times as the table then holds entries, plus 64: a generator that never
+    /// returns one answer twice can collide with each held uid at most once, so it always covers the track. Only a
+    /// generator that repeats itself can run out; then, as defined behaviour (no assertion), the track gets no
+    /// entry in this call, the next `cover` asks again, and meanwhile the track is uncovered: `buildLinkFeed` leaves
+    /// it out of the feed (not offered, never followed) and its leader plays it itself. Returns whether the table
+    /// changed (an entry added or removed).
     bool cover(const Document& doc, const std::vector<int>& historyTrackIds, const Generator& make);
 
     /// The uid of track `trackId`, or empty when it has none.
@@ -107,7 +111,9 @@ struct LinkFeed {
     std::vector<LinkLane> lanes;   // the chords lane first, then the tracks in document order
 };
 
-/// Builds the feed of `doc`. `uids` must cover `doc` (every track has a uid; asserted). The lanes whose uid is in
+/// Builds the feed of `doc`. A track `uids` does not cover (no uid: `LaneUids::cover` ran out of answers) is left out
+/// of the feed's lanes: never listed with an empty uid, so it is not offered and cannot be followed, while every
+/// other lane is published as usual (its leader plays the uncovered one itself). The lanes whose uid is in
 /// `followed` are compiled (`compiled` true, their events possibly empty: an inaudible lane compiles to nothing);
 /// the others carry no events. A uid in `followed` that names no lane of `doc` is ignored. Allocates: never on
 /// the audio thread.
@@ -427,8 +433,10 @@ public:
     /// later, from this instance's hook or after the caller ran the hooks of an operation. Returns whether it
     /// published the own buffer at least once.
     ///
-    /// Always: gives every track of `doc` a lane uid and drops the entries of tracks neither `doc` nor the history
-    /// holds (`LaneUids::cover`).
+    /// Always: drops the entries of tracks neither `doc` nor the history holds, and gives every track of `doc` a
+    /// lane uid (`LaneUids::cover`). A track the generator could not cover is published all the same, in the own
+    /// buffer (it is never followed) and left out of the feed; the feed and every other follower are not held
+    /// back by it, and a later publish covers and offers it.
     ///
     /// Not following: asks the registry which of its
     /// lanes (`kChordsLaneUid` and each track's uid) are followed in THIS document, `documentId()` (a follower
@@ -483,9 +491,9 @@ public:
     /// `leaderLabel` hint) replaced by the bound leader's current ones while bound (as stored while waiting).
     State state() const;
     /// A state load whose state has the instance block (`loadStateJson` returned one; for a state without one the
-    /// shell calls `adoptWithoutBlock`). Call it in the same model-mutex section as the store's replace, after the replace: otherwise another
-    /// instance's hook could run `publishOwn` with the new document and the old document id and lane table, or the
-    /// old document and the new ones. `publishOwn` may follow in that same section, as well as after the hooks.
+    /// shell calls `adoptWithoutBlock`). Call it in the same model-mutex section as the store's replace, after the
+    /// replace: otherwise another instance's hook could run `publishOwn` with the new document and the old document
+    /// id and lane table, or the old document and the new ones. `publishOwn` may follow in that same section, as well as after the hooks.
     /// The registry decides the id (`LinkRegistry::adoptState` rule 3, a fresh uid from `makeUid` for a copy) and
     /// replaces the follow atomically under its mutex; the document id and the lane uid table become the loaded
     /// ones; `following()` follows the loaded follow. `hooks` receives what the caller must run after releasing

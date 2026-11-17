@@ -1500,6 +1500,78 @@ TEST_CASE("link sim: a state without the instance block ends a follower's link")
     checkSettles(pf, *own, 30, spans.size(), "former follower on the loaded document");
 }
 
+TEST_CASE("link sim: a track the uid generator cannot cover is not offered, and everything else is still published") {
+    // One leader whose generator breaks while it adds a track (it keeps returning a uid its table holds), in the
+    // same edit that changes the lead, which a follower follows.
+    const Song s = song();
+    World w;
+    auto broken = std::make_shared<bool>(false);
+    auto held = std::make_shared<std::string>();
+    const LinkEndpoint::UidGenerator shared = w.uids;
+    const LinkEndpoint::UidGenerator make = [=] { return *broken ? *held : shared(); };
+    auto leader = std::make_unique<FakeInstance>(w.registry, "L", make);
+    leader->loadDocument(s.state);
+    auto follower = w.make("F");
+    REQUIRE(follower->follow("L", leader->laneUid(s.lead), lineageOf(*follower, "L")) == Result::Applied);
+    const std::vector<Span> spans = steady(100);
+    Player pl(*leader, spans);
+    Player pf(*follower, spans);
+    rounds(pl, pf, 20);
+
+    *held = leader->laneUid(s.bass);
+    *broken = true;
+    int added = 0;
+    leader->edit([&](DocumentStore& d) {
+        added = addTrackWith(d, TrackRole::Other, "Uncovered", {ns(50, 960, 960)});
+        REQUIRE(d.insertNotes(s.lead, {ns(83, 960, 240)}).size() == 1);
+    });
+    CHECK(leader->laneUid(added).empty());
+    CHECK(validInstanceState(leader->save().link));  // no entry for it is a valid state
+
+    // What the follower's picker sees: the leader's lanes, none with an empty uid, the uncovered one not offered.
+    const auto lanesOfLeader = [&](const FakeInstance& viewer) {
+        for (const LinkLeaderView& l : viewer.view().leaders) {
+            if (l.id == "L") return l.lanes;
+        }
+        FAIL("no leader L");
+        return std::vector<LinkLaneView>{};
+    };
+    std::vector<LinkLaneView> lanes = lanesOfLeader(*follower);
+    CHECK(lanes.size() == 3);  // chords, bass, lead
+    for (const LinkLaneView& lane : lanes) {
+        CHECK_FALSE(lane.uid.empty());
+        CHECK(lane.name != "Uncovered");
+    }
+    CHECK(linkStateJson(follower->view()).find(R"("lane":"")") == std::string::npos);
+
+    // The leader plays the uncovered track itself; the follower got the edited lead in that same publish.
+    DocumentStore edited;
+    edited.replace(s.state.doc, s.state.nextId, s.state.nextSectionId, s.state.nextTrackId, s.state.nextNoteId);
+    addTrackWith(edited, TrackRole::Other, "Uncovered", {ns(50, 960, 960)});
+    REQUIRE(edited.insertNotes(s.lead, {ns(83, 960, 240)}).size() == 1);
+    const auto leaderExpected =
+        reference(docStateOf(edited), [&](DocumentStore& d) { d.setTrackMute(s.lead, true); }, spans);
+    const auto followerExpected =
+        reference(docStateOf(edited), [&](DocumentStore& d) { d.setTrackSolo(s.lead, true); }, spans);
+    rounds(pl, pf, 60);
+    CHECK(leader->played()[50]);
+    checkSettles(pl, *leaderExpected, 20, 60, "leader with the uncovered track");
+    checkSettles(pf, *followerExpected, 20, 60, "follower of the lead");
+
+    // The generator works again: the next publish covers the track and offers it, and it can be followed.
+    *broken = false;
+    leader->republish();
+    const std::string uid = leader->laneUid(added);
+    REQUIRE_FALSE(uid.empty());
+    lanes = lanesOfLeader(*follower);
+    CHECK(std::any_of(lanes.begin(), lanes.end(), [&](const LinkLaneView& l) { return l.uid == uid; }));
+    auto second = w.make("F2");
+    CHECK(second->follow("L", uid, lineageOf(*second, "L")) == Result::Applied);
+    CHECK(second->view().status == LinkStatus::Playing);
+    second->block(0.0, kFrames);
+    CHECK(second->played()[50]);
+}
+
 // --- 7. revert ---------------------------------------------------------------------------------------------------
 
 TEST_CASE("link sim: a reverted leader's new track with the followed track's number is not the followed lane") {

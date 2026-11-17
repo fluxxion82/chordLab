@@ -22,18 +22,33 @@ bool holdsTrack(const Document& doc, int trackId) {
 
 namespace {
 
-/// How often `LaneUids::cover` asks its generator for one track before it gives up for this call.
-constexpr int kLaneUidAttempts = 64;
+/// The margin of answers `LaneUids::cover` asks for one track beyond the uids its table holds (see `cover`).
+constexpr std::size_t kLaneUidAttempts = 64;
 
 }  // namespace
 
 bool LaneUids::cover(const Document& doc, const std::vector<int>& historyTrackIds, const Generator& make) {
     assert(std::is_sorted(historyTrackIds.begin(), historyTrackIds.end()) && "LaneUids::cover: history ascending");
     bool changed = false;
+    // First the entries no undo or redo can use any more: an entry stays while its track is in the document or in
+    // the history. Before covering, so that a restarted counter's answers never collide with uids about to go.
+    for (auto it = entries_.begin(); it != entries_.end();) {
+        if (holdsTrack(doc, it->first) ||
+            std::binary_search(historyTrackIds.begin(), historyTrackIds.end(), it->first)) {
+            ++it;
+            continue;
+        }
+        it = entries_.erase(it);
+        changed = true;
+    }
     for (const Track& track : doc.tracks) {
         if (entries_.count(track.id) != 0) continue;
+        // A generator that never returns one answer twice can collide only with the uids the table holds, each at
+        // most once: within entries_.size() + 1 answers one is new. The margin is for a generator that also
+        // returns an unusable answer now and then.
+        const std::size_t attempts = entries_.size() + kLaneUidAttempts;
         std::optional<std::string> uid;
-        for (int attempt = 0; attempt < kLaneUidAttempts && !uid; ++attempt) {
+        for (std::size_t attempt = 0; attempt < attempts && !uid; ++attempt) {
             std::string candidate = make();
             const bool usable = !candidate.empty() && candidate != kChordsLaneUid;
             assert(usable && "a lane uid generator never returns kChordsLaneUid or an empty string");
@@ -43,19 +58,10 @@ bool LaneUids::cover(const Document& doc, const std::vector<int>& historyTrackId
                                           [&](const auto& entry) { return entry.second == candidate; });
             if (usable && !held) uid = std::move(candidate);
         }
-        assert(uid.has_value() && "a lane uid generator kept returning uids the table already holds");
-        if (!uid) continue;  // without asserts: no entry for this track in this call; the next cover asks again
+        // Out of answers only with a generator that repeats itself: defined, no entry for this track in this call
+        // (it is left out of the feed, and the leader plays it itself); the next cover asks again.
+        if (!uid) continue;
         entries_.emplace(track.id, std::move(*uid));
-        changed = true;
-    }
-    // An entry stays while its track is in the document or an undo or redo can bring it back with its number.
-    for (auto it = entries_.begin(); it != entries_.end();) {
-        if (holdsTrack(doc, it->first) ||
-            std::binary_search(historyTrackIds.begin(), historyTrackIds.end(), it->first)) {
-            ++it;
-            continue;
-        }
-        it = entries_.erase(it);
         changed = true;
     }
     return changed;
@@ -125,7 +131,7 @@ std::shared_ptr<const LinkFeed> buildLinkFeed(const Document& doc, std::string d
         const Track& track = doc.tracks[i];
         LinkLane lane;
         lane.uid = uids.uidOf(track.id);
-        assert(!lane.uid.empty() && "buildLinkFeed: the lane uids must cover the document");
+        if (lane.uid.empty()) continue;  // uncovered: not offered, so never followed (its leader plays it)
         lane.name = track.name;
         lane.role = track.role;
         lane.audible = trackAudible(doc, i);
@@ -653,7 +659,9 @@ bool LinkEndpoint::publishOwn(const DocumentStore& store, const std::string& lin
     key.laneUids.emplace_back(kChordsLaneUid);
     key.audible.push_back(chordsAudible(doc));
     for (std::size_t i = 0; i < doc.tracks.size(); ++i) {
-        key.laneUids.push_back(uids_.uidOf(doc.tracks[i].id));
+        std::string uid = uids_.uidOf(doc.tracks[i].id);
+        if (uid.empty()) continue;  // uncovered (LaneUids::cover): not in the feed, never followed
+        key.laneUids.push_back(std::move(uid));
         key.audible.push_back(trackAudible(doc, i));
     }
     // Followed in the document being published: a follower linked to another document does not count. With the
