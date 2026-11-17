@@ -1,9 +1,9 @@
 // vst3host: loads a built ChordLab.vst3 into this process, as a VST3 host does, and runs the shell's scenarios
 // (per-track instruments plan, M2 Task 8b) against it: life cycle, state, playback of one instance, two instances
 // linked through their states alone, a copy, a state load while playing, and previews a leader's editor sends for
-// a lane a follower plays (M5 Task 9b). Every VST3 call is made on this, the main, thread, as Live makes them (plan
-// V14), and `process` is called on the same thread between them. No window on screen (an editor is opened into a
-// view in no window: editor.h), no audio or MIDI device, nothing written anywhere.
+// a lane a follower plays, also under reused ids (M5 Task 9b). Every VST3 call is made on this, the main, thread,
+// as Live makes them (plan V14), and `process` is called on the same thread between them. No window on screen (an
+// editor is opened into a view in no window: editor.h), no audio or MIDI device, nothing written anywhere.
 //
 // What the plug-in must play is never computed by the code under test: the expected output of every instance is a
 // lone engine scheduler playing a document of its own (the leader's document with the followed lane muted, the
@@ -939,6 +939,87 @@ void previews(const Plug& plug) {
     expectClean(rb, 0, next, "B");
 }
 
+/// 8. Reused preview ids: the editor's ids restart when it reopens, so a Start may reuse an id that still sounds
+/// where its lane went before. A Start forwarded to B ends A's own preview of that id; a Start A plays itself ends
+/// what that id forwarded to B; a follower that unlinks releases what it was forwarded, and the id then plays on A.
+/// The transport stands, so nothing but previews sounds.
+void reusedPreviewIds(const Plug& plug) {
+    std::puts("== 8 reused preview ids");
+    const Song s = song();
+    const std::vector<Span> spans = transport(0, 400);
+    Instance a(plug, "A");
+    a.setState(wrap(s.json, gTrailer));
+    const Leader leader = leaderOf(a, s);
+    Instance b(plug, "B");
+    a.start();
+    b.start();
+    void* parent = editor::makeParent(kDefaultEditorWidth, kDefaultEditorHeight);
+    a.openEditor(parent);
+    check(editor::hasController(parent), "A's editor is open, and its view controller takes the editor's messages");
+    editor::takeErrors();
+
+    Run ra(spans.size()), rb(spans.size());
+    std::size_t next = 0;
+    const auto run = [&](std::size_t blocks) {
+        const std::size_t first = next;
+        play({&a, &b}, {&ra, &rb}, spans, first, first + blocks);
+        next += blocks;
+        return first;
+    };
+    const auto send = [&](const std::string& json, const std::string& what) {
+        setStep("A's editor sends " + what);
+        if (!editor::send(parent, editor::kPreview, json)) fail("A's editor is gone before it sends " + what);
+    };
+    const auto expectNext = [&](const std::string& wantA, const std::string& wantB, const std::string& what) {
+        const std::size_t i = run(1);
+        check(notes(ra[i]) == wantA && notes(rb[i]) == wantB,
+              what + ": A [" + notes(ra[i]) + "], B [" + notes(rb[i]) + "] in block " + std::to_string(i));
+    };
+    const auto expectSilent = [&](std::size_t blocks, const std::string& what) {
+        const std::size_t i = run(blocks);
+        check(silentBetween(ra, i, next) && silentBetween(rb, i, next),
+              what + " (blocks " + std::to_string(i) + ".." + std::to_string(next - 1) + ")");
+    };
+
+    expectSilent(2, "both silent before any preview");
+
+    // A's own, then forwarded under the same id.
+    send(previewStart(7, 50, 90, s.bass), "a held Start of the bass roll");
+    expectNext("on50v90", "", "nobody follows the bass yet: A plays it");
+    b.setState(wrap(followerState("vst3host-follower-b", leader.id, leader.doc, leader.bassUid), gTrailer));
+    expectSilent(2, "B now follows A's bass; A's preview goes on");
+    send(previewStart(7, 52, 100, s.bass), "a Start of the bass roll under the same id");
+    expectNext("off50", "on52v100", "the same id, now forwarded: it sounds on B and ends A's own");
+    send(previewStop(7), "its Stop");
+    expectNext("", "off52", "its Stop ends it on B");
+
+    // Forwarded, then A's own under the same id.
+    send(previewStart(8, 55, 100, s.bass), "a held Start of the bass roll");
+    expectNext("", "on55v100", "a Start of the bass track sounds on B");
+    send(previewStart(8, 62, 80, std::nullopt), "a Start of the chords lane under the same id");
+    expectNext("on62v80", "off55", "the same id for the chords lane, which A plays: it ends B's");
+    send(previewStop(8), "its Stop");
+    expectNext("off62", "", "its Stop ends it on A");
+
+    // Forwarded, then B unlinks, then the id again: A's own now.
+    send(previewStart(9, 57, 100, s.bass), "a held Start of the bass roll");
+    expectNext("", "on57v100", "a Start of the bass track sounds on B");
+    b.setState(wrap(otherSong().json, gTrailer));  // a state without an instance block: B follows nothing
+    expectNext("", "off57", "B unlinks: its next block releases the forwarded preview");
+    send(previewStart(9, 59, 100, s.bass), "a Start of the bass roll under the same id");
+    expectNext("on59v100", "", "the same id again: nobody follows the bass now, A plays it, and B stays silent");
+    send(previewStop(9), "its Stop");
+    expectNext("off59", "", "its Stop ends it on A");
+    const std::vector<std::string> errors = editor::takeErrors();
+    check(errors.empty(), "no error reaches the editor" + (errors.empty() ? "" : " (" + errors.front() + ")"));
+
+    a.closeEditor();
+    expectSilent(4, "both silent after");
+    editor::releaseParent(parent);
+    expectClean(ra, 0, next, "A");
+    expectClean(rb, 0, next, "B");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -979,6 +1060,7 @@ int main(int argc, char** argv) {
     copy(plug);
     loadWhilePlaying(plug);
     previews(plug);
+    reusedPreviewIds(plug);
 
     setStep("unload the module");
     module.reset();

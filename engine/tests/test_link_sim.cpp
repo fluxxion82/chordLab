@@ -260,9 +260,10 @@ public:
     }
 
     /// The shell's HandlePreview (Task 9b): the command offered to the endpoint in the model-mutex section, and
-    /// pushed into its own scheduler when it was not forwarded. Main thread. With `lenientPreviews`, a command
-    /// refused for a full ring (its own, or every follower's: `QueueFull`) is counted in `refusedPreviews` instead
-    /// of failing a check: for a test whose audio threads drain on their own schedule, where any ring may fill.
+    /// pushed into its own scheduler when it was not forwarded; a forwarded Start also gives its own scheduler a Stop
+    /// for its id (Task 9d, the shell's OfferPreview). Main thread. With `lenientPreviews`, a command refused for a
+    /// full ring (its own, or every follower's: `QueueFull`) is counted in `refusedPreviews` instead of failing a
+    /// check: for a test whose audio threads drain on their own schedule, where any ring may fill.
     LinkForward preview(std::optional<int> trackId, const PreviewCmd& cmd) {
         const std::lock_guard<std::mutex> lock(model_);
         const LinkForward result = endpoint_->forwardPreview(trackId, cmd);
@@ -275,6 +276,13 @@ public:
             }
         } else if (result == LinkForward::QueueFull && lenientPreviews) {
             ++refusedPreviews;
+        }
+        if (result == LinkForward::Forwarded && cmd.kind == PreviewCmd::Start) {
+            // As the shell's OfferPreview: an earlier Start of this id played here ends (a full ring: the watchdog).
+            PreviewCmd stop{};
+            stop.kind = PreviewCmd::Stop;
+            stop.id = cmd.id;
+            scheduler_->pushPreview(stop);
         }
         return result;
     }

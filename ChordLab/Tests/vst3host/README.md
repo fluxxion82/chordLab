@@ -1,6 +1,6 @@
 # vst3host
 
-A command-line VST3 host that loads a built `ChordLab.vst3` into its own process and runs the shell's runtime scenarios: life cycle, state, playback of one instance, two instances linked through their states, a copy, a state load while playing, and previews a leader's editor sends for a lane its follower plays. No DAW, window on screen, audio or MIDI device; it writes nothing.
+A command-line VST3 host that loads a built `ChordLab.vst3` into its own process and runs the shell's runtime scenarios: life cycle, state, playback of one instance, two instances linked through their states, a copy, a state load while playing, and previews a leader's editor sends for a lane its follower plays, also under reused ids. No DAW, window on screen, audio or MIDI device; it writes nothing.
 
 Every expected note comes from a lone engine scheduler playing the document as the plug-in should (followed lane muted on the leader, soloed on the follower), never from the code under test.
 
