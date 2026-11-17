@@ -92,6 +92,11 @@ struct Scenario {
     Scenario(name: name, setup: { _, _, _ in }, checks: { _, _ in }, sizes: sizes, custom: run)
   }
 
+  /// Whether `message` is a preview start (`"on": true`).
+  static func isPreviewStart(_ message: ShellStub.Message) -> Bool {
+    message.tag == kMsgTagPreview && message.json?["on"] as? Bool == true
+  }
+
   /// The link state for a follower of ChordLab A's Bass (the follower fixture) with `status` and no copy to switch to.
   @MainActor static func follower(_ h: Harness, status: String, switchTo: Bool = false) -> Data {
     h.json("link-state-follower.json") { object in
@@ -410,7 +415,9 @@ struct Scenario {
       // Callbacks the editor left outstanding when the panel appeared: a roll menu choice, a rename commit, an append,
       // a cell press with Record on. None of them may leave, and the press may leave nothing behind for its release:
       // the instance stops following before the button comes up. The panel's Thru and Panic do leave. (No explicit
-      // releaseHeld here: it would hide a press the book recorded.)
+      // releaseHeld here: it would hide a press the book recorded.) Then, no longer following, the same presses start,
+      // each saying its lane (M5 design D1): the key of Bass's roll and a Lead note with its one-shot their tracks, the
+      // cell none.
       state.applySnapshot(json: h.data("snapshot-tracks.json"))
       state.applyLinkState(json: follower(h, status: "playing"))
       shell.clear()
@@ -420,7 +427,7 @@ struct Scenario {
       state.send(command: ["cmd": "appendChord", "root": 0, "type": "maj"])
       state.thru.wrappedValue = false
       state.panic()                                                    // before the presses: Panic ends any hold
-      _ = state.pressKey(pitch: 60)                                    // a keyboard-column press of the roll
+      _ = state.pressKey(pitch: 60, trackId: 1)                        // a keyboard-column press of Bass's roll
       state.performRollEffects([.previewStart(pitch: 40, velocity: 100), .previewOneShot(pitch: 41, velocity: 100)],
                                trackId: 1)                             // a roll note press and an inserted note's sound
       h.observed["key held while following"] = state.isKeepingPreviewAlive
@@ -430,19 +437,42 @@ struct Scenario {
       h.observed["held while following"] = state.heldCellId != nil
       h.observed["kept alive while following"] = state.isKeepingPreviewAlive
       state.applyLinkState(json: h.json("link-state-follower.json") { $0["following"] = NSNull() })
+      h.observed["a start left while following"] = shell.sent.contains { Self.isPreviewStart($0) }
       if let cell { state.releaseCell(cell, PressRelease(reason: .buttonUp, heldSeconds: 0.6)) }
       h.observed["held at the end"] = state.heldCellId != nil
+      state.recording = false
+      func starts(_ press: () -> Void) -> [[String: Any]] {
+        let before = shell.sent.count
+        press()
+        return shell.sent.dropFirst(before).filter { Self.isPreviewStart($0) }.compactMap(\.json)
+      }
+      var keyId: Int?
+      let key = starts { keyId = state.pressKey(pitch: 60, trackId: 1) }
+      if let keyId { state.releaseKey(id: keyId) }
+      let note = starts {
+        state.performRollEffects([.previewStart(pitch: 40, velocity: 100), .previewStop,
+                                  .previewOneShot(pitch: 41, velocity: 100)], trackId: 2)
+      }
+      let pressed = starts { if let cell { state.pressCell(cell) } }
+      state.releaseHeld()
+      h.observed["the key's start says track 1"] = key.count == 1 && key.allSatisfy { $0["track"] as? Int == 1 }
+      h.observed["the roll note's and its one-shot's starts say track 2"] =
+        note.count == 2 && note.allSatisfy { $0["track"] as? Int == 2 }
+      h.observed["the cell's start says no track"] = pressed.count == 1 && pressed.allSatisfy { $0["track"] == nil }
     }, checks: { h, r in
       h.checkEditor(r, banner: false, followMenu: true)
       let commands = r.shell.sent.filter { $0.tag == kMsgTagCommand }.compactMap { $0.json?["cmd"] as? String }
       h.check(commands == ["setMidiThru"], "only the panel's Thru command left, no insertChords for the press (\(commands))")
-      let starts = r.shell.sent.filter { $0.tag == kMsgTagPreview && $0.json?["on"] as? Bool == true }
-      h.check(starts.isEmpty, "no preview start left")
+      h.check(h.observed["a start left while following"] == false, "no preview start left")
       h.check(r.shell.sent.contains { $0.tag == kMsgTagPanic }, "Panic left")
       h.check(h.observed["held while following"] == false, "the retained press held no cell")
       h.check(h.observed["kept alive while following"] == false && h.observed["key held while following"] == false,
               "no keep-alive timer ran for a refused hold (a cell, a key, a roll note)")
       h.check(h.observed["held at the end"] == false, "nothing is held after the release")
+      h.check(h.observed["the key's start says track 1"] == true, "after following, a key of Bass's roll says track 1")
+      h.check(h.observed["the roll note's and its one-shot's starts say track 2"] == true,
+              "after following, a Lead note's start and its one-shot's say track 2")
+      h.check(h.observed["the cell's start says no track"] == true, "after following, a cell's start says no track")
     }),
     Scenario(name: "dismiss-reopen", setup: { h, state, _ in
       // Not now, then the window closed and opened again: a new state of the same instance and document.
@@ -519,10 +549,13 @@ struct Scenario {
       h.checkEditor(r, banner: true, followMenu: true)
     }),
     Scenario(name: "answer-applied-while-held", setup: { h, state, shell in
-      // A palette cell is held when the follow is applied: the panel shows and the hold ends with its stop.
+      // A palette cell is held when the follow is applied: the panel shows and the hold ends with its stop. The cell's
+      // start belongs to the chords: no `track` (M5 design D1).
       state.applySnapshot(json: h.data("snapshot-home-empty.json"))
       state.applyLinkState(json: h.freshLink())
       if let cell = state.snapshot?.palette.cells.first { state.pressCell(cell) }
+      let starts = shell.sent.filter { Self.isPreviewStart($0) }
+      h.observed["the cell's start says no track"] = starts.count == 1 && starts[0].json?["track"] == nil
       shell.clear()
       shell.onLink = { _ in state.applyLinkState(json: h.followingChordsOfA()) }
       h.clickFirstBannerButton(state)
@@ -530,6 +563,7 @@ struct Scenario {
     }, checks: { h, r in
       h.checkPanel(r, rows: ["status", "actions", "controls", "notes"], absent: ["switch", "notice"])
       h.check(r.state.heldCellId == nil, "no cell is held")
+      h.check(h.observed["the cell's start says no track"] == true, "the cell's start said no track")
       let link = r.shell.sent.firstIndex { $0.tag == kMsgTagLink }
       let stop = r.shell.sent.firstIndex { $0.tag == kMsgTagPreview && $0.json?["on"] as? Bool == false }
       h.check(link != nil && stop != nil && stop! > link!, "the held preview's stop was sent when the panel appeared")
