@@ -2,6 +2,7 @@
 import UIKit
 import SwiftUI
 public typealias PlatformView = UIView
+public typealias PlatformViewController = UIViewController
 public typealias PlatformColor = UIColor
 public typealias PlatformRect = CGRect
 public typealias PlatformHostingController = UIHostingController
@@ -10,6 +11,7 @@ public typealias PlatformNibName = String
 import AppKit
 import SwiftUI
 public typealias PlatformView = NSView
+public typealias PlatformViewController = NSViewController
 public typealias PlatformColor = NSColor
 public typealias PlatformRect = NSRect
 public typealias PlatformHostingController = NSHostingController

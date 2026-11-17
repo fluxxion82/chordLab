@@ -24,7 +24,7 @@ struct ViewHarness {
   static func main() {
     var args = Array(CommandLine.arguments.dropFirst())
     if args == ["--list"] {
-      for scenario in Scenario.all { print(scenario.name) }
+      for scenario in Scenario.every { print(scenario.name) }
       exit(0)
     }
     let source = URL(fileURLWithPath: #filePath)
@@ -42,9 +42,9 @@ struct ViewHarness {
     }
     let out = URL(fileURLWithPath: outPath, isDirectory: true)
     let names = Array(args.dropFirst())
-    var scenarios = names.isEmpty ? Scenario.all : []
+    var scenarios = names.isEmpty ? Scenario.every : []
     for name in names {
-      guard let scenario = Scenario.all.first(where: { $0.name == name }) else {
+      guard let scenario = Scenario.every.first(where: { $0.name == name }) else {
         usage("unknown mode '\(name)' (try --list)")
       }
       scenarios.append(scenario)
@@ -81,6 +81,16 @@ struct Scenario {
   let checks: @MainActor (Harness, Render) -> Void
   /// The window sizes to render at; nil for `ViewHarness.sizes`.
   var sizes: [CGSize]? = nil
+  /// A mode that renders and checks on its own (PluginHost.swift) instead of `setup`, one render and `checks`.
+  var custom: (@MainActor (Harness, CGSize) -> Void)? = nil
+
+  /// Every mode: the state modes below, then the plug-in-hosted ones (PluginHost.swift).
+  static var every: [Scenario] { all + hosted }
+
+  /// A mode that does its own rendering and checking at each size.
+  static func custom(name: String, sizes: [CGSize]? = nil, run: @escaping @MainActor (Harness, CGSize) -> Void) -> Scenario {
+    Scenario(name: name, setup: { _, _, _ in }, checks: { _, _ in }, sizes: sizes, custom: run)
+  }
 
   /// The link state for a follower of ChordLab A's Bass (the follower fixture) with `status` and no copy to switch to.
   @MainActor static func follower(_ h: Harness, status: String, switchTo: Bool = false) -> Data {
@@ -583,12 +593,15 @@ final class ShellStub {
 
   private(set) var sent: [Message] = []
   var onLink: ((Message) -> Void)?
+  /// Answers the editor's snapshot request inside the send, as the shell does (`OnMessage`, kMsgTagRequestSnapshot).
+  var onRequestSnapshot: (() -> Void)?
 
   @MainActor func receive(tag: Int, data: Data?) {
     let object = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
     let message = Message(tag: tag, json: object)
     sent.append(message)
     if tag == kMsgTagLink { onLink?(message) }
+    if tag == kMsgTagRequestSnapshot { onRequestSnapshot?() }
   }
 
   func clear() { sent = [] }
@@ -629,6 +642,8 @@ struct Render {
   private var passed = 0
   private var failures: [String] = []
   private var current = ""
+  /// The mode being run (for the PNG names of the custom modes).
+  private(set) var currentMode = ""
   /// What a scenario's setup saw on the way (for its checks); emptied before every run.
   var observed: [String: Bool] = [:]
 
@@ -728,8 +743,13 @@ struct Render {
 
   func run(_ scenario: Scenario, size: CGSize) {
     current = "\(scenario.name) \(Int(size.width))x\(Int(size.height))"
+    currentMode = scenario.name
     print("== \(current)")
     observed = [:]
+    if let custom = scenario.custom {
+      custom(self, size)
+      return
+    }
     let defaults = MemoryDefaults()
     let shell = ShellStub()
     let state = ChordLabState(sendCommand: { tag, data in shell.receive(tag: tag, data: data) },
@@ -744,11 +764,7 @@ struct Render {
       .frame(width: size.width, height: size.height)
     let (host, window) = render(root, size: size, probe: probe)
     let frames = probe.frames
-    for name in frames.keys.sorted() {
-      let f = frames[name]!
-      print("  frame " + name.padding(toLength: 30, withPad: " ", startingAt: 0)
-            + String(format: "x %7.1f  y %7.1f  w %7.1f  h %7.1f", f.minX, f.minY, f.width, f.height))
-    }
+    printFrames(frames)
     let file = out.appendingPathComponent("\(scenario.name)-\(Int(size.width))x\(Int(size.height)).png")
     let render = Render(scenario: scenario.name, size: size, state: state, shell: shell, frames: frames, host: host)
     writePNG(host, to: file)
@@ -756,6 +772,14 @@ struct Render {
     scenario.checks(self, render)
     window.contentView = nil
     window.close()
+  }
+
+  func printFrames(_ frames: [String: CGRect]) {
+    for name in frames.keys.sorted() {
+      let f = frames[name]!
+      print("  frame " + name.padding(toLength: 30, withPad: " ", startingAt: 0)
+            + String(format: "x %7.1f  y %7.1f  w %7.1f  h %7.1f", f.minX, f.minY, f.width, f.height))
+    }
   }
 
   /// Hosts `root` in an offscreen window that is never ordered in, and lets layout settle until the reported frames

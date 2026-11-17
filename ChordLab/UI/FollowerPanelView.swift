@@ -8,16 +8,28 @@ import SwiftUI
 /// Panic (the transport row's controls), the status lines the editor's bottom row would show (incomplete blocks, the
 /// last error), and the notes: where to edit, that this ChordLab's own chords are kept, and Live's routing reminder.
 ///
-/// The content is centred and at most `maxContentWidth` wide; its texts wrap and never truncate, so from the 700 x 632
-/// minimum up nothing is clipped (the render harness checks every mode, ChordLab/Tests/viewharness).
+/// The content is a card centred in the window, at most `maxContentWidth` wide and never wider than the window
+/// (`FollowerPanelGeometry`, through `FollowerPanelLayout`, which always lays the card out at a definite width, whatever
+/// the panel is proposed); its texts wrap and never truncate, so from the 700 x 632 minimum up nothing is clipped (the
+/// render harness checks every mode, ChordLab/Tests/viewharness).
 struct FollowerPanelView: View {
   @EnvironmentObject var state: ChordLabState
   let model: FollowerPanelModel
 
   /// The widest the panel's content gets.
-  static let maxContentWidth: CGFloat = 520
+  static let maxContentWidth = FollowerPanelGeometry.maxCardWidth
 
   var body: some View {
+    FollowerPanelLayout {
+      card
+        .probeFrame("panel.content")
+    }
+    .accessibilityElement(children: .contain)
+    .accessibilityLabel(model.headlineText)
+  }
+
+  /// The headline, the rows and the notes on their rounded fill.
+  private var card: some View {
     VStack(alignment: .leading, spacing: 16) {
       VStack(alignment: .leading, spacing: 6) {
         headline
@@ -79,12 +91,6 @@ struct FollowerPanelView: View {
     .frame(maxWidth: .infinity, alignment: .leading)
     .padding(20)
     .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.06)))
-    .frame(maxWidth: Self.maxContentWidth)
-    .probeFrame("panel.content")
-    .frame(maxWidth: .infinity, maxHeight: .infinity)
-    .padding(12)
-    .accessibilityElement(children: .contain)
-    .accessibilityLabel(model.headlineText)
   }
 
   /// A text that wraps onto as many lines as it needs and never truncates.
@@ -159,5 +165,27 @@ struct FollowerPanelView: View {
     case .stopFollowing:
       Button(action.title) { state.unfollow() }
     }
+  }
+}
+
+/// Lays the panel out by `FollowerPanelGeometry`: its one subview, the card, centred and measured and placed at the width
+/// the geometry gives, which is definite whatever the panel is proposed. A `.frame(maxWidth:)` in its place measured the
+/// card without a width whenever the panel was measured without one (its ideal size): one line per text, the card as
+/// wide as its longest text, and the panel reported the height of that unwrapped card, shorter than the card it draws.
+/// The unwrapped card has the geometry of the band seen in Live.
+private struct FollowerPanelLayout: Layout {
+  func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+    let card = subviews.first?.sizeThatFits(cardProposal(width: proposal.width, height: proposal.height)) ?? .zero
+    return FollowerPanelGeometry.panelSize(proposedWidth: proposal.width, proposedHeight: proposal.height, card: card)
+  }
+
+  func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+    subviews.first?.place(at: CGPoint(x: bounds.midX, y: bounds.midY), anchor: .center,
+                          proposal: cardProposal(width: bounds.width, height: bounds.height))
+  }
+
+  private func cardProposal(width: CGFloat?, height: CGFloat?) -> ProposedViewSize {
+    ProposedViewSize(width: FollowerPanelGeometry.cardWidth(panelWidth: width),
+                     height: FollowerPanelGeometry.cardHeight(panelHeight: height))
   }
 }
