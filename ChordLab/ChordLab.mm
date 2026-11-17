@@ -88,7 +88,10 @@
 // random UUID; the endpoint draws document ids and lane uids from the same helper). Only the VST3 joins the
 // process's shared registry, where instances find each other and a follower plays one lane of a leader; the AU
 // and the app register with a registry of their own (mPrivateRegistry) that no other instance sees, so they run
-// the same code and behave as before. Two buffers feed the scheduler:
+// the same code and behave as before (kLinks false). Such an instance can never bind a follow, so it drops a follow
+// a loaded state carries before adopting it (chordlab::bridge::adoptableState: it plays its own document, and its
+// next save writes no follow; silence for ever would be the wrong failure), and it applies no link message, whose
+// answer is the link state alone (chordlab::bridge::linkApplies). Two buffers feed the scheduler:
 // - the own buffer (mSnapshots): written only by LinkEndpoint::publishOwn, called only from
 //   PublishSnapshotLocked, so its producer is the holder of mModelMutex. A leading instance publishes there
 //   every lane nobody follows, and in the same call hands the registry a feed from which the registry writes its
@@ -293,12 +296,9 @@ ChordLab::ChordLab(const InstanceInfo& info)
   // format a registry of its own that no other instance sees. A fresh id, so no follower waits for it yet. The
   // hook is what other instances run to make this one republish: it holds mLifeline, not `this` alone, and does
   // nothing once the destructor retired it; it only republishes (no editor, no host call).
-#if defined(VST3_API)
-  chordlab::LinkRegistry& registry = chordlab::LinkRegistry::shared();
-#else
-  mPrivateRegistry = std::make_unique<chordlab::LinkRegistry>();
-  chordlab::LinkRegistry& registry = *mPrivateRegistry;
-#endif
+  if (!kLinks)
+    mPrivateRegistry = std::make_unique<chordlab::LinkRegistry>();
+  chordlab::LinkRegistry& registry = kLinks ? chordlab::LinkRegistry::shared() : *mPrivateRegistry;
   // mModelMutex from before the registration to the first publish: the endpoint registers inside its constructor,
   // before mLink is assigned, and a hook that reached this instance in that window would publish through a null
   // mLink. The hook takes mModelMutex, so it waits until the instance is whole (order: model, then the registry's,
@@ -973,7 +973,7 @@ void ChordLab::HandleLink(std::string_view json)
   {
     std::lock_guard<std::mutex> lock(mModelMutex);
     lineage = chordlab::bridge::compareLineage(field, mClipboardToken);
-    if (chordlab::bridge::linkApplies(lineage))
+    if (chordlab::bridge::linkApplies(lineage, kLinks))       // never for an instance that does not link (I15)
     {
       // What SerializeState would save of the follow, before and after: the host is dirtied only when it changed
       // (an applied follow of the very link already saved, hints included, changes nothing).
@@ -986,8 +986,8 @@ void ChordLab::HandleLink(std::string_view json)
     }
   }
   const chordlab::bridge::LinkOutcome outcome =
-    chordlab::bridge::linkOutcome(lineage, request->follow, result, savedFollowChanged);
-  if (chordlab::bridge::linkApplies(lineage))
+    chordlab::bridge::linkOutcome(kLinks, lineage, request->follow, result, savedFollowChanged);
+  if (chordlab::bridge::linkApplies(lineage, kLinks))
   {
     RunHooks(hooks);                                             // holding nothing: the old and the new leader republish
     std::lock_guard<std::mutex> lock(mModelMutex);
@@ -1498,7 +1498,7 @@ int ChordLab::UnserializeState(const IByteChunk& chunk, int startPos)
         // One of the two on every successful load, never neither; a failed load or another version changes
         // nothing of the link.
         if (instance)
-          mLink->adopt(*instance, hooks);
+          mLink->adopt(chordlab::bridge::adoptableState(*instance, kLinks), hooks);   // a non-linking one drops a follow
         else
           mLink->adoptWithoutBlock(hooks);
         ConstrainEditorResize(width, height);                    // the state stores the size verbatim: a set saved under

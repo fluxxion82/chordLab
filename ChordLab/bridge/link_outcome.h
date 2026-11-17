@@ -20,14 +20,29 @@ struct LinkOutcome
     const char* error = nullptr;     // non-null: PushError(error), the command path's wording
 };
 
-/// Whether the shell calls the endpoint (LinkEndpoint::follow or unfollow) at all: exactly as for a command, only
-/// for an absent or a current lineage (lineageApplies). A stale, malformed or unreadable one applies nothing.
-inline bool linkApplies(CommandLineage lineage) noexcept
+/// Whether the shell calls the endpoint (LinkEndpoint::follow or unfollow) at all: only for an instance that links
+/// (`linking`: it is in the process's shared registry, the VST3; plan I15), and then exactly as for a command, for an
+/// absent or a current lineage (lineageApplies). A stale, malformed or unreadable one applies nothing. An instance
+/// with a registry of its own (the AU, the app) never applies a link message: nothing could ever bind there.
+inline bool linkApplies(CommandLineage lineage, bool linking) noexcept
 {
-    return lineageApplies(lineage);
+    return linking && lineageApplies(lineage);
+}
+
+/// What a state load hands LinkEndpoint::adopt: the loaded instance block, without its follow when the instance does
+/// not link (plan I15). In a registry of its own a follow could never bind, and the instance would play an empty
+/// link buffer for ever; without it, the instance plays its own document and its next save writes no follow. The id,
+/// the document id and the lane uids are adopted either way.
+inline InstanceState adoptableState(InstanceState loaded, bool linking)
+{
+    if (!linking)
+        loaded.follow.reset();
+    return loaded;
 }
 
 /// The outcome of a link message, from:
+///  - `linking`: whether the instance links (see linkApplies); when it does not, nothing was called and the outcome
+///    is empty whatever the rest says (the link state alone answers);
 ///  - `lineage`: compareLineage's answer for the message's own `lineage` member;
 ///  - `follow`: the request's kind (true: follow, false: unfollow);
 ///  - `result`: what LinkEndpoint::follow returned (follow only; ignored for an unfollow, and when the lineage does
@@ -37,15 +52,18 @@ inline bool linkApplies(CommandLineage lineage) noexcept
 ///    or bound: either is saved); for an applied follow it is false when the same link with the same hints was
 ///    already saved. Ignored when nothing was called.
 /// Rows:
+///  - Not linking: nothing applied, nothing else (no dirty, no snapshot, no error), for every lineage.
 ///  - Stale: nothing applied, `pushSnapshot`, no error (a click that a state load overtook; as a command).
 ///  - Malformed, Failed: nothing applied, `error` kMalformedLineageError / kLineageFailedError (as a command).
 ///  - Absent or Current, follow: `markDirty` only when `result` is Applied AND the saved follow changed; a refused
 ///    follow (StaleLeader, UnknownLeader, UnknownLane) changes nothing and is no error.
 ///  - Absent or Current, unfollow: `markDirty` only when the saved follow changed (the instance was following).
-inline LinkOutcome linkOutcome(CommandLineage lineage, bool follow, LinkFollowResult result,
+inline LinkOutcome linkOutcome(bool linking, CommandLineage lineage, bool follow, LinkFollowResult result,
                                bool savedFollowChanged) noexcept
 {
     LinkOutcome outcome;
+    if (!linking)
+        return outcome;
     switch (lineage)
     {
         case CommandLineage::Stale:

@@ -306,13 +306,24 @@ private:
   // Linking (per-track instruments plan I4 to I7, I15; "Links" in ChordLab.mm). Declared after mModelMutex, mStore,
   // mSnapshots, mPublication and mLifeline, so destroyed before them; the destructor resets mLink explicitly anyway,
   // after retiring mLifeline.
+  // Whether this instance links (plan I15): only the VST3 joins the process's shared registry, where other
+  // instances can see it. The one format conditional of linking: the constructor picks the registry by it,
+  // UnserializeState drops a loaded follow when it is false (chordlab::bridge::adoptableState: a follow that can never
+  // bind would leave the instance playing an empty link buffer), and HandleLink applies no link message when it is
+  // false (chordlab::bridge::linkApplies / linkOutcome).
+#if defined(VST3_API)
+  static constexpr bool kLinks = true;
+#else
+  static constexpr bool kLinks = false;
+#endif
   // Not VST3 only: the registry of this instance alone, made in the constructor before mLink and destroyed after it
   // (declared first); no other instance can see it, so the AU and the app run the same code and never link. Null
   // under VST3, which joins chordlab::LinkRegistry::shared(). Touched by the constructor and the destructor only.
   std::unique_ptr<chordlab::LinkRegistry> mPrivateRegistry;
   // The instance's link endpoint: its registration, document id, lane uids, link buffer and feed. Made in the
   // constructor (under mModelMutex, before the first publish) and non-null from then until the destructor's
-  // mLink.reset(), which ends that guarantee (after retiring mLifeline; OnIdle and PushLinkState check it). Every call is made under mModelMutex (main thread,
-  // the host's state thread), except following() and linkBuffer(), the audio thread's (ProcessBlock), and serial().
+  // mLink.reset(), which ends that guarantee (after retiring mLifeline; OnIdle and PushLinkState check it). Every
+  // call is made under mModelMutex (main thread, the host's state thread), except following() and linkBuffer(), the
+  // audio thread's (ProcessBlock), and serial().
   std::unique_ptr<chordlab::LinkEndpoint> mLink;
 };
