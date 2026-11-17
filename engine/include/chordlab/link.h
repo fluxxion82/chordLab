@@ -152,6 +152,16 @@ enum class LinkStatus { NotFollowing, Waiting, ProjectChanged, LaneMissing, Mute
 /// or its feed has no such lane.
 enum class LinkFollowResult { Applied, StaleLeader, UnknownLeader, UnknownLane };
 
+/// What `LinkRegistry::followedLanes` returns: the followed lanes, and the leader's binding counter read in the same
+/// critical section.
+struct LinkFollowed {
+    std::vector<std::string> lanes;
+    /// Moves (never back) whenever a follower binds to or unbinds from the leader, including a bound follower whose
+    /// link changes (an unbind, then a bind if it binds again) and a bound follower's removal. It does not move on
+    /// reads, a refused `follow`, a publish or new hints alone. 0 for an unknown token.
+    std::uint64_t bindings = 0;
+};
+
 /// One lane of a leader as `LinkView` lists it: from the leader's feed, plus how many followers bound to that
 /// leader follow it in the feed's document.
 struct LinkLaneView {
@@ -301,10 +311,12 @@ public:
                             std::string_view leaderLineage, Hooks& hooks);
 
     /// Which of `laneUids` (kChordsLaneUid may be among them) are followed, in document `documentId`, by followers
-    /// bound to `leader`, in the order of `laneUids` and each once. A follower whose link names another document
-    /// does not count, nor does a waiting one.
-    std::vector<std::string> followedLanes(LinkToken leader, std::string_view documentId,
-                                           const std::vector<std::string>& laneUids) const;
+    /// bound to `leader`, in the order of `laneUids` and each once (`lanes`; empty for an instance that follows).
+    /// A follower whose link names another document does not count, nor does a waiting one. With them, from the same
+    /// critical section, `leader`'s binding counter (`LinkFollowed::bindings`): a follower that takes over a lane
+    /// its old follower just left changes no lane, but it moves the counter.
+    LinkFollowed followedLanes(LinkToken leader, std::string_view documentId,
+                               const std::vector<std::string>& laneUids) const;
 
     /// A leader's publish: stores `feed` and writes every bound follower's link buffer from it (rule 4). Ignored
     /// (and asserts) for an instance that is following, and for a null `feed`: a leader with nothing to publish
@@ -409,30 +421,47 @@ public:
     LinkEndpoint(const LinkEndpoint&) = delete;
     LinkEndpoint& operator=(const LinkEndpoint&) = delete;
 
-    /// The instance's publish, in place of a bare `fillSlot`, in the caller's model-mutex section. Returns
-    /// `fillSlot`'s result: when true the caller publishes `ownSlot` (its own buffer's `beginWrite()`) under
-    /// `ownPublication.generation`.
+    /// The instance's publish, in place of a bare `fillSlot` and the own buffer's publish, in the caller's
+    /// model-mutex section: the own buffer's single producer is whoever holds that mutex, and this is its only
+    /// writer. It may run in the same section as a store change (a command, a state load right after `adopt`) or
+    /// later, from this instance's hook or after the caller ran the hooks of an operation. Returns whether it
+    /// published the own buffer at least once.
     ///
-    /// Not following: gives every track of `doc` a lane uid (`LaneUids::cover`); asks the registry which of its
+    /// Not following: gives every track of `doc` a lane uid (`LaneUids::cover`) and asks the registry which of its
     /// lanes (`kChordsLaneUid` and each track's uid) are followed in THIS document, `documentId()` (a follower
     /// whose link names another document does not count: it is about to fall silent, so this instance keeps the
-    /// lane); fills `ownSlot` with the audible lanes minus those (`fillSlot(doc, AllExcept{...}, ...)`); and then,
-    /// when anything a feed carries changed since the last feed it published, builds one (`buildLinkFeed`, the
-    /// followed lanes compiled) and publishes it, which writes every bound follower's link buffer before this
-    /// returns. A feed is published when there was none since the instance was created, adopted a state or
-    /// stopped following, and otherwise when one of these differs from the last feed's: `revision` (the store's
-    /// content revision, which every undoable change moves), the document id, the lane uids in order,
-    /// `progressionLoop`, `followHost`, any lane's audibility (mute and solo), the followed set, `lineage` (the
-    /// label is the registry's for the registration's life and never changes). The followed set counts
-    /// followers: which lanes are followed, and how many bound followers follow each (`LinkView::routed`), since a
-    /// follower that binds to a lane already followed changes no lane of the feed but gets its content only from
-    /// its leader's next publish (`LinkRegistry` rule 4), the one its hook causes. A selection change, a browsed
-    /// key, Thru, or a refused or no-op command publishes no feed.
+    /// lane). Then, so that the side that gives a lane up always lets go before the side that takes it is written
+    /// (a gap is preferred to a doubled lane, both ways):
+    ///  1. it fills and publishes the own buffer (`fillSlot(doc, AllExcept{...}, ...)`, published when that
+    ///     returns true) with every lane excluded that is followed now OR was excluded by the last own publication
+    ///     and still names a lane of `doc`: nothing comes back yet, newly followed lanes leave;
+    ///  2. it publishes a feed (`buildLinkFeed`, the followed lanes compiled) when anything a feed carries changed
+    ///     since the last one, which writes every bound follower's link buffer: newly bound followers get their
+    ///     lane, followers whose lane no longer resolves (another document, a deleted track) are emptied;
+    ///  3. only when some lane excluded by step 1 is not followed now, it fills and publishes the own buffer again
+    ///     with exactly the followed lanes excluded: the lane comes back after its old follower was emptied (by the
+    ///     registry on an unfollow, or by step 2). Without such a lane step 3 does not run (no second compile).
+    /// A feed is published when there was none since the instance was created, adopted a state or stopped
+    /// following, and otherwise when one of these differs from the last feed's: `revision` (the store's content
+    /// revision, which every undoable change moves), the document id, the lane uids in order, `progressionLoop`,
+    /// `followHost`, any lane's audibility (mute and solo), the followed set, `lineage` (the label is the
+    /// registry's for the registration's life and never changes). The followed set includes who follows: the
+    /// registry's binding counter (`LinkFollowed::bindings`), since a follower that binds to a lane already
+    /// followed changes no lane of the feed but gets its content only from its leader's next publish
+    /// (`LinkRegistry` rule 4), the one its hook causes. A selection change, a browsed key, Thru, or a refused or
+    /// no-op command publishes no feed.
     ///
-    /// Following: fills `ownSlot` with the whole own document (`fillSlot(doc, LaneSelection{}, ...)`: it is not
-    /// played, but Thru rides in it and an unfollow returns to it) and publishes no feed.
-    bool publishOwn(const Document& doc, std::uint64_t revision, const std::string& lineage, SnapshotSlot& ownSlot,
-                    Publication& ownPublication);
+    /// Following: fills the own buffer with the whole own document (`fillSlot(doc, LaneSelection{}, ...)`: it is
+    /// not played, but Thru rides in it and an unfollow returns to it), publishes it when that returns true, and
+    /// publishes no feed. That publication excludes nothing, so a later leading publish brings nothing back.
+    bool publishOwn(const Document& doc, std::uint64_t revision, const std::string& lineage,
+                    TripleBuffer<SnapshotSlot>& ownBuffer, Publication& ownPublication);
+
+    /// A test seam: when set, called inside a leading `publishOwn` between its publications, after step 1 and
+    /// after step 2 (twice per call, whether or not a step published anything), with the caller's model mutex
+    /// held. The engine's simulation runs audio blocks there to test the order of the publications; the shell
+    /// never sets it.
+    void setPublicationProbe(std::function<void()> probe);
 
     /// Follow `laneUid` of the leader `leaderId` if `leaderLineage` is that leader's current lineage: one
     /// `LinkRegistry::follow` call (its checks and results). On `Applied` the instance follows (`following()`
@@ -448,6 +477,9 @@ public:
     /// `leaderLabel` hint) replaced by the bound leader's current ones while bound (as stored while waiting).
     State state() const;
     /// A state load (a state without the block is Task 6's business: the caller then keeps its current state).
+    /// Call it in the same model-mutex section as the store's replace, after the replace: otherwise another
+    /// instance's hook could run `publishOwn` with the new document and the old document id and lane table, or the
+    /// old document and the new ones. `publishOwn` may follow in that same section, as well as after the hooks.
     /// The registry decides the id (`LinkRegistry::adoptState` rule 3, a fresh uid from `makeUid` for a copy) and
     /// replaces the follow atomically under its mutex; the document id and the lane uid table become the loaded
     /// ones; `following()` follows the loaded follow. `hooks` receives what the caller must run after releasing
@@ -477,7 +509,7 @@ private:
         std::vector<std::string> laneUids;  // kChordsLaneUid, then the tracks' uids in document order
         std::vector<bool> audible;          // in the same order
         std::vector<std::string> followed;
-        std::vector<std::pair<std::string, int>> followers;  // `LinkView::routed`: lane uid, bound followers
+        std::uint64_t bindings = 0;  // the registry's binding counter for this instance
     };
 
     LinkRegistry& registry_;
@@ -489,6 +521,8 @@ private:
     LaneUids uids_;
     std::atomic<bool> following_{false};
     std::optional<FeedKey> lastFeed_;  // empty: the next leading publishOwn publishes a feed
+    std::vector<std::string> ownExcluded_;  // the lane uids the last own publication excluded
+    std::function<void()> probe_;
 };
 
 }  // namespace chordlab

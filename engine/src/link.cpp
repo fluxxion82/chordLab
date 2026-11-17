@@ -208,6 +208,7 @@ struct LinkRegistry::Entry {
     LinkToken copiedFrom = 0;                      // the instance the last state load found it a copy of (rule 3)
     std::uint64_t copyOrder = 0;                   // when it became that copy, for "the newest" (rule 8)
     std::shared_ptr<const LinkFeed> feed;          // a leader's last feed; null before one and once it follows
+    std::uint64_t bindings = 0;                    // moves on every bind to and unbind from this instance
 };
 
 /// Everything behind the mutex. The helpers expect the caller to hold `mutex`.
@@ -234,6 +235,18 @@ struct LinkRegistry::State {
         return e != nullptr && !e->follow;
     }
 
+    /// Binds follower `e` to `leader`, moving the leader's binding counter.
+    void bind(Entry& e, LinkToken leader) {
+        e.boundTo = leader;
+        if (Entry* l = find(leader)) ++l->bindings;
+    }
+    /// Unbinds follower `e`, moving its old leader's binding counter (when that one still lives).
+    void unbind(Entry& e) {
+        if (e.boundTo == 0) return;
+        if (Entry* l = find(e.boundTo)) ++l->bindings;
+        e.boundTo = 0;
+    }
+
     /// Rule 4, the only writes into a link buffer: `e`'s lane from `feed`, or empty for a null feed.
     static void write(Entry& e, const LinkFeed* feed) {
         const std::string_view laneUid = e.follow ? std::string_view(e.follow->laneUid) : std::string_view();
@@ -255,16 +268,16 @@ struct LinkRegistry::State {
             Entry& e = entry.second;
             const LinkToken before = e.boundTo;
             if (!e.follow) {
-                e.boundTo = 0;
+                unbind(e);
             } else if (e.boundTo == 0 || !leads(e.boundTo)) {
                 if (e.boundTo != 0) {
-                    e.boundTo = 0;
+                    unbind(e);
                     write(e, nullptr);
                 }
                 for (const auto& candidate : entries) {
                     if (candidate.first != entry.first && !candidate.second.follow &&
                         candidate.second.id == e.follow->leaderId) {
-                        e.boundTo = candidate.first;
+                        bind(e, candidate.first);
                         write(e, nullptr);
                         break;
                     }
@@ -279,14 +292,14 @@ struct LinkRegistry::State {
     /// is unbound and emptied, and the caller must `resolve` (which also unbinds the followers of an instance that
     /// started following, rule 5). New hints alone are stored and change nothing else. An instance that starts
     /// following drops its feed (rule 5) into `dropped`, for the caller to release after the mutex.
-    static bool applyFollow(Entry& e, std::optional<LinkFollow> follow, std::shared_ptr<const LinkFeed>& dropped) {
+    bool applyFollow(Entry& e, std::optional<LinkFollow> follow, std::shared_ptr<const LinkFeed>& dropped) {
         if (sameLink(e.follow, follow)) {
             e.follow = std::move(follow);
             return false;
         }
         if (!e.follow) dropped = std::move(e.feed);
         e.follow = std::move(follow);
-        e.boundTo = 0;
+        unbind(e);  // the old leader's counter moves
         write(e, nullptr);
         return true;
     }
@@ -387,6 +400,7 @@ LinkRegistry::Hooks LinkRegistry::remove(LinkToken token) {
     const auto it = s.entries.find(token);
     if (it == s.entries.end()) return hooks;
     s.collectHooks(token, {it->second.boundTo}, hooks);
+    s.unbind(it->second);  // its leader's counter moves
     dead.emplace(std::move(it->second));
     s.entries.erase(it);
     s.resolve();  // its followers are unbound and emptied
@@ -427,7 +441,7 @@ LinkRegistry::Adopted LinkRegistry::adoptState(LinkToken token, std::string load
     }
 
     const LinkToken before = e->boundTo;
-    const bool changed = State::applyFollow(*e, std::move(follow), dropped);
+    const bool changed = s.applyFollow(*e, std::move(follow), dropped);
     const bool rebound = s.resolve();  // always: the id may have changed
     if (changed || e->boundTo != before) s.collectHooks(token, {before, e->boundTo}, out.hooks);
     out.id = e->id;
@@ -478,15 +492,18 @@ LinkFollowResult LinkRegistry::follow(LinkToken token, std::string_view leaderId
     return LinkFollowResult::Applied;
 }
 
-std::vector<std::string> LinkRegistry::followedLanes(LinkToken leader, std::string_view documentId,
-                                                     const std::vector<std::string>& laneUids) const {
-    std::vector<std::string> out;
+LinkFollowed LinkRegistry::followedLanes(LinkToken leader, std::string_view documentId,
+                                        const std::vector<std::string>& laneUids) const {
+    LinkFollowed out;
     const State& s = *state_;
     const std::lock_guard<std::mutex> lock(s.mutex);
-    if (!s.leads(leader)) return out;
+    const Entry* e = s.find(leader);
+    if (e == nullptr) return out;
+    out.bindings = e->bindings;
+    if (e->follow) return out;
     for (const std::string& uid : laneUids) {
-        if (std::find(out.begin(), out.end(), uid) != out.end()) continue;
-        if (s.followersOf(leader, documentId, uid) > 0) out.push_back(uid);
+        if (std::find(out.lanes.begin(), out.lanes.end(), uid) != out.lanes.end()) continue;
+        if (s.followersOf(leader, documentId, uid) > 0) out.lanes.push_back(uid);
     }
     return out;
 }
@@ -601,11 +618,28 @@ LinkEndpoint::~LinkEndpoint() {
     }
 }
 
+namespace {
+
+/// `fillSlot` into the buffer's back slot and its publish when that returned true. Returns whether it published.
+bool fillAndPublish(const Document& doc, const LaneSelection& selection, TripleBuffer<SnapshotSlot>& buffer,
+                    Publication& last) {
+    if (!fillSlot(doc, selection, buffer.beginWrite(), last)) return false;
+    buffer.publish(last.generation);
+    return true;
+}
+
+bool contains(const std::vector<std::string>& list, const std::string& value) {
+    return std::find(list.begin(), list.end(), value) != list.end();
+}
+
+}  // namespace
+
 bool LinkEndpoint::publishOwn(const Document& doc, std::uint64_t revision, const std::string& lineage,
-                              SnapshotSlot& ownSlot, Publication& ownPublication) {
+                              TripleBuffer<SnapshotSlot>& ownBuffer, Publication& ownPublication) {
     uids_.cover(doc, makeUid_);
     if (following()) {
-        return fillSlot(doc, LaneSelection{}, ownSlot, ownPublication);
+        ownExcluded_.clear();  // the whole own document: nothing excluded
+        return fillAndPublish(doc, LaneSelection{}, ownBuffer, ownPublication);
     }
 
     FeedKey key;
@@ -622,28 +656,54 @@ bool LinkEndpoint::publishOwn(const Document& doc, std::uint64_t revision, const
         key.laneUids.push_back(uids_.uidOf(doc.tracks[i].id));
         key.audible.push_back(trackAudible(doc, i));
     }
-    // Followed in the document being published: a follower linked to another document does not count.
-    key.followed = registry_.followedLanes(token_, documentId_, key.laneUids);
-    // Who follows, for the publish decision only: a follower newly bound to a lane already followed needs this
-    // publish to get its content (rule 4), though the feed's lanes stay as they were.
-    for (const LinkLaneView& lane : registry_.view(token_).routed) key.followers.emplace_back(lane.uid, lane.followers);
+    // Followed in the document being published: a follower linked to another document does not count. With the
+    // binding counter from the same critical section: a follower newly bound to a lane already followed changes no
+    // lane, but needs this publish to get its content (rule 4).
+    LinkFollowed followed = registry_.followedLanes(token_, documentId_, key.laneUids);
+    key.followed = std::move(followed.lanes);
+    key.bindings = followed.bindings;
 
-    LaneSelection own{LaneSelection::Mode::AllExcept, {}};
-    for (const std::string& uid : key.followed) {
-        if (const std::optional<LaneKey> lane = uids_.laneOf(doc, uid)) own.lanes.push_back(*lane);
+    const auto excluding = [&](const std::vector<std::string>& uids) {
+        LaneSelection selection{LaneSelection::Mode::AllExcept, {}};
+        for (const std::string& uid : uids) {
+            if (const std::optional<LaneKey> lane = uids_.laneOf(doc, uid)) selection.lanes.push_back(*lane);
+        }
+        return selection;
+    };
+
+    // 1. Let go first: the followed lanes, and every lane the last own publication excluded that still resolves.
+    std::vector<std::string> letGo = key.followed;
+    for (const std::string& uid : ownExcluded_) {
+        if (!contains(letGo, uid) && uids_.laneOf(doc, uid)) letGo.push_back(uid);
     }
-    const bool filled = fillSlot(doc, own, ownSlot, ownPublication);
+    bool published = fillAndPublish(doc, excluding(letGo), ownBuffer, ownPublication);
+    ownExcluded_ = letGo;
+    if (probe_) probe_();
 
+    // 2. The feed: serves newly bound followers, empties those whose lane no longer resolves.
     const bool feedChanged = !lastFeed_ || key.revision != lastFeed_->revision ||
                              key.documentId != lastFeed_->documentId || key.lineage != lastFeed_->lineage ||
                              key.loop != lastFeed_->loop || key.followHost != lastFeed_->followHost ||
                              key.laneUids != lastFeed_->laneUids || key.audible != lastFeed_->audible ||
-                             key.followed != lastFeed_->followed || key.followers != lastFeed_->followers;
+                             key.followed != lastFeed_->followed || key.bindings != lastFeed_->bindings;
     if (feedChanged) {
         registry_.publish(token_, buildLinkFeed(doc, documentId_, uids_, lineage, label_, key.followed));
-        lastFeed_ = std::move(key);
+        lastFeed_ = key;
     }
-    return filled;
+    if (probe_) probe_();
+
+    // 3. Take back what nobody follows any more, now that its old follower is silent.
+    const bool comesBack = std::any_of(ownExcluded_.begin(), ownExcluded_.end(),
+                                       [&](const std::string& uid) { return !contains(key.followed, uid); });
+    if (comesBack) {
+        published = fillAndPublish(doc, excluding(key.followed), ownBuffer, ownPublication) || published;
+        ownExcluded_ = key.followed;
+    }
+    return published;
+}
+
+void LinkEndpoint::setPublicationProbe(std::function<void()> probe) {
+    probe_ = std::move(probe);
 }
 
 LinkEndpoint::LinkResult LinkEndpoint::follow(std::string_view leaderId, std::string_view laneUid,

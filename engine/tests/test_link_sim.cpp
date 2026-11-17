@@ -30,9 +30,11 @@
 // The two-instance simulation (per-track instruments plan, Task 5): whole instances, each a document store, a
 // LinkEndpoint, its own and its link buffer, a scheduler and a LinkSource, driven through scripted orders of
 // main-thread work and audio blocks exactly as the shell will drive them. What each instance emits is compared,
-// message for message and offset for offset, with a lone reference instance that plays the expected content as a
-// document of its own (only the lane in question audible, or the lane muted), never with anything computed by the
-// code under test. There is no idle step: everything must be right when the call that caused it returns.
+// message for message and offset for offset, with the expected output of a lone plug-in without any link code
+// (`reference`: the bare fillSlot, a triple buffer, acquire then adopt, as ChordLab::ProcessBlock does today) playing
+// the expected content as a document of its own (only the lane in question audible, or the lane muted), never with
+// anything computed by the code under test. There is no idle step: everything must be right when the call that
+// caused it returns.
 
 using namespace chordlab;
 
@@ -149,6 +151,9 @@ public:
             const std::lock_guard<std::mutex> guard(life->mutex);
             if (life->instance != nullptr) life->instance->republish();
         });
+        endpoint_->setPublicationProbe([this] {
+            if (probe) probe();
+        });
         republish();  // the shell's constructor publishes its (empty) document
     }
 
@@ -236,9 +241,9 @@ public:
         publishLocked();
     }
 
-    /// Run between publishOwn's return (the feed, and with it the followers' buffers, already published) and the
-    /// own buffer's publish, if set: where a test puts audio blocks inside a republish.
-    std::function<void()> betweenFillAndPublish;
+    /// Run between the endpoint's publications inside a leading republish (`LinkEndpoint::setPublicationProbe`),
+    /// if set: where a test puts audio blocks inside one.
+    std::function<void()> probe;
 
     DocumentStore& store() { return store_; }
     LinkView view() const { return endpoint_->view(); }
@@ -257,6 +262,7 @@ public:
     Midi block(double ppq, int frames, double bpm = kBpm, bool playing = true) {
         const LinkSource::Flags flags =
             source_.select(*own_, endpoint_->linkBuffer(), endpoint_->following(), *scheduler_);
+        lastFlags = flags;
         const BlockInfo info{ppq, frames, kSr, bpm, playing && flags.followHost, flags.thru};
         std::size_t written = 0;
         complete_ = scheduler_->process(info, out_.data(), out_.size(), written);
@@ -301,6 +307,8 @@ public:
         return bits;
     }
     std::uint32_t generation() const { return source_.generation(); }
+    /// The flags LinkSource returned for the last block.
+    LinkSource::Flags lastFlags;
     /// For a block on a thread of its own: no assertion inside `block`, faults counted in `faults` instead.
     bool quiet = false;
     int faults = 0;
@@ -309,10 +317,7 @@ public:
 
 private:
     void publishLocked() {
-        const bool filled =
-            endpoint_->publishOwn(store_.doc(), store_.revision(), lineage_, own_->beginWrite(), ownPublication_);
-        if (betweenFillAndPublish) betweenFillAndPublish();
-        if (filled) own_->publish(ownPublication_.generation);
+        endpoint_->publishOwn(store_.doc(), store_.revision(), lineage_, *own_, ownPublication_);
     }
 
     LinkEndpoint::UidGenerator uids_;
@@ -467,21 +472,23 @@ struct Player {
     std::vector<Bits> sounding;
     std::vector<bool> plays;  // the snapshot played in that block holds a pitch of `lane`
     std::vector<std::uint32_t> generation;
-    std::vector<bool> during;  // the block began while an operation was under way
+    /// When the block ran: 0 before an operation, 1 to 4 in one of its gaps (`Gaps`), kAfter after it.
+    std::vector<int> phase;
+    static constexpr int kAfter = 9;
 
     Player(FakeInstance& instance, std::vector<Span> transport, Bits watched = {}, std::size_t from = 0)
         : inst(&instance), spans(std::move(transport)), lane(watched), next(from), first(from),
           out(spans.size()), sounding(spans.size()), plays(spans.size()), generation(spans.size()),
-          during(spans.size()) {}
+          phase(spans.size(), 0) {}
 
-    void step(bool duringOp = false) {
+    void step(int when = 0) {
         REQUIRE(next < spans.size());
         const Span& s = spans[next];
         out[next] = inst->block(s.ppq, s.frames, s.bpm);
         sounding[next] = inst->sounding();
         plays[next] = (inst->played() & lane).any();
         generation[next] = inst->generation();
-        during[next] = duringOp;
+        phase[next] = when;
         ++next;
     }
     void stepTo(std::size_t n) {
@@ -502,32 +509,70 @@ struct Player {
     }
 };
 
-/// A lone instance playing `doc` (after `tweak`, a mute or a solo) over `spans`, in a registry of its own: the
-/// expected output.
-struct Reference {
-    LinkRegistry registry;
-    std::unique_ptr<FakeInstance> inst;
-    std::unique_ptr<Player> player;
+/// The expected output: a lone plug-in as `ChordLab::ProcessBlock` plays today, with no link code at all (no
+/// LinkEndpoint, no LinkSource, no registry): `doc` (after `tweak`, a mute or a solo) compiled by the bare
+/// three-argument `fillSlot` into a triple buffer, and per block an acquire, an adopt of what it delivered, the
+/// flags from the front slot, and `Scheduler::process`.
+struct Expected {
+    std::vector<Span> spans;
+    std::vector<Midi> out;
+    std::vector<Bits> sounding;
+
+    std::vector<std::pair<long, Msg>> absolute(std::size_t from = 0) const {
+        std::vector<std::pair<long, Msg>> all;
+        for (std::size_t i = from; i < out.size(); ++i) {
+            for (const Msg& m : out[i]) {
+                all.emplace_back(spans[i].start + m.offset, Msg{0, m.status, m.pitch, m.velocity});
+            }
+        }
+        return all;
+    }
 };
 
-std::unique_ptr<Reference> reference(const DocState& doc, const std::function<void(DocumentStore&)>& tweak,
-                                     const std::vector<Span>& spans) {
-    auto ref = std::make_unique<Reference>();
-    ref->inst = std::make_unique<FakeInstance>(ref->registry, "reference", uidSource());
-    ref->inst->loadDocument(doc);
-    if (tweak) ref->inst->edit(tweak);
-    ref->player = std::make_unique<Player>(*ref->inst, spans);
-    ref->player->stepTo(spans.size());
-    return ref;
+std::unique_ptr<Expected> reference(const DocState& doc, const std::function<void(DocumentStore&)>& tweak,
+                                    const std::vector<Span>& spans) {
+    DocumentStore store;
+    store.replace(doc.doc, doc.nextId, doc.nextSectionId, doc.nextTrackId, doc.nextNoteId);
+    if (tweak) tweak(store);
+    const auto buffer = std::make_unique<TripleBuffer<SnapshotSlot>>();
+    Publication publication;
+    if (fillSlot(store.doc(), buffer->beginWrite(), publication)) buffer->publish(publication.generation);
+    const auto scheduler = std::make_unique<Scheduler>();
+    scheduler->reset(kSr);
+    std::array<MidiOut, kOutCapacity> out{};
+
+    auto expected = std::make_unique<Expected>();
+    expected->spans = spans;
+    for (const Span& span : spans) {
+        if (const SnapshotSlot* slot = buffer->acquire()) {
+            scheduler->adopt(
+                Snapshot{slot->events.data(), slot->count, slot->endBeat, slot->loop, buffer->currentGeneration()});
+        }
+        const SnapshotSlot* front = buffer->current();
+        const bool followHost = front != nullptr ? front->followHost : true;
+        const bool thru = front != nullptr ? front->midiThru : true;
+        std::size_t written = 0;
+        REQUIRE(scheduler->process(BlockInfo{span.ppq, span.frames, kSr, span.bpm, followHost, thru}, out.data(),
+                                   out.size(), written));
+        Midi midi;
+        for (std::size_t i = 0; i < written; ++i) {
+            midi.push_back(Msg{out[i].sampleOffset, out[i].status, out[i].data1, out[i].data2});
+        }
+        expected->out.push_back(std::move(midi));
+        Bits bits;
+        for (int p = 0; p < 128; ++p) bits[static_cast<std::size_t>(p)] = scheduler->sounding(p);
+        expected->sounding.push_back(bits);
+    }
+    return expected;
 }
 
-/// A reference that plays nothing.
-std::unique_ptr<Reference> silence(const std::vector<Span>& spans) {
+/// An expected output of nothing at all.
+std::unique_ptr<Expected> silence(const std::vector<Span>& spans) {
     return reference(DocState{}, nullptr, spans);
 }
 
 /// Spans [from, to) of `p` equal `ref`'s message for message, offset for offset.
-void checkExact(const Player& p, const Player& ref, std::size_t from, std::size_t to, const std::string& what) {
+void checkExact(const Player& p, const Expected& ref, std::size_t from, std::size_t to, const std::string& what) {
     for (std::size_t i = from; i < to; ++i) {
         if (!(p.out[i] == ref.out[i])) {
             FAIL_CHECK(what << ": span " << i << ": " << describe(p.out[i]) << " expected " << describe(ref.out[i]));
@@ -540,7 +585,7 @@ void checkExact(const Player& p, const Player& ref, std::size_t from, std::size_
 /// it is the switch's block, where both sides release and chase at offset 0 (scheduler.h): after it the same
 /// pitches sound as in `ref`, and its messages after offset 0 are `ref`'s; every later block is exact and adopts
 /// nothing new. Without an adopt in the first block, every block is exact.
-void checkSettles(const Player& p, const Player& ref, std::size_t from, std::size_t to, const std::string& what) {
+void checkSettles(const Player& p, const Expected& ref, std::size_t from, std::size_t to, const std::string& what) {
     REQUIRE(from < to);
     std::size_t exactFrom = from;
     if (p.adoptedAt(from)) {
@@ -565,11 +610,11 @@ void checkStopsClean(FakeInstance& inst, double ppq) {
     CHECK(inst.silent());
 }
 
-/// Runs both players in rounds up to span `n`.
-void rounds(Player& a, Player& b, std::size_t n) {
+/// Runs both players in rounds up to span `n`, recording `phase` for each block.
+void rounds(Player& a, Player& b, std::size_t n, int phase = 0) {
     while (a.next < n || b.next < n) {
-        if (a.next < n) a.step();
-        if (b.next < n) b.step();
+        if (a.next < n) a.step(phase);
+        if (b.next < n) b.step(phase);
     }
 }
 
@@ -593,8 +638,8 @@ TEST_CASE("link sim: a follower plays its lane exactly as a lone instance with o
         Player pl(*leader, spans);
         Player pf(*follower, spans);
         rounds(pl, pf, spans.size());
-        checkExact(pf, *soloBass->player, 0, spans.size(), "follower");
-        checkExact(pl, *mutedBass->player, 0, spans.size(), "leader");
+        checkExact(pf, *soloBass, 0, spans.size(), "follower");
+        checkExact(pl, *mutedBass, 0, spans.size(), "leader");
         CHECK(follower->view().status == LinkStatus::Playing);
         checkStopsClean(*leader, 0.0);
         checkStopsClean(*follower, 0.0);
@@ -615,9 +660,9 @@ TEST_CASE("link sim: a follower plays its lane exactly as a lone instance with o
             p1.step();
             p2.step();
         }
-        checkExact(p1, *soloBass->player, 0, spans.size(), "first follower");
-        checkExact(p2, *soloBass->player, 0, spans.size(), "second follower");
-        checkExact(pl, *mutedBass->player, 0, spans.size(), "leader");
+        checkExact(p1, *soloBass, 0, spans.size(), "first follower");
+        checkExact(p2, *soloBass, 0, spans.size(), "second follower");
+        checkExact(pl, *mutedBass, 0, spans.size(), "leader");
     }
     SUBCASE("the chords lane followed") {
         const auto soloChords = reference(s.state, [](DocumentStore& d) { d.setChordsSolo(true); }, spans);
@@ -630,8 +675,8 @@ TEST_CASE("link sim: a follower plays its lane exactly as a lone instance with o
         Player pl(*leader, spans);
         Player pf(*follower, spans);
         rounds(pl, pf, spans.size());
-        checkExact(pf, *soloChords->player, 0, spans.size(), "follower");
-        checkExact(pl, *mutedChords->player, 0, spans.size(), "leader");
+        checkExact(pf, *soloChords, 0, spans.size(), "follower");
+        checkExact(pl, *mutedChords, 0, spans.size(), "leader");
     }
 }
 
@@ -651,42 +696,42 @@ TEST_CASE("link sim: mute, solo, deleting the followed track and its undo reach 
     Player pl(*leader, spans);
     Player pf(*follower, spans);
     rounds(pl, pf, 20);
-    checkExact(pf, *soloBass->player, 0, 20, "follower before");
-    checkExact(pl, *mutedBass->player, 0, 20, "leader before");
+    checkExact(pf, *soloBass, 0, 20, "follower before");
+    checkExact(pl, *mutedBass, 0, 20, "leader before");
 
     SUBCASE("the followed lane muted, then unmuted") {
         leader->edit([&](DocumentStore& d) { REQUIRE(d.setTrackMute(s.bass, true)); });
         CHECK(follower->view().status == LinkStatus::Muted);
         rounds(pl, pf, 60);
-        checkSettles(pf, *nothing->player, 20, 60, "follower muted");
-        checkExact(pl, *mutedBass->player, 20, 60, "leader with the followed lane muted");  // its content is unchanged
+        checkSettles(pf, *nothing, 20, 60, "follower muted");
+        checkExact(pl, *mutedBass, 20, 60, "leader with the followed lane muted");  // its content is unchanged
         leader->edit([&](DocumentStore& d) { REQUIRE(d.setTrackMute(s.bass, false)); });
         CHECK(follower->view().status == LinkStatus::Playing);
         rounds(pl, pf, 200);
-        checkSettles(pf, *soloBass->player, 60, 200, "follower unmuted");
-        checkExact(pl, *mutedBass->player, 60, 200, "leader unmuted");
+        checkSettles(pf, *soloBass, 60, 200, "follower unmuted");
+        checkExact(pl, *mutedBass, 60, 200, "leader unmuted");
     }
     SUBCASE("another lane soloed") {
         const auto chordsOnly = reference(s.state, [](DocumentStore& d) { d.setChordsSolo(true); }, spans);
         leader->edit([](DocumentStore& d) { REQUIRE(d.setChordsSolo(true)); });
         CHECK(follower->view().status == LinkStatus::Muted);
         rounds(pl, pf, 200);
-        checkSettles(pf, *nothing->player, 20, 200, "follower");
-        checkSettles(pl, *chordsOnly->player, 20, 200, "leader");
+        checkSettles(pf, *nothing, 20, 200, "follower");
+        checkSettles(pl, *chordsOnly, 20, 200, "leader");
     }
     SUBCASE("the followed track deleted, then restored by undo with its uid") {
         const std::string uid = leader->laneUid(s.bass);
         leader->edit([&](DocumentStore& d) { REQUIRE(d.removeTrack(s.bass)); });
         CHECK(follower->view().status == LinkStatus::LaneMissing);
         rounds(pl, pf, 60);
-        checkSettles(pf, *nothing->player, 20, 60, "follower, track deleted");
-        checkExact(pl, *mutedBass->player, 20, 60, "leader, track deleted");
+        checkSettles(pf, *nothing, 20, 60, "follower, track deleted");
+        checkExact(pl, *mutedBass, 20, 60, "leader, track deleted");
         leader->edit([](DocumentStore& d) { REQUIRE(d.undo()); });
         CHECK(leader->laneUid(s.bass) == uid);
         CHECK(follower->view().status == LinkStatus::Playing);
         rounds(pl, pf, 200);
-        checkSettles(pf, *soloBass->player, 60, 200, "follower, track restored");
-        checkExact(pl, *mutedBass->player, 60, 200, "leader, track restored");
+        checkSettles(pf, *soloBass, 60, 200, "follower, track restored");
+        checkExact(pl, *mutedBass, 60, 200, "leader, track restored");
     }
     SUBCASE("an edit of the followed lane reaches the follower with the edit call") {
         DocumentStore edited;
@@ -696,11 +741,114 @@ TEST_CASE("link sim: mute, solo, deleting the followed track and its undo reach 
             reference(docStateOf(edited), [&](DocumentStore& d) { d.setTrackSolo(s.bass, true); }, spans);
         leader->edit([&](DocumentStore& d) { REQUIRE(d.insertNotes(s.bass, {ns(38, 1920, 960)}).size() == 1); });
         rounds(pl, pf, 200);  // no step in between: the next blocks
-        checkSettles(pf, *editedSolo->player, 20, 200, "follower after the edit");
-        checkExact(pl, *mutedBass->player, 20, 200, "leader after the edit");
+        checkSettles(pf, *editedSolo, 20, 200, "follower after the edit");
+        checkExact(pl, *mutedBass, 20, 200, "leader after the edit");
     }
     checkStopsClean(*leader, 0.0);
     checkStopsClean(*follower, 0.0);
+}
+
+TEST_CASE("link sim: a follower that takes over a followed lane in the same moment its old follower lets go plays it") {
+    // F1 unfollows and F2 takes the bass before either runs the leader's hook: both hook runs see the bass followed
+    // by one follower, as before. F2 must still get its content: who is bound changed.
+    const Song s = song();
+    const std::vector<Span> spans = steady(80);
+    const auto soloBass = reference(s.state, [&](DocumentStore& d) { d.setTrackSolo(s.bass, true); }, spans);
+    const auto mutedBass = reference(s.state, [&](DocumentStore& d) { d.setTrackMute(s.bass, true); }, spans);
+
+    const auto takeOver = [&](bool byLoad) {
+        CAPTURE(byLoad);
+        World w;
+        auto leader = w.make("L");
+        leader->loadDocument(s.state);
+        auto f1 = w.make("F1");
+        auto f2 = w.make("F2");
+        const std::string bass = leader->laneUid(s.bass);
+        REQUIRE(f1->follow("L", bass, lineageOf(*f1, "L")) == Result::Applied);
+        const Saved followingBass = f1->save();
+        Player pl(*leader, spans);
+        Player p2(*f2, spans);
+        rounds(pl, p2, 10);
+
+        const Hooks first = f1->unfollowStep();
+        Hooks second;
+        if (byLoad) {
+            second = f2->loadStep(followingBass);  // a copy of F1's state: F2 gets a fresh id and F1's link
+        } else {
+            REQUIRE(f2->followStep("L", bass, lineageOf(*f2, "L"), second) == Result::Applied);
+        }
+        FakeInstance::run(first);
+        FakeInstance::run(second);
+        f1->republish();
+        f2->republish();
+        CHECK(f2->view().status == LinkStatus::Playing);
+        rounds(pl, p2, spans.size());
+        checkSettles(p2, *soloBass, 10, spans.size(), "the follower that took over");
+        checkExact(pl, *mutedBass, 0, spans.size(), "leader");
+    };
+    SUBCASE("by a follow") { takeOver(false); }
+    SUBCASE("by a state load") { takeOver(true); }
+}
+
+TEST_CASE("link sim: a follower destroyed mid-run hands its lane back to the leader with the destruction") {
+    // The endpoint's destructor runs the hooks `remove` returned: the leader republishes before it returns.
+    const Song s = song();
+    const std::vector<Span> spans = steady(110);
+    const auto mutedBass = reference(s.state, [&](DocumentStore& d) { d.setTrackMute(s.bass, true); }, spans);
+    const auto all = reference(s.state, nullptr, spans);
+    World w;
+    auto leader = w.make("L");
+    leader->loadDocument(s.state);
+    auto follower = w.make("F");
+    REQUIRE(follower->follow("L", leader->laneUid(s.bass), lineageOf(*follower, "L")) == Result::Applied);
+    Player pl(*leader, spans);
+    {
+        Player pf(*follower, spans);
+        rounds(pl, pf, 44);
+    }
+    checkExact(pl, *mutedBass, 0, 44, "leader with a follower");
+    follower.reset();  // deleted mid-run
+    pl.stepTo(spans.size());  // the very next block
+    checkSettles(pl, *all, 44, spans.size(), "leader after its follower was deleted");
+}
+
+TEST_CASE("link sim: a follower's Thru and its own document stay live while it follows") {
+    // While following, publishOwn still fills the own buffer with the whole own document: Thru rides in it, and an
+    // unfollow returns to the document as it was edited meanwhile.
+    const Song s = song();
+    DocumentStore editedOwn;
+    {
+        const DocState start = followerOwn();
+        editedOwn.replace(start.doc, start.nextId, start.nextSectionId, start.nextTrackId, start.nextNoteId);
+        editedOwn.appendChord(chord(7, "maj"), 4.0, 100);
+    }
+    const std::vector<Span> spans = steady(120);
+    const auto soloBass = reference(s.state, [&](DocumentStore& d) { d.setTrackSolo(s.bass, true); }, spans);
+    const auto edited = reference(docStateOf(editedOwn), nullptr, spans);
+    World w;
+    auto leader = w.make("L");
+    leader->loadDocument(s.state);
+    auto follower = w.make("F");
+    follower->loadDocument(followerOwn());
+    REQUIRE(follower->follow("L", leader->laneUid(s.bass), lineageOf(*follower, "L")) == Result::Applied);
+    Player pl(*leader, spans);
+    Player pf(*follower, spans);
+    rounds(pl, pf, 10);
+    CHECK(follower->lastFlags.thru);
+
+    follower->edit([](DocumentStore& d) { d.setMidiThru(false); });
+    rounds(pl, pf, 11);
+    CHECK_FALSE(follower->lastFlags.thru);  // the very next block
+    follower->edit([](DocumentStore& d) { d.setMidiThru(true); });
+    rounds(pl, pf, 12);
+    CHECK(follower->lastFlags.thru);
+    follower->edit([](DocumentStore& d) { d.appendChord(chord(7, "maj"), 4.0, 100); });
+    rounds(pl, pf, 30);
+    checkExact(pf, *soloBass, 0, 30, "follower, its own document edited meanwhile");
+
+    follower->unfollow();  // no further edit
+    rounds(pl, pf, spans.size());
+    checkSettles(pf, *edited, 30, spans.size(), "follower back on its edited own document");
 }
 
 // --- 3. cold restore ---------------------------------------------------------------------------------------------
@@ -749,8 +897,8 @@ TEST_CASE("link sim: a cold restore in either order is right from the very first
         Player pl(*leader, spans);
         Player pf(*follower, spans);
         rounds(pl, pf, spans.size());
-        checkExact(pf, *soloBass->player, 0, spans.size(), "follower");
-        checkExact(pl, *mutedBass->player, 0, spans.size(), "leader");
+        checkExact(pf, *soloBass, 0, spans.size(), "follower");
+        checkExact(pl, *mutedBass, 0, spans.size(), "leader");
         checkStopsClean(*leader, 0.0);
         checkStopsClean(*follower, 0.0);
     };
@@ -762,76 +910,148 @@ TEST_CASE("link sim: a cold restore in either order is right from the very first
 
 namespace {
 
-/// What one interleaving showed: the spans in which the lane was on both outputs or on neither.
+/// What one interleaving showed, counted in song spans (a span is one block of each instance at the same transport
+/// position): the spans in which the lane was in the snapshot both instances played, or in neither. These count
+/// the blocks the test injected between the operation's steps and paired by position, not time: two blocks of one
+/// span may have run at different moments of the operation.
 struct Overlap {
     int both = 0;
     int neither = 0;
 };
 
-enum class Op { Link, Unlink };
+/// One interleaving's run: the giving and the taking instance, and the phases (see `Player::phase`) from which the
+/// giver has let the lane go and the taker may have it.
+struct HandOver {
+    const Player* giver;
+    const Player* taker;
+    int givePhase;
+    int takePhase;
+};
 
-/// One link or unlink of the bass between leader L and follower F, with audio blocks put between its internal
-/// steps: `g1` after the follower's step (the registry empties its link buffer and the flag turns), `g2` inside
-/// the leader's hook between its publishOwn (whose feed writes the follower's buffer) and its own buffer's
-/// publish, `g3` after the hook and before the follower's own republish. Each letter is one block of that
-/// instance ('L' or 'F'), in order.
-Overlap runOrdering(Op op, const std::string& g1, const std::string& g2, const std::string& g3, const Song& s,
-                    const std::vector<Span>& spans, std::size_t pre, const Player& leaderBefore,
-                    const Player& leaderAfter, const Player& followerBefore, const Player& followerAfter) {
-    CAPTURE(g1);
-    CAPTURE(g2);
-    CAPTURE(g3);
+/// The hand-over rule: at no moment do both instances hold the lane. The taker plays it only in blocks that began
+/// after the giver let it go; the giver only in blocks that began before the taker got it. So a span with the lane
+/// on both outputs straddles the operation: its giver block ran before the giving step, its taker block after
+/// the taking step. Returns the span counts.
+Overlap checkHandOver(const HandOver& h, std::size_t spans) {
+    // Whatever the order of the steps: blocks run in one gap ran at one moment of the operation, and the two
+    // instances never both hold the lane there.
+    for (int phase = 1; phase < Player::kAfter; ++phase) {
+        bool giverHolds = false;
+        bool takerHolds = false;
+        for (std::size_t i = 0; i < spans; ++i) {
+            giverHolds = giverHolds || (h.giver->phase[i] == phase && h.giver->plays[i]);
+            takerHolds = takerHolds || (h.taker->phase[i] == phase && h.taker->plays[i]);
+        }
+        CHECK_MESSAGE(!(giverHolds && takerHolds), "both instances held the lane in gap " << phase);
+    }
+    Overlap overlap;
+    for (std::size_t i = 0; i < spans; ++i) {
+        CAPTURE(i);
+        if (h.taker->plays[i]) {
+            CHECK_MESSAGE(h.taker->phase[i] >= h.givePhase, "the taker played the lane before the giver let it go");
+        }
+        if (h.giver->plays[i]) {
+            CHECK_MESSAGE(h.giver->phase[i] < h.takePhase, "the giver played the lane after the taker got it");
+        }
+        const bool both = h.giver->plays[i] && h.taker->plays[i];
+        const bool neither = !h.giver->plays[i] && !h.taker->plays[i];
+        if (both || neither) {
+            const bool injected = (h.giver->phase[i] > 0 && h.giver->phase[i] < Player::kAfter) ||
+                                  (h.taker->phase[i] > 0 && h.taker->phase[i] < Player::kAfter);
+            CHECK_MESSAGE(injected, "span " << i << ": the lane on " << (both ? "both outputs" : "neither output")
+                                            << " with no block injected into the operation");
+        }
+        overlap.both += both ? 1 : 0;
+        overlap.neither += neither ? 1 : 0;
+    }
+    return overlap;
+}
+
+enum class Op { Link, Unlink, Replace };
+
+/// The four places a test puts audio blocks into an operation, each a string of 'L' (a leader block) and 'F'
+/// (a follower block), run in order.
+struct Gaps {
+    std::string g1;  // after the operation's own step (the follower's follow or unfollow, the leader's load)
+    std::string g2;  // inside the leader's publishOwn, after its first own-buffer publication
+    std::string g3;  // inside it, after the feed
+    std::string g4;  // after the leader's hook, before the follower's own republish (link and unlink)
+};
+
+/// One link, unlink or document replacement between leader L (the song) and follower F (on its bass), with audio
+/// blocks put between the steps (`Gaps`). Returns the hand-over's span counts after checking the hand-over rule,
+/// exact output after the operation, note pairing and that nothing hangs.
+Overlap runOrdering(Op op, const Gaps& gaps, const Song& s, const Song& other, const std::vector<Span>& spans,
+                    std::size_t pre, const Expected& leaderBefore, const Expected& leaderAfter,
+                    const Expected& followerBefore, const Expected& followerAfter) {
+    CAPTURE(gaps.g1);
+    CAPTURE(gaps.g2);
+    CAPTURE(gaps.g3);
+    CAPTURE(gaps.g4);
     World w;
     auto leader = w.make("L");
     leader->loadDocument(s.state);
     auto follower = w.make("F");
     follower->loadDocument(followerOwn());
     const std::string lane = leader->laneUid(s.bass);
-    if (op == Op::Unlink) REQUIRE(follower->follow("L", lane, lineageOf(*follower, "L")) == Result::Applied);
+    if (op != Op::Link) REQUIRE(follower->follow("L", lane, lineageOf(*follower, "L")) == Result::Applied);
 
-    const Bits bass = pitches({kBass1, kBass2});
-    Player pl(*leader, spans, bass);
-    Player pf(*follower, spans, bass);
+    // The watched lane: the bass, and for a replacement also the other project's track with the same number and uid.
+    const Bits watched = op == Op::Replace ? pitches({kBass1, kBass2, 48}) : pitches({kBass1, kBass2});
+    Player pl(*leader, spans, watched);
+    Player pf(*follower, spans, watched);
     rounds(pl, pf, pre);
     checkExact(pl, leaderBefore, 0, pre, "leader before");
     checkExact(pf, followerBefore, 0, pre, "follower before");
 
-    const auto gap = [&](const std::string& pattern) {
-        for (const char c : pattern) (c == 'L' ? pl : pf).step(true);
+    const auto gap = [&](const std::string& pattern, int phase) {
+        for (const char c : pattern) (c == 'L' ? pl : pf).step(phase);
     };
-    Hooks hooks;
-    if (op == Op::Link) {
-        REQUIRE(follower->followStep("L", lane, lineageOf(*follower, "L"), hooks) == Result::Applied);
+    int probes = 0;
+    leader->probe = [&] {
+        const bool firstProbe = probes++ == 0;
+        gap(firstProbe ? gaps.g2 : gaps.g3, firstProbe ? 2 : 3);
+    };
+    if (op == Op::Replace) {
+        Saved otherProject;
+        otherProject.doc = other.state;
+        otherProject.link.id = "another-instance";
+        otherProject.link.documentId = "another-document";
+        otherProject.link.lanes = {{other.bass, lane}, {other.lead, "another-uid-2"}};  // the same lane uid
+        FakeInstance::run(leader->loadStep(otherProject));
+        gap(gaps.g1, 1);
+        leader->republish();
     } else {
-        hooks = follower->unfollowStep();
+        Hooks hooks;
+        if (op == Op::Link) {
+            REQUIRE(follower->followStep("L", lane, lineageOf(*follower, "L"), hooks) == Result::Applied);
+        } else {
+            hooks = follower->unfollowStep();
+        }
+        REQUIRE(hooks.size() == 1);  // the leader's
+        gap(gaps.g1, 1);
+        FakeInstance::run(hooks);
+        gap(gaps.g4, 4);
+        follower->republish();
     }
-    REQUIRE(hooks.size() == 1);  // the leader's
-    gap(g1);
-    leader->betweenFillAndPublish = [&] { gap(g2); };
-    FakeInstance::run(hooks);
-    leader->betweenFillAndPublish = nullptr;
-    gap(g3);
-    follower->republish();
+    leader->probe = nullptr;
 
     // Everything after the whole operation returned.
     const std::size_t leaderFrom = pl.next;
     const std::size_t followerFrom = pf.next;
-    rounds(pl, pf, spans.size());
+    rounds(pl, pf, spans.size(), Player::kAfter);
     checkSettles(pl, leaderAfter, leaderFrom, spans.size(), "leader after");
     checkSettles(pf, followerAfter, followerFrom, spans.size(), "follower after");
 
-    Overlap overlap;
-    for (std::size_t i = 0; i < spans.size(); ++i) {
-        const bool both = pl.plays[i] && pf.plays[i];
-        const bool neither = !pl.plays[i] && !pf.plays[i];
-        if (both || neither) {
-            CHECK_MESSAGE((pl.during[i] || pf.during[i]),
-                          "span " << i << ": the lane on " << (both ? "both outputs" : "neither output")
-                                  << " in blocks that began after the operation");
-        }
-        overlap.both += both ? 1 : 0;
-        overlap.neither += neither ? 1 : 0;
-    }
+    // Who gives and who takes, and at which phase. Link: the leader lets go in its first own publication (phase 2
+    // on), the follower gets the lane with the feed (phase 3 on). Unlink: the follower lets go in its own step
+    // (phase 1 on), the leader takes the lane back in its last own publication, after its hook (phase 4 on).
+    // Replacement: the follower is emptied by the feed (phase 3 on), the leader takes the track in its last own
+    // publication, as the operation ends.
+    const HandOver h = op == Op::Link     ? HandOver{&pl, &pf, 2, 3}
+                       : op == Op::Unlink ? HandOver{&pf, &pl, 1, 4}
+                                          : HandOver{&pf, &pl, 3, Player::kAfter};
+    const Overlap overlap = checkHandOver(h, spans.size());
     checkStopsClean(*leader, 0.0);
     checkStopsClean(*follower, 0.0);
     return overlap;
@@ -839,46 +1059,56 @@ Overlap runOrdering(Op op, const std::string& g1, const std::string& g2, const s
 
 }  // namespace
 
-TEST_CASE("link sim: link and unlink with audio blocks between every internal step") {
+TEST_CASE("link sim: link, unlink and a document replacement with audio blocks between every internal step") {
     const Song s = song();
+    const Song other = otherSong();
+    REQUIRE(other.bass == s.bass);
     const std::size_t pre = 8;
-    const std::vector<Span> spans = steady(pre + 80);  // after the operation, more than one loop (64 blocks)
+    const std::vector<Span> spans = steady(pre + 72);  // after the operation, more than one loop (64 blocks)
     const auto all = reference(s.state, nullptr, spans);
     const auto soloBass = reference(s.state, [&](DocumentStore& d) { d.setTrackSolo(s.bass, true); }, spans);
     const auto mutedBass = reference(s.state, [&](DocumentStore& d) { d.setTrackMute(s.bass, true); }, spans);
     const auto own = reference(followerOwn(), nullptr, spans);
+    const auto otherAll = reference(other.state, nullptr, spans);
+    const auto nothing = silence(spans);
 
     const std::vector<std::string> patterns{"", "L", "F", "LF", "FL"};
-    for (const Op op : {Op::Link, Op::Unlink}) {
-        const std::string opName = op == Op::Link ? "link" : "unlink";
+    for (const Op op : {Op::Link, Op::Unlink, Op::Replace}) {
+        const std::string opName = op == Op::Link ? "link" : op == Op::Unlink ? "unlink" : "replacement";
         CAPTURE(opName);
         Overlap most;
         int interleavings = 0;
         for (const std::string& g1 : patterns) {
             for (const std::string& g2 : patterns) {
                 for (const std::string& g3 : patterns) {
-                    const Overlap o =
-                        op == Op::Link
-                            ? runOrdering(op, g1, g2, g3, s, spans, pre, *all->player, *mutedBass->player,
-                                          *own->player, *soloBass->player)
-                            : runOrdering(op, g1, g2, g3, s, spans, pre, *mutedBass->player, *all->player,
-                                          *soloBass->player, *own->player);
-                    most.both = std::max(most.both, o.both);
-                    most.neither = std::max(most.neither, o.neither);
-                    ++interleavings;
+                    for (const std::string& g4 : patterns) {
+                        if (op == Op::Replace && !g4.empty()) continue;  // a load has no hook to run
+                        const Gaps gaps{g1, g2, g3, g4};
+                        const Overlap o =
+                            op == Op::Link     ? runOrdering(op, gaps, s, other, spans, pre, *all,
+                                                             *mutedBass, *own, *soloBass)
+                            : op == Op::Unlink ? runOrdering(op, gaps, s, other, spans, pre, *mutedBass,
+                                                             *all, *soloBass, *own)
+                                               : runOrdering(op, gaps, s, other, spans, pre, *mutedBass,
+                                                             *otherAll, *soloBass, *nothing);
+                        most.both = std::max(most.both, o.both);
+                        most.neither = std::max(most.neither, o.neither);
+                        ++interleavings;
+                    }
                 }
             }
         }
-        CHECK(interleavings == 125);
-        // What the interleavings show (the shell's order: the leader's feed, which writes the follower, is published
-        // inside publishOwn, before the caller publishes the leader's own slot). Pinned, so that a change of order
-        // shows up here.
+        CHECK(interleavings == (op == Op::Replace ? 125 : 625));
+        // The design's bounds, on top of the hand-over rule checked in every run. A span has the lane on both
+        // outputs only when it straddles the operation: its giver block ran before the giving publication, its
+        // taker block after the taking one. On a link only the first gap precedes the leader's first publication,
+        // and it holds at most one leader block: at most one such span. On an unlink the follower lets go in the
+        // operation's own step, before any block is injected: never. A replacement has no count bound of its own:
+        // each follower block injected before the feed pairs with a leader block after the operation.
         if (op == Op::Link) {
-            CHECK(most.both == 2);
-            CHECK(most.neither == 1);
-        } else {
+            CHECK(most.both <= 1);
+        } else if (op == Op::Unlink) {
             CHECK(most.both == 0);
-            CHECK(most.neither == 2);
         }
     }
 }
@@ -968,25 +1198,25 @@ TEST_CASE("link sim: a leader that starts following silences its followers; when
         }
     };
     roundsTo(44);  // beat 5.5: B's 41 sounds
-    checkExact(pb, *aSoloBass->player, 0, 44, "B before");
-    checkExact(pa, *aMutedBass->player, 0, 44, "A before");
+    checkExact(pb, *aSoloBass, 0, 44, "B before");
+    checkExact(pa, *aMutedBass, 0, 44, "A before");
     REQUIRE(pb.sounding[43][kBass2]);
 
     REQUIRE(instA->follow("C", instC->laneUid(c.bass), lineageOf(*instA, "C")) == Result::Applied);
     CHECK(instB->view().status == LinkStatus::Waiting);
     REQUIRE(instB->view().follow.has_value());
     roundsTo(100);
-    checkSettles(pb, *nothing->player, 44, 100, "B while A follows");
+    checkSettles(pb, *nothing, 44, 100, "B while A follows");
     CHECK(pb.out[44] == Midi{Msg{0, 0x80, kBass2, 0}});  // released with its note-off, at once
-    checkSettles(pa, *cSoloBass->player, 44, 100, "A following C");
-    checkSettles(pc, *cMutedBass->player, 44, 100, "C");
+    checkSettles(pa, *cSoloBass, 44, 100, "A following C");
+    checkSettles(pc, *cMutedBass, 44, 100, "C");
 
     instA->unfollow();
     CHECK(instB->view().status == LinkStatus::Playing);
     roundsTo(200);
-    checkSettles(pb, *aSoloBass->player, 100, 200, "B after A stopped following");
-    checkSettles(pa, *aMutedBass->player, 100, 200, "A leading again");
-    checkSettles(pc, *cAll->player, 100, 200, "C");
+    checkSettles(pb, *aSoloBass, 100, 200, "B after A stopped following");
+    checkSettles(pa, *aMutedBass, 100, 200, "A leading again");
+    checkSettles(pc, *cAll, 100, 200, "C");
     checkStopsClean(*instB, 0.0);
 }
 
@@ -1029,16 +1259,16 @@ TEST_CASE("link sim: a different project in a bound leader is played by the lead
         CHECK(leader->id() == "L");  // bound followers: it keeps its id
         CHECK(follower->view().status == LinkStatus::ProjectChanged);
         rounds(pl, pf, spans.size());
-        checkSettles(pl, *otherAll->player, 30, spans.size(), "leader with the other project");
-        checkSettles(pf, *nothing->player, 30, spans.size(), "follower");
+        checkSettles(pl, *otherAll, 30, spans.size(), "leader with the other project");
+        checkSettles(pf, *nothing, 30, spans.size(), "follower");
     }
     SUBCASE("the same project's own state") {
         const Saved same = leader->save();
         leader->load(same);
         CHECK(follower->view().status == LinkStatus::Playing);
         rounds(pl, pf, spans.size());
-        checkExact(pl, *mutedBass->player, 0, spans.size(), "leader");  // no switch at all
-        checkExact(pf, *soloBass->player, 0, spans.size(), "follower");
+        checkExact(pl, *mutedBass, 0, spans.size(), "leader");  // no switch at all
+        checkExact(pf, *soloBass, 0, spans.size(), "follower");
         for (std::size_t i = 31; i < spans.size(); ++i) CHECK_FALSE(pf.adoptedAt(i));
     }
     checkStopsClean(*leader, 0.0);
@@ -1080,8 +1310,8 @@ TEST_CASE("link sim: a reverted leader's new track with the followed track's num
     const auto leaderNow = reference(docStateOf(leader->store()), nullptr, spans);
     const auto nothing = silence(spans);
     rounds(pl, pf, spans.size());
-    checkSettles(pl, *leaderNow->player, 20, spans.size(), "leader with its new track");
-    checkSettles(pf, *nothing->player, 20, spans.size(), "follower");
+    checkSettles(pl, *leaderNow, 20, spans.size(), "leader with its new track");
+    checkSettles(pf, *nothing, 20, spans.size(), "follower");
     (void)lead;
 }
 
@@ -1112,8 +1342,8 @@ TEST_CASE("link sim: a follow with a stale leader lineage applies nothing") {
     CHECK(follower->view().status == LinkStatus::NotFollowing);
     CHECK_FALSE(follower->view().follow.has_value());
     rounds(pl, pf, spans.size());
-    checkExact(pl, *all->player, 0, spans.size(), "leader");
-    checkExact(pf, *own->player, 0, spans.size(), "follower");
+    checkExact(pl, *all, 0, spans.size(), "leader");
+    checkExact(pf, *own, 0, spans.size(), "follower");
 }
 
 TEST_CASE("link sim: a follower's state load replaces its link atomically; the first block after plays the new one") {
@@ -1136,21 +1366,21 @@ TEST_CASE("link sim: a follower's state load replaces its link atomically; the f
     Player pl(*leader, spans);
     Player pf(*follower, spans);
     rounds(pl, pf, 30);
-    checkExact(pf, *soloBass->player, 0, 30, "follower on the bass");
+    checkExact(pf, *soloBass, 0, 30, "follower on the bass");
 
     // The load's own step: the link is the lead's at once, the buffer emptied; no moment follows nothing.
     const Hooks hooks = follower->loadStep(onLead);
     CHECK(follower->view().follow->laneUid == leader->laneUid(s.lead));
-    pf.step(true);  // a block between the load and the leader's republish plays the emptied buffer
+    pf.step(1);  // a block between the load and the leader's republish plays the emptied buffer
     CHECK(pf.sounding[30].none());
     CHECK((follower->played() & chordPitches(followerOwn().doc)).none());
     REQUIRE(hooks.size() == 1);  // the leader's, once: it was the old leader and is the new one
     FakeInstance::run(hooks);
     follower->republish();
-    pl.step(true);  // span 30 of the leader, after the operation
+    pl.step(Player::kAfter);  // span 30 of the leader, after the operation
     rounds(pl, pf, spans.size());
-    checkSettles(pf, *soloLead->player, 31, spans.size(), "follower on the lead");
-    checkSettles(pl, *mutedLead->player, 30, spans.size(), "leader");
+    checkSettles(pf, *soloLead, 31, spans.size(), "follower on the lead");
+    checkSettles(pl, *mutedLead, 30, spans.size(), "leader");
     (void)mutedBass;
 }
 
@@ -1246,9 +1476,9 @@ TEST_CASE("link sim: a leader removed mid-run releases its followers, which wait
         p1.step();
         p2.step();
     }
-    checkSettles(p1, *nothing->player, 44, 70, "first follower, leader gone");
+    checkSettles(p1, *nothing, 44, 70, "first follower, leader gone");
     CHECK(p1.out[44] == Midi{Msg{0, 0x80, kBass2, 0}});  // released with its note-off
-    checkSettles(p2, *nothing->player, 44, 70, "second follower, leader gone");
+    checkSettles(p2, *nothing, 44, 70, "second follower, leader gone");
 
     auto successor = w.make("L2");  // the undo of the deletion: a new instance given the saved state
     successor->load(leaderState);
@@ -1260,9 +1490,9 @@ TEST_CASE("link sim: a leader removed mid-run releases its followers, which wait
         p1.step();
         p2.step();
     }
-    checkSettles(p1, *soloBass->player, 70, spans.size(), "first follower, successor");
-    checkSettles(p2, *soloLead->player, 70, spans.size(), "second follower, successor");
-    checkSettles(ps, *chordsOnly->player, 70, spans.size(), "successor");
+    checkSettles(p1, *soloBass, 70, spans.size(), "first follower, successor");
+    checkSettles(p2, *soloLead, 70, spans.size(), "second follower, successor");
+    checkSettles(ps, *chordsOnly, 70, spans.size(), "successor");
     checkStopsClean(*f1, 0.0);
     checkStopsClean(*f2, 0.0);
 }
@@ -1320,8 +1550,8 @@ TEST_CASE("link sim: transport histories") {
         Player pf(*p.follower, spansOf(total, {7, 333, 4800, 1024}));
         pl.stepTo(pl.spans.size());
         pf.stepTo(pf.spans.size());
-        CHECK(pf.absolute() == ref->player->absolute());
-        CHECK(pl.absolute() == refLeader->player->absolute());
+        CHECK(pf.absolute() == ref->absolute());
+        CHECK(pl.absolute() == refLeader->absolute());
     }
     SUBCASE("a tempo change seen at different block boundaries: within the seek threshold") {
         // 120 to 119 bpm at beat 4. The follower's blocks of 7000 frames straddle the change (91000..98000) and
@@ -1338,10 +1568,10 @@ TEST_CASE("link sim: transport histories") {
         Player pf(*p.follower, coarse);
         pl.stepTo(fine.size());
         pf.stepTo(coarse.size());
-        CHECK(pf.absolute() == sameHistory->player->absolute());  // the same transport history: exact
+        CHECK(pf.absolute() == sameHistory->absolute());  // the same transport history: exact
         const double samplesPerBeat = kSr * 60.0 / 119.0;
         const long bound = static_cast<long>(std::ceil(Scheduler::kSeekThresholdBeats * samplesPerBeat)) + 1;
-        const long most = checkWithin(pf.absolute(), ref->player->absolute(), bound, "follower against the reference");
+        const long most = checkWithin(pf.absolute(), ref->absolute(), bound, "follower against the reference");
         CHECK(most > 0);  // the histories do differ
     }
     SUBCASE("ppq jitter under the seek threshold: exact") {
@@ -1351,7 +1581,7 @@ TEST_CASE("link sim: transport histories") {
         Player pl(*p.leader, spansOf(total, {kFrames}));
         Player pf(*p.follower, spansOf(total, {kFrames}, 0.9 / 1024.0));
         rounds(pl, pf, pl.spans.size());
-        CHECK(pf.absolute() == ref->player->absolute());
+        CHECK(pf.absolute() == ref->absolute());
     }
     SUBCASE("a follower that starts processing mid-song: within the seek threshold") {
         Pair p;
@@ -1361,10 +1591,10 @@ TEST_CASE("link sim: transport histories") {
         pl.stepTo(45);
         Player pf(*p.follower, spans, {}, 45);  // its first block: the transport is at 5.62 beats, 41 sounding
         rounds(pl, pf, spans.size());
-        REQUIRE(ref->player->sounding[45][kBass2]);
-        CHECK(pf.sounding[45] == ref->player->sounding[45]);  // its start chases what sounds
-        CHECK(tail(pf.out[45]) == tail(ref->player->out[45]));
+        REQUIRE(ref->sounding[45][kBass2]);
+        CHECK(pf.sounding[45] == ref->sounding[45]);  // its start chases what sounds
+        CHECK(tail(pf.out[45]) == tail(ref->out[45]));
         const long bound = static_cast<long>(std::ceil(Scheduler::kSeekThresholdBeats * kSamplesPerBeat)) + 1;
-        checkWithin(pf.absolute(46), ref->player->absolute(46), bound, "follower after its first block");
+        checkWithin(pf.absolute(46), ref->absolute(46), bound, "follower after its first block");
     }
 }

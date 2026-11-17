@@ -1041,6 +1041,36 @@ TEST_CASE("link source: an unpublished link buffer plays empty; the link buffer 
     CHECK(rig.link->currentGeneration() == kLinkGenerationBase + 1);
 }
 
+TEST_CASE("link source: an own buffer that was never published is adopted as empty under generation 0") {
+    SUBCASE("on a switch back from the link") {
+        SourceRig rig;
+        rig.publishLink(40);
+        rig.block(true);
+        REQUIRE(rig.sounds(40));
+        rig.block(false);
+        CHECK(rig.adoptedThisBlock == 1);
+        CHECK_FALSE(rig.sounds(40));
+        CHECK(rig.source.playing() == LinkSource::Source::Own);
+        CHECK(rig.source.generation() == 0);
+        CHECK(rig.flags.thru);
+        CHECK(rig.flags.followHost);
+        rig.block(false);
+        CHECK(rig.adoptedThisBlock == 0);
+        rig.publishOwn(60);  // its first publication, generation 1, is a change
+        rig.block(false);
+        CHECK(rig.adoptedThisBlock == 1);
+        CHECK(rig.soundsOnly(60, {40, 60}));
+    }
+    SUBCASE("on the very first block") {
+        SourceRig rig;
+        rig.block(false);
+        CHECK(rig.adoptedThisBlock == 1);
+        CHECK(rig.source.playing() == LinkSource::Source::Own);
+        CHECK(rig.source.generation() == 0);
+        CHECK(rig.scheduler->sounding(60) == false);
+    }
+}
+
 TEST_CASE("link source: rapid toggles and publications, each block playing the selected buffer's latest") {
     SourceRig rig;
     std::uint32_t state = 12345u;

@@ -178,7 +178,7 @@ struct World {
     }
     LinkStatus status(const Inst& inst) const { return reg.view(inst.token).status; }
     Names followed(const Inst& leader, const Song& s, const std::string& documentId = "doc-1") const {
-        return reg.followedLanes(leader.token, documentId, s.all());
+        return reg.followedLanes(leader.token, documentId, s.all()).lanes;
     }
 };
 
@@ -629,7 +629,7 @@ TEST_CASE("link registry: A leads B, then A follows C, then A stops following") 
     CHECK(w.followed(a, s).empty());
     CHECK(w.view(a).routed.empty());
     CHECK(w.view(c).leaders.empty());  // A follows, B follows
-    CHECK(w.reg.followedLanes(c.token, "doc-c", {s.uidB}) == Names{s.uidB});
+    CHECK(w.reg.followedLanes(c.token, "doc-c", {s.uidB}).lanes == Names{s.uidB});
 
     CHECK(setA(std::nullopt) == Names{"C"});
     CHECK(w.status(b) == LinkStatus::ProjectChanged);  // bound to A again, whose feed was dropped
@@ -953,7 +953,7 @@ TEST_CASE("link registry: follow applies only to a live leading instance with th
     expected.leaderLabel = "ChordLab A";
     CHECK(w.shown(f) == expected);
     CHECK(w.status(f) == LinkStatus::Playing);
-    CHECK(w.reg.followedLanes(l.token, "doc-7", s.all()) == Names{s.uidA});
+    CHECK(w.reg.followedLanes(l.token, "doc-7", s.all()).lanes == Names{s.uidA});
     Taken t = take(f);
     CHECK(t.fresh);  // emptied, as by setFollow
     CHECK(t.count == 0);
@@ -1160,15 +1160,79 @@ TEST_CASE("link registry: followedLanes counts bound followers in the given docu
 
     CHECK(w.followed(l, s) == Names{s.uidA});
     CHECK(w.followed(l, s, "doc-old") == Names{std::string(kChordsLaneUid)});
-    CHECK(w.reg.followedLanes(l.token, "doc-1", {s.uidB, s.uidA, s.uidA}) == Names{s.uidA});
-    CHECK(w.reg.followedLanes(l.token, "doc-1", {s.uidB}).empty());
-    CHECK(w.reg.followedLanes(l.token, "doc-1", {}).empty());
+    CHECK(w.reg.followedLanes(l.token, "doc-1", {s.uidB, s.uidA, s.uidA}).lanes == Names{s.uidA});
+    CHECK(w.reg.followedLanes(l.token, "doc-1", {s.uidB}).lanes.empty());
+    CHECK(w.reg.followedLanes(l.token, "doc-1", {}).lanes.empty());
     CHECK(w.followed(m, s) == Names{s.uidB});
     CHECK(w.followed(f1, s).empty());  // a follower has no followers
-    CHECK(w.reg.followedLanes(0, "doc-1", s.all()).empty());
+    CHECK(w.reg.followedLanes(0, "doc-1", s.all()).lanes.empty());
 
     Inst& lo = w.add("L-other");
     CHECK(w.followed(lo, s) == Names{s.uidB});
+}
+
+TEST_CASE("link registry: a leader's binding counter moves with every bind and unbind, and comes with its lanes") {
+    // followedLanes returns the counter from the same critical section as the lanes: a follower that takes over a
+    // lane its old follower just left changes no lane, but it moves the counter (a leader's publish decision).
+    Song s;
+    World w;
+    Inst& l = w.add("L");
+    Inst& m = w.add("M");
+    Inst& f1 = w.add("F1");
+    Inst& f2 = w.add("F2");
+    const auto bindings = [&](const Inst& leader) {
+        return w.reg.followedLanes(leader.token, "doc-1", s.all()).bindings;
+    };
+    w.reg.publish(l.token, s.feed(s.all()));
+    w.reg.publish(m.token, s.feed(s.all()));
+
+    std::uint64_t before = bindings(l);
+    w.reg.setFollow(f1.token, follow("L", s.uidA));  // binds
+    CHECK(bindings(l) > before);
+    before = bindings(l);
+    const std::uint64_t mBefore = bindings(m);
+    Hooks hooks;
+    REQUIRE(w.reg.follow(f1.token, "L", s.uidB, "lineage-1", hooks) == LinkFollowResult::Applied);  // another lane
+    CHECK(bindings(l) > before);
+    CHECK(bindings(m) == mBefore);  // nothing of M's changed
+
+    SUBCASE("an unbind") {
+        before = bindings(l);
+        w.reg.setFollow(f1.token, std::nullopt);
+        CHECK(bindings(l) > before);
+    }
+    SUBCASE("a bound follower moving to another leader moves both counters") {
+        before = bindings(l);
+        w.reg.setFollow(f1.token, follow("M", s.uidA));
+        CHECK(bindings(l) > before);
+        CHECK(bindings(m) > mBefore);
+    }
+    SUBCASE("a bound follower removed") {
+        before = bindings(l);
+        (void)w.reg.remove(f1.token);
+        CHECK(bindings(l) > before);
+    }
+    SUBCASE("a follower takes over the lane its old follower left: the lanes stay, the counter moves") {
+        const Names lanes = w.followed(l, s);
+        before = bindings(l);
+        w.reg.setFollow(f1.token, std::nullopt);
+        w.reg.setFollow(f2.token, follow("L", s.uidB));
+        CHECK(w.followed(l, s) == lanes);
+        CHECK(bindings(l) > before);
+    }
+    SUBCASE("reads, a refused follow, a publish and new hints alone leave it") {
+        before = bindings(l);
+        (void)w.reg.view(l.token);
+        (void)w.reg.view(f1.token);
+        (void)w.reg.followedLanes(l.token, "doc-1", s.all());
+        CHECK(w.reg.follow(f2.token, "L", s.uidA, "stale-lineage", hooks) == LinkFollowResult::StaleLeader);
+        CHECK(w.reg.follow(f2.token, "L", "no-such-lane", "lineage-1", hooks) == LinkFollowResult::UnknownLane);
+        w.reg.publish(l.token, s.feed(s.all()));
+        LinkFollow hinted = w.shown(f1);
+        hinted.laneName = "other hint";
+        w.reg.setFollow(f1.token, hinted);
+        CHECK(bindings(l) == before);
+    }
 }
 
 TEST_CASE("link registry: shared is one registry for the process") {
