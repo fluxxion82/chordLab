@@ -194,8 +194,9 @@ struct LinkLaneView {
     int trackId = 0;
 };
 
-/// A leader as `LinkView` lists it. `documentId`, `lineage` and `lanes` come from its stored feed and are empty
-/// while it has none (it has not published since it was added or since it last stopped following).
+/// A leader as `LinkView` lists it. `label` is its id's label at that moment (`LinkRegistry` rule 9).
+/// `documentId`, `lineage` and `lanes` come from its stored feed and are empty while it has none (it has not
+/// published since it was added or since it last stopped following).
 struct LinkLeaderView {
     std::string id;
     std::string label;
@@ -204,7 +205,7 @@ struct LinkLeaderView {
     std::vector<LinkLaneView> lanes;   // the feed's order: the chords lane first, then the tracks
 };
 
-/// An instance named for display: its persistent id and its label.
+/// An instance named for display: its persistent id and that id's label at that moment (`LinkRegistry` rule 9).
 struct LinkInstanceRef {
     std::string id;
     std::string label;
@@ -212,11 +213,15 @@ struct LinkInstanceRef {
 
 /// What one instance sees of the registry (plain data, for the editor and for saving), as of one moment.
 struct LinkView {
-    std::string id;                    // the instance's own id and label; both empty for an unknown token
+    /// The instance's own id; empty for an unknown token.
+    std::string id;
+    /// The label of its own id (`LinkRegistry` rule 9) while it is not following; empty while it follows (a
+    /// follower has no label of its own) and for an unknown token.
     std::string label;
     LinkStatus status = LinkStatus::NotFollowing;
-    /// When following: its follow, with `leaderId` and `leaderLabel` replaced by the bound leader's current id
-    /// and label while bound (as stored while waiting).
+    /// When following: its follow, with `leaderId` replaced by the bound leader's current id while bound (as stored
+    /// while waiting), and `leaderLabel` replaced, bound or waiting, by the label of that `leaderId` (rule 9), never
+    /// the stored hint.
     std::optional<LinkFollow> follow;
     /// For a follower of a duplicated or pasted *group* (`LinkRegistry` rule 8): it became a copy by a state load
     /// that carried a follow, it is bound to a leader O, and a copy of O that is not following was made a copy
@@ -290,15 +295,28 @@ struct LinkView {
 ///    made from the leader's chain (a copy carrying no follow, which then follows by command), or a follower's
 ///    chain duplicated now and the leader's chain later, is never offered a copy that is merely the next follower
 ///    to be.
-/// 9. *Labels.* "ChordLab A", "ChordLab B", ... by order of `add`, one per instance for its lifetime (after Z:
-///    "ChordLab 27", "ChordLab 28", ...). Display only.
+/// 9. *Labels.* A label belongs to an instance id, not to a registration: the registry keeps a table from ids to
+///    numbers, and number n is labelled "ChordLab A" to "ChordLab Z" for 1 to 26, then "ChordLab 27",
+///    "ChordLab 28", and so on. An id is in use while a live instance that is not following holds it, or while a
+///    live follower's follow names it as its leader, whether that follower is bound or waiting. Whenever an
+///    instance is added or removed, adopts an id, or has its follow's link set, changed or cleared, the table
+///    first drops the row of every id no longer in use, and then gives every id in use without a row the lowest
+///    number from 1 that no row holds, visiting the instances in the order they were added (each one stands for
+///    its own id when it is not following, for its follow's leader's otherwise). An id in use therefore keeps its
+///    number: a deleted leader's label waits for its id while a follower names it, and comes back with the
+///    instance that adopts that id again (an undo). A follower has no label of its own. Every label a view shows
+///    is the table's for that id at that moment: an instance's own, a listed leader's, `switchTo`'s and
+///    `copyOf`'s, and a follow's `leaderLabel`. The `leaderLabel` hint stored with a follow (written by `follow`,
+///    loaded with a state) is never shown. Display only.
 /// 10. *Serial.* Moves on every `add`, every `remove` and `publish` of a live instance, and on a `setFollow`,
 ///    `follow`, `adoptState` or `adoptWithoutBlock` that changes something a view shows (a follow's link or hints,
 ///    an id, being a copy, a binding); does not move on a call that changes nothing (an identical follow, a load
 ///    that leaves all of that as it was, a refused `follow`, an unknown token), nor on `followedLanes`, `view` or
 ///    `serial`. So it moves whenever some view's `copyOf` or `switchTo` changes: those change only with a
 ///    removal, a follow's link, a binding, an id or being a copy (the times a copy was made are fixed with it;
-///    the clock moving on changes no view).
+///    the clock moving on changes no view). Likewise for labels: an id in use never changes its number (rule 9),
+///    so a label changes in some view only with an `add`, a `remove`, an id or a follow's link. A new
+///    `leaderLabel` hint alone is stored but changes no view, and does not move it.
 /// 11. *Copy of.* For an instance that is not following and is a copy (rule 3), `copyOf` names the instance it
 ///    was copied from while that instance lives and is not following, no follower is bound to this instance, and
 ///    no follower's `switchTo` (rule 8) names this instance: a copy that others play from, or the new leader of a
@@ -314,7 +332,8 @@ struct LinkView {
 ///    gone. Two copies of one original each name it.
 ///
 /// A follow is changed (rules 4 and 6) when its `leaderId`, `documentId` or `laneUid` differ, or when it is set
-/// or cleared; new hints alone are stored and change nothing else. A follow whose `leaderId` is the instance's own
+/// or cleared; new hints alone are stored and change nothing else (new `laneName` or `laneRole` hints show in the
+/// follower's view, a new `leaderLabel` hint shows nowhere, rule 9). A follow whose `leaderId` is the instance's own
 /// id is accepted by `setFollow` and `adoptState` and waits forever (an instance never binds to itself, and it is
 /// no leader while it follows); `follow` refuses it (`UnknownLeader`). Unknown tokens (0, or removed instances)
 /// are ignored by every method: nothing changes and the result is empty (`UnknownLeader` for `follow`).
@@ -340,8 +359,8 @@ public:
     /// so instances torn down during static destruction still find it.
     static LinkRegistry& shared();
 
-    /// A new instance: a leader, following nothing, with id `id` (assumed unique among live instances) and the
-    /// next label. `linkBuffer` (not null) is its link buffer, which only this registry writes, under its mutex,
+    /// A new instance: a leader, following nothing, with id `id` (assumed unique among live instances), labelled
+    /// by rule 9 (the label its id already holds, or the lowest free one). `linkBuffer` (not null) is its link buffer, which only this registry writes, under its mutex,
     /// until `remove`; it must outlive the registration, and its consumer is the instance's audio thread. Followers
     /// waiting for `id` bind to it. An empty `hook` is never returned.
     LinkToken add(std::string id, TripleBuffer<SnapshotSlot>* linkBuffer, Hook hook);
@@ -379,7 +398,8 @@ public:
     /// UnknownLeader), compares its stored feed's lineage with `leaderLineage` (StaleLeader when it differs or the
     /// leader has published no feed), finds the lane `laneUid` in that feed (UnknownLane), and then sets `token`'s
     /// follow to that leader, the feed's documentId and the lane, with the lane's name, its role
-    /// (`trackRoleName`; empty for the chords lane) and the leader's label as hints, exactly as `setFollow` would.
+    /// (`trackRoleName`; empty for the chords lane) and the leader's label at that moment (rule 9) as hints, exactly
+    /// as `setFollow` would.
     /// `hooks` is replaced by what `setFollow` would return; on any other result nothing changes (not the serial
     /// either) and it is empty. An unknown `token` gives UnknownLeader.
     LinkFollowResult follow(LinkToken token, std::string_view leaderId, std::string_view laneUid,
@@ -529,7 +549,7 @@ public:
     /// following, and otherwise when one of these differs from the last feed's: `revision` (the store's content
     /// revision, which every undoable change moves), the document id, the lane uids in order, `progressionLoop`,
     /// `followHost`, any lane's audibility (mute and solo), the followed set, `lineage` (a feed carries no label:
-    /// labels are the registry's). The followed set includes who follows: the
+    /// labels are the registry's, rule 9). The followed set includes who follows: the
     /// registry's binding counter (`LinkFollowed::bindings`), since a follower that binds to a lane already
     /// followed changes no lane of the feed but gets its content only from its leader's next publish
     /// (`LinkRegistry` rule 4), the one its hook causes. A selection change, a browsed key, Thru, or a refused or
@@ -557,8 +577,10 @@ public:
     /// buffer, then `following()` turns false; `hooks` receives the old leader's hook, to run after the lock.
     void unfollow(LinkRegistry::Hooks& hooks);
 
-    /// What to save: the instance's id, its document id and lane uids, and its follow with `leaderId` (and the
-    /// `leaderLabel` hint) replaced by the bound leader's current ones while bound (as stored while waiting).
+    /// What to save: the instance's id, its document id and lane uids, and its follow as its view shows it
+    /// (`LinkRegistry::view`): `leaderId` replaced by the bound leader's current id while bound (as stored while
+    /// waiting), and the `leaderLabel` hint replaced, bound or waiting, by the label of that id at that moment
+    /// (rule 9).
     State state() const;
     /// A state load whose state has the instance block (`loadStateJson` returned one; for a state without one the
     /// shell calls `adoptWithoutBlock`). Call it in the same model-mutex section as the store's replace, after the

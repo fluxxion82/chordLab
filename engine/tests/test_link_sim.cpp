@@ -1963,6 +1963,14 @@ TEST_CASE("link sim: the saved follow changes exactly when a link message change
     leader.reset();
     REQUIRE(follower->view().status == LinkStatus::Waiting);
     REQUIRE(follower->endpoint().state().follow.has_value());
+    // Waiting, it saves the label its leader's id keeps while it names it (rule 9), whatever hint it loaded.
+    CHECK(follower->endpoint().state().follow->leaderLabel == label);
+    Saved waiting = follower->save();
+    REQUIRE(waiting.link.follow.has_value());
+    waiting.link.follow->leaderLabel = "ChordLab Z";
+    follower->load(waiting);
+    REQUIRE(follower->view().status == LinkStatus::Waiting);
+    CHECK(follower->endpoint().state().follow->leaderLabel == label);
     CHECK(unfollow());
     CHECK_FALSE(follower->endpoint().state().follow.has_value());
 
