@@ -107,15 +107,13 @@ void LaneUids::replace(std::map<int, std::string> entries) {
 }
 
 std::shared_ptr<const LinkFeed> buildLinkFeed(const Document& doc, std::string documentId, const LaneUids& uids,
-                                              std::string lineage, std::string label,
-                                              const std::vector<std::string>& followed) {
+                                              std::string lineage, const std::vector<std::string>& followed) {
     const auto isFollowed = [&](std::string_view uid) {  // an empty uid (an uncovered track) is never followed
         return !uid.empty() && std::find(followed.begin(), followed.end(), uid) != followed.end();
     };
     auto feed = std::make_shared<LinkFeed>();
     feed->documentId = std::move(documentId);
     feed->lineage = std::move(lineage);
-    feed->label = std::move(label);
     const Compiled chordsCompiled = compile(doc);  // once, for the frame and for every compiled lane
     feed->endBeat = chordsCompiled.endBeat;
     feed->loop = doc.progressionLoop;
@@ -677,7 +675,6 @@ LinkEndpoint::LinkEndpoint(LinkRegistry& registry, std::string instanceId, UidGe
     : registry_(registry), makeUid_(std::move(makeUid)), linkBuffer_(std::make_unique<TripleBuffer<SnapshotSlot>>()) {
     documentId_ = makeUid_();
     token_ = registry_.add(std::move(instanceId), linkBuffer_.get(), std::move(hook));
-    label_ = registry_.view(token_).label;  // rule 9: fixed for the registration's life
 }
 
 LinkEndpoint::~LinkEndpoint() {
@@ -760,7 +757,7 @@ bool LinkEndpoint::publishOwn(const DocumentStore& store, const std::string& lin
                              key.laneUids != lastFeed_->laneUids || key.audible != lastFeed_->audible ||
                              key.followed != lastFeed_->followed || key.bindings != lastFeed_->bindings;
     if (feedChanged) {
-        registry_.publish(token_, buildLinkFeed(doc, documentId_, uids_, lineage, label_, key.followed));
+        registry_.publish(token_, buildLinkFeed(doc, documentId_, uids_, lineage, key.followed));
         lastFeed_ = key;
     }
     if (probe_) probe_();

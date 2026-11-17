@@ -114,7 +114,6 @@ struct LinkLane {
 struct LinkFeed {
     std::string documentId;
     std::string lineage;
-    std::string label;
     double endBeat = 0.0;     // compile(doc).endBeat
     bool loop = true;         // doc.progressionLoop
     bool followHost = true;   // doc.followHost
@@ -128,8 +127,7 @@ struct LinkFeed {
 /// the others carry no events. A uid in `followed` that names no lane of `doc` is ignored. Allocates: never on
 /// the audio thread.
 std::shared_ptr<const LinkFeed> buildLinkFeed(const Document& doc, std::string documentId, const LaneUids& uids,
-                                              std::string lineage, std::string label,
-                                              const std::vector<std::string>& followed);
+                                              std::string lineage, const std::vector<std::string>& followed);
 
 /// How close in time two state loads that made copies must be to count as one paste of a group (`LinkRegistry`
 /// rule 8), in milliseconds, inclusive. A host duplicates or pastes the members of a group within milliseconds; a
@@ -530,8 +528,8 @@ public:
     /// A feed is published when there was none since the instance was created, adopted a state or stopped
     /// following, and otherwise when one of these differs from the last feed's: `revision` (the store's content
     /// revision, which every undoable change moves), the document id, the lane uids in order, `progressionLoop`,
-    /// `followHost`, any lane's audibility (mute and solo), the followed set, `lineage` (the label is the
-    /// registry's for the registration's life and never changes). The followed set includes who follows: the
+    /// `followHost`, any lane's audibility (mute and solo), the followed set, `lineage` (a feed carries no label:
+    /// labels are the registry's). The followed set includes who follows: the
     /// registry's binding counter (`LinkFollowed::bindings`), since a follower that binds to a lane already
     /// followed changes no lane of the feed but gets its content only from its leader's next publish
     /// (`LinkRegistry` rule 4), the one its hook causes. A selection change, a browsed key, Thru, or a refused or
@@ -621,7 +619,6 @@ private:
     UidGenerator makeUid_;
     std::unique_ptr<TripleBuffer<SnapshotSlot>> linkBuffer_;
     LinkToken token_ = 0;
-    std::string label_;
     std::string documentId_;
     LaneUids uids_;
     std::atomic<bool> following_{false};

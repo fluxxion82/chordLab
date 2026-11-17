@@ -81,7 +81,7 @@ struct Song {
     }
 
     std::shared_ptr<const LinkFeed> feed(const Names& followed, const std::string& documentId = "doc-1") const {
-        return buildLinkFeed(store.doc(), documentId, uids, "lineage-1", "feed label", followed);
+        return buildLinkFeed(store.doc(), documentId, uids, "lineage-1", followed);
     }
 
     /// What lane `uid` plays alone.
@@ -755,7 +755,7 @@ TEST_CASE("link registry: a feed of another document is ProjectChanged even when
     DocumentStore other;
     other.appendChord(chord(2, "min"), 4.0, 100);
     const LaneUids none;
-    const auto feed = buildLinkFeed(other.doc(), "doc-2", none, "lineage-2", "feed label", {});
+    const auto feed = buildLinkFeed(other.doc(), "doc-2", none, "lineage-2", {});
     REQUIRE(std::none_of(feed->lanes.begin(), feed->lanes.end(),
                          [&](const LinkLane& lane) { return lane.uid == s.uidA; }));
     w.reg.publish(l.token, feed);
