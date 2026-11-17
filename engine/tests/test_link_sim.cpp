@@ -1969,3 +1969,121 @@ TEST_CASE("link sim: the saved follow changes exactly when a link message change
     // An unfollow when not following: unchanged.
     CHECK_FALSE(unfollow());
 }
+
+// --- what the editor reads: routed track numbers and copies (M3 Task 10a) -----------------------------------------
+
+namespace {
+
+/// The uids and track numbers of `view.routed`, in its order.
+std::vector<std::pair<std::string, int>> routedTracks(const LinkView& view) {
+    std::vector<std::pair<std::string, int>> out;
+    for (const LinkLaneView& lane : view.routed) out.emplace_back(lane.uid, lane.trackId);
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE("link sim: routed names each followed track by its number in the leader's table, the chords lane by 0") {
+    using Routed = std::vector<std::pair<std::string, int>>;
+    const Song s = song();
+    World w;
+    auto leader = w.make("L");
+    leader->loadDocument(s.state);
+    auto chordsFollower = w.make("F1");
+    auto bassFollower = w.make("F2");
+    auto padFollower = w.make("F3");
+    const std::string chords(kChordsLaneUid);
+    const std::string bass = leader->laneUid(s.bass);
+    REQUIRE(chordsFollower->follow("L", chords, lineageOf(*chordsFollower, "L")) == Result::Applied);
+    REQUIRE(bassFollower->follow("L", bass, lineageOf(*bassFollower, "L")) == Result::Applied);
+    CHECK(routedTracks(leader->view()) == (Routed{{chords, 0}, {bass, s.bass}}));
+    // Only routed carries track numbers: a follower's list of leaders, and the registry's own view, never do.
+    for (const LinkLeaderView& other : chordsFollower->view().leaders) {
+        for (const LinkLaneView& lane : other.lanes) CHECK(lane.trackId == 0);
+    }
+
+    // An edit adds a track, and a follower takes it: the new track's number.
+    int pad = 0;
+    leader->edit([&](DocumentStore& d) {
+        pad = d.addTrack(TrackRole::Other, std::string("Pad"));
+        REQUIRE(pad != kNoTrackId);
+    });
+    REQUIRE(pad != s.bass);
+    REQUIRE(pad != s.lead);
+    const std::string padUid = leader->laneUid(pad);
+    REQUIRE_FALSE(padUid.empty());
+    CHECK(routedTracks(leader->view()) == (Routed{{chords, 0}, {bass, s.bass}}));  // nobody follows it yet
+    REQUIRE(padFollower->follow("L", padUid, lineageOf(*padFollower, "L")) == Result::Applied);
+    CHECK(routedTracks(leader->view()) == (Routed{{chords, 0}, {bass, s.bass}, {padUid, pad}}));
+
+    // The followed bass track deleted: no longer routed; undo brings it back with its uid and its number.
+    leader->edit([&](DocumentStore& d) { REQUIRE(d.removeTrack(s.bass)); });
+    CHECK(routedTracks(leader->view()) == (Routed{{chords, 0}, {padUid, pad}}));
+    leader->edit([](DocumentStore& d) { REQUIRE(d.undo()); });
+    CHECK(routedTracks(leader->view()) == (Routed{{chords, 0}, {bass, s.bass}, {padUid, pad}}));
+    CHECK(w.registry.view(0).routed.empty());
+}
+
+TEST_CASE("link sim: a routed lane whose uid the leader's table does not hold has track number 0") {
+    // Between a load and the next publish the registry still holds the old feed, while the table is the loaded one.
+    const Song s = song();
+    World w;
+    auto leader = w.make("L");
+    leader->loadDocument(s.state);
+    auto follower = w.make("F");
+    const std::string bass = leader->laneUid(s.bass);
+    REQUIRE(follower->follow("L", bass, lineageOf(*follower, "L")) == Result::Applied);
+    REQUIRE(leader->view().routed.size() == 1);
+    REQUIRE(leader->view().routed[0].trackId == s.bass);
+
+    Saved saved = leader->save();
+    saved.link.lanes.clear();  // a table that holds none of the old uids
+    const Hooks hooks = leader->loadStep(saved);
+    LinkView v = leader->view();
+    CHECK(v.id == "L");  // kept: a follower is bound
+    REQUIRE(v.routed.size() == 1);
+    CHECK(v.routed[0].uid == bass);
+    CHECK(v.routed[0].trackId == 0);
+    FakeInstance::run(hooks);
+    leader->republish();  // the loaded table covers the tracks with new uids: the old bass uid names no lane now
+    CHECK(follower->view().status == LinkStatus::LaneMissing);
+    CHECK(leader->view().routed.empty());
+}
+
+TEST_CASE("link sim: a duplicate of a leader names its original until a state without the block replaces its "
+          "document") {
+    const Song s = song();
+    World w;
+    auto original = w.make("O");
+    original->loadDocument(s.state);
+    auto copy = w.make("ctor-c");
+    copy->load(original->save());  // Live's duplicate: a new instance given the source's state while it lives
+    LinkView v = copy->view();
+    CHECK(v.id != "O");
+    CHECK(v.id != "ctor-c");
+    REQUIRE(v.copyOf.has_value());
+    CHECK(v.copyOf->id == "O");
+    CHECK(v.copyOf->label == original->view().label);
+    CHECK_FALSE(original->view().copyOf.has_value());
+    // The copy's table holds the original's lane uids (it loaded them), yet the original's lanes as the copy lists
+    // them carry no track numbers: only routed does, and only for the viewer's own lanes.
+    REQUIRE(copy->laneUid(s.bass) == original->laneUid(s.bass));
+    REQUIRE(v.leaders.size() == 1);
+    REQUIRE(v.leaders[0].lanes.size() == 3);
+    for (const LinkLaneView& lane : v.leaders[0].lanes) CHECK(lane.trackId == 0);
+
+    // Saved and loaded again by itself (its own id): no collision, so no copy any more.
+    SUBCASE("its own state again") {
+        copy->load(copy->save());
+        CHECK_FALSE(copy->view().copyOf.has_value());
+    }
+    SUBCASE("a state without the instance block") {
+        copy->loadJson(stateJson(copy->store()));
+        CHECK(copy->id() == v.id);
+        CHECK_FALSE(copy->view().copyOf.has_value());
+    }
+    SUBCASE("the original is destroyed") {
+        original.reset();
+        CHECK_FALSE(copy->view().copyOf.has_value());
+    }
+}

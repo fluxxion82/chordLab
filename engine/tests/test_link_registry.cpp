@@ -176,6 +176,11 @@ struct World {
         const LinkView v = reg.view(inst.token);
         return v.switchTo ? v.switchTo->id : std::string();
     }
+    /// The id `copyOf` names in `inst`'s view, or empty.
+    std::string copyOfId(const Inst& inst) const {
+        const LinkView v = reg.view(inst.token);
+        return v.copyOf ? v.copyOf->id : std::string();
+    }
     LinkStatus status(const Inst& inst) const { return reg.view(inst.token).status; }
     Names followed(const Inst& leader, const Song& s, const std::string& documentId = "doc-1") const {
         return reg.followedLanes(leader.token, documentId, s.all()).lanes;
@@ -848,6 +853,250 @@ TEST_CASE("link registry: a copy that keeps its id on a load because followers a
     CHECK_FALSE(a.copy);
     CHECK(w.view(d).id == "L-copy");
     CHECK_FALSE(w.view(f2).switchTo.has_value());
+}
+
+TEST_CASE("link registry: a copy of a follower's leader is no switch target once a load without a block ended it") {
+    Song s;
+    World w;
+    w.add("L");
+    Inst& f = w.add("F");
+    w.reg.setFollow(f.token, follow("L", s.uidA));
+    Inst& f2 = w.add("F2", "ctor-f2");
+    REQUIRE(w.reg.adoptState(f2.token, "F", "F-copy", follow("L", s.uidA)).copy);
+    Inst& d = w.add("D", "ctor-d");
+    REQUIRE(w.reg.adoptState(d.token, "L", "L-copy", std::nullopt).copy);
+    REQUIRE(w.switchId(f2) == "L-copy");
+    CHECK(w.reg.adoptWithoutBlock(d.token).empty());
+    CHECK(w.view(d).id == "L-copy");  // the id is kept
+    CHECK_FALSE(w.view(f2).switchTo.has_value());
+}
+
+// --- rule 11: copy of -------------------------------------------------------------------------------------------
+
+TEST_CASE("link registry: a copy that leads names its original while the original lives and leads") {
+    Song s;
+    World w;
+    Inst& o = w.add("O");
+    Inst& c = w.add("C", "ctor-c");
+    CHECK_FALSE(w.view(c).copyOf.has_value());  // no load yet
+    CHECK_FALSE(w.view(o).copyOf.has_value());
+    REQUIRE(w.reg.adoptState(c.token, "O", "O-copy", std::nullopt).copy);
+    LinkView v = w.view(c);
+    REQUIRE(v.copyOf.has_value());
+    CHECK(v.copyOf->id == "O");
+    CHECK(v.copyOf->label == w.view(o).label);
+    CHECK_FALSE(w.view(o).copyOf.has_value());  // the original is no copy of its copy
+
+    SUBCASE("the original follows: empty; it stops: named again") {
+        w.reg.setFollow(o.token, follow("nobody", s.uidA));
+        CHECK_FALSE(w.view(c).copyOf.has_value());
+        w.reg.setFollow(o.token, std::nullopt);
+        CHECK(w.copyOfId(c) == "O");
+        // By command as well: the original follows its own copy, then lets go.
+        w.reg.publish(c.token, s.feed({}));
+        Hooks hooks;
+        REQUIRE(w.reg.follow(o.token, "O-copy", s.uidA, "lineage-1", hooks) == LinkFollowResult::Applied);
+        CHECK_FALSE(w.view(c).copyOf.has_value());
+        w.reg.setFollow(o.token, std::nullopt);
+        CHECK(w.copyOfId(c) == "O");
+        // And by a state load that brings a follow.
+        w.reg.adoptState(o.token, "O", "O-2", follow("nobody", s.uidA));
+        CHECK_FALSE(w.view(c).copyOf.has_value());
+    }
+    SUBCASE("the original loads states: still named, by its current id") {
+        CHECK(w.reg.adoptState(o.token, "O-other", "O-2", std::nullopt).id == "O-other");
+        v = w.view(c);
+        REQUIRE(v.copyOf.has_value());
+        CHECK(v.copyOf->id == "O-other");
+        CHECK(v.copyOf->label == w.view(o).label);
+        // The original becomes a copy of a third instance itself: it is still this copy's original.
+        w.add("X");
+        REQUIRE(w.reg.adoptState(o.token, "X", "O-3", std::nullopt).copy);
+        CHECK(w.copyOfId(c) == "O-3");
+        // A load without a block in the original changes nothing for the copy.
+        CHECK(w.reg.adoptWithoutBlock(o.token).empty());
+        CHECK(w.copyOfId(c) == "O-3");
+    }
+    SUBCASE("the original is removed: empty for good, also when another instance takes its id back") {
+        w.reg.remove(o.token);
+        CHECK_FALSE(w.view(c).copyOf.has_value());
+        Inst& back = w.add("Back", "ctor-back");
+        REQUIRE(w.reg.adoptState(back.token, "O", "O-2", std::nullopt).id == "O");  // the undo of the delete
+        CHECK_FALSE(w.view(c).copyOf.has_value());
+        CHECK_FALSE(w.view(back).copyOf.has_value());
+    }
+}
+
+TEST_CASE("link registry: a copy's own loads decide anew whether it is a copy, and of what") {
+    Song s;
+    World w;
+    Inst& o = w.add("O");
+    Inst& p = w.add("P");
+    Inst& c = w.add("C", "ctor-c");
+    REQUIRE(w.reg.adoptState(c.token, "O", "O-copy", std::nullopt).copy);
+    REQUIRE(w.copyOfId(c) == "O");
+
+    SUBCASE("a load with the original's block again: a copy of it again, under another fresh id") {
+        const LinkRegistry::Adopted a = w.reg.adoptState(c.token, "O", "O-copy-2", std::nullopt);
+        CHECK(a.copy);
+        CHECK(a.id == "O-copy-2");
+        CHECK(w.copyOfId(c) == "O");
+    }
+    SUBCASE("a load with another live instance's block: a copy of that one") {
+        REQUIRE(w.reg.adoptState(c.token, "P", "P-copy", std::nullopt).copy);
+        CHECK(w.copyOfId(c) == "P");
+    }
+    SUBCASE("a load whose id nobody holds: no copy") {
+        REQUIRE_FALSE(w.reg.adoptState(c.token, "Q", "Q-copy", std::nullopt).copy);
+        CHECK_FALSE(w.view(c).copyOf.has_value());
+    }
+    SUBCASE("a load of its own id: no copy") {
+        REQUIRE_FALSE(w.reg.adoptState(c.token, "O-copy", "O-copy-2", std::nullopt).copy);
+        CHECK_FALSE(w.view(c).copyOf.has_value());
+    }
+    SUBCASE("a load that keeps the id because followers are bound: no copy") {
+        Inst& g = w.add("G");
+        w.reg.setFollow(g.token, follow("O-copy", s.uidA));
+        REQUIRE(w.reg.adoptState(c.token, "O", "O-copy-2", std::nullopt).id == "O-copy");
+        CHECK_FALSE(w.view(c).copyOf.has_value());
+    }
+    SUBCASE("a load without a block: no copy, the id kept") {
+        CHECK(w.reg.adoptWithoutBlock(c.token).empty());
+        CHECK(w.view(c).id == "O-copy");
+        CHECK_FALSE(w.view(c).copyOf.has_value());
+        // Nothing brings it back but another load that is a copy.
+        w.reg.setFollow(c.token, follow("O", s.uidA));
+        w.reg.setFollow(c.token, std::nullopt);
+        CHECK_FALSE(w.view(c).copyOf.has_value());
+    }
+    (void)o;
+    (void)p;
+}
+
+TEST_CASE("link registry: a copy that follows has no copyOf, and has it again when it stops") {
+    Song s;
+    World w;
+    Inst& o = w.add("O");
+    Inst& c = w.add("C", "ctor-c");
+    REQUIRE(w.reg.adoptState(c.token, "O", "O-copy", std::nullopt).copy);
+    w.reg.publish(o.token, s.feed({}));
+    Hooks hooks;
+    REQUIRE(w.reg.follow(c.token, "O", s.uidA, "lineage-1", hooks) == LinkFollowResult::Applied);
+    CHECK(w.status(c) == LinkStatus::Playing);
+    CHECK_FALSE(w.view(c).copyOf.has_value());
+    CHECK_FALSE(w.view(c).switchTo.has_value());  // no other copy of O leads
+    // Another copy of O that leads: rule 8 offers it to the following copy, never copyOf.
+    Inst& c2 = w.add("C2", "ctor-c2");
+    REQUIRE(w.reg.adoptState(c2.token, "O", "O-copy-2", std::nullopt).copy);
+    CHECK(w.switchId(c) == "O-copy-2");
+    CHECK_FALSE(w.view(c).copyOf.has_value());
+    CHECK(w.copyOfId(c2) == "O");
+
+    w.reg.setFollow(c.token, std::nullopt);
+    CHECK(w.copyOfId(c) == "O");
+    CHECK_FALSE(w.view(c).switchTo.has_value());
+    // A state load that makes it a following copy: switchTo, never copyOf.
+    REQUIRE(w.reg.adoptState(c.token, "O", "O-copy-3", follow("O", s.uidA)).copy);
+    CHECK_FALSE(w.view(c).copyOf.has_value());
+    CHECK(w.switchId(c) == "O-copy-2");
+}
+
+TEST_CASE("link registry: a copy of a copy names the copy it was made from; two copies of one original both name it") {
+    World w;
+    Inst& o = w.add("O");
+    Inst& b = w.add("B", "ctor-b");
+    REQUIRE(w.reg.adoptState(b.token, "O", "B-id", std::nullopt).copy);
+    Inst& c = w.add("C", "ctor-c");
+    REQUIRE(w.reg.adoptState(c.token, "B-id", "C-id", std::nullopt).copy);  // a duplicate of the duplicate
+    Inst& d = w.add("D", "ctor-d");
+    REQUIRE(w.reg.adoptState(d.token, "O", "D-id", std::nullopt).copy);     // a second duplicate of the original
+    CHECK(w.copyOfId(b) == "O");
+    CHECK(w.copyOfId(c) == "B-id");
+    CHECK(w.copyOfId(d) == "O");
+    CHECK_FALSE(w.view(o).copyOf.has_value());
+
+    // The middle one goes: its copy names nobody (never the original's original).
+    w.reg.remove(b.token);
+    CHECK_FALSE(w.view(c).copyOf.has_value());
+    CHECK(w.copyOfId(d) == "O");
+    // The original goes: its remaining copy names nobody.
+    w.reg.remove(o.token);
+    CHECK_FALSE(w.view(d).copyOf.has_value());
+}
+
+TEST_CASE("link registry: a copy of a follower names it only while it leads") {
+    Song s;
+    World w;
+    w.add("L");
+    Inst& f = w.add("F");
+    w.reg.setFollow(f.token, follow("L", s.uidA));
+    Inst& c = w.add("C", "ctor-c");
+    REQUIRE(w.reg.adoptState(c.token, "F", "F-copy", std::nullopt).copy);  // copied without the follow
+    CHECK_FALSE(w.view(c).copyOf.has_value());
+    w.reg.setFollow(f.token, std::nullopt);
+    CHECK(w.copyOfId(c) == "F");
+}
+
+TEST_CASE("link registry: the serial moves whenever a view's copyOf changes, and adoptWithoutBlock only on a change") {
+    Song s;
+    World w;
+    const auto moved = [&](const std::function<void()>& call) {
+        const std::uint64_t before = w.reg.serial();
+        call();
+        return w.reg.serial() != before;
+    };
+    Inst& o = w.add("O");
+    Inst& c = w.add("C", "ctor-c");
+    CHECK(moved([&] { REQUIRE(w.reg.adoptState(c.token, "O", "O-copy", std::nullopt).copy); }));
+    CHECK(moved([&] { w.reg.setFollow(o.token, follow("nobody", s.uidA)); }));
+    CHECK(moved([&] { w.reg.setFollow(o.token, std::nullopt); }));
+    // A load without a block: moves when it ends being a copy or clears a follow, not when it changes nothing.
+    CHECK(moved([&] { w.reg.adoptWithoutBlock(c.token); }));
+    CHECK_FALSE(w.view(c).copyOf.has_value());
+    CHECK_FALSE(moved([&] { w.reg.adoptWithoutBlock(c.token); }));
+    w.reg.setFollow(c.token, follow("O", s.uidA));
+    CHECK(moved([&] { w.reg.adoptWithoutBlock(c.token); }));
+    CHECK_FALSE(w.view(c).follow.has_value());
+    CHECK_FALSE(moved([&] { w.reg.adoptWithoutBlock(0); }));
+    CHECK(w.reg.adoptWithoutBlock(0).empty());
+    // A removal of the original moves it (as every removal does), and the copy's view changed with it.
+    REQUIRE(w.reg.adoptState(c.token, "O", "O-copy-2", std::nullopt).copy);
+    REQUIRE(w.copyOfId(c) == "O");
+    CHECK(moved([&] { w.reg.remove(o.token); }));
+    CHECK_FALSE(w.view(c).copyOf.has_value());
+}
+
+TEST_CASE("link registry: adoptWithoutBlock clears a follow as setFollow does: buffer emptied, old leader's hook") {
+    Song s;
+    World w;
+    Inst& l = w.add("L");
+    Inst& f = w.add("F");
+    w.reg.setFollow(f.token, follow("L", s.uidA));
+    w.reg.publish(l.token, s.feed({s.uidA}));
+    REQUIRE(take(f).events == s.lane(s.uidA));
+    CHECK(w.run(w.reg.adoptWithoutBlock(f.token)) == Names{"L"});
+    const Taken t = take(f);
+    CHECK(t.fresh);
+    CHECK(t.count == 0);
+    CHECK(w.status(f) == LinkStatus::NotFollowing);
+    CHECK(w.view(f).id == "F");
+    CHECK(w.followed(l, s).empty());
+}
+
+TEST_CASE("link registry: the registry's own view leaves every lane's trackId 0") {
+    Song s;
+    World w;
+    Inst& l = w.add("L");
+    Inst& f = w.add("F");
+    Inst& m = w.add("M");
+    w.reg.setFollow(f.token, follow("L", s.uidA));
+    w.reg.publish(l.token, s.feed({s.uidA}));
+    const LinkView vl = w.view(l);
+    REQUIRE(vl.routed.size() == 1);
+    CHECK(vl.routed[0].trackId == 0);
+    const LinkView vm = w.view(m);
+    REQUIRE(vm.leaders.size() == 1);
+    for (const LinkLaneView& lane : vm.leaders[0].lanes) CHECK(lane.trackId == 0);
 }
 
 // --- rule 9: labels ---------------------------------------------------------------------------------------------

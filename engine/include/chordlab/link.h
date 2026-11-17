@@ -76,6 +76,11 @@ public:
     /// The uid of track `trackId`, or empty when it has none.
     std::string uidOf(int trackId) const;
 
+    /// The track number whose entry holds `uid`, or 0 when none does (`kChordsLaneUid`, an empty or unknown uid).
+    /// 0 is never a track number (`Track::id` counts from 1). Whether the document still holds that track is not
+    /// asked: an entry stays while undo or redo can bring its track back (`cover`).
+    int trackOf(std::string_view uid) const;
+
     /// The lane `uid` names in `doc`: the chords lane for `kChordsLaneUid`; the track whose number has that uid
     /// when such a track exists in `doc`; nothing otherwise (an empty or unknown uid, or the uid of a track
     /// number `doc` does not hold).
@@ -179,6 +184,11 @@ struct LinkLaneView {
     bool chords = false;
     bool audible = false;
     int followers = 0;
+    /// The number (`Track::id`) of the track this lane is, in the viewing leader's own lane uid table: set only in
+    /// `LinkView::routed` and only by `LinkEndpoint::view` (`LaneUids::trackOf` of `uid`). 0 for the chords lane,
+    /// for a uid the table does not hold, everywhere in `LinkView::leaders`, and in every `LinkRegistry::view`
+    /// (the registry knows no track numbers).
+    int trackId = 0;
 };
 
 /// A leader as `LinkView` lists it. `documentId`, `lineage` and `lanes` come from its stored feed and are empty
@@ -208,10 +218,18 @@ struct LinkView {
     /// For a follower that is itself a copy and whose bound leader has a live copy that leads: that copy (the one
     /// that became a copy last, if several). Empty otherwise.
     std::optional<LinkInstanceRef> switchTo;
+    /// For an instance that is not following and is a copy (`LinkRegistry` rule 3: its latest state load found its
+    /// id held by another live instance, the *original*): the original, by its current id and label, while the
+    /// original lives and is not following (rule 11). Empty otherwise, and so always for a follower (a follower
+    /// that is a copy has `switchTo`, rule 8). The relation is to the original *instance*, as a binding is: it
+    /// names whatever id the original takes, survives whatever the original loads, and ends for good when the
+    /// original is removed (a new instance that takes its id back, as the undo of a delete does, is not the original).
+    std::optional<LinkInstanceRef> copyOf;
     /// Every other live instance that is not following, in the order they were added.
     std::vector<LinkLeaderView> leaders;
     /// For a leader with a feed: the lanes of its feed that bound followers follow in the feed's document, with
     /// their counts (`followers` > 0), in the feed's order. Empty for a follower and for a leader without a feed.
+    /// `LinkEndpoint::view` fills each one's `trackId`; `LinkRegistry::view` leaves it 0.
     std::vector<LinkLaneView> routed;
 };
 
@@ -230,9 +248,13 @@ struct LinkView {
 ///    lives and leads, whatever happens to ids.
 /// 3. *Ids on a state load* (`adoptState`), in this order: an instance with bound followers keeps its id; else if
 ///    another live instance holds `loadedId`, this one is a copy: it takes `freshId` and remembers which instance
-///    it was copied from; else it takes `loadedId`. The constructor's id (`add`) is assumed unique. A load whose
-///    state has no instance block is no `adoptState`: the instance keeps its id, and only its follow is cleared
-///    (`setFollow`, `LinkEndpoint::adoptWithoutBlock`).
+///    it was copied from (that instance, by its token, not its id); else it takes `loadedId`. Being a copy is the
+///    outcome of the latest load alone: a load that is no copy (the first case, the third) ends it. The
+///    constructor's id (`add`) is assumed unique. A load whose state has no instance block is no `adoptState`:
+///    the instance keeps its id, its follow is cleared, and it is no copy any more, since the document it now
+///    holds is unrelated to the original's as far as links know (`adoptWithoutBlock`, which
+///    `LinkEndpoint::adoptWithoutBlock` calls). Nothing else ends or starts being a copy: not a `setFollow` or
+///    `follow` of the copy, nor anything the original does (rules 8 and 11 look at the original when asked).
 /// 4. *Writes into a link buffer* happen under the mutex and only here: in `publish` (each bound follower's lane
 ///    from the feed, `fillSlotFromFeed(feed, follow.laneUid, follow.documentId, ...)`, then the buffer's
 ///    `publish` when that returned true), and "empty" (`fillSlotFromFeed(nullptr, ...)`, published when it
@@ -244,9 +266,9 @@ struct LinkView {
 /// 5. *An instance that starts following* loses its dependents: every follower bound to it is unbound, emptied
 ///    and waits; its stored feed is dropped. *An instance that stops following* is a leader again: followers
 ///    waiting for its id bind to it (they get content when it next publishes, which its caller does at once).
-/// 6. *Hooks.* `setFollow`, `adoptState` and `remove` return the hooks of every other instance whose set of
-///    followed lanes may have changed (the follower's old bound leader and its new one), never the caller's own,
-///    each at most once.
+/// 6. *Hooks.* `setFollow`, `adoptState`, `adoptWithoutBlock` and `remove` return the hooks of every other
+///    instance whose set of followed lanes may have changed (the follower's old bound leader and its new one),
+///    never the caller's own, each at most once.
 /// 7. *Status* of a follower: `Waiting` (unbound); `ProjectChanged` (bound, and the leader has published no feed
 ///    yet or its feed has another `documentId`, whether or not that feed has the lane); `LaneMissing` (the lane
 ///    uid is not in the feed); `Muted` (the lane is in the feed and not audible); `Playing` otherwise. Right after
@@ -257,9 +279,20 @@ struct LinkView {
 /// 9. *Labels.* "ChordLab A", "ChordLab B", ... by order of `add`, one per instance for its lifetime (after Z:
 ///    "ChordLab 27", "ChordLab 28", ...). Display only.
 /// 10. *Serial.* Moves on every `add`, every `remove` and `publish` of a live instance, and on a `setFollow`,
-///    `follow` or `adoptState` that changes something a view shows (a follow's link or hints, an id, being a copy,
-///    a binding); does not move on a call that changes nothing (an identical follow, a load that leaves all of that
-///    as it was, a refused `follow`, an unknown token), nor on `followedLanes`, `view` or `serial`.
+///    `follow`, `adoptState` or `adoptWithoutBlock` that changes something a view shows (a follow's link or hints,
+///    an id, being a copy, a binding); does not move on a call that changes nothing (an identical follow, a load
+///    that leaves all of that as it was, a refused `follow`, an unknown token), nor on `followedLanes`, `view` or
+///    `serial`. So it moves whenever some view's `copyOf` or `switchTo` changes: those change only with a
+///    removal, a follow's link, an id or being a copy.
+/// 11. *Copy of.* For an instance that is not following and is a copy (rule 3), `copyOf` names the instance it
+///    was copied from while that instance lives and is not following; it is empty while the original follows and
+///    names it again when it stops (the copy still holds a copy of its document: following changes no document,
+///    plan I1), and the same holds for the copy's own following (empty while it follows, back when it stops). The
+///    original's state loads do not end it (whatever id or document it takes, it is still the instance the copy
+///    was made from, and its current lanes are what the copy can follow); its removal ends it for good (tokens
+///    are never handed out twice, so a successor that takes the original's id back is another instance). A copy of
+///    a copy names the instance its own load collided with, never that one's original, also once that instance is
+///    gone. Two copies of one original each name it.
 ///
 /// A follow is changed (rules 4 and 6) when its `leaderId`, `documentId` or `laneUid` differ, or when it is set
 /// or cleared; new hints alone are stored and change nothing else. A follow whose `leaderId` is the instance's own
@@ -299,11 +332,17 @@ public:
     };
     /// A state load: the instance takes `loadedId` unless rule 3 says otherwise, and its follow becomes `follow`.
     /// `freshId` is used when the instance turns out to be a copy. A follow of the instance's own (resulting) id
-    /// waits forever. Being a copy (here and for rule 8) is the
+    /// waits forever. Being a copy (here and for rules 8 and 11) is the
     /// outcome of the latest load alone: a later load that is no copy, including one that keeps the id because
-    /// followers are bound, ends it. The id is decided before the follow is applied, so a bound leader that loads
-    /// a follower's state keeps its id and then loses its dependents (rule 5).
+    /// followers are bound, ends it, and a later load that is a copy again (of the same original or another) makes
+    /// it the copy of the instance that load collided with. The id is decided before the follow is applied, so a
+    /// bound leader that loads a follower's state keeps its id and then loses its dependents (rule 5).
     Adopted adoptState(LinkToken token, std::string loadedId, std::string freshId, std::optional<LinkFollow> follow);
+
+    /// A state load whose state has no instance block (rule 3): under one lock, the instance is no copy any more
+    /// and its follow is cleared exactly as `setFollow(token, std::nullopt)` clears it (the link buffer emptied,
+    /// the old leader unbound); its id is kept. Returns the hooks to run (its old leader's, when it was bound).
+    Hooks adoptWithoutBlock(LinkToken token);
 
     /// A follow or unfollow as given, for an unfollow and for state loads; a follow by command goes through
     /// `follow`, which checks the leader first. A follow of the instance's own id waits forever. Returns the hooks
@@ -511,8 +550,10 @@ public:
     /// track 1 to the followers of the old document's track 1, and a follower must not keep a link its state says
     /// nothing of. So: the document id becomes a fresh `makeUid()`; the lane uid table is emptied (the next
     /// `cover` gives every track a fresh uid); the follow is cleared through the registry in `unfollow`'s order
-    /// (the registry empties the link buffer, then `following()` turns false); the instance keeps its id (it is the
-    /// same instance; no `adoptState`, so the id rules do not apply). `hooks` receives the old leader's hook, to run
+    /// (the registry empties the link buffer, then `following()` turns false), and the instance is no copy any more
+    /// (`LinkRegistry::adoptWithoutBlock`: its document is no copy of the original's now, so its view's `copyOf`
+    /// ends and no follower is offered it as `switchTo`); the instance keeps its id (it is the same instance; no
+    /// `adoptState`, so the id rules do not apply). `hooks` receives the old leader's hook, to run
     /// after the lock. Same calling contract as `adopt`: in the model-mutex section of the store's replace, after
     /// the replace. The next `publishOwn` publishes a feed, under the new document id, so every bound follower
     /// stops resolving (`ProjectChanged`, its link buffer empty) while this instance plays every lane itself.
@@ -525,7 +566,11 @@ public:
     TripleBuffer<SnapshotSlot>& linkBuffer() noexcept { return *linkBuffer_; }
     /// The registry's serial (any thread).
     std::uint64_t serial() const noexcept;
-    /// What this instance sees of the registry.
+    /// What this instance sees of the registry (`LinkRegistry::view`), with each `routed` lane's `trackId` filled
+    /// from this instance's lane uid table (`LaneUids::trackOf`): the track number the uid names now, 0 for the
+    /// chords lane and for a uid the table does not hold (`routed` comes from the last feed published, the table
+    /// from the last `publishOwn` or load: between a load and the next `publishOwn` an old feed's uid may be
+    /// unknown to the loaded table). `leaders` is left as the registry gives it.
     LinkView view() const;
     /// The id of the document the instance holds.
     const std::string& documentId() const noexcept { return documentId_; }

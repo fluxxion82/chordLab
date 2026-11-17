@@ -695,21 +695,28 @@ std::optional<InstanceState> writableInstanceState(const InstanceState& instance
 /// The link as the editor shows it (per-track instruments plan I12), from one `LinkView` (link.h):
 /// ```
 /// {"schema":1,
-///  "self":{"id":"<id>","label":"ChordLab A"},
+///  "self":{"id":"<id>","label":"ChordLab B","copyOf":null|{"leader":"<id>","label":"ChordLab A"}},
 ///  "following":null | {"leader":"<id>","leaderLabel":"...","lane":"chords"|"<uid>","laneName":"...","role":"...",
 ///                      "status":"playing"|"muted"|"waiting"|"laneMissing"|"projectChanged",
 ///                      "switchTo":null|{"leader":"<id>","label":"..."}},
 ///  "leaders":[{"id":"...","label":"...","lineage":"...",
 ///              "lanes":[{"lane":"chords"|"<uid>","name":"...","role":"...","chords":true,"audible":true,
 ///                        "followers":0}, ...]}, ...],
-///  "routed":[{"lane":"<uid>","followers":2}, ...]}
+///  "routed":[{"lane":"chords"|"<uid>","followers":2,"trackId":0}, ...]}
 /// ```
-/// `self` is `view.id` and `view.label`. `following` is null when `view.follow` is empty or `view.status` is
-/// `NotFollowing` (no registry view has one without the other); otherwise its fields are the follow's `leaderId`,
-/// `leaderLabel`, `laneUid`, `laneName` and `laneRole`, `status` names `view.status`, and `switchTo` is
-/// `view.switchTo` (its `id` as `leader`) or null. `leaders` and `routed` are `view.leaders` and `view.routed` in
-/// their order, each lane's `lane` its uid and `role` its `trackRoleName`, empty for the chords lane (whose role
-/// means nothing, as the registry's hints have it). Member order inside objects is nlohmann's (sorted by name).
+/// `self` is `view.id` and `view.label`, and `copyOf` is `view.copyOf` (its `id` as `leader`) or null: the
+/// instance this one is a copy of, set only while this one is not following and the original lives and is not
+/// following (`LinkView::copyOf`, `LinkRegistry` rule 11). `following` is null when `view.follow` is empty or
+/// `view.status` is `NotFollowing` (no registry view has one without the other); otherwise its fields are the
+/// follow's `leaderId`, `leaderLabel`, `laneUid`, `laneName` and `laneRole`, `status` names `view.status`, and
+/// `switchTo` is `view.switchTo` (its `id` as `leader`) or null. `leaders` and `routed` are `view.leaders` and
+/// `view.routed` in their order, each lane's `lane` its uid and `role` its `trackRoleName`, empty for the chords
+/// lane (whose role means nothing, as the registry's hints have it). Only `routed` lanes carry `trackId`: the
+/// `LinkLaneView::trackId` that `LinkEndpoint::view` fills, the number of the viewer's own track (0 for the
+/// chords lane and for a uid the viewer's lane table does not hold; always 0 in a `LinkRegistry::view`), which
+/// is how the editor finds the tab of a followed lane (its snapshot's tracks carry their numbers, not their lane
+/// uids); `leaders[].lanes[]` never has it. Member order inside objects is nlohmann's (sorted by name). The
+/// golden fixtures `engine/tests/fixtures/link-state-*.json` are this function's output (test_fixtures.cpp).
 /// Strings are written as UTF-8; invalid UTF-8 in any of them (a name, a label) is replaced by U+FFFD, never thrown
 /// on (`error_handler_t::replace`, as the shell's error messages). Allocates: the UI/message thread only.
 std::string linkStateJson(const LinkView& view);

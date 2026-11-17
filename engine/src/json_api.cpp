@@ -3235,10 +3235,14 @@ std::string linkStateJson(const LinkView& view) {
     }
     json routed = json::array();
     for (const LinkLaneView& lane : view.routed) {
-        routed.push_back({{"lane", lane.uid}, {"followers", lane.followers}});
+        routed.push_back({{"lane", lane.uid}, {"followers", lane.followers}, {"trackId", lane.trackId}});
+    }
+    json copyOf;  // null
+    if (view.copyOf.has_value()) {
+        copyOf = {{"leader", view.copyOf->id}, {"label", view.copyOf->label}};
     }
     const json state = {{"schema", kJsonSchema},
-                        {"self", {{"id", view.id}, {"label", view.label}}},
+                        {"self", {{"id", view.id}, {"label", view.label}, {"copyOf", std::move(copyOf)}}},
                         {"following", std::move(following)},
                         {"leaders", std::move(leaders)},
                         {"routed", std::move(routed)}};

@@ -72,6 +72,14 @@ std::string LaneUids::uidOf(int trackId) const {
     return it == entries_.end() ? std::string() : it->second;
 }
 
+int LaneUids::trackOf(std::string_view uid) const {
+    if (uid.empty() || uid == kChordsLaneUid) return 0;
+    for (const auto& entry : entries_) {
+        if (entry.second == uid) return entry.first;
+    }
+    return 0;
+}
+
 std::optional<LaneKey> LaneUids::laneOf(const Document& doc, std::string_view uid) const {
     if (uid == kChordsLaneUid) return chordsLane();
     if (uid.empty()) return std::nullopt;
@@ -460,6 +468,20 @@ LinkRegistry::Adopted LinkRegistry::adoptState(LinkToken token, std::string load
     return out;
 }
 
+LinkRegistry::Hooks LinkRegistry::adoptWithoutBlock(LinkToken token) {
+    std::shared_ptr<const LinkFeed> dropped;  // released after the mutex
+    Hooks hooks;
+    State& s = *state_;
+    const std::lock_guard<std::mutex> lock(s.mutex);
+    Entry* e = s.find(token);
+    if (e == nullptr) return hooks;
+    const bool wasCopy = e->copiedFrom != 0;
+    e->copiedFrom = 0;  // rule 3: its document is no copy of the original's now
+    const bool followChanged = s.setFollowLocked(token, *e, std::nullopt, dropped, hooks);
+    if (wasCopy || followChanged) s.moved();
+    return hooks;
+}
+
 LinkRegistry::Hooks LinkRegistry::setFollow(LinkToken token, std::optional<LinkFollow> follow) {
     std::shared_ptr<const LinkFeed> dropped;  // released after the mutex
     Hooks hooks;
@@ -566,6 +588,10 @@ LinkView LinkRegistry::view(LinkToken token) const {
                 if (newest != nullptr) v.switchTo = LinkInstanceRef{newest->id, newest->label};
             }
         }
+    }
+    if (!e->follow && e->copiedFrom != 0) {  // rule 11
+        const Entry* original = s.find(e->copiedFrom);
+        if (original != nullptr && !original->follow) v.copyOf = LinkInstanceRef{original->id, original->label};
     }
     for (const auto& entry : s.entries) {
         if (entry.first != token && !entry.second.follow) v.leaders.push_back(s.leaderView(entry.first, entry.second));
@@ -759,7 +785,7 @@ void LinkEndpoint::adopt(const State& loaded, LinkRegistry::Hooks& hooks) {
 }
 
 void LinkEndpoint::adoptWithoutBlock(LinkRegistry::Hooks& hooks) {
-    hooks = registry_.setFollow(token_, std::nullopt);       // empties the link buffer if it followed
+    hooks = registry_.adoptWithoutBlock(token_);             // empties the link buffer if it followed
     following_.store(false, std::memory_order_release);      // after the registry wrote it
     documentId_ = makeUid_();
     uids_.replace({});
@@ -771,7 +797,9 @@ std::uint64_t LinkEndpoint::serial() const noexcept {
 }
 
 LinkView LinkEndpoint::view() const {
-    return registry_.view(token_);
+    LinkView v = registry_.view(token_);
+    for (LinkLaneView& lane : v.routed) lane.trackId = uids_.trackOf(lane.uid);
+    return v;
 }
 
 }  // namespace chordlab

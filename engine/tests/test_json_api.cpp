@@ -6777,7 +6777,8 @@ LinkView leaderView() {
     other.lanes.push_back(LinkLaneView{"chords", "Chords", TrackRole::Bass, true, true, 0});
     other.lanes.push_back(LinkLaneView{"uid-bass", "Bass", TrackRole::Bass, false, false, 2});
     v.leaders.push_back(other);
-    v.routed.push_back(LinkLaneView{"uid-lead", "Lead", TrackRole::Lead, false, true, 2});
+    v.routed.push_back(LinkLaneView{"uid-lead", "Lead", TrackRole::Lead, false, true, 2, 2});
+    v.routed.push_back(LinkLaneView{"chords", "Chords", TrackRole::Other, true, true, 1, 0});
     return v;
 }
 
@@ -6794,14 +6795,45 @@ LinkView followerView(LinkStatus status) {
 
 TEST_CASE("linkStateJson: a leader's view, every member as documented") {
     const json j = json::parse(linkStateJson(leaderView()));
-    CHECK(j == json::parse(R"({"schema":1,"self":{"id":"self-id","label":"ChordLab A"},"following":null,
+    CHECK(j == json::parse(R"({"schema":1,"self":{"id":"self-id","label":"ChordLab A","copyOf":null},
+        "following":null,
         "leaders":[{"id":"other-id","label":"ChordLab B","lineage":"lineage-7","lanes":[
             {"lane":"chords","name":"Chords","role":"","chords":true,"audible":true,"followers":0},
             {"lane":"uid-bass","name":"Bass","role":"bass","chords":false,"audible":false,"followers":2}]}],
-        "routed":[{"lane":"uid-lead","followers":2}]})"));
+        "routed":[{"lane":"uid-lead","followers":2,"trackId":2},{"lane":"chords","followers":1,"trackId":0}]})"));
     LinkView empty;
     CHECK(json::parse(linkStateJson(empty)) ==
-          json::parse(R"({"schema":1,"self":{"id":"","label":""},"following":null,"leaders":[],"routed":[]})"));
+          json::parse(R"({"schema":1,"self":{"id":"","label":"","copyOf":null},"following":null,"leaders":[],
+                          "routed":[]})"));
+}
+
+TEST_CASE("linkStateJson: self.copyOf is null or names the original as leader and label") {
+    LinkView v = leaderView();
+    CHECK(json::parse(linkStateJson(v)).at("self") ==
+          json({{"id", "self-id"}, {"label", "ChordLab A"}, {"copyOf", nullptr}}));
+    v.copyOf = LinkInstanceRef{"other-id", "ChordLab B"};
+    CHECK(json::parse(linkStateJson(v)).at("self") ==
+          json({{"id", "self-id"}, {"label", "ChordLab A"},
+                {"copyOf", {{"leader", "other-id"}, {"label", "ChordLab B"}}}}));
+    // Written as given, whatever else the view holds: no view of the registry has it with a follow.
+    LinkView follower = followerView(LinkStatus::Playing);
+    follower.copyOf = LinkInstanceRef{"x", "ChordLab X"};
+    CHECK(json::parse(linkStateJson(follower)).at("self").at("copyOf") ==
+          json({{"leader", "x"}, {"label", "ChordLab X"}}));
+    CHECK(json::parse(linkStateJson(followerView(LinkStatus::Playing))).at("self").at("copyOf").is_null());
+}
+
+TEST_CASE("linkStateJson: routed carries trackId; leaders' lanes never do") {
+    LinkView v = leaderView();
+    v.leaders[0].lanes[1].trackId = 7;  // never written: only routed has track numbers
+    const json j = json::parse(linkStateJson(v));
+    for (const json& lane : j.at("leaders").at(0).at("lanes")) {
+        CHECK_FALSE(lane.contains("trackId"));
+    }
+    REQUIRE(j.at("routed").size() == 2);
+    CHECK(j.at("routed").at(0).at("trackId") == 2);
+    CHECK(j.at("routed").at(1).at("trackId") == 0);  // the chords lane
+    CHECK(j.at("routed").at(0).size() == 3);         // lane, followers, trackId
 }
 
 TEST_CASE("linkStateJson: each status, and following null exactly when there is no follow or the status says so") {
@@ -6840,6 +6872,7 @@ TEST_CASE("linkStateJson: invalid UTF-8 in names and labels is replaced, never t
     v.follow->laneName = "cut \xC3";
     v.leaders[0].lanes[1].name = "\xE2\x82";
     v.switchTo = LinkInstanceRef{"copy-id", "\x80"};
+    v.copyOf = LinkInstanceRef{"orig-id", "orig \xC0"};
     std::string text;
     CHECK_NOTHROW(text = linkStateJson(v));
     json j;
@@ -6849,4 +6882,5 @@ TEST_CASE("linkStateJson: invalid UTF-8 in names and labels is replaced, never t
     CHECK(j.at("leaders").at(0).at("lanes").at(1).at("name").get<std::string>().find("\xEF\xBF\xBD") !=
           std::string::npos);
     CHECK(j.at("following").at("switchTo").at("label") == "\xEF\xBF\xBD");
+    CHECK(j.at("self").at("copyOf").at("label").get<std::string>().find("\xEF\xBF\xBD") != std::string::npos);
 }
