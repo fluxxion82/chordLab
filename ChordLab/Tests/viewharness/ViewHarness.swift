@@ -272,7 +272,7 @@ struct Scenario {
       let offer = FollowerPanelModel(r.state.linkState, snapshot: r.state.snapshot, ownLineage: r.state.clipboardToken)?
         .switchOffer
       h.check(offer?.action == .choose(leader: "uid-6"), "the switch is a menu over the copy's lanes")
-      h.check(offer?.button == "Play a track of ChordLab C instead", "a menu switch names no track the copy lacks")
+      h.check(offer?.button == "Play a track of ChordLab B instead", "a menu switch names no track the copy lacks")
     }),
     Scenario(name: "panel-long-names", setup: { h, state, _ in
       // The followed lane and its copy's have 64-character names: the headline wraps, the switch button is bounded.
