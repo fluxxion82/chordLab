@@ -16,8 +16,9 @@ import SwiftUI
 /// The window's measured size decides three things once, here: where the Transpose with key switch is (the
 /// key bar from `keyBarSwitchMinWidth` up, else the transport row; exactly one of them shows it), whether the
 /// Diatonic / Applied switch keeps its row above the palette (not while the key transpose row shows in a
-/// window shorter than `compactHeight`, unless the listener is active: the row then holds the Heard group and
-/// always shows), and whether the key transpose row draws compact (in a window shorter than `compactHeight`).
+/// window shorter than `FollowOffer.compactHeight`, unless the listener is active: the row then holds the Heard group
+/// and always shows), and whether the key transpose row and the Follow banner draw compact (in a window shorter than
+/// `FollowOffer.compactHeight`, the one threshold for both).
 /// The palette viewport (or, with a track open, the roll area) is the row that gives up height; the status and
 /// export row along the bottom never does.
 struct ContentView: View {
@@ -29,15 +30,13 @@ struct ContentView: View {
   /// Minor (the widest tonic menu) and at 875 pt for C Major; 3 pt added for margin. Below it the switch moves
   /// to the transport row and the key bar keeps its two rows.
   static let keyBarSwitchMinWidth: CGFloat = 880
-  /// Below this window height the key transpose row draws compact and takes the Diatonic / Applied switch's
-  /// row while it shows.
-  static let compactHeight: CGFloat = 700
 
   /// The window's size, as last measured (900 × 620, the default window, until the first measurement).
   @State private var size = CGSize(width: 900, height: 620)
 
   var body: some View {
     let switchInKeyBar = size.width >= Self.keyBarSwitchMinWidth
+    let compact = FollowOffer.isCompact(height: size.height)
     ZStack {
       PaletteView.background
       // Following another ChordLab's lane: the panel takes the whole window (plan section 5). The editor's
@@ -48,10 +47,16 @@ struct ContentView: View {
         VStack(spacing: 12) {
           KeyBarView(showsTransposeSwitch: switchInKeyBar)
 
+          // The Follow banner (`FollowOffer`): a fresh ChordLab, or a copy of another one, offers to play one of the
+          // other ChordLab's tracks. A row of its own, like the transpose row below: the rows under it move down.
+          if let offer = state.followOffer {
+            FollowBannerView(offer: offer, compact: compact)
+          }
+
           // The transpose hint or the moved note, in a row of its own: the rows below move down while it
           // shows, so nothing (Follow Live, Loop, Panic) is covered.
           if let row = state.keyRow {
-            KeyTransposeRow(row: row, compact: size.height < Self.compactHeight)
+            KeyTransposeRow(row: row, compact: compact)
           }
 
           TransportBarView(showsTransposeSwitch: !switchInKeyBar)
@@ -70,7 +75,7 @@ struct ContentView: View {
             SuggestionsView()
 
             // While the listener is active the switch row carries the Heard group and always shows (D15).
-            PaletteView(showsViewSwitch: state.keyRow == nil || size.height >= Self.compactHeight
+            PaletteView(showsViewSwitch: state.keyRow == nil || !compact
                           || state.heard?.active == true)
 
             HomeRowView()

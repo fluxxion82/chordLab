@@ -7,7 +7,7 @@ import SwiftUI
 struct KeyTransposeRow: View {
   @EnvironmentObject var state: ChordLabState
   let row: ChordLabState.KeyRow
-  /// In a window shorter than `ContentView.compactHeight`: callout text, small buttons, a small icon and less
+  /// In a window shorter than `FollowOffer.compactHeight`: callout text, small buttons, a small icon and less
   /// vertical padding, so the hint fits on one line at the 700-pt minimum width and the row is at most 24 pt
   /// tall in either state (the palette keeps 100 pt or more at the 700 x 632 minimum, with the lane tab row and
   /// the Heard group's switch row showing too).
