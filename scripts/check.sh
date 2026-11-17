@@ -16,7 +16,7 @@
 #                               ${TMPDIR:-/tmp}/chordlab-shell-gate; only inside $TMPDIR, /private/tmp or
 #                               /private/var/folders); fails if the installed VST3 or app binary changes. Then
 #                               builds ChordLab/Tests/vst3host there and runs it against the scratch ChordLab.vst3
-#   scripts/check.sh --all      everything but --shell
+#   scripts/check.sh --all      everything but --shell (--shell with --plugin or --all is refused)
 #   scripts/check.sh --release  ... plus the release script's preflight, in report mode
 # Flags combine; section 1 always runs first.
 #
@@ -50,6 +50,12 @@ for arg in "$@"; do
         *) echo "check.sh: unknown option '$arg' (try --help)" >&2; exit 2 ;;
     esac
 done
+# --plugin (and --all, which includes it) installs over the very binaries --shell must leave untouched, and its section
+# runs first: --shell's before/after hashes would then compare the overwritten installation with itself.
+if [ "$want_shell" -eq 1 ] && [ "$want_plugin" -eq 1 ]; then
+    echo "check.sh: --shell cannot be combined with --plugin or --all: their installing build would run first, and --shell would compare the overwritten installation with itself" >&2
+    exit 2
+fi
 
 if command -v timeout >/dev/null 2>&1; then
     TIMEOUT_CMD=timeout
