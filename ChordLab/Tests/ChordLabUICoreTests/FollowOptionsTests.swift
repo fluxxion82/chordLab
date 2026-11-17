@@ -28,7 +28,7 @@ final class FollowOptionsTests: XCTestCase {
   // MARK: - Fixtures
 
   func testTheLeaderFixtureOffersTheOtherLeadersUnfollowedLanesFirst() throws {
-    let groups = FollowOptions.groups(try LinkStateTests.fixture("link-state-leader.json"))
+    let groups = FollowOptions.groups(try LinkStateTests.fixture("link-state-leader.json"), ownLineage: "own")
     XCTAssertEqual(groups.map(\.leader), ["id-original"])
     XCTAssertEqual(groups[0].title, "ChordLab A")
     XCTAssertEqual(groups[0].options.map(\.name), ["Chords", "Lead", "Bass"])     // Bass has a follower
@@ -44,7 +44,7 @@ final class FollowOptionsTests: XCTestCase {
   }
 
   func testTheFollowerFixtureMarksTheCurrentLane() throws {
-    let groups = FollowOptions.groups(try LinkStateTests.fixture("link-state-follower.json"))
+    let groups = FollowOptions.groups(try LinkStateTests.fixture("link-state-follower.json"), ownLineage: "own")
     XCTAssertEqual(groups.map(\.leader), ["id-leader", "uid-6"])
     XCTAssertEqual(groups.map(\.title), ["ChordLab A", "ChordLab C"])
     let current = groups[0].options.filter(\.isCurrent)
@@ -57,7 +57,7 @@ final class FollowOptionsTests: XCTestCase {
   }
 
   func testTheWaitingFixtureOffersTheOtherLeader() throws {
-    let groups = FollowOptions.groups(try LinkStateTests.fixture("link-state-waiting.json"))
+    let groups = FollowOptions.groups(try LinkStateTests.fixture("link-state-waiting.json"), ownLineage: "own")
     XCTAssertEqual(groups.map(\.leader), ["id-other"])
     XCTAssertEqual(groups[0].options.map(\.name), ["Chords", "Keys"])
     XCTAssertEqual(groups[0].options.map(\.role), [nil, .other])
@@ -66,14 +66,14 @@ final class FollowOptionsTests: XCTestCase {
   // MARK: - What is not offered
 
   func testNoLeadersIsNoOptions() {
-    XCTAssertEqual(FollowOptions.groups(state([])), [])
-    XCTAssertEqual(FollowOptions.groups(nil), [])
+    XCTAssertEqual(FollowOptions.groups(state([]), ownLineage: "own"), [])
+    XCTAssertEqual(FollowOptions.groups(nil, ownLineage: "own"), [])
   }
 
   func testALeaderThatHasNotPublishedIsNotOffered() {
     let groups = FollowOptions.groups(state([leader("a", "ChordLab A", lineage: ""),
                                              leader("b", "ChordLab B", lanes: []),
-                                             leader("c", "ChordLab C")]))
+                                             leader("c", "ChordLab C")]), ownLineage: "own")
     XCTAssertEqual(groups.map(\.leader), ["c"])
   }
 
@@ -84,7 +84,7 @@ final class FollowOptionsTests: XCTestCase {
       leader("b", "ChordLab B", lineage: long),
       leader("c", "ChordLab C", lanes: [lane("", "Bass", "bass"), lane(long, "Lead", "lead"), lane("ok", "Keys", "other")]),
       leader("", "ChordLab D"),
-    ]))
+    ]), ownLineage: "own")
     XCTAssertEqual(groups.map(\.leader), ["c"])
     XCTAssertEqual(groups[0].options.map(\.lane), ["ok"])
   }
@@ -95,7 +95,7 @@ final class FollowOptionsTests: XCTestCase {
     let groups = FollowOptions.groups(state([leader("a", "ChordLab A", lanes: [
       lane("chords", "Akkorde", ""), lane("u1", "", "bass"), lane("u2", "", "lead"), lane("u3", "", "other"),
       lane("u4", "My line", "lead"),
-    ])]))
+    ])]), ownLineage: "own")
     XCTAssertEqual(groups[0].options.map(\.name), ["Chords", "Bass", "Lead", "Other", "My line"])
   }
 
@@ -103,7 +103,7 @@ final class FollowOptionsTests: XCTestCase {
     let groups = FollowOptions.groups(state([leader("a", "ChordLab A", lanes: [
       lane("chords", "Chords", "", followers: 1), lane("u1", "One", "bass"), lane("u2", "Two", "lead", followers: 2),
       lane("u3", "Three", "other"), lane("u4", "Four", "bass", followers: 1),
-    ])]))
+    ])]), ownLineage: "own")
     XCTAssertEqual(groups[0].options.map(\.lane), ["u1", "u3", "chords", "u2", "u4"])
     XCTAssertEqual(groups[0].options.map(\.detail), [nil, nil, "(1 other ChordLab plays it)", "(2 other ChordLabs play it)",
                                                      "(1 other ChordLab plays it)"])
@@ -114,7 +114,7 @@ final class FollowOptionsTests: XCTestCase {
     let groups = FollowOptions.groups(state([leader("a", "ChordLab A", lanes: [
       lane("chords", "Chords", "", followers: 1), lane("u1", "One", "bass", followers: 1),
       lane("u2", "Two", "lead", followers: 2), lane("u3", "Three", "other"),
-    ])], following: ("a", "u1")))
+    ])], following: ("a", "u1")), ownLineage: "own")
     XCTAssertEqual(groups[0].options.map(\.lane), ["u1", "u3", "chords", "u2"])
     XCTAssertEqual(groups[0].options.map(\.otherTracks), [0, 0, 1, 2])
   }
@@ -127,7 +127,7 @@ final class FollowOptionsTests: XCTestCase {
                                         lane("chords", "Chords", "")]),
       leader("a", "ChordLab A again", lanes: [lane("v", "Keys", "other")]),
       leader("b", "ChordLab B"),
-    ]))
+    ]), ownLineage: "own")
     XCTAssertEqual(groups.map(\.leader), ["a", "b"])
     XCTAssertEqual(groups[0].title, "ChordLab A")
     XCTAssertEqual(groups[0].options.map(\.lane), ["chords", "u"])
@@ -177,7 +177,7 @@ final class FollowOptionsTests: XCTestCase {
   // MARK: - The copy fixture
 
   func testTheCopyFixtureOffersItsOriginalFirstWithBassPlayedByOneOther() throws {
-    let groups = FollowOptions.groups(try LinkStateTests.fixture("link-state-copy.json"))
+    let groups = FollowOptions.groups(try LinkStateTests.fixture("link-state-copy.json"), ownLineage: "own")
     XCTAssertEqual(groups.map(\.leader), ["id-original"])
     XCTAssertEqual(groups[0].options.map(\.name), ["Chords", "Lead", "Bass"])
     XCTAssertEqual(groups[0].options[2].detail, "(1 other ChordLab plays it)")
@@ -185,15 +185,15 @@ final class FollowOptionsTests: XCTestCase {
 
   func testLeadersKeepTheirOrderAndACopysOriginalComesFirst() {
     let leaders = [leader("a", "ChordLab A"), leader("b", "ChordLab B"), leader("c", "ChordLab C")]
-    XCTAssertEqual(FollowOptions.groups(state(leaders)).map(\.leader), ["a", "b", "c"])
-    XCTAssertEqual(FollowOptions.groups(state(leaders, copyOf: "c")).map(\.leader), ["c", "a", "b"])
-    XCTAssertEqual(FollowOptions.groups(state(leaders, copyOf: "gone")).map(\.leader), ["a", "b", "c"])
+    XCTAssertEqual(FollowOptions.groups(state(leaders), ownLineage: "own").map(\.leader), ["a", "b", "c"])
+    XCTAssertEqual(FollowOptions.groups(state(leaders, copyOf: "c"), ownLineage: "own").map(\.leader), ["c", "a", "b"])
+    XCTAssertEqual(FollowOptions.groups(state(leaders, copyOf: "gone"), ownLineage: "own").map(\.leader), ["a", "b", "c"])
   }
 
   func testTheCurrentLaneIsMatchedByLeaderIdAndLaneKey() {
     let leaders = [leader("a", "ChordLab A", lanes: [lane("chords", "Chords", ""), lane("same", "Bass", "bass")]),
                    leader("b", "ChordLab B", lanes: [lane("chords", "Chords", ""), lane("same", "Bass", "bass")])]
-    let groups = FollowOptions.groups(state(leaders, following: ("b", "same")))
+    let groups = FollowOptions.groups(state(leaders, following: ("b", "same")), ownLineage: "own")
     XCTAssertEqual(groups[0].options.map(\.isCurrent), [false, false])
     XCTAssertEqual(groups[1].options.map(\.isCurrent), [false, true])
     XCTAssertEqual(groups[1].options[1].id, FollowTarget(leader: "b", lane: "same"))
@@ -201,7 +201,7 @@ final class FollowOptionsTests: XCTestCase {
 
   func testACurrentLaneFollowedOnlyByThisInstanceHasNoDetail() {
     let groups = FollowOptions.groups(state([leader("a", "ChordLab A", lanes: [lane("u", "Bass", "bass", followers: 1)])],
-                                            following: ("a", "u")))
+                                            following: ("a", "u")), ownLineage: "own")
     XCTAssertEqual(groups[0].options[0].otherTracks, 0)
     XCTAssertNil(groups[0].options[0].detail)
     XCTAssertEqual(groups[0].options[0].menuTitle, "Bass  ✓")
@@ -209,13 +209,13 @@ final class FollowOptionsTests: XCTestCase {
   }
 
   func testAnEmptyLabelIsAnotherChordLab() {
-    let groups = FollowOptions.groups(state([leader("a", "")]))
+    let groups = FollowOptions.groups(state([leader("a", "")]), ownLineage: "own")
     XCTAssertEqual(groups[0].title, "Another ChordLab")
     XCTAssertEqual(groups[0].options[0].leaderLabel, "")
   }
 
   func testTheGroupIsFoundByLeaderId() {
-    let groups = FollowOptions.groups(state([leader("a", "ChordLab A"), leader("b", "ChordLab B")]))
+    let groups = FollowOptions.groups(state([leader("a", "ChordLab A"), leader("b", "ChordLab B")]), ownLineage: "own")
     XCTAssertEqual(FollowOptions.group(leader: "b", in: groups)?.title, "ChordLab B")
     XCTAssertNil(FollowOptions.group(leader: "z", in: groups))
     XCTAssertEqual(groups.map(\.id), ["a", "b"])
@@ -228,10 +228,61 @@ final class FollowOptionsTests: XCTestCase {
   // MARK: - The request
 
   func testAnOptionsRequestCarriesItsIdentityAndItsLeadersLineage() {
-    let option = FollowOption(leader: "a", lane: "uid-bass", leaderLineage: "t", leaderLabel: "ChordLab A",
+    let option = FollowOption(leader: "a", lane: "uid-bass", leaderLineage: "t", ownLineage: "own", leaderLabel: "ChordLab A",
                               name: "Bass", role: .bass, followers: 0, isCurrent: false)
     XCTAssertEqual(FollowRequest(option), FollowRequest(leader: "a", lane: "uid-bass", leaderLabel: "ChordLab A"))
     XCTAssertEqual(option.command as NSDictionary,
                    ["op": "follow", "leader": "a", "lane": "uid-bass", "leaderLineage": "t"] as NSDictionary)
+  }
+
+  // MARK: - The own lineage, labels, tooltips (Task 11 review)
+
+  /// An entry keeps the own lineage it was drawn under, and its request carries that one, whatever the token is at the
+  /// click: a state load in between makes the shell answer stale instead of applying it over the loaded follow.
+  func testAnEntryKeepsTheOwnLineageItWasDrawnUnder() {
+    let groups = FollowOptions.groups(state([leader("a", "ChordLab A")]), ownLineage: "doc-1")
+    let option = groups[0].options[1]
+    XCTAssertEqual(option.ownLineage, "doc-1")
+    XCTAssertEqual(option.stampedCommand as NSDictionary,
+                   ["op": "follow", "leader": "a", "lane": "u-a", "leaderLineage": "t", "lineage": "doc-1"] as NSDictionary)
+    XCTAssertNil(option.command["lineage"])
+    XCTAssertEqual(FollowOptions.groups(state([leader("a", "ChordLab A")]), ownLineage: "doc-2")[0].options[1].ownLineage,
+                   "doc-2")
+  }
+
+  func testALongNameIsShortenedInTheMiddle() {
+    XCTAssertEqual(FollowLabels.maxCharacters, 16)
+    XCTAssertEqual(FollowLabels.short("Bass"), "Bass")
+    XCTAssertEqual(FollowLabels.short("Sixteen chars ok"), "Sixteen chars ok")
+    XCTAssertEqual(FollowLabels.short("Seventeen chars!!"), "Seventee…chars!!")
+    XCTAssertEqual(FollowLabels.short("Seventeen chars!!").count, 16)
+    let long = String(repeating: "W", count: 64)
+    XCTAssertEqual(FollowLabels.short(long), String(repeating: "W", count: 8) + "…" + String(repeating: "W", count: 7))
+    XCTAssertEqual(FollowLabels.short("ä🎸ä🎸ä🎸ä🎸ä🎸ä🎸ä🎸ä🎸ä🎸", max: 5), "ä🎸…ä🎸")   // by characters, never splitting one
+    let option = FollowOptions.groups(state([leader("a", "ChordLab A", lanes: [lane("u", long, "bass")])]),
+                                      ownLineage: "own")[0].options[0]
+    XCTAssertEqual(option.label.count, 16)
+    XCTAssertEqual(option.name, long)                               // the menu keeps the whole name
+  }
+
+  func testTheTooltipSaysWhoElsePlaysIt() {
+    let lanes = [lane("chords", "Chords", ""), lane("u1", "Bass", "bass", followers: 1), lane("u2", "Lead", "lead", followers: 2)]
+    let options = FollowOptions.groups(state([leader("a", "ChordLab A", lanes: lanes)]), ownLineage: "own")[0].options
+    XCTAssertEqual(options.map(\.tooltip), [nil, "Another ChordLab already plays it.", "2 other ChordLabs already play it."])
+  }
+
+  func testTheMenuShowsOnlyWhileThePickerOffersSomething() throws {
+    XCTAssertTrue(FollowOptions.showsMenu(try LinkStateTests.fixture("link-state-leader.json")))
+    XCTAssertFalse(FollowOptions.showsMenu(state([])))
+    XCTAssertFalse(FollowOptions.showsMenu(state([leader("a", "ChordLab A", lineage: "")])))
+    XCTAssertFalse(FollowOptions.showsMenu(nil))
+  }
+
+  func testThePickerGroupsAreEveryGroupOrOneLeaders() {
+    let s = state([leader("a", "ChordLab A"), leader("b", "ChordLab B")])
+    XCTAssertEqual(FollowOptions.pickerGroups(s, ownLineage: "own").map(\.leader), ["a", "b"])
+    XCTAssertEqual(FollowOptions.pickerGroups(s, ownLineage: "own", leader: "b").map(\.leader), ["b"])
+    XCTAssertEqual(FollowOptions.pickerGroups(s, ownLineage: "own", leader: "z").map(\.leader), [])
+    XCTAssertEqual(FollowOptions.pickerGroups(s, ownLineage: "doc-9")[1].options[0].ownLineage, "doc-9")
   }
 }

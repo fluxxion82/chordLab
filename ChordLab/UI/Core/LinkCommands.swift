@@ -66,6 +66,10 @@ enum FollowVerdict: Equatable {
 ///   link state; a malformed or missing own lineage with an error and then a link state): no verdict, no notice, and a
 ///   link state that follows in the same send is not judged. The state shows the error as it shows any.
 /// - No answer inside the send: `sendReturned` forgets the request; no verdict, no notice.
+/// - Stop following goes through the same steps (`sentUnfollow`, the send, `sendReturned`): the first link state inside
+///   the send is **applied** when it follows nothing, otherwise **refused** with the own-document sentence ("This
+///   ChordLab changed while you were choosing. Pick again."): a linking instance refuses an unfollow only for a stale own
+///   lineage. An error inside that send is its answer, as for a follow.
 /// - The notice stays (in the picker or the banner) until the next choice (`sent`), until the user clears it
 ///   (`dismiss`), or until a later link state shows that what this instance follows has changed since the refusal
 ///   (it started or stopped following, or follows another lane). A refused Change… in the follower's panel leaves the
@@ -73,6 +77,8 @@ enum FollowVerdict: Equatable {
 final class FollowAttempt {
   /// The request of the send in flight that has not been answered yet; nil otherwise.
   private(set) var pending: FollowRequest?
+  /// True while an unfollow's send is in flight and unanswered.
+  private(set) var pendingUnfollow = false
   /// The refusal text, until cleared; nil when there is none.
   private(set) var notice: String?
   /// True between `sent` and `sendReturned`.
@@ -96,6 +102,15 @@ final class FollowAttempt {
   /// Right before the follow request is sent: it is the one an answer inside the send judges, and the old notice goes.
   func sent(_ request: FollowRequest) {
     pending = request
+    pendingUnfollow = false
+    inFlight = true
+    notice = nil
+  }
+
+  /// Right before an unfollow is sent: the answer inside the send judges it; the old notice goes.
+  func sentUnfollow() {
+    pending = nil
+    pendingUnfollow = true
     inFlight = true
     notice = nil
   }
@@ -104,6 +119,7 @@ final class FollowAttempt {
   /// unanswered request is forgotten without a notice.
   func sendReturned() {
     pending = nil
+    pendingUnfollow = false
     inFlight = false
   }
 
@@ -117,6 +133,7 @@ final class FollowAttempt {
   @discardableResult func receivedError() -> Bool {
     guard inFlight else { return false }
     pending = nil
+    pendingUnfollow = false
     return true
   }
 
@@ -124,6 +141,16 @@ final class FollowAttempt {
   /// the notice is cleared when what this instance follows differs from the refusing answer's.
   @discardableResult func received(_ state: LinkStateJSON, ownDocumentChanged: Bool = false) -> FollowVerdict? {
     let followed = state.following.map { Followed(leader: $0.leader, lane: $0.lane) }
+    if inFlight && pendingUnfollow {
+      pendingUnfollow = false
+      if followed == nil {
+        notice = nil
+        return .applied
+      }
+      notice = Self.refusalText(leaderLabel: "", ownDocumentChanged: true)
+      followedAtRefusal = followed
+      return .refused
+    }
     guard inFlight, let request = pending else {
       if notice != nil, followed != followedAtRefusal { notice = nil }
       return nil

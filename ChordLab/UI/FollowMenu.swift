@@ -14,12 +14,12 @@ struct FollowPickerItems: View {
 
   var body: some View {
     let link = state.linkState
-    let groups = FollowOptions.groups(link)
     ForEach(FollowOptions.menuNotes(link, notice: state.followNotice), id: \.self) { note in
       Button(note) {}
         .disabled(true)
     }
-    ForEach(leader.map { FollowOptions.group(leader: $0, in: groups).map { [$0] } ?? [] } ?? groups) { group in
+    // The entries carry the own lineage they are drawn under (`FollowOption.ownLineage`).
+    ForEach(FollowOptions.pickerGroups(link, ownLineage: state.clipboardToken, leader: leader)) { group in
       Section(group.title) {
         ForEach(group.options) { option in
           Button(option.menuTitle) { state.follow(option) }
@@ -30,13 +30,13 @@ struct FollowPickerItems: View {
 }
 
 /// The transport row's Follow menu (after Length, `TransportBarView`): the picker (`FollowPickerItems`), shown only
-/// while it offers something (`FollowOptions.groups` is not empty; never in an AU, the app or a lone instance, which is
-/// not an error).
+/// while it offers something (`FollowOptions.showsMenu`; never in an AU, the app or a lone instance, which is not an
+/// error).
 struct FollowMenu: View {
   @EnvironmentObject var state: ChordLabState
 
   var body: some View {
-    if !FollowOptions.groups(state.linkState).isEmpty {
+    if FollowOptions.showsMenu(state.linkState) {
       Menu {
         FollowPickerItems()
       } label: {

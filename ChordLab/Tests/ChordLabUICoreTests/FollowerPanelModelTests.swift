@@ -26,7 +26,7 @@ final class FollowerPanelModelTests: XCTestCase {
   }
 
   private func model(_ state: LinkStateJSON, snapshot: Snapshot? = nil) throws -> FollowerPanelModel {
-    try XCTUnwrap(FollowerPanelModel(state, snapshot: snapshot))
+    try XCTUnwrap(FollowerPanelModel(state, snapshot: snapshot, ownLineage: "own"))
   }
 
   private func snapshot(_ name: String) throws -> Snapshot {
@@ -40,8 +40,8 @@ final class FollowerPanelModelTests: XCTestCase {
   // MARK: - Not following
 
   func testNoModelWhenNotFollowing() throws {
-    XCTAssertNil(FollowerPanelModel(nil, snapshot: nil))
-    XCTAssertNil(FollowerPanelModel(try LinkStateTests.fixture("link-state-leader.json"), snapshot: nil))
+    XCTAssertNil(FollowerPanelModel(nil, snapshot: nil, ownLineage: "own"))
+    XCTAssertNil(FollowerPanelModel(try LinkStateTests.fixture("link-state-leader.json"), snapshot: nil, ownLineage: "own"))
   }
 
   // MARK: - Headline
@@ -122,11 +122,11 @@ final class FollowerPanelModelTests: XCTestCase {
   func testAStaleStoredLabelIsNotUsedWhileWaiting() throws {
     let impostor = LinkLeaderJSON(id: "x", label: "ChordLab A", lineage: "t", lanes: [lane("chords", "Chords", "")])
     let m = try model(state(status: .waiting, leaders: [impostor]))
-    XCTAssertEqual(m.headline, [TextRun("Plays "), TextRun("Bass", bold: true), TextRun(" of the other ChordLab")])
+    XCTAssertEqual(m.headline, [TextRun("Set to play "), TextRun("Bass", bold: true), TextRun(" of the other ChordLab")])
     XCTAssertEqual(m.statusLine,
                    "Waiting for the other ChordLab. It is not in this set, or it now plays from another ChordLab.")
     let other = LinkLeaderJSON(id: "x", label: "ChordLab C", lineage: "t", lanes: [lane("chords", "Chords", "")])
-    XCTAssertEqual(try model(state(status: .waiting, leaders: [other])).headlineText, "Plays Bass of ChordLab A")
+    XCTAssertEqual(try model(state(status: .waiting, leaders: [other])).headlineText, "Set to play Bass of ChordLab A")
   }
 
   func testABoundLeadersLabelIsItsOwnWhateverElseIsListed() throws {
@@ -169,7 +169,7 @@ final class FollowerPanelModelTests: XCTestCase {
 
   func testTheWaitingFixtureUsesTheStoredHints() throws {
     let m = try model(try LinkStateTests.fixture("link-state-waiting.json"))
-    XCTAssertEqual(m.headlineText, "Plays Bass of ChordLab A")       // the listed ChordLab C is another label
+    XCTAssertEqual(m.headlineText, "Set to play Bass of ChordLab A")   // the listed ChordLab C is another label
     XCTAssertEqual(m.statusLine, "Waiting for ChordLab A. It is not in this set, or it now plays from another ChordLab.")
     XCTAssertEqual(m.role, .bass)
     XCTAssertNil(m.switchOffer)
@@ -301,6 +301,50 @@ final class FollowerPanelModelTests: XCTestCase {
 
   func testAnUnknownTrackSwitchButtonSaysTheSameTrack() throws {
     let s = state(laneName: "", role: "", leaders: [copy([lane("x", "Bass", "bass")])], switchTo: copyRef)
-    XCTAssertEqual(try XCTUnwrap(try model(s).switchOffer).button, "Play the same track of ChordLab C instead")
+    XCTAssertEqual(try XCTUnwrap(try model(s).switchOffer).button, "Play a track of ChordLab C instead")
+  }
+
+  // MARK: - The headline's verb and the status's tone (Task 11 review)
+
+  func testTheHeadlineSaysPlaysOnlyWhileItPlaysOrIsMuted() throws {
+    XCTAssertEqual(try model(state(status: .playing)).headlineText, "Plays Bass of ChordLab A")
+    XCTAssertEqual(try model(state(status: .muted)).headlineText, "Plays Bass of ChordLab A")
+    for status in [LinkStatus.waiting, .laneMissing, .projectChanged, .unknown] {
+      let m = try model(state(status: status))
+      XCTAssertEqual(m.headline, [TextRun("Set to play "), TextRun("Bass", bold: true), TextRun(" of "),
+                                  TextRun("ChordLab A", bold: true)], "\(status)")
+    }
+    XCTAssertEqual(try model(state(status: .laneMissing, lane: "chords", laneName: "", role: "")).headlineText,
+                   "Set to play the chords of ChordLab A")
+    XCTAssertEqual(try model(state(status: .unknown, laneName: "", role: "", leaderLabel: "", leaders: [])).headline,
+                   [TextRun("Set to play a track of another ChordLab")])
+  }
+
+  func testTheToneIsAttentionWhenSomethingMustBeRepaired() throws {
+    XCTAssertEqual(try model(state(status: .playing)).statusTone, .fine)
+    XCTAssertEqual(try model(state(status: .muted)).statusTone, .fine)
+    for status in [LinkStatus.waiting, .laneMissing, .projectChanged, .unknown] {
+      XCTAssertEqual(try model(state(status: status)).statusTone, .attention, "\(status)")
+    }
+  }
+
+  // MARK: - The switch button's title and lineage (Task 11 review)
+
+  /// `.choose` opens the copy's lanes: the title names no track (the copy may not have one of that name).
+  func testAChooseButtonNamesNoTrack() throws {
+    let s = state(leaders: [leaderA, copy([lane("chords", "Chords", ""), lane("x", "Bass 2", "bass")])], switchTo: copyRef)
+    let offer = try XCTUnwrap(try model(s).switchOffer)
+    XCTAssertEqual(offer.action, .choose(leader: "c"))
+    XCTAssertEqual(offer.button, "Play a track of ChordLab C instead")
+  }
+
+  func testAFollowButtonNamesTheCopysLaneBounded() throws {
+    let long = String(repeating: "B", count: 64)
+    let a = LinkLeaderJSON(id: "a", label: "ChordLab A", lineage: "t", lanes: [lane("u-bass", long, "bass")])
+    let s = state(laneName: long, leaders: [a, copy([lane("u-bass", long, "bass")])], switchTo: copyRef)
+    let offer = try XCTUnwrap(try model(s).switchOffer)
+    XCTAssertEqual(offer.button, "Play \(FollowLabels.short(long)) of ChordLab C instead")
+    guard case .follow(let option) = offer.action else { return XCTFail("expected a follow") }
+    XCTAssertEqual(option.ownLineage, "own")
   }
 }

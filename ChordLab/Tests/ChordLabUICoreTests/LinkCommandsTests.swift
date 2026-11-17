@@ -235,4 +235,47 @@ final class LinkCommandsTests: XCTestCase {
     XCTAssertNil(attempt.received(state(following: nil)))
     XCTAssertNil(attempt.notice)
   }
+
+  // MARK: - Stop following (Task 11 review)
+
+  func testAnUnfollowThatTookEffectIsApplied() {
+    let attempt = FollowAttempt()
+    attempt.sentUnfollow()
+    XCTAssertTrue(attempt.pendingUnfollow)
+    XCTAssertEqual(attempt.received(state(following: nil)), .applied)
+    attempt.sendReturned()
+    XCTAssertFalse(attempt.pendingUnfollow)
+    XCTAssertNil(attempt.notice)
+  }
+
+  /// A linking instance refuses an unfollow only for a stale own lineage: the sentence names this ChordLab.
+  func testAnUnfollowAnsweredStillFollowingNamesThisChordLab() {
+    let attempt = FollowAttempt()
+    attempt.sentUnfollow()
+    XCTAssertEqual(attempt.received(state(following: "a")), .refused)
+    attempt.sendReturned()
+    XCTAssertEqual(attempt.notice, "This ChordLab changed while you were choosing. Pick again.")
+    XCTAssertNil(attempt.received(state(following: "a")))            // a later push of the same: still shown
+    XCTAssertNotNil(attempt.notice)
+    XCTAssertNil(attempt.received(state(following: nil)))            // it stopped since: the sentence goes
+    XCTAssertNil(attempt.notice)
+  }
+
+  func testAnErrorAnswersAnUnfollowToo() {
+    let attempt = FollowAttempt()
+    attempt.sentUnfollow()
+    XCTAssertTrue(attempt.receivedError())
+    XCTAssertFalse(attempt.pendingUnfollow)
+    XCTAssertNil(attempt.received(state(following: "a")))
+    attempt.sendReturned()
+    XCTAssertNil(attempt.notice)
+    XCTAssertFalse(attempt.receivedError())                        // outside a send
+  }
+
+  func testAFollowAfterAnUnfollowIsJudgedAsAFollow() {
+    let attempt = FollowAttempt()
+    attempt.sentUnfollow()
+    attempt.sendReturned()                                          // no answer
+    XCTAssertEqual(send(attempt, bass) { $0.received(self.state(following: "a")) }, .applied)
+  }
 }

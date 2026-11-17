@@ -60,6 +60,7 @@ struct KeyTransposeRow: View {
     .padding(.horizontal, 10)
     .padding(.vertical, compact ? 2 : 6)
     .background(RoundedRectangle(cornerRadius: 6).fill(Color.white.opacity(0.07)))
+    .probeFrame("keyRow")
   }
 
   @ViewBuilder private func hintLabel(wrapped: Bool) -> some View {

@@ -43,13 +43,13 @@ class ChordLabState: NSObject, ObservableObject {
   /// `followAttempt.notice`, published for the banner, the picker's first entry and the follower's panel; nil when
   /// there is none.
   @Published private(set) var followNotice: String?
-  /// The document lineage (`clipboardToken`) a follow request went out under, while its send is in flight: a link
-  /// state that arrives in the same send after the token changed answers a stale own lineage (the shell pushed the
-  /// current document's token and snapshot first). Nil outside a follow's send.
+  /// The own document lineage a follow or unfollow request was stamped with, while its send is in flight: when the
+  /// state's token differs from it as the answer arrives, the shell answered a stale own lineage (it pushed the current
+  /// document's token and snapshot first, or the entry was drawn before a load). Nil outside such a send.
   private var followSendToken: String?
-  /// The document lineage the user dismissed the Follow banner in (`FollowOffer`; Stop following counts as a
-  /// dismissal); nil when never dismissed. A new document may offer again.
-  @Published private(set) var followBannerDismissedLineage: String?
+  /// The documents the user dismissed the Follow banner in (`FollowOffer`; Stop following counts as a dismissal), for
+  /// the life of the process: `FollowDismissals.shared` unless a harness passes its own. A new document may offer again.
+  let followDismissals: FollowDismissals
   /// Whether a text field (a section rename) is being edited: the key routes (`EditorKeyRouter`) stand
   /// down meanwhile, so typing a name never appends or removes chords.
   @Published var editingText = false
@@ -157,6 +157,7 @@ class ChordLabState: NSObject, ObservableObject {
     self.mouseButtonsDown = { NSEvent.pressedMouseButtons != 0 }
     self.resolvedClipboardToken = ClipboardToken.resolve(nil)
     self.defaults = .standard
+    self.followDismissals = .shared
     self.guideDisplay = GuideDisplay(rawValue: UserDefaults.standard.string(forKey: GuideDisplay.storageKey))
     super.init()
     observeDefaults()
@@ -164,14 +165,16 @@ class ChordLabState: NSObject, ObservableObject {
 
   /// `clipboardToken` is the plug-in instance's (`ClipboardToken`: the view controller passes the one the C++ shell
   /// made); nil makes one for this state alone. `defaults` is where editor-wide preferences are remembered
-  /// (`UserDefaults.standard` unless a harness passes its own).
+  /// (`UserDefaults.standard` unless a harness passes its own), `followDismissals` where the Follow banner's
+  /// dismissals are (the process's, `FollowDismissals.shared`, unless a harness passes its own).
   public init(beginEdit: @MainActor @escaping (Int) -> Void = { _ in },
               doEdit: @MainActor @escaping (Int, Double) -> Void = { _, _ in },
               endEdit: @MainActor @escaping (Int) -> Void = { _ in },
               sendCommand: @MainActor @escaping (Int, Data?) -> Void = { _, _ in },
               mouseButtonsDown: @escaping () -> Bool = { NSEvent.pressedMouseButtons != 0 },
               clipboardToken: String? = nil,
-              defaults: UserDefaults = .standard) {
+              defaults: UserDefaults = .standard,
+              followDismissals: FollowDismissals = .shared) {
     self.beginEdit = beginEdit
     self.doEdit = doEdit
     self.endEdit = endEdit
@@ -179,6 +182,7 @@ class ChordLabState: NSObject, ObservableObject {
     self.mouseButtonsDown = mouseButtonsDown
     self.resolvedClipboardToken = ClipboardToken.resolve(clipboardToken)
     self.defaults = defaults
+    self.followDismissals = followDismissals
     self.guideDisplay = GuideDisplay(rawValue: defaults.string(forKey: GuideDisplay.storageKey))
     super.init()
     observeDefaults()
@@ -900,40 +904,54 @@ class ChordLabState: NSObject, ObservableObject {
 
   /// The banner (`FollowOffer`) for the current link state, snapshot and document, nil when it does not show.
   var followOffer: FollowOffer? {
-    FollowOffer.make(link: linkState, snapshot: snapshot, lineage: clipboardToken,
-                     dismissedLineage: followBannerDismissedLineage)
+    FollowOffer.make(link: linkState, snapshot: snapshot, lineage: clipboardToken, dismissals: followDismissals)
   }
 
   /// A click on a picker entry, a banner button or the follower panel's switch: `kMsgTagLink` with the entry's
-  /// follow (`FollowOption.command`: the leader's id, the lane's key and the leader's lineage as listed), stamped with
-  /// this instance's own document lineage as every command is. The shell answers inside the send with a link state
-  /// (and, for a stale own lineage, the current snapshot first), never an error for a refusal: `FollowAttempt` judges
-  /// that answer. The sequence: `sent`, the send, `sendReturned`; `applyLinkState` and `applyError` report what
-  /// arrives in between.
+  /// follow stamped with the own lineage the entry was drawn under (`FollowOption.stampedCommand`), so an entry drawn
+  /// before a state load is answered as stale rather than applied over the follow the load brought. The shell answers
+  /// inside the send with a link state (and, for a stale own lineage, the current snapshot first), never an error for a
+  /// refusal: `FollowAttempt` judges that answer. The sequence: `sent`, the send, `sendReturned`; `applyLinkState` and
+  /// `applyError` report what arrives in between.
   @MainActor func follow(_ option: FollowOption) {
     followAttempt.sent(FollowRequest(option))
     syncFollowNotice()
-    followSendToken = clipboardToken
-    send(CommandLineage.stamp(option.command, token: actionLineage.lineage(current: clipboardToken)), tag: kMsgTagLink)
+    followSendToken = option.ownLineage
+    send(option.stampedCommand, tag: kMsgTagLink)
     followSendToken = nil
     followAttempt.sendReturned()
     syncFollowNotice()
   }
 
-  /// The panel's Stop following: `kMsgTagLink` `unfollow`, stamped with the own lineage; answered with a link state
-  /// without `following`. It also dismisses the banner for this document (`FollowOffer.dismissedLineage
-  /// (afterStopFollowing:)`), so the editor that comes back does not offer at once.
+  /// The panel's Stop following: `kMsgTagLink` `unfollow`, stamped with the own lineage, judged like a follow
+  /// (`FollowAttempt.sentUnfollow`: a stale own lineage leaves the panel with the sentence that this ChordLab changed;
+  /// an error inside the send is the request's, never a refused editor command's). It also dismisses the banner for
+  /// this document (`FollowOffer.dismissedLineage(afterStopFollowing:)`), so the editor that comes back does not offer
+  /// at once.
   @MainActor func unfollow() {
-    followBannerDismissedLineage = FollowOffer.dismissedLineage(afterStopFollowing: clipboardToken)
-    send(CommandLineage.stamp(LinkCommands.unfollow(), token: actionLineage.lineage(current: clipboardToken)),
-         tag: kMsgTagLink)
+    dismissFollowBanner(in: FollowOffer.dismissedLineage(afterStopFollowing: clipboardToken))
+    let token = actionLineage.lineage(current: clipboardToken)
+    followAttempt.sentUnfollow()
+    syncFollowNotice()
+    followSendToken = token
+    send(CommandLineage.stamp(LinkCommands.unfollow(), token: token), tag: kMsgTagLink)
+    followSendToken = nil
+    followAttempt.sendReturned()
+    syncFollowNotice()
   }
 
-  /// The banner's Not now: it does not show again in this document; its refusal sentence goes with it.
+  /// The banner's Not now: it does not show again in this document, for the life of the process; its refusal sentence
+  /// goes with it.
   @MainActor func dismissFollowBanner() {
-    followBannerDismissedLineage = clipboardToken
+    dismissFollowBanner(in: clipboardToken)
     followAttempt.dismiss()
     syncFollowNotice()
+  }
+
+  /// Records the dismissal in the shared store and redraws (the store is not observed).
+  private func dismissFollowBanner(in lineage: String) {
+    objectWillChange.send()
+    followDismissals.dismiss(lineage)
   }
 
   /// Publishes `followAttempt.notice` when it changed.
@@ -1020,8 +1038,13 @@ class ChordLabState: NSObject, ObservableObject {
   }
 
   /// JSON-encodes `fields` plus `"schema": 1` and sends it under `tag`; false (and an error shown) when it is not valid
-  /// JSON.
+  /// JSON. Every command and preview message goes through here, so this is the one place `LinkGate` is asked: while
+  /// this instance follows another ChordLab's lane no editor command but the panel's own and no preview start leaves
+  /// (false, nothing shown), whichever callback the editor left outstanding sends it.
   @MainActor @discardableResult private func send(_ fields: [String: Any], tag: Int) -> Bool {
+    let following = LinkKeys.isFollowing(linkState)
+    if tag == kMsgTagCommand, !LinkGate.allowsCommand(fields, following: following) { return false }
+    if tag == kMsgTagPreview, !LinkGate.allowsPreview(fields, following: following) { return false }
     var message = fields
     message["schema"] = 1
     guard JSONSerialization.isValidJSONObject(message),

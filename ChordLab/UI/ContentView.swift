@@ -37,11 +37,15 @@ struct ContentView: View {
   var body: some View {
     let switchInKeyBar = size.width >= Self.keyBarSwitchMinWidth
     let compact = FollowOffer.isCompact(height: size.height)
+    let offer = state.followOffer
+    let rows = EditorRows.visible(offer: offer != nil, keyRow: state.keyRow != nil,
+                                  heardActive: state.heard?.active == true, compact: compact,
+                                  notice: state.followNotice != nil)
     ZStack {
       PaletteView.background
       // Following another ChordLab's lane: the panel takes the whole window (plan section 5). The editor's
       // document stays alive behind it, and no key reaches it (`LinkKeys`).
-      if let panel = FollowerPanelModel(state.linkState, snapshot: state.snapshot) {
+      if let panel = FollowerPanelModel(state.linkState, snapshot: state.snapshot, ownLineage: state.clipboardToken) {
         FollowerPanelView(model: panel)
       } else {
         VStack(spacing: 12) {
@@ -49,13 +53,14 @@ struct ContentView: View {
 
           // The Follow banner (`FollowOffer`): a fresh ChordLab, or a copy of another one, offers to play one of the
           // other ChordLab's tracks. A row of its own, like the transpose row below: the rows under it move down.
-          if let offer = state.followOffer {
-            FollowBannerView(offer: offer, compact: compact)
+          // Which optional rows show is `EditorRows`' (in a short window the key row wins over the banner).
+          if let offer, rows.banner {
+            FollowBannerView(offer: offer, compact: compact, noticeInline: rows.noticeInline)
           }
 
           // The transpose hint or the moved note, in a row of its own: the rows below move down while it
           // shows, so nothing (Follow Live, Loop, Panic) is covered.
-          if let row = state.keyRow {
+          if let row = state.keyRow, rows.keyRow {
             KeyTransposeRow(row: row, compact: compact)
           }
 
@@ -75,8 +80,7 @@ struct ContentView: View {
             SuggestionsView()
 
             // While the listener is active the switch row carries the Heard group and always shows (D15).
-            PaletteView(showsViewSwitch: state.keyRow == nil || !compact
-                          || state.heard?.active == true)
+            PaletteView(showsViewSwitch: rows.paletteSwitchRow)
 
             HomeRowView()
           }

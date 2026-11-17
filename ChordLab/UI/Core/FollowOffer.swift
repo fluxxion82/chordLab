@@ -9,8 +9,8 @@ import Foundation
 /// - the picker has options (`FollowOptions`; none in an AU, the app or a lone instance, which is not an error);
 /// - the instance is a **copy** of a leader the picker offers (`self.copyOf`; a duplicated rack chain, plan I13), or it
 ///   is **fresh**: its snapshot has arrived and holds no chords in the sequence and no tracks;
-/// - the user has not dismissed it for this document (`dismissedLineage`, the document lineage the user dismissed it
-///   in; a new document may offer again). Stopping following counts as a dismissal
+/// - the user has not dismissed it for this document (`FollowDismissals`, by document lineage, for the life of the
+///   process; a new document may offer again). Stopping following counts as a dismissal
 ///   (`dismissedLineage(afterStopFollowing:)`), so the banner does not come back at once.
 ///
 /// The wording never says "on this track": in the recommended set-up the instance is a chain of the main ChordLab's
@@ -18,7 +18,9 @@ import Foundation
 ///
 /// A copy is named first and gets its own wording; a `copyOf` that names a leader the picker does not offer (it has
 /// published nothing yet) is ignored, and the fresh rule may still apply. The buttons are the first group's entries in
-/// the picker's order, at most `maxButtons`; "More…" (the picker) shows when there are more lanes or more leaders.
+/// the picker's order, at most `maxButtons`, each labelled with its bounded name (`FollowOption.label`); the view shows
+/// as many of them, in order, as fit on the banner's line, and "More…" (the picker) shows when there are more lanes or
+/// more leaders than it shows (`showsMore(shown:)`).
 struct FollowOffer: Equatable {
   static let maxButtons = 5
   static let moreTitle = "More…"
@@ -47,7 +49,7 @@ struct FollowOffer: Equatable {
 
   /// The dismissal the state records when the user stops following, in the document of lineage `lineage`: the
   /// instance is no longer following and may be fresh, and the banner must not come back at once. It is the same
-  /// per-document dismissal the banner's own button records (`dismissedLineage` of `make`); a new document may offer
+  /// per-document dismissal the banner's own button records (`FollowDismissals`, which `make` consults); a new document may offer
   /// again.
   static func dismissedLineage(afterStopFollowing lineage: String) -> String { lineage }
 
@@ -60,16 +62,24 @@ struct FollowOffer: Equatable {
     return snapshot.events.isEmpty && (snapshot.tracks ?? []).isEmpty
   }
 
-  /// The banner for this link state and snapshot in the document of lineage `lineage`, nil when it does not show.
-  static func make(link: LinkStateJSON?, snapshot: Snapshot?, lineage: String, dismissedLineage: String?) -> FollowOffer? {
-    guard let link, !link.isFollowing, link.routed.isEmpty, dismissedLineage != lineage else { return nil }
-    let groups = FollowOptions.groups(link)
+  /// The banner for this link state and snapshot in the document of lineage `lineage` (the buttons carry it as their
+  /// own lineage), nil when it does not show or the user dismissed it in that document (`dismissals`).
+  static func make(link: LinkStateJSON?, snapshot: Snapshot?, lineage: String, dismissals: FollowDismissals) -> FollowOffer? {
+    guard let link, !link.isFollowing, link.routed.isEmpty, !dismissals.isDismissed(lineage) else { return nil }
+    let groups = FollowOptions.groups(link, ownLineage: lineage)
     guard let first = groups.first else { return nil }
     let isCopy = link.instance.copyOf.map { $0.leader == first.leader } ?? false   // groups put an offered original first
     guard isCopy || isFresh(snapshot) else { return nil }
     let label = first.options.first?.leaderLabel ?? ""
-    return FollowOffer(leader: first.leader, isCopy: isCopy, buttons: Array(first.options.prefix(maxButtons)),
-                       showsMore: groups.count > 1 || first.options.count > maxButtons,
+    let buttons = Array(first.options.prefix(maxButtons))
+    return FollowOffer(leader: first.leader, isCopy: isCopy, buttons: buttons,
+                       showsMore: groups.count > 1 || first.options.count > buttons.count,
                        leaderName: label.isEmpty ? "another ChordLab" : label)
+  }
+
+  /// Whether More… shows when the view shows the first `shown` buttons (those that fit on its line): when the picker
+  /// holds more than the banner offers, or the view leaves some of them out.
+  func showsMore(shown: Int) -> Bool {
+    showsMore || shown < buttons.count
   }
 }

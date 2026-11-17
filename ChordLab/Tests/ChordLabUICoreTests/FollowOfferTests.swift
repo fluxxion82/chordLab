@@ -37,7 +37,9 @@ final class FollowOfferTests: XCTestCase {
   }
 
   private func offer(_ link: LinkStateJSON?, _ snapshot: Snapshot?, dismissed: String? = nil) -> FollowOffer? {
-    FollowOffer.make(link: link, snapshot: snapshot, lineage: "doc-1", dismissedLineage: dismissed)
+    let dismissals = FollowDismissals()
+    if let dismissed { dismissals.dismiss(dismissed) }
+    return FollowOffer.make(link: link, snapshot: snapshot, lineage: "doc-1", dismissals: dismissals)
   }
 
   // MARK: - Fresh
@@ -132,7 +134,9 @@ final class FollowOfferTests: XCTestCase {
     XCTAssertNotNil(offer(l, try fresh()))
     let recorded = FollowOffer.dismissedLineage(afterStopFollowing: "doc-1")
     XCTAssertNil(offer(l, try fresh(), dismissed: recorded))
-    XCTAssertNotNil(FollowOffer.make(link: l, snapshot: try fresh(), lineage: "doc-2", dismissedLineage: recorded))
+    let dismissals = FollowDismissals()
+    dismissals.dismiss(recorded)
+    XCTAssertNotNil(FollowOffer.make(link: l, snapshot: try fresh(), lineage: "doc-2", dismissals: dismissals))
   }
 
   // MARK: - Fixtures
@@ -190,5 +194,26 @@ final class FollowOfferTests: XCTestCase {
     XCTAssertTrue(FollowOffer.isCompact(height: 699.5))
     XCTAssertFalse(FollowOffer.isCompact(height: 700))
     XCTAssertFalse(FollowOffer.isCompact(height: 800))
+  }
+
+  // MARK: - Long names and the own lineage (Task 11 review)
+
+  /// 64-byte names: the buttons' labels are bounded (`FollowLabels`); the view shows those that fit, and More… covers
+  /// the ones it leaves out.
+  func testLongNamesAreBoundedAndWhatTheViewLeavesOutGoesToMore() throws {
+    let huge = (1...4).map { lane("h\($0)", String(repeating: "\($0)", count: 64), "lead") }
+    let o = try XCTUnwrap(offer(link([leader("a", "ChordLab A", lanes: [lane("chords", "Chords", "")] + huge)]), try fresh()))
+    XCTAssertEqual(o.buttons.count, 5)
+    XCTAssertEqual(o.buttons.dropFirst().map(\.label.count), [16, 16, 16, 16])
+    XCTAssertFalse(o.showsMore)
+    XCTAssertFalse(o.showsMore(shown: 5))
+    XCTAssertTrue(o.showsMore(shown: 2))
+    let more = try XCTUnwrap(offer(link([leader("a", "ChordLab A"), leader("b", "ChordLab B")]), try fresh()))
+    XCTAssertTrue(more.showsMore(shown: more.buttons.count))      // another ChordLab: always
+  }
+
+  func testTheButtonsCarryTheDocumentsLineage() throws {
+    let o = try XCTUnwrap(offer(link([leader("a", "ChordLab A")]), try fresh()))
+    XCTAssertEqual(Set(o.buttons.map(\.ownLineage)), ["doc-1"])
   }
 }

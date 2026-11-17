@@ -9,12 +9,17 @@ struct FollowTarget: Hashable {
 }
 
 /// One entry of the Follow picker: a lane of a leader, with what a request needs (the leader's id, the lane's key,
-/// the leader's lineage as this list was drawn from it) and what the entry shows (`name`, the role's colour,
-/// whether others already play it, whether it is the lane this instance follows now).
+/// the leader's lineage as this list was drawn from it, and this instance's own document lineage when it was drawn)
+/// and what the entry shows (`name`, the role's colour, whether others already play it, whether it is the lane this
+/// instance follows now).
 struct FollowOption: Equatable, Identifiable {
   let leader: String
   let lane: String
   let leaderLineage: String
+  /// This instance's own document lineage (its clipboard token) when the entry was drawn. The request carries this one,
+  /// not the token current at the click: an entry drawn before a state load replaced this instance's document is
+  /// answered as stale by the shell (snapshot, then link state), never applied over the follow the load brought.
+  let ownLineage: String
   /// The leader's label as listed (display only; may be empty), for `FollowAttempt`'s sentence.
   let leaderLabel: String
   /// "Chords" for the chords lane, the track's name, or its role's name when the name is empty (`LaneTabs.label`).
@@ -46,9 +51,41 @@ struct FollowOption: Equatable, Identifiable {
     name + (isCurrent ? "  ✓" : "") + (detail.map { "  " + $0 } ?? "")
   }
 
-  /// The request's fields (`LinkCommands.follow`); `ChordLabState` stamps the own lineage.
+  /// "Another ChordLab already plays it.", "2 other ChordLabs already play it."; nil when no other ChordLab plays it
+  /// (the banner button's tooltip: the menu says it in `detail`).
+  var tooltip: String? {
+    switch otherTracks {
+    case 0: return nil
+    case 1: return "Another ChordLab already plays it."
+    default: return "\(otherTracks) other ChordLabs already play it."
+    }
+  }
+
+  /// The name on a button (the banner's), at most `FollowLabels.maxCharacters` long (`FollowLabels.short`).
+  var label: String { FollowLabels.short(name) }
+
+  /// The request's fields (`LinkCommands.follow`), without the own lineage.
   var command: [String: Any] {
     LinkCommands.follow(leader: leader, lane: lane, leaderLineage: leaderLineage)
+  }
+
+  /// What `ChordLabState.follow` sends: `command` stamped with `ownLineage`, the lineage the entry was drawn under.
+  var stampedCommand: [String: Any] {
+    CommandLineage.stamp(command, token: ownLineage)
+  }
+}
+
+/// The one rule for a name on a button (the banner's lanes, the follower panel's switch): at most `maxCharacters`
+/// characters, the middle replaced by "…" when longer, so the start and the end of a long name stay readable and no
+/// button grows past the window (track names may be 64 bytes long).
+enum FollowLabels {
+  static let maxCharacters = 16
+
+  static func short(_ name: String, max: Int = maxCharacters) -> String {
+    guard name.count > max, max >= 3 else { return name }
+    let keep = max - 1
+    let head = (keep + 1) / 2
+    return String(name.prefix(head)) + "…" + String(name.suffix(keep - head))
   }
 }
 
@@ -107,11 +144,25 @@ enum FollowOptions {
     var notes: [String] = []
     if let notice { notes.append(notice) }
     if let warning = warning(state) { notes.append(warning) }
-    if groups(state).isEmpty { notes.append(nothingToPick) }
+    if groups(state, ownLineage: "").isEmpty { notes.append(nothingToPick) }
     return notes
   }
 
-  static func groups(_ state: LinkStateJSON?) -> [FollowGroup] {
+  /// Whether the transport row's Follow menu shows: only while the picker offers something.
+  static func showsMenu(_ state: LinkStateJSON?) -> Bool {
+    !groups(state, ownLineage: "").isEmpty
+  }
+
+  /// The picker's sections: every group, or only the one of `leader` (the follower panel's switch to a copy,
+  /// `FollowerSwitchAction.choose`; none when that leader is not offered).
+  static func pickerGroups(_ state: LinkStateJSON?, ownLineage: String, leader: String? = nil) -> [FollowGroup] {
+    let all = groups(state, ownLineage: ownLineage)
+    guard let leader else { return all }
+    return group(leader: leader, in: all).map { [$0] } ?? []
+  }
+
+  /// The groups, each entry carrying `ownLineage`, this instance's document lineage as the list is drawn.
+  static func groups(_ state: LinkStateJSON?, ownLineage: String) -> [FollowGroup] {
     guard let state else { return [] }
     let current = state.following.map { FollowTarget(leader: $0.leader, lane: $0.lane) }
     var groups: [FollowGroup] = []
@@ -124,7 +175,8 @@ enum FollowOptions {
       var seenLanes = Set<String>()
       let lanes = leader.lanes.filter { LinkCommands.isSendable($0.lane) && seenLanes.insert($0.lane).inserted }
       let options = lanes.map { lane in
-        FollowOption(leader: leader.id, lane: lane.lane, leaderLineage: leader.lineage, leaderLabel: leader.label,
+        FollowOption(leader: leader.id, lane: lane.lane, leaderLineage: leader.lineage, ownLineage: ownLineage,
+                     leaderLabel: leader.label,
                      name: displayName(lane), role: lane.trackRole, followers: lane.followers,
                      isCurrent: current == FollowTarget(leader: leader.id, lane: lane.lane))
       }

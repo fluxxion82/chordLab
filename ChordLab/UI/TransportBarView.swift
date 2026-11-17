@@ -244,6 +244,7 @@ struct TransportBarView: View {
     .accessibilityElement(children: .contain)
     .accessibilityLabel("Length")
     .accessibilityValue(title)
+    .probeFrame("transport.length")
     .popover(isPresented: $showingCustomLength, arrowEdge: .leading) {
       CustomLengthView(initial: lengths.first ?? LengthOptions.newChordBeats(newChordBeats, meter: meter)) { beats in
         showingCustomLength = false

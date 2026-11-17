@@ -2,7 +2,7 @@ import SwiftUI
 
 /// The follower's window (per-track instruments plan section 5): while this ChordLab plays a lane of another one, this
 /// read-only panel replaces the editor (`ContentView`). It draws `FollowerPanelModel` and nothing of its own: the
-/// headline with the lane's role colour, the status line, the switch to a copy of the other ChordLab when there is one,
+/// headline with the lane's role colour, the status line (in orange when something must be repaired, `statusTone`), the switch to a copy of the other ChordLab when there is one,
 /// the model's `actions` (Change…, the picker as a menu, and Stop following; the status's emphasised one drawn
 /// prominent), the refusal sentence of the last choice (`ChordLabState.followNotice`), this instance's own Thru and
 /// Panic (the transport row's controls), the status lines the editor's bottom row would show (incomplete blocks, the
@@ -23,7 +23,7 @@ struct FollowerPanelView: View {
         headline
           .probeFrame("panel.headline")
         wrapped(Text(model.statusLine))
-          .foregroundStyle(Color.white.opacity(0.85))
+          .foregroundStyle(model.statusTone == .attention ? Color.orange : Color.white.opacity(0.85))
           .probeFrame("panel.status")
       }
       .probeFrame("panel.row.status")
@@ -49,7 +49,7 @@ struct FollowerPanelView: View {
       }
       .probeFrame("panel.row.controls")
 
-      if state.incompleteBlocks > 0 || state.lastError != nil {
+      if EditorRows.showsStatusLines(incompleteBlocks: state.incompleteBlocks, lastError: state.lastError) {
         VStack(alignment: .leading, spacing: 4) {
           StatusLines()
         }
@@ -126,6 +126,7 @@ struct FollowerPanelView: View {
             .menuStyle(.button)
         }
       }
+      .lineLimit(1)
       .fixedSize()
       .probeFrame("panel.switch.button")
     }
