@@ -705,8 +705,10 @@ std::optional<InstanceState> writableInstanceState(const InstanceState& instance
 ///  "routed":[{"lane":"chords"|"<uid>","followers":2,"trackId":0}, ...]}
 /// ```
 /// `self` is `view.id` and `view.label`, and `copyOf` is `view.copyOf` (its `id` as `leader`) or null: the
-/// instance this one is a copy of, set only while this one is not following and the original lives and is not
-/// following (`LinkView::copyOf`, `LinkRegistry` rule 11). `following` is null when `view.follow` is empty or
+/// instance this one is a copy of, set only while this one is not following, the original lives and is not
+/// following, and no follower is bound to this one or offered it as `switchTo` (`LinkView::copyOf`,
+/// `LinkRegistry` rule 11). `switchTo` is set only for a follower of a group pasted in one go (rule 8,
+/// `kPasteWindowMs`). `following` is null when `view.follow` is empty or
 /// `view.status` is `NotFollowing` (no registry view has one without the other); otherwise its fields are the
 /// follow's `leaderId`, `leaderLabel`, `laneUid`, `laneName` and `laneRole`, `status` names `view.status`, and
 /// `switchTo` is `view.switchTo` (its `id` as `leader`) or null. `leaders` and `routed` are `view.leaders` and

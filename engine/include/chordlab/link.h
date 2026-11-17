@@ -131,6 +131,11 @@ std::shared_ptr<const LinkFeed> buildLinkFeed(const Document& doc, std::string d
                                               std::string lineage, std::string label,
                                               const std::vector<std::string>& followed);
 
+/// How close in time two state loads that made copies must be to count as one paste of a group (`LinkRegistry`
+/// rule 8), in milliseconds, inclusive. A host duplicates or pastes the members of a group within milliseconds; a
+/// person needs far longer than two seconds between two duplications of their own.
+constexpr std::int64_t kPasteWindowMs = 2000;
+
 /// Generations of a link buffer start above this, own-buffer generations (publication.h, counting up from 1) stay
 /// below it: a scheduler that switches between the two buffers can never see one generation for two contents.
 constexpr std::uint32_t kLinkGenerationBase = 0x80000000u;
@@ -215,15 +220,17 @@ struct LinkView {
     /// When following: its follow, with `leaderId` and `leaderLabel` replaced by the bound leader's current id
     /// and label while bound (as stored while waiting).
     std::optional<LinkFollow> follow;
-    /// For a follower that is itself a copy and whose bound leader has a live copy that leads: that copy (the one
-    /// that became a copy last, if several). Empty otherwise.
+    /// For a follower of a duplicated or pasted *group* (`LinkRegistry` rule 8): it became a copy by a state load
+    /// that carried a follow, it is bound to a leader O, and a copy of O that is not following was made a copy
+    /// within `kPasteWindowMs` of it; that copy (the newest such, if several). Empty otherwise.
     std::optional<LinkInstanceRef> switchTo;
     /// For an instance that is not following and is a copy (`LinkRegistry` rule 3: its latest state load found its
     /// id held by another live instance, the *original*): the original, by its current id and label, while the
-    /// original lives and is not following (rule 11). Empty otherwise, and so always for a follower (a follower
-    /// that is a copy has `switchTo`, rule 8). The relation is to the original *instance*, as a binding is: it
-    /// names whatever id the original takes, survives whatever the original loads, and ends for good when the
-    /// original is removed (a new instance that takes its id back, as the undo of a delete does, is not the original).
+    /// original lives and is not following, no follower is bound to this instance, and no follower's `switchTo`
+    /// names this instance (rule 11). Empty otherwise, and so always for a follower (a follower of a pasted group
+    /// has `switchTo`, rule 8). The relation follows the original instance's token: it names whatever id the
+    /// original takes and survives whatever the original loads, and, unlike a binding, it does not re-form when a
+    /// new instance takes the original's id back (after a delete and its undo the copy has no `copyOf`).
     std::optional<LinkInstanceRef> copyOf;
     /// Every other live instance that is not following, in the order they were added.
     std::vector<LinkLeaderView> leaders;
@@ -248,7 +255,8 @@ struct LinkView {
 ///    lives and leads, whatever happens to ids.
 /// 3. *Ids on a state load* (`adoptState`), in this order: an instance with bound followers keeps its id; else if
 ///    another live instance holds `loadedId`, this one is a copy: it takes `freshId` and remembers which instance
-///    it was copied from (that instance, by its token, not its id); else it takes `loadedId`. Being a copy is the
+///    it was copied from (that instance, by its token, not its id), whether this load carried a follow, and when
+///    (the registry's clock, `Clock`); else it takes `loadedId`. Being a copy is the
 ///    outcome of the latest load alone: a load that is no copy (the first case, the third) ends it. The
 ///    constructor's id (`add`) is assumed unique. A load whose state has no instance block is no `adoptState`:
 ///    the instance keeps its id, its follow is cleared, and it is no copy any more, since the document it now
@@ -274,8 +282,16 @@ struct LinkView {
 ///    uid is not in the feed); `Muted` (the lane is in the feed and not audible); `Playing` otherwise. Right after
 ///    binding a follower is `Playing` although its buffer is still empty: content arrives with the leader's next
 ///    publish, which the hook returned to the caller causes at once.
-/// 8. *Copies.* For a follower that is itself a copy and whose bound leader has a live copy that leads,
-///    `switchTo` names that copy (the newest, if several: the one whose state load made it a copy last).
+/// 8. *Switch to a pasted leader.* `switchTo` of a follower f names the newest live instance c (the one whose
+///    state load made it a copy last) such that: f became a copy by a load that carried a follow (it was copied
+///    as a follower); f is bound to a leader O; c is a copy of O and is not following; and c and f were made
+///    copies within `kPasteWindowMs` of each other, in either order. Otherwise it is empty. This is the one case
+///    the hint is for: a group (a leader and its followers) duplicated or pasted in one go (plan I7), whose copied
+///    followers still follow the original leader. A host makes the members of such a group within milliseconds of
+///    each other, while a person needs far longer than `kPasteWindowMs` between two duplications. So a follower
+///    made from the leader's chain (a copy carrying no follow, which then follows by command), or a follower's
+///    chain duplicated now and the leader's chain later, is never offered a copy that is merely the next follower
+///    to be.
 /// 9. *Labels.* "ChordLab A", "ChordLab B", ... by order of `add`, one per instance for its lifetime (after Z:
 ///    "ChordLab 27", "ChordLab 28", ...). Display only.
 /// 10. *Serial.* Moves on every `add`, every `remove` and `publish` of a live instance, and on a `setFollow`,
@@ -283,14 +299,19 @@ struct LinkView {
 ///    an id, being a copy, a binding); does not move on a call that changes nothing (an identical follow, a load
 ///    that leaves all of that as it was, a refused `follow`, an unknown token), nor on `followedLanes`, `view` or
 ///    `serial`. So it moves whenever some view's `copyOf` or `switchTo` changes: those change only with a
-///    removal, a follow's link, an id or being a copy.
+///    removal, a follow's link, a binding, an id or being a copy (the times a copy was made are fixed with it;
+///    the clock moving on changes no view).
 /// 11. *Copy of.* For an instance that is not following and is a copy (rule 3), `copyOf` names the instance it
-///    was copied from while that instance lives and is not following; it is empty while the original follows and
+///    was copied from while that instance lives and is not following, no follower is bound to this instance, and
+///    no follower's `switchTo` (rule 8) names this instance: a copy that others play from, or the new leader of a
+///    pasted group, is a leader in its own right and is never invited to follow (it would leave its followers
+///    waiting); it gets `copyOf` back when that ends. It is empty while the original follows and
 ///    names it again when it stops (the copy still holds a copy of its document: following changes no document,
 ///    plan I1), and the same holds for the copy's own following (empty while it follows, back when it stops). The
 ///    original's state loads do not end it (whatever id or document it takes, it is still the instance the copy
 ///    was made from, and its current lanes are what the copy can follow); its removal ends it for good (tokens
-///    are never handed out twice, so a successor that takes the original's id back is another instance). A copy of
+///    are never handed out twice, so, unlike a binding, it does not re-form when a successor takes the original's
+///    id back). A copy of
 ///    a copy names the instance its own load collided with, never that one's original, also once that instance is
 ///    gone. Two copies of one original each name it.
 ///
@@ -305,14 +326,20 @@ public:
     /// again. Must only republish; must be safe to call after the instance is gone (the shell guards it).
     using Hook = std::function<void()>;
     using Hooks = std::vector<std::shared_ptr<const Hook>>;
+    /// A monotonic time in milliseconds (rule 3: when a state load made an instance a copy). Called under the
+    /// registry's mutex, only from `adoptState`: it must not call into the registry, and must not go backwards.
+    using Clock = std::function<std::int64_t()>;
 
+    /// A registry on `std::chrono::steady_clock` (milliseconds).
     LinkRegistry();
+    /// A registry on `clock` (tests drive their own; an empty `clock` means `steady_clock`).
+    explicit LinkRegistry(Clock clock);
     ~LinkRegistry();
     LinkRegistry(const LinkRegistry&) = delete;
     LinkRegistry& operator=(const LinkRegistry&) = delete;
 
-    /// The process's registry: heap-allocated on first use and never destroyed, so instances torn down during
-    /// static destruction still find it.
+    /// The process's registry, on `std::chrono::steady_clock`: heap-allocated on first use and never destroyed,
+    /// so instances torn down during static destruction still find it.
     static LinkRegistry& shared();
 
     /// A new instance: a leader, following nothing, with id `id` (assumed unique among live instances) and the
@@ -331,9 +358,10 @@ public:
         Hooks hooks;
     };
     /// A state load: the instance takes `loadedId` unless rule 3 says otherwise, and its follow becomes `follow`.
-    /// `freshId` is used when the instance turns out to be a copy. A follow of the instance's own (resulting) id
-    /// waits forever. Being a copy (here and for rules 8 and 11) is the
-    /// outcome of the latest load alone: a later load that is no copy, including one that keeps the id because
+    /// `freshId` is used when the instance turns out to be a copy; then the registry also records whether `follow`
+    /// is set (the load carried a follow) and the clock's time, for rule 8. A follow of the instance's own
+    /// (resulting) id waits forever. Being a copy (here and for rules 8 and 11) is the outcome of the latest load
+    /// alone: a later load that is no copy, including one that keeps the id because
     /// followers are bound, ends it, and a later load that is a copy again (of the same original or another) makes
     /// it the copy of the instance that load collided with. The id is decided before the follow is applied, so a
     /// bound leader that loads a follower's state keeps its id and then loses its dependents (rule 5).
