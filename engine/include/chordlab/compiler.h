@@ -123,8 +123,8 @@ struct LaneSelection {
 /// silences the selected ones, and a lane that is muted and soloed sounds in a selection that includes it.
 ///
 /// The chords lane is keyed `chordsLane()`, track `i` by `trackLane(doc.tracks[i].id)`. A listed key that names no
-/// lane of `doc` (an unknown track id) is ignored: it includes nothing, and an `AllExcept` list holding only such
-/// keys selects every lane.
+/// lane of `doc` (an unknown track id) is ignored: listing it changes nothing (`Only` gains no lane from it,
+/// `AllExcept` loses none).
 ///
 /// `endBeat` and `feelLimited` are `compile(doc)`'s whatever is selected. The paired merge, the drop rule for
 /// notes the merge shortened, the clipping of track notes at `endBeat` (a note clipped to under `kMinNoteTicks`

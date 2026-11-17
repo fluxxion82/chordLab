@@ -1730,16 +1730,22 @@ struct ThreeLanes {
 
 }  // namespace
 
-TEST_CASE("compilePlaybackFor: every lane is compilePlayback") {
-    const auto checkEvery = [](const Document& doc) {
-        const Compiled every = compilePlaybackFor(doc, LaneSelection{});
+TEST_CASE("compilePlaybackFor: selections equivalent to every lane are compilePlayback") {
+    // compilePlayback forwards to the default selection, so it is compared with selections built differently.
+    const auto checkSame = [](const Document& doc, const LaneSelection& selection) {
+        const Compiled other = compilePlaybackFor(doc, selection);
         const Compiled playback = compilePlayback(doc);
-        CHECK(every.events == playback.events);
-        CHECK(bitsOf(every.endBeat) == bitsOf(playback.endBeat));
-        CHECK(every.feelLimited == playback.feelLimited);
-        checkPlayable(every);
+        CHECK(other.events == playback.events);
+        CHECK(bitsOf(other.endBeat) == bitsOf(playback.endBeat));
+        CHECK(other.feelLimited == playback.feelLimited);
+        checkPlayable(other);
     };
-    for (const DocumentStore& store : identityDocuments()) checkEvery(store.doc());
+    for (const DocumentStore& store : identityDocuments()) {
+        REQUIRE(store.doc().tracks.empty());
+        checkSame(store.doc(), LaneSelection{});
+        checkSame(store.doc(), only({chordsLane()}));
+        checkSame(store.doc(), allExcept({trackLane(9999)}));
+    }
     for (unsigned mask = 0; mask < 64; ++mask) {
         CAPTURE(mask);
         DocumentStore store = fourBars();
@@ -1751,7 +1757,10 @@ TEST_CASE("compilePlaybackFor: every lane is compilePlayback") {
         if (mask & 8u) REQUIRE(store.setTrackSolo(a, true));
         if (mask & 16u) REQUIRE(store.setTrackMute(b, true));
         if (mask & 32u) REQUIRE(store.setTrackSolo(b, true));
-        checkEvery(store.doc());
+        checkSame(store.doc(), LaneSelection{});
+        checkSame(store.doc(), only({chordsLane(), trackLane(a), trackLane(b)}));
+        checkSame(store.doc(), only({trackLane(b), chordsLane(), trackLane(a)}));
+        checkSame(store.doc(), allExcept({trackLane(9999)}));
     }
 }
 
@@ -1801,8 +1810,6 @@ TEST_CASE("compilePlaybackFor: LaneKey equality and LaneSelection::includes") {
 
 TEST_CASE("compilePlaybackFor: a single lane is that lane's events") {
     const ThreeLanes d;
-    const Document& doc = d.store.doc();
-    CHECK(d.chordEvents == compile(doc).events);
     CHECK(d.playing(only({chordsLane()})) == d.chordEvents);
     CHECK(d.playing(only({trackLane(d.a)})) == d.aEvents);
     CHECK(d.playing(only({trackLane(d.b)})) == d.bEvents);
@@ -1908,6 +1915,36 @@ TEST_CASE("compilePlaybackFor: the merge follows the output, not the document") 
     }
 }
 
+TEST_CASE("compilePlaybackFor: the merge runs among the selected lanes of a subset") {
+    DocumentStore store = fourBars();  // C: 60 64 67 over [0, 4)
+    const int b = addTrackWith(store, {ns(36, 0, kFeelTicksPerBeat)});
+    const Events bEvents{{0.0, true, 36, 100}, {1.0, false, 36, 0}};
+    const auto check = [&](const Compiled& result) { checkFrame(store.doc(), result); };
+    SUBCASE("a later track note retriggers the chord tone among the selected lanes only") {
+        const int a = addTrackWith(store, {ns(60, kFeelTicksPerBeat, kFeelTicksPerBeat, 90)});
+        const Compiled withA = compilePlaybackFor(store.doc(), allExcept({trackLane(b)}));
+        CHECK(soundingIn(withA, 60, 0.0, 4.0) == Soundings{{0.0, 1.0, 60, 100}, {1.0, 2.0, 60, 90}});
+        CHECK(soundingIn(withA, 36).empty());
+        check(withA);
+        const Compiled withoutA = compilePlaybackFor(store.doc(), allExcept({trackLane(a)}));
+        CHECK(soundingIn(withoutA, 60, 0.0, 4.0) == Soundings{{0.0, 4.0, 60, 100}});
+        CHECK(soundingIn(withoutA, 36) == Soundings{{0.0, 1.0, 36, 100}});
+        check(withoutA);
+        CHECK(compilePlaybackFor(store.doc(), only({trackLane(b)})).events == bEvents);
+    }
+    SUBCASE("the drop rule applies inside a subset") {
+        const int a = addTrackWith(store, {ns(60, kMinNoteTicks - 1, kFeelTicksPerBeat, 90)});
+        const double at = (kMinNoteTicks - 1) / kTicksPerBeat;
+        const Compiled withA = compilePlaybackFor(store.doc(), allExcept({trackLane(b)}));
+        CHECK(soundingIn(withA, 60, 0.0, 4.0) == Soundings{{at, at + 1.0, 60, 90}});  // the 4-tick chord fragment is gone
+        check(withA);
+        const Compiled withoutA = compilePlaybackFor(store.doc(), allExcept({trackLane(a)}));
+        CHECK(soundingIn(withoutA, 60, 0.0, 4.0) == Soundings{{0.0, 4.0, 60, 100}});
+        CHECK(soundingIn(withoutA, 36) == Soundings{{0.0, 1.0, 36, 100}});
+        check(withoutA);
+    }
+}
+
 TEST_CASE("compilePlaybackFor: a track note clipped at endBeat below kMinNoteTicks is kept, as in playback") {
     DocumentStore store;
     for (int i = 0; i < 3; ++i) store.appendChord(kC, 0.2506, 100);  // ends at 721.728 ticks
@@ -1918,7 +1955,9 @@ TEST_CASE("compilePlaybackFor: a track note clipped at endBeat below kMinNoteTic
     CHECK(soundingIn(track, 40) == expected);
     CHECK(track.events.size() == 2);
     checkFrame(store.doc(), track);
-    CHECK(soundingIn(compilePlaybackFor(store.doc(), allExcept({chordsLane()})), 40) == expected);
+    const Compiled rest = compilePlaybackFor(store.doc(), allExcept({chordsLane()}));
+    CHECK(soundingIn(rest, 40) == expected);
+    checkFrame(store.doc(), rest);
 }
 
 TEST_CASE("compilePlaybackFor: feel documents play the chords as compile does and the track at tick / 960") {
@@ -1935,5 +1974,6 @@ TEST_CASE("compilePlaybackFor: feel documents play the chords as compile does an
         checkFrame(store.doc(), track);
         const Compiled rest = compilePlaybackFor(store.doc(), allExcept({chordsLane()}));
         CHECK(rest.events == track.events);
+        checkFrame(store.doc(), rest);
     }
 }
