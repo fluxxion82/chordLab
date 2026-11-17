@@ -3,6 +3,7 @@
 #include "chordlab/chord.h"
 #include "chordlab/document.h"
 #include "chordlab/limits.h"
+#include "chordlab/link.h"
 #include "chordlab/publication.h"
 #include "chordlab/tracks.h"
 
@@ -555,4 +556,108 @@ TEST_CASE("publication: a real document at the caps fills a slot with exactly kM
     CHECK(slot->count == kMaxSnapshotEvents);
     CHECK(eventsOf(*slot) == compilePlayback(store.doc()).events);
     CHECK(slot->events[kMaxSnapshotEvents - 1].beat <= slot->endBeat);
+}
+
+// --- per-track instruments (M1): the leader's own fill -----------------------------------------------------------
+
+namespace {
+
+LaneSelection allExcept(std::vector<LaneKey> lanes) {
+    return LaneSelection{LaneSelection::Mode::AllExcept, std::move(lanes)};
+}
+
+/// Two chords, track A (36 on beat 0 and a 60 on beat 1 that cuts C's 60 in the every-lane result) and track B
+/// (38 on beat 2).
+struct Leader {
+    DocumentStore store;
+    int a = 0;
+    int b = 0;
+    Leader() {
+        store.appendChord(chord(0, "maj"), 4.0, 100);
+        store.appendChord(chord(9, "min"), 4.0, 100);
+        a = addTrackWith(store, {NoteSpec{36, 0, 960, 90}, NoteSpec{60, 960, 960, 110}});
+        b = addTrackWith(store, {NoteSpec{38, 1920, 480, 100}});
+    }
+};
+
+}  // namespace
+
+TEST_CASE("publication: fillSlot with a selection publishes compilePlaybackFor of that selection") {
+    const Leader d;
+    const Document& doc = d.store.doc();
+    const std::vector<LaneSelection> selections{
+        LaneSelection{},
+        allExcept({trackLane(d.a)}),
+        allExcept({trackLane(d.b)}),
+        allExcept({trackLane(d.a), trackLane(d.b)}),
+        allExcept({chordsLane()}),
+        LaneSelection{LaneSelection::Mode::Only, {trackLane(d.b)}},
+    };
+    for (std::size_t i = 0; i < selections.size(); ++i) {
+        CAPTURE(i);
+        const Compiled expected = compilePlaybackFor(doc, selections[i]);
+        if (i > 0) REQUIRE(expected.events != compilePlayback(doc).events);
+        Publication last;
+        auto slot = newSlot();
+        REQUIRE(fillSlot(doc, selections[i], *slot, last));
+        CHECK(last.generation == 1);
+        CHECK(eventsOf(*slot) == expected.events);
+        CHECK(last.compiled.events == expected.events);
+        CHECK(slot->endBeat == expected.endBeat);
+        CHECK(slot->endBeat == 8.0);
+        CHECK(slot->loop == true);
+        CHECK(slot->followHost == true);
+        CHECK(slot->midiThru == true);
+        CHECK_FALSE(fillSlot(doc, selections[i], *slot, last));
+    }
+}
+
+TEST_CASE("publication: a change of the own selection alone is content when it changes what plays") {
+    Leader d;
+    Publication last;
+    auto slot = newSlot();
+    REQUIRE(fillSlot(d.store.doc(), LaneSelection{}, *slot, last));
+    REQUIRE(last.generation == 1);
+    const std::vector<NoteEvent> every = eventsOf(*slot);
+
+    // A becomes followed: the leader stops playing it.
+    REQUIRE(fillSlot(d.store.doc(), allExcept({trackLane(d.a)}), *slot, last));
+    CHECK(last.generation == 2);
+    CHECK(eventsOf(*slot) == compilePlaybackFor(d.store.doc(), allExcept({trackLane(d.a)})).events);
+    CHECK(eventsOf(*slot) != every);
+    CHECK_FALSE(fillSlot(d.store.doc(), allExcept({trackLane(d.a)}), *slot, last));
+
+    // B instead.
+    REQUIRE(fillSlot(d.store.doc(), allExcept({trackLane(d.b)}), *slot, last));
+    CHECK(last.generation == 3);
+    CHECK(eventsOf(*slot) == compilePlaybackFor(d.store.doc(), allExcept({trackLane(d.b)})).events);
+
+    // Follow Live alone under a selection: the same generation.
+    d.store.setFollowHost(false);
+    REQUIRE(fillSlot(d.store.doc(), allExcept({trackLane(d.b)}), *slot, last));
+    CHECK(last.generation == 3);
+    CHECK(slot->followHost == false);
+
+    // A muted lane plays nowhere: following it or not changes nothing that sounds, so nothing is published.
+    REQUIRE(d.store.setTrackMute(d.a, true));
+    REQUIRE(fillSlot(d.store.doc(), allExcept({trackLane(d.a)}), *slot, last));
+    CHECK(last.generation == 4);
+    CHECK_FALSE(fillSlot(d.store.doc(), LaneSelection{}, *slot, last));
+    CHECK_FALSE(fillSlot(d.store.doc(), *slot, last));  // the three-argument fill: the same every-lane content
+    CHECK(last.generation == 4);
+}
+
+TEST_CASE("publication: own generations count up from 1, below kLinkGenerationBase where link generations start") {
+    // A leader's own buffer and a follower's link buffer feed one scheduler in turn (link.h), so one generation must
+    // never stand for two contents: own generations count 1, 2, ... (one per content change: 2^31 - 1 changes before
+    // reaching the base), link generations start at kLinkGenerationBase + 1.
+    const Leader d;
+    Publication last;
+    auto slot = newSlot();
+    for (std::uint32_t i = 1; i <= 1000; ++i) {
+        const LaneSelection own = (i % 2 == 0) ? allExcept({trackLane(d.a)}) : LaneSelection{};
+        REQUIRE(fillSlot(d.store.doc(), own, *slot, last));
+        CHECK(last.generation == i);
+        CHECK(last.generation < kLinkGenerationBase);
+    }
 }

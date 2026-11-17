@@ -11,7 +11,9 @@
 // undo history) and times the shell's command path (ChordLab::OnMessage in ChordLab/ChordLab.mm): applyCommandJson
 // with the dirty check, RebuildPaletteLocked, PublishSnapshotLocked (fillSlot into a preallocated slot) and
 // PushSnapshot (snapshotJson with SnapshotExtras), for a note edit, a selection change and a chord length edit that
-// ripples every note. Then the audio thread: Scheduler::adopt of a full kMaxSnapshotEvents slot, the flush-and-chase
+// ripples every note; and (d) the note edit again on a leader whose four tracks are all followed (per-track
+// instruments M1): its own fillSlot plays the chords only (AllExcept the four tracks), then it builds the link feed
+// with the four tracks compiled and fills four followers' slots from it (fillSlotFromFeed). Then the audio thread: Scheduler::adopt of a full kMaxSnapshotEvents slot, the flush-and-chase
 // block after it, seek-and-chase blocks and steady blocks at 64 frames.
 
 #include "chordlab/chord.h"
@@ -21,6 +23,7 @@
 #include "chordlab/guide.h"
 #include "chordlab/json_api.h"
 #include "chordlab/limits.h"
+#include "chordlab/link.h"
 #include "chordlab/palette.h"
 #include "chordlab/publication.h"
 #include "chordlab/scheduler.h"
@@ -137,21 +140,61 @@ Bench buildWorst(const Feel& feel) {
 
 // --- the shell's command path ---------------------------------------------------------------------------------
 
-/// What ChordLab::OnMessage does under mModelMutex for an accepted command, then PushSnapshot's section.
+/// What a leader adds when every track of its document is followed by another instance (per-track instruments
+/// M1): its own slot carries every lane except the followed ones, and each publish builds a feed and fills each
+/// follower's link slot from it (in the plug-in the registry does those fills under its mutex).
+struct LinkedLeader {
+    LaneUids uids;
+    LaneSelection own{LaneSelection::Mode::AllExcept, {}};
+    std::vector<std::string> followed;
+    std::vector<std::unique_ptr<SnapshotSlot>> followerSlots;
+    std::vector<Publication> followerPublications;
+    std::shared_ptr<const LinkFeed> feed;
+
+    explicit LinkedLeader(const Document& doc) {
+        int n = 0;
+        require(uids.cover(doc, [&n] { return "lane-uid-" + std::to_string(++n); }), "cover changed nothing");
+        for (const Track& t : doc.tracks) {
+            own.lanes.push_back(trackLane(t.id));
+            followed.push_back(uids.uidOf(t.id));
+            followerSlots.push_back(std::make_unique<SnapshotSlot>());
+            followerPublications.emplace_back();
+        }
+    }
+
+    /// The link part of a publish: the feed, then every follower's fill.
+    void publishLinks(const Document& doc) {
+        feed = buildLinkFeed(doc, "bench-document", uids, "bench-lineage", "ChordLab A", followed);
+        for (std::size_t i = 0; i < followed.size(); ++i) {
+            fillSlotFromFeed(feed.get(), followed[i], "bench-document", *followerSlots[i], followerPublications[i]);
+        }
+    }
+};
+
+/// What ChordLab::OnMessage does under mModelMutex for an accepted command, then PushSnapshot's section. With a
+/// `LinkedLeader`, the fill is the leader's own (its selection) and the link part follows it.
 struct Shell {
     DocumentStore& store;
     Palette palette;
     std::unique_ptr<SnapshotSlot> slot = std::make_unique<SnapshotSlot>();
     Publication publication;
     std::string lastJson;
+    std::unique_ptr<LinkedLeader> leader;
 
-    explicit Shell(DocumentStore& s) : store(s), palette(buildPalette(s.doc().browsedKey, s.doc().projectKey)) {
-        fillSlot(store.doc(), *slot, publication);
+    explicit Shell(DocumentStore& s, bool linked = false)
+        : store(s), palette(buildPalette(s.doc().browsedKey, s.doc().projectKey)) {
+        if (linked) {
+            leader = std::make_unique<LinkedLeader>(store.doc());
+            fillSlot(store.doc(), leader->own, *slot, publication);
+            leader->publishLinks(store.doc());
+        } else {
+            fillSlot(store.doc(), *slot, publication);
+        }
     }
 };
 
 struct Sample {
-    double apply, palette, fill, snapshot, total;
+    double apply, palette, fill, link, snapshot, total;
 };
 
 Sample runCommand(Shell& shell, const std::string& json) {
@@ -169,23 +212,33 @@ Sample runCommand(Shell& shell, const std::string& json) {
     shell.palette = buildPalette(shell.store.doc().browsedKey, shell.store.doc().projectKey);  // RebuildPaletteLocked
     s.palette = msSince(t1);
     const auto t2 = Clock::now();
-    fillSlot(shell.store.doc(), *shell.slot, shell.publication);  // PublishSnapshotLocked (publish itself is a swap)
+    if (shell.leader) {
+        fillSlot(shell.store.doc(), shell.leader->own, *shell.slot, shell.publication);
+    } else {
+        fillSlot(shell.store.doc(), *shell.slot, shell.publication);  // PublishSnapshotLocked (publish is a swap)
+    }
     s.fill = msSince(t2);
+    if (shell.leader) {
+        const auto tl = Clock::now();
+        shell.leader->publishLinks(shell.store.doc());
+        s.link = msSince(tl);
+    }
     const auto t3 = Clock::now();
     const SnapshotExtras extras{shell.store.noteSelection(), shell.store.revision()};
     shell.lastJson = snapshotJson(shell.store.doc(), shell.palette, shell.store.selectedEventId(),
                                   shell.store.selectedEventIds(), extras);
     s.snapshot = msSince(t3);
-    s.total = s.apply + s.palette + s.fill + s.snapshot;
+    s.total = s.apply + s.palette + s.fill + s.link + s.snapshot;
     return s;
 }
 
-void printPath(const char* name, const std::vector<Sample>& samples) {
-    std::vector<double> apply, palette, fill, snapshot, total;
+void printPath(const char* name, const std::vector<Sample>& samples, bool linked = false) {
+    std::vector<double> apply, palette, fill, link, snapshot, total;
     for (const Sample& s : samples) {
         apply.push_back(s.apply);
         palette.push_back(s.palette);
         fill.push_back(s.fill);
+        link.push_back(s.link);
         snapshot.push_back(s.snapshot);
         total.push_back(s.total);
     }
@@ -199,7 +252,12 @@ void printPath(const char* name, const std::vector<Sample>& samples) {
     };
     row("applyCommandJson (+ dirty check)", apply);
     row("buildPalette", palette);
-    row("fillSlot (compilePlayback)", fill);
+    if (linked) {
+        row("fillSlot (AllExcept four tracks)", fill);
+        row("buildLinkFeed + 4 fillSlotFromFeed", link);
+    } else {
+        row("fillSlot (compilePlayback)", fill);
+    }
     row("snapshotJson", snapshot);
     row("total", total);
 }
@@ -273,9 +331,27 @@ void commandPaths(const char* variant, const Feel& feel, int runs, const char* d
         ripple.push_back(runCommand(shell, json));
     }
 
+    // (d) the note edit of (a) on a leader whose four tracks are all followed: its own fill, the feed and the four
+    // followers' fills. The edited note is in a followed track, so the leader's own content does not change (its
+    // fill compiles and compares) while one follower's does.
+    Shell linkedShell(store, true);
+    std::vector<Sample> linkedNoteEdit;
+    for (int i = 0; i < runs; ++i) {
+        const bool away = i % 2 == 0;
+        const std::string json = "{\"schema\":1,\"cmd\":\"updateNotes\",\"trackId\":" + std::to_string(trackId) +
+                                 ",\"baseRevision\":" + std::to_string(store.revision()) + ",\"notes\":[{\"id\":" +
+                                 std::to_string(moved.id) + ",\"pitch\":" + std::to_string(moved.pitch - (away ? 1 : 0)) +
+                                 ",\"start\":" + std::to_string(baseStart + (away ? 240 : 0)) + "}]}";
+        linkedNoteEdit.push_back(runCommand(linkedShell, json));
+    }
+    require(linkedShell.leader->followerPublications[0].generation == kLinkGenerationBase + 1 +
+                                                                           static_cast<std::uint32_t>(runs),
+            "the followed track's follower did not see every edit");
+
     printPath("(a) note edit: updateNotes", noteEdit);
     printPath("(b) selection change: selectNotes", selection);
     printPath("(c) chord timing edit: setLength chord 0 (ripples every note)", ripple);
+    printPath("(d) note edit, four tracks followed: updateNotes on the leader", linkedNoteEdit, true);
 
     // What the stages are made of, timed alone on the same document.
     std::printf("  parts (ms, %d runs each)\n", runs);
@@ -298,6 +374,10 @@ void commandPaths(const char* variant, const Feel& feel, int runs, const char* d
               }));
     printPart("compile (chords)", timeRuns(runs, [&](int) { gSink = gSink + compile(store.doc()).events.size(); }));
     printPart("compilePlayback", timeRuns(runs, [&](int) { gSink = gSink + compilePlayback(store.doc()).events.size(); }));
+    printPart("buildLinkFeed, four tracks followed", timeRuns(runs, [&](int) {
+                  gSink = gSink + buildLinkFeed(store.doc(), "d", linkedShell.leader->uids, "l", "L",
+                                                linkedShell.leader->followed)->lanes.size();
+              }));
     printPart("voicings", timeRuns(runs, [&](int) { gSink = gSink + voicings(store.doc()).size(); }));
     printPart("chordPlaySpans (given compile)", timeRuns(runs, [&](int) {
                   gSink = gSink + chordPlaySpans(store.doc(), chords).size();
