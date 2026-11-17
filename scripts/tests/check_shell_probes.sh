@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Regression probes for the guards of `scripts/check.sh --shell` (and of --views' refusal next to an install),
-# filesystem only: no xcodebuild, cmake, ctest or swift ever runs. Shims of those four (first on PATH) record their calls and do nothing else, except that the
-# xcodebuild shim reports success and creates an empty ChordLab binary under the DSTROOT it is given, so that the
-# sections after the build can be reached. Everything happens in a fresh directory under /private/tmp made by this
-# run, plus (for one probe) a fresh build-check-probe.XXXXXX directory at the repository root (ignored by git:
-# build-*), the stand-in for a place outside every allowed scratch root. Each is removed at the end, and only if this
-# run created it.
+# filesystem only: no xcodebuild, cmake, ctest or swift ever runs. Shims of those four (first on PATH) record their
+# calls and do nothing else, except that the xcodebuild shim reports success and creates an empty ChordLab binary
+# under the DSTROOT it is given, so that the sections after the build can be reached. Everything happens in a fresh
+# directory under /private/tmp made by this run, plus (for one probe) a fresh build-check-probe.XXXXXX directory at
+# the repository root (ignored by git: build-*), the stand-in for a place outside every allowed scratch root. Each is
+# removed at the end, and only if this run created it.
 #
 #   scripts/tests/check_shell_probes.sh
 #

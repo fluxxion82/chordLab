@@ -100,11 +100,7 @@ struct Scenario {
     Scenario(name: "banner-fresh", setup: { h, state, _ in
       // A fresh instance (no chords, no tracks) that sees ChordLab A and is no copy.
       state.applySnapshot(json: h.data("snapshot-home-empty.json"))
-      state.applyLinkState(json: h.json("link-state-copy.json") { object in
-        var me = object["self"] as! [String: Any]
-        me["copyOf"] = NSNull()
-        object["self"] = me
-      })
+      state.applyLinkState(json: h.freshLink())
     }, checks: { h, r in
       h.checkEditor(r, banner: true, followMenu: true)
       h.checkBanner(r)
@@ -119,33 +115,60 @@ struct Scenario {
     }),
     Scenario(name: "banner-compact", setup: { h, state, shell in
       // The fullest banner: five lanes of ChordLab A, More… (a second ChordLab), and the sentence a refused click
-      // leaves under it (the stub shell answers the follow inline with the link state unchanged, as the plug-in
-      // answers a stale leader lineage).
+      // leaves (the stub shell answers the follow inline with the link state unchanged, as the plug-in answers a stale
+      // leader lineage): in its own line in a tall window, in the sentence's place in a short one.
       state.applySnapshot(json: h.data("snapshot-home-empty.json"))
-      let link = h.json("link-state-copy.json") { object in
-        var me = object["self"] as! [String: Any]
-        me["copyOf"] = NSNull()
-        object["self"] = me
-        var leaders = object["leaders"] as! [[String: Any]]
-        var lanes = leaders[0]["lanes"] as! [[String: Any]]
-        lanes.append(["audible": true, "chords": false, "followers": 0, "lane": "uid-4", "name": "Keys", "role": "other"])
-        lanes.append(["audible": true, "chords": false, "followers": 0, "lane": "uid-5", "name": "Arp", "role": "lead"])
-        leaders[0]["lanes"] = lanes
-        leaders.append(["id": "id-second", "label": "ChordLab C", "lineage": "lineage-second",
-                        "lanes": [["audible": true, "chords": true, "followers": 0, "lane": "chords", "name": "Chords",
-                                   "role": ""]]])
-        object["leaders"] = leaders
-      }
+      let link = h.freshLink(extraLanes: [("uid-4", "Keys", "other"), ("uid-5", "Arp", "lead")], secondLeader: true)
       state.applyLinkState(json: link)
-      shell.answerLink = link
-      h.clickFirstBannerButton(state)
+      h.refuseFirstBannerClick(state, shell, answer: link)
     }, checks: { h, r in
       h.checkEditor(r, banner: true, followMenu: true)
       h.checkBanner(r)
-      h.check(r.frames["banner.notice"] != nil, "the refusal sentence shows under the banner")
+      let compact = FollowOffer.isCompact(height: r.size.height)
+      h.check((r.frames["banner.notice"] != nil) == !compact,
+              compact ? "the refusal sentence takes the banner's sentence's place" : "the refusal sentence shows under the banner")
       h.check(r.state.followNotice == FollowAttempt.refusalText(leaderLabel: "ChordLab A"),
               "the refusal sentence is FollowAttempt's for ChordLab A")
       h.checkFollowRequest(r)
+    }),
+    Scenario(name: "banner-long-names", setup: { h, state, _ in
+      // Four tracks with 64-character names (the longest a name may be), no spaces.
+      state.applySnapshot(json: h.data("snapshot-home-empty.json"))
+      state.applyLinkState(json: h.freshLink(lanes: (1...4).map { ("long-\($0)", String(repeating: "\($0)", count: 64), "lead") }))
+    }, checks: { h, r in
+      h.checkEditor(r, banner: true, followMenu: true)
+      h.checkBanner(r)
+      h.check(r.frames["banner.more"] != nil, "the lanes that do not fit go to More…")
+    }),
+    Scenario(name: "banner-realistic-names", setup: { h, state, _ in
+      // Five tracks with 16-character names.
+      state.applySnapshot(json: h.data("snapshot-home-empty.json"))
+      state.applyLinkState(json: h.freshLink(lanes: ["Warm pad strings", "Sub bass in mono", "Arpeggio lead 01",
+                                                     "Counter melody 2", "Bell plucks high"].enumerated()
+                                                       .map { ("r-\($0.offset)", $0.element, "other") }))
+    }, checks: { h, r in
+      h.checkEditor(r, banner: true, followMenu: true)
+      h.checkBanner(r)
+    }),
+    Scenario(name: "banner-wide-names", setup: { h, state, _ in
+      // A copy's sentence (the longest), five lanes with names in wide letters, and More… (a second ChordLab): the
+      // banner keeps one line and leaves to More… the lanes that do not fit.
+      state.applySnapshot(json: h.data("snapshot-home-progression.json"))
+      let link = h.json("link-state-copy.json") { object in
+        var leaders = object["leaders"] as! [[String: Any]]
+        leaders[0]["lanes"] = [h.lane("chords", "Chords", ""), h.lane("w1", "WMWMWMWMWMWMWMWM", "bass"),
+                               h.lane("w2", "MWMWMWMWMWMWMWMW", "lead"), h.lane("w3", "WMWMWMWMWMWMWMWM", "other"),
+                               h.lane("w4", "MWMWMWMWMWMWMWMW", "lead")]
+        leaders.append(["id": "id-second", "label": "ChordLab C", "lineage": "lineage-second",
+                        "lanes": [h.lane("chords", "Chords", "")]])
+        object["leaders"] = leaders
+      }
+      state.applyLinkState(json: link)
+    }, checks: { h, r in
+      h.checkEditor(r, banner: true, followMenu: true)
+      h.checkBanner(r)
+      h.check(r.state.followOffer?.buttons.count == 5, "the offer holds five lanes")
+      h.check(r.frames["banner.more"] != nil, "More… shows")
     }),
     Scenario(name: "menu", setup: { h, state, _ in
       // A leader whose chords and Lead others play (routed): no banner, the Follow menu with its warning.
@@ -203,25 +226,45 @@ struct Scenario {
       state.applySnapshot(json: h.data("snapshot-tracks.json"))
       let link = h.json("link-state-follower.json") { object in
         var leaders = object["leaders"] as! [[String: Any]]
-        leaders[1]["lanes"] = [["audible": true, "chords": true, "followers": 0, "lane": "chords", "name": "Chords",
-                                "role": ""],
-                               ["audible": true, "chords": false, "followers": 0, "lane": "uid-9", "name": "Bass 2",
-                                "role": "bass"]]
+        leaders[1]["lanes"] = [h.lane("chords", "Chords", ""), h.lane("uid-9", "Bass 2", "bass")]
         object["leaders"] = leaders
       }
       state.applyLinkState(json: link)
-      shell.answerLink = link
-      if let option = FollowOptions.groups(state.linkState).first?.options.first(where: { !$0.isCurrent }) {
+      shell.onLink = { _ in state.applyLinkState(json: link) }
+      if let option = FollowOptions.groups(state.linkState, ownLineage: state.clipboardToken).first?.options
+        .first(where: { !$0.isCurrent }) {
         state.follow(option)
       }
+      shell.onLink = nil
       state.applyStatus(json: Data(#"{"schema":1,"incompleteBlocks":3}"#.utf8))
       state.applyError(json: Data(#"{"schema":1,"error":"a refused command's text, long enough to need a second line in the narrowest panel"}"#.utf8))
     }, checks: { h, r in
       h.checkPanel(r, rows: ["status", "switch", "actions", "notice", "controls", "statusLines", "notes"], absent: [])
-      if case .choose? = FollowerPanelModel(r.state.linkState, snapshot: r.state.snapshot)?.switchOffer?.action {
-        h.check(true, "the switch is a menu over the copy's lanes")
-      } else {
-        h.check(false, "the switch is a menu over the copy's lanes")
+      let offer = FollowerPanelModel(r.state.linkState, snapshot: r.state.snapshot, ownLineage: r.state.clipboardToken)?
+        .switchOffer
+      h.check(offer?.action == .choose(leader: "uid-6"), "the switch is a menu over the copy's lanes")
+      h.check(offer?.button == "Play a track of ChordLab C instead", "a menu switch names no track the copy lacks")
+    }),
+    Scenario(name: "panel-long-names", setup: { h, state, _ in
+      // The followed lane and its copy's have 64-character names: the headline wraps, the switch button is bounded.
+      state.applySnapshot(json: h.data("snapshot-tracks.json"))
+      let long = String(repeating: "Bassline", count: 8)
+      state.applyLinkState(json: h.json("link-state-follower.json") { object in
+        var following = object["following"] as! [String: Any]
+        following["laneName"] = long
+        object["following"] = following
+        var leaders = object["leaders"] as! [[String: Any]]
+        for i in leaders.indices {
+          var lanes = leaders[i]["lanes"] as! [[String: Any]]
+          lanes[1]["name"] = long
+          leaders[i]["lanes"] = lanes
+        }
+        object["leaders"] = leaders
+      })
+    }, checks: { h, r in
+      h.checkPanel(r, rows: ["status", "switch", "actions", "controls", "notes"], absent: [])
+      if let button = r.frames["panel.switch.button"], let content = r.frames["panel.content"] {
+        h.check(button.width <= content.width - 40, String(format: "the switch button (%.1f pt) stays inside the panel", button.width))
       }
     }),
     Scenario(name: "tab-mark", setup: { h, state, _ in
@@ -232,27 +275,285 @@ struct Scenario {
       h.checkEditor(r, banner: false, followMenu: true)
       h.checkTabMarks(r, marked: [.chords, .track(2)], unmarked: [.track(1)])
     }),
+
+    // MARK: Rows above the palette (review item E): every reachable combination keeps one palette row at 700 x 632.
+
+    Scenario(name: "rows-before-banner", setup: { h, state, _ in
+      // What existed before the banner: the key hint and the Heard group, no link state.
+      state.applySnapshot(json: h.data("snapshot-home-progression.json"))
+      h.showKeyHint(state)
+      state.applyHeard(json: h.heardActive)
+    }, checks: { h, r in
+      h.checkEditor(r, banner: false, followMenu: false)
+      h.check(r.state.keyRow != nil, "the key hint shows")
+    }),
+    Scenario(name: "rows-banner-heard", setup: { h, state, _ in
+      state.applySnapshot(json: h.data("snapshot-home-progression.json"))
+      state.applyLinkState(json: h.data("link-state-copy.json"))
+      state.applyHeard(json: h.heardActive)
+    }, checks: { h, r in
+      h.checkEditor(r, banner: true, followMenu: true)
+      h.checkBanner(r)
+    }),
+    Scenario(name: "rows-banner-heard-notice", setup: { h, state, shell in
+      state.applySnapshot(json: h.data("snapshot-home-progression.json"))
+      let link = h.data("link-state-copy.json")
+      state.applyLinkState(json: link)
+      state.applyHeard(json: h.heardActive)
+      h.refuseFirstBannerClick(state, shell, answer: link)
+    }, checks: { h, r in
+      h.checkEditor(r, banner: true, followMenu: true)
+      h.checkBanner(r)
+    }),
+    Scenario(name: "rows-banner-key-hint", setup: { h, state, _ in
+      state.applySnapshot(json: h.data("snapshot-home-progression.json"))
+      state.applyLinkState(json: h.data("link-state-copy.json"))
+      h.showKeyHint(state)
+    }, checks: { h, r in
+      h.checkKeyHintRows(r)
+    }),
+    Scenario(name: "rows-banner-key-hint-notice", setup: { h, state, shell in
+      state.applySnapshot(json: h.data("snapshot-home-progression.json"))
+      let link = h.data("link-state-copy.json")
+      state.applyLinkState(json: link)
+      h.refuseFirstBannerClick(state, shell, answer: link)
+      h.showKeyHint(state)
+    }, checks: { h, r in
+      h.checkKeyHintRows(r)
+    }),
+    Scenario(name: "rows-banner-key-hint-heard", setup: { h, state, _ in
+      state.applySnapshot(json: h.data("snapshot-home-progression.json"))
+      state.applyLinkState(json: h.data("link-state-copy.json"))
+      h.showKeyHint(state)
+      state.applyHeard(json: h.heardActive)
+    }, checks: { h, r in
+      h.checkKeyHintRows(r)
+    }),
+    Scenario(name: "rows-all", setup: { h, state, shell in
+      // The banner with its refusal sentence, the key hint and the Heard group at once.
+      state.applySnapshot(json: h.data("snapshot-home-progression.json"))
+      let link = h.data("link-state-copy.json")
+      state.applyLinkState(json: link)
+      h.refuseFirstBannerClick(state, shell, answer: link)
+      h.showKeyHint(state)
+      state.applyHeard(json: h.heardActive)
+    }, checks: { h, r in
+      h.checkKeyHintRows(r)
+    }),
+    Scenario(name: "rows-long-names-notice-heard", setup: { h, state, shell in
+      // The widest banner (long names, More…) with its refusal sentence and the Heard group.
+      state.applySnapshot(json: h.data("snapshot-home-empty.json"))
+      let link = h.freshLink(lanes: (1...4).map { ("long-\($0)", String(repeating: "\($0)", count: 64), "lead") })
+      state.applyLinkState(json: link)
+      state.applyHeard(json: h.heardActive)
+      h.refuseFirstBannerClick(state, shell, answer: link)
+    }, checks: { h, r in
+      h.checkEditor(r, banner: true, followMenu: true)
+      h.checkBanner(r)
+    }),
+
+    // MARK: The state's sequences (review items A, B, F, G, H): what the shell answers, in its order.
+
+    Scenario(name: "follow-stale-entry", setup: { h, state, shell in
+      // An entry drawn before a state load replaced this instance's document, clicked after it: it carries the old
+      // lineage, and the shell answers stale (the current snapshot, then the link state), nothing applied.
+      state.applySnapshot(json: h.data("snapshot-home-empty.json"))
+      let link = h.freshLink()
+      state.applyLinkState(json: link)
+      guard let entry = state.followOffer?.buttons.first else { return }
+      state.clipboardToken = "doc-2"                                  // the load: the shell renews the token first
+      state.applySnapshot(json: h.data("snapshot-home-empty.json"))
+      shell.onLink = { message in
+        guard message.json?["lineage"] as? String != state.clipboardToken else { return }
+        state.applySnapshot(json: h.data("snapshot-home-empty.json"))
+        state.applyLinkState(json: link)
+      }
+      state.follow(entry)
+      shell.onLink = nil
+    }, checks: { h, r in
+      let link = r.shell.sent.first { $0.tag == kMsgTagLink }?.json
+      h.check(link?["lineage"] as? String == "doc-1", "the old entry was sent with the lineage it was drawn under")
+      h.check(r.state.followNotice == FollowAttempt.refusalText(leaderLabel: "", ownDocumentChanged: true),
+              "the answer says that this ChordLab changed")
+      h.check(r.state.lastError == nil && !(r.state.linkState?.isFollowing ?? true), "no error, nothing applied")
+    }),
+    Scenario(name: "gate-retained-callbacks", setup: { h, state, shell in
+      // Callbacks the editor left outstanding when the panel appeared: a roll menu choice, a rename commit, an append,
+      // a cell press. None of them may leave; the panel's Thru and Panic do.
+      state.applySnapshot(json: h.data("snapshot-tracks.json"))
+      state.applyLinkState(json: follower(h, status: "playing"))
+      shell.clear()
+      state.performRollMenu(.delete, RollContextMenu(trackId: 1, targetIds: [1], select: nil, pasteTick: nil,
+                                                     notesOnPasteboard: false))
+      state.renameTrack(id: 1, draft: "Renamed")
+      state.send(command: ["cmd": "appendChord", "root": 0, "type": "maj"])
+      if let cell = state.snapshot?.palette.cells.first { state.pressCell(cell) }
+      state.releaseHeld()
+      state.thru.wrappedValue = false
+      state.panic()
+    }, checks: { h, r in
+      h.checkPanel(r, rows: ["status", "actions", "controls", "notes"], absent: ["switch"])
+      let commands = r.shell.sent.filter { $0.tag == kMsgTagCommand }.compactMap { $0.json?["cmd"] as? String }
+      h.check(commands == ["setMidiThru"], "only the panel's Thru command left (\(commands))")
+      let starts = r.shell.sent.filter { $0.tag == kMsgTagPreview && $0.json?["on"] as? Bool == true }
+      h.check(starts.isEmpty, "no preview start left")
+      h.check(r.shell.sent.contains { $0.tag == kMsgTagPanic }, "Panic left")
+    }),
+    Scenario(name: "dismiss-reopen", setup: { h, state, _ in
+      // Not now, then the window closed and opened again: a new state of the same instance and document.
+      state.applySnapshot(json: h.data("snapshot-home-empty.json"))
+      state.applyLinkState(json: h.freshLink())
+      state.dismissFollowBanner()
+    }, checks: { h, r in
+      h.checkEditor(r, banner: false, followMenu: true)
+      let reopened = ChordLabState(sendCommand: { _, _ in }, mouseButtonsDown: { false }, clipboardToken: "doc-1",
+                                   defaults: MemoryDefaults(), followDismissals: r.state.followDismissals)
+      reopened.applySnapshot(json: h.data("snapshot-home-empty.json"))
+      reopened.applyLinkState(json: h.freshLink())
+      h.check(reopened.followOffer == nil, "the reopened editor of the same document does not offer")
+      let other = ChordLabState(sendCommand: { _, _ in }, mouseButtonsDown: { false }, clipboardToken: "doc-9",
+                                defaults: MemoryDefaults(), followDismissals: r.state.followDismissals)
+      other.applySnapshot(json: h.data("snapshot-home-empty.json"))
+      other.applyLinkState(json: h.freshLink())
+      h.check(other.followOffer != nil, "another document still offers")
+    }),
+    Scenario(name: "answer-stale", setup: { h, state, shell in
+      // The own lineage was stale: the shell pushes the current token, the snapshot, then the link state.
+      state.applySnapshot(json: h.data("snapshot-home-empty.json"))
+      let link = h.freshLink()
+      state.applyLinkState(json: link)
+      shell.onLink = { _ in
+        state.clipboardToken = "doc-2"
+        state.applySnapshot(json: h.data("snapshot-home-empty.json"))
+        state.applyLinkState(json: link)
+      }
+      h.clickFirstBannerButton(state)
+      shell.onLink = nil
+    }, checks: { h, r in
+      h.check(r.state.followNotice == FollowAttempt.refusalText(leaderLabel: "", ownDocumentChanged: true),
+              "the sentence says that this ChordLab changed")
+      h.check(r.state.lastError == nil, "no error")
+    }),
+    Scenario(name: "answer-malformed-lineage", setup: { h, state, shell in
+      // A malformed own lineage: an error, then the link state.
+      state.applySnapshot(json: h.data("snapshot-home-empty.json"))
+      let link = h.freshLink()
+      state.applyLinkState(json: link)
+      shell.onLink = { _ in
+        state.applyError(json: Data(#"{"schema":1,"error":"the lineage is malformed"}"#.utf8))
+        state.applyLinkState(json: link)
+      }
+      h.clickFirstBannerButton(state)
+      shell.onLink = nil
+    }, checks: { h, r in
+      h.check(r.state.lastError == "the lineage is malformed", "the error shows")
+      h.check(r.state.followNotice == nil, "no refusal sentence")
+    }),
+    Scenario(name: "answer-parse-error", setup: { h, state, shell in
+      // A message the shell cannot parse: an error alone. A later push of the same state is not an answer.
+      state.applySnapshot(json: h.data("snapshot-home-empty.json"))
+      let link = h.freshLink()
+      state.applyLinkState(json: link)
+      shell.onLink = { _ in state.applyError(json: Data(#"{"schema":1,"error":"link message could not be parsed"}"#.utf8)) }
+      h.clickFirstBannerButton(state)
+      shell.onLink = nil
+      state.applyLinkState(json: link)
+    }, checks: { h, r in
+      h.check(r.state.lastError == "link message could not be parsed", "the error shows")
+      h.check(r.state.followNotice == nil, "nothing was pending: no refusal sentence")
+    }),
+    Scenario(name: "answer-none", setup: { h, state, shell in
+      // No answer inside the send; a later push of the same state is not judged.
+      state.applySnapshot(json: h.data("snapshot-home-empty.json"))
+      let link = h.freshLink()
+      state.applyLinkState(json: link)
+      h.clickFirstBannerButton(state)
+      state.applyLinkState(json: link)
+    }, checks: { h, r in
+      h.check(r.state.followNotice == nil && r.state.lastError == nil, "no sentence, no error")
+      h.checkEditor(r, banner: true, followMenu: true)
+    }),
+    Scenario(name: "answer-applied-while-held", setup: { h, state, shell in
+      // A palette cell is held when the follow is applied: the panel shows and the hold ends with its stop.
+      state.applySnapshot(json: h.data("snapshot-home-empty.json"))
+      state.applyLinkState(json: h.freshLink())
+      if let cell = state.snapshot?.palette.cells.first { state.pressCell(cell) }
+      shell.clear()
+      shell.onLink = { _ in state.applyLinkState(json: h.followingChordsOfA()) }
+      h.clickFirstBannerButton(state)
+      shell.onLink = nil
+    }, checks: { h, r in
+      h.checkPanel(r, rows: ["status", "actions", "controls", "notes"], absent: ["switch", "notice"])
+      h.check(r.state.heldCellId == nil, "no cell is held")
+      let link = r.shell.sent.firstIndex { $0.tag == kMsgTagLink }
+      let stop = r.shell.sent.firstIndex { $0.tag == kMsgTagPreview && $0.json?["on"] as? Bool == false }
+      h.check(link != nil && stop != nil && stop! > link!, "the held preview's stop was sent when the panel appeared")
+    }),
+    Scenario(name: "answer-applied", setup: { h, state, shell in
+      state.applySnapshot(json: h.data("snapshot-home-empty.json"))
+      state.applyLinkState(json: h.freshLink())
+      shell.onLink = { _ in state.applyLinkState(json: h.followingChordsOfA()) }
+      h.clickFirstBannerButton(state)
+      shell.onLink = nil
+    }, checks: { h, r in
+      h.checkPanel(r, rows: ["status", "actions", "controls", "notes"], absent: ["switch", "notice"])
+      h.check(r.state.followNotice == nil && r.state.lastError == nil, "no sentence, no error")
+    }),
+    Scenario(name: "unfollow-stale", setup: { h, state, shell in
+      // Stop following with a stale own lineage: the panel stays and says that this ChordLab changed.
+      state.applySnapshot(json: h.data("snapshot-tracks.json"))
+      let link = follower(h, status: "playing")
+      state.applyLinkState(json: link)
+      shell.onLink = { _ in
+        state.clipboardToken = "doc-2"
+        state.applySnapshot(json: h.data("snapshot-tracks.json"))
+        state.applyLinkState(json: link)
+      }
+      state.unfollow()
+      shell.onLink = nil
+    }, checks: { h, r in
+      h.checkPanel(r, rows: ["status", "actions", "notice", "controls", "notes"], absent: ["switch"])
+      h.check(r.state.followNotice == FollowAttempt.refusalText(leaderLabel: "", ownDocumentChanged: true),
+              "the panel says that this ChordLab changed")
+      h.check(r.state.lastError == nil, "no error")
+    }),
+    Scenario(name: "unfollow-error", setup: { h, state, shell in
+      // Stop following answered with an error (a malformed lineage) and the link state: the error, no sentence.
+      state.applySnapshot(json: h.data("snapshot-tracks.json"))
+      let link = follower(h, status: "playing")
+      state.applyLinkState(json: link)
+      shell.onLink = { _ in
+        state.applyError(json: Data(#"{"schema":1,"error":"the lineage is malformed"}"#.utf8))
+        state.applyLinkState(json: link)
+      }
+      state.unfollow()
+      shell.onLink = nil
+    }, checks: { h, r in
+      h.checkPanel(r, rows: ["status", "actions", "controls", "statusLines", "notes"], absent: ["notice"])
+      h.check(r.state.followNotice == nil, "no refusal sentence")
+    }),
   ]
 }
 
 // MARK: - The stub plug-in connection
 
 /// Stands in for the plug-in: records what the editor sends, and answers a link message inline (as the shell does,
-/// inside the send) with `answerLink` when set, so a follow it does not apply comes back refused.
+/// inside the send) by running `onLink` with it: the scenario makes it push what the shell would, in its order (a new
+/// token, a snapshot, an error, a link state).
 final class ShellStub {
   struct Message {
     let tag: Int
     let json: [String: Any]?
   }
 
-  weak var state: ChordLabState?
   private(set) var sent: [Message] = []
-  var answerLink: Data?
+  var onLink: ((Message) -> Void)?
 
   @MainActor func receive(tag: Int, data: Data?) {
     let object = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
-    sent.append(Message(tag: tag, json: object))
-    if tag == kMsgTagLink, let answer = answerLink { state?.applyLinkState(json: answer) }
+    let message = Message(tag: tag, json: object)
+    sent.append(message)
+    if tag == kMsgTagLink { onLink?(message) }
   }
 
   func clear() { sent = [] }
@@ -320,6 +621,72 @@ struct Render {
     return try! JSONSerialization.data(withJSONObject: object)
   }
 
+  /// One lane of a link state's leader, as JSON.
+  func lane(_ key: String, _ name: String, _ role: String, followers: Int = 0) -> [String: Any] {
+    ["audible": true, "chords": key == "chords", "followers": followers, "lane": key, "name": name, "role": role]
+  }
+
+  /// The copy fixture made a plain link state: this instance is no copy and sees ChordLab A (chords, Bass, Lead), or
+  /// A with the chords lane and `lanes` instead, `extraLanes` added, and a second ChordLab (C) when `secondLeader`.
+  func freshLink(lanes: [(String, String, String)]? = nil, extraLanes: [(String, String, String)] = [],
+                 secondLeader: Bool = false) -> Data {
+    json("link-state-copy.json") { object in
+      var me = object["self"] as! [String: Any]
+      me["copyOf"] = NSNull()
+      object["self"] = me
+      var leaders = object["leaders"] as! [[String: Any]]
+      var aLanes = leaders[0]["lanes"] as! [[String: Any]]
+      if let lanes { aLanes = [lane("chords", "Chords", "")] + lanes.map { lane($0.0, $0.1, $0.2) } }
+      aLanes += extraLanes.map { lane($0.0, $0.1, $0.2) }
+      leaders[0]["lanes"] = aLanes
+      if secondLeader {
+        leaders.append(["id": "id-second", "label": "ChordLab C", "lineage": "lineage-second",
+                        "lanes": [lane("chords", "Chords", "")]])
+      }
+      object["leaders"] = leaders
+    }
+  }
+
+  /// `freshLink()` as the shell answers an applied follow of ChordLab A's chords.
+  func followingChordsOfA() -> Data {
+    let link = try! JSONSerialization.jsonObject(with: freshLink()) as! [String: Any]
+    var object = link
+    object["following"] = ["leader": "id-original", "leaderLabel": "ChordLab A", "lane": "chords", "laneName": "Chords",
+                           "role": "", "status": "playing", "switchTo": NSNull()] as [String: Any]
+    return try! JSONSerialization.data(withJSONObject: object)
+  }
+
+  /// The listener active, holding C E G.
+  let heardActive = Data(#"{"schema":1,"active":true,"held":[60,64,67],"heldNames":["C","E","G"],"chord":null,"chordHeld":false,"key":null,"onsets":3}"#.utf8)
+
+  /// The key hint, as a user gets it: a tonic change with Transpose with key off over a progression, answered by a
+  /// snapshot in the new key (the plug-in's answer to `setKey`, here fed by hand).
+  func showKeyHint(_ state: ChordLabState) {
+    guard let tonic = state.snapshot?.tonics(for: "Ionian")?[2] else { return }
+    state.changeProjectKey(pc: 2, mode: "Ionian")
+    state.applySnapshot(json: json("snapshot-home-progression.json") { object in
+      let key: [String: Any] = ["mode": "Ionian", "tonic": ["letter": tonic.letter, "alter": tonic.alter]]
+      object["projectKey"] = key
+      object["browsedKey"] = key
+    })
+  }
+
+  /// Clicks the banner's first lane with the stub shell answering `answer` unchanged: a refusal.
+  func refuseFirstBannerClick(_ state: ChordLabState, _ shell: ShellStub, answer: Data) {
+    shell.onLink = { _ in state.applyLinkState(json: answer) }
+    clickFirstBannerButton(state)
+    shell.onLink = nil
+  }
+
+  /// A copy's banner with the key hint: in a short window the key row wins and the banner waits; in a tall one both.
+  func checkKeyHintRows(_ r: Render) {
+    let compact = FollowOffer.isCompact(height: r.size.height)
+    check(r.state.keyRow != nil && r.frames["keyRow"] != nil, "the key hint shows")
+    check(r.state.followOffer != nil, "the banner has something to offer")
+    checkEditor(r, banner: !compact, followMenu: true)
+    if !compact { checkBanner(r) }
+  }
+
   // MARK: Running
 
   func run(_ scenario: Scenario, size: CGSize) {
@@ -328,8 +695,8 @@ struct Render {
     let defaults = MemoryDefaults()
     let shell = ShellStub()
     let state = ChordLabState(sendCommand: { tag, data in shell.receive(tag: tag, data: data) },
-                              mouseButtonsDown: { false }, clipboardToken: "doc-1", defaults: defaults)
-    shell.state = state
+                              mouseButtonsDown: { false }, clipboardToken: "doc-1", defaults: defaults,
+                              followDismissals: FollowDismissals())
     scenario.setup(self, state, shell)
     let probe = FrameProbe()
     let root = ContentView()
@@ -475,6 +842,10 @@ struct Render {
     check((r.frames["transport.follow"] != nil) == followMenu, followMenu ? "the Follow menu shows" : "no Follow menu")
     if let follow = r.frames["transport.follow"] {
       check(inside(follow, content), "the Follow menu \(describe(follow)) lies inside the window's padding")
+      if let length = r.frames["transport.length"] {
+        check(abs(follow.midY - length.midY) < 2 && follow.minX >= length.maxX,
+              "the Follow menu sits after Length in the strip row")
+      }
     }
     if let viewport = r.frames["palette.viewport"] {
       print(String(format: "  palette viewport height %.1f", viewport.height))
@@ -503,7 +874,15 @@ struct Render {
     let compact = FollowOffer.isCompact(height: r.size.height)
     print(String(format: "  banner height %.1f (%@)", banner.height, compact ? "compact" : "full"))
     if let sentence = r.frames["banner.sentence"], let buttons = r.frames["banner.buttons"] {
-      check(abs(sentence.midY - buttons.midY) < 2, "the sentence and the buttons share one line")
+      // The refusal sentence in the sentence's place (a short window) may push the buttons under it; otherwise they
+      // share one line.
+      let noticeInline = compact && r.state.followNotice != nil
+      if noticeInline {
+        check(banner.height <= 48, String(format: "the banner with its refusal sentence is at most two lines (%.1f pt)",
+                                          banner.height))
+      } else {
+        check(abs(sentence.midY - buttons.midY) < 2, "the sentence and the buttons share one line")
+      }
       check(buttons.height <= (compact ? 24 : 28), String(format: "the buttons are one line (%.1f pt)", buttons.height))
     } else {
       check(false, "the banner's sentence and buttons were laid out")
