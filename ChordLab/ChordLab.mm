@@ -175,7 +175,9 @@
 // does not play it. OfferPreview, for a Start, Extend or Stop alike (HandlePreview, CloseWindow's fallback Stop),
 // first calls LinkEndpoint::forwardPreview under mModelMutex (the endpoint reads its lane uids and document id, which
 // publishOwn and the state loads write under that mutex; order: model, then the registry's) and falls back to its
-// own scheduler only on NotForwarded; QueueFull is reported like its own full ring. The registry pushes into a
+// own scheduler only on NotForwarded; QueueFull is reported like its own full ring. CloseWindow first calls
+// LinkEndpoint::stopForwards (same guard and lock), which ends every preview this instance forwarded, then gives its
+// fallback Stop for mOpenPreviewId to the own scheduler. The registry pushes into a
 // follower's scheduler under its mutex, from the leader's call, and a scheduler's preview ring has ONE producer: so
 // every push must come from one thread. It does: OfferPreview forwards only when kLinks and on the main thread
 // ([NSThread isMainThread]), and in the VST3 every path that pushes a preview runs there: OnMessage (the editor's
@@ -482,12 +484,25 @@ void ChordLab::CloseWindow()
   if (!mViewController)
     return;
   id controller = (id) mViewController;                         // +1 from OpenWindow's alloc/init
+  if (kLinks && [NSThread isMainThread])
+  {
+    // Everything this instance forwarded ends on its followers: the held preview and every one-shot whose Stop the
+    // closing editor will never send (a one-shot's end timer dies with the view), not only the last Start that
+    // mOpenPreviewId names. A Stop under each recorded id, and the records dropped (LinkRegistry::stopForwards); a
+    // full ring there leaves that preview to the follower's watchdog. Same guard and lock as OfferPreview (main
+    // thread, the followers' rings have one producer; mModelMutex, then the registry's), and before the fallback
+    // Stop below, which then finds no record and goes to this scheduler.
+    std::lock_guard<std::mutex> lock(mModelMutex);
+    if (mLink)
+      mLink->stopForwards();
+  }
   if (mOpenPreviewId >= 0)                                       // belt and braces: the UI's onDisappear sends this too
   {
     chordlab::PreviewCmd stop{};
     stop.kind = chordlab::PreviewCmd::Stop;
     stop.id = mOpenPreviewId;
-    // Where its Start went: a follower's scheduler, or this one (OfferPreview). Off the main thread (the AU's
+    // For a Start this scheduler played. A forwarded one was ended just above (its record is gone, so OfferPreview
+    // gives the Stop to this scheduler, where an id it does not hold is harmless). Off the main thread (the AU's
     // destructor) and in every instance that does not link, straight to this scheduler, as before. A full ring is
     // covered by the watchdog. Under AU, ~ChordLab calls this before mLink.reset(), and OfferPreview never reads
     // mLink there anyway (kLinks is false).
@@ -1110,12 +1125,14 @@ void ChordLab::HandlePreview(std::string_view text)
     PushError("preview queue full");
     return;
   }
-  // Forwarded or not: CloseWindow's fallback Stop goes through OfferPreview too, so it reaches a forwarded Start.
+  // Forwarded or not: CloseWindow first ends everything this instance forwarded (LinkEndpoint::stopForwards), then
+  // gives its fallback Stop to this scheduler for a Start played here.
   switch (cmd.kind)
   {
     // Only the LAST Start is remembered: a roll one-shot started over a held preview replaces it here, so
-    // CloseWindow's fallback Stop can miss the held one. Accepted: the UI's onDisappear stops the held preview
-    // itself, and the scheduler's 4 s watchdog ends anything whose Stop never arrives.
+    // CloseWindow's fallback Stop can miss a held one played here. Accepted: the UI's onDisappear stops the held
+    // preview itself, and the scheduler's 4 s watchdog ends anything whose Stop never arrives. Forwarded ones are
+    // all ended by CloseWindow's stopForwards, whichever Start this names.
     case chordlab::PreviewCmd::Start:  mOpenPreviewId = cmd.id; break;
     case chordlab::PreviewCmd::Stop:   if (cmd.id == mOpenPreviewId) mOpenPreviewId = -1; break;
     case chordlab::PreviewCmd::Extend: break;                    // the open Start stays open
