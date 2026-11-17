@@ -31,7 +31,8 @@ constexpr std::size_t kMaxVanishedLaneUids = 64;
 
 /// One instance's table of lane uids (per-track instruments plan I2): each track number of the document it has
 /// published gets a UUID once, so that a link names a lane that a reverted or replaced document cannot imitate
-/// by reusing the number. A track number is `Track::id`. No entry is ever `kChordsLaneUid` or empty.
+/// by reusing the number. A track number is `Track::id`. No entry is ever `kChordsLaneUid` or empty, and no two
+/// entries share a uid (`cover` takes fresh uids from its generator, `replace` asserts it of a loaded table).
 class LaneUids {
 public:
     /// A fresh, never-before-returned uid (a UUID in the shell); never empty, never `kChordsLaneUid`.
@@ -57,7 +58,9 @@ public:
     const std::map<int, std::string>& entries() const noexcept;
 
     /// Replaces the whole table by a loaded one: entries not in `entries` are forgotten, so a track number the
-    /// loaded table lacks gets a new uid at the next `cover`, never the one it had before.
+    /// loaded table lacks gets a new uid at the next `cover`, never the one it had before. The caller passes a
+    /// validated table (Task 6's loader validates a loaded one): no value empty or `kChordsLaneUid`, the values
+    /// pairwise distinct (asserted). Nothing is dropped or repaired here.
     void replace(std::map<int, std::string> entries);
 
 private:
@@ -107,7 +110,11 @@ constexpr std::uint32_t kLinkGenerationBase = 0x80000000u;
 /// generation is `kLinkGenerationBase + n`, n counting up from 1 with every change of content (events, count,
 /// endBeat, loop), not with a change of `followHost` alone. A lane with more events than a slot holds is
 /// published as empty (and asserts), as `fillSlot` does. `last` must be fresh (generation 0) or have been
-/// filled only by this function (asserted). Allocates: never on the audio thread.
+/// filled only by this function (asserted). "Same generation, same content" holds only while one `Publication`
+/// lives exactly as long as its link buffer: a caller must never reset or recreate a link buffer's `Publication`,
+/// or a later fill would restart at `kLinkGenerationBase + 1` and a scheduler could take new content for
+/// unchanged. Reaching `UINT32_MAX` would take 2^31 - 1 content changes (asserted before every increment).
+/// Allocates: never on the audio thread.
 bool fillSlotFromFeed(const LinkFeed* feed, std::string_view laneUid, std::string_view documentId,
                       SnapshotSlot& slot, Publication& last);
 

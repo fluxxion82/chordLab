@@ -1,5 +1,7 @@
 #include "chordlab/publication.h"
 
+#include "chordlab/link.h"
+
 #include <algorithm>
 #include <cassert>
 #include <utility>
@@ -34,6 +36,7 @@ bool fillSlot(const Document& doc, const LaneSelection& own, SnapshotSlot& slot,
     last.midiThru = doc.midiThru;
     if (contentChanged) {
         ++last.generation;
+        assert(last.generation < kLinkGenerationBase && "an own generation stays below the link generations");
     }
     return true;
 }

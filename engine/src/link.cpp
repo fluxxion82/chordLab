@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstdint>
+#include <set>
 #include <utility>
 
 namespace chordlab {
@@ -64,20 +66,29 @@ const std::map<int, std::string>& LaneUids::entries() const noexcept {
 }
 
 void LaneUids::replace(std::map<int, std::string> entries) {
+#ifndef NDEBUG
+    std::set<std::string_view> seen;
+    for (const auto& entry : entries) {
+        assert(!entry.second.empty() && entry.second != kChordsLaneUid &&
+               "LaneUids::replace: a lane uid is never empty nor kChordsLaneUid (the caller validates the table)");
+        assert(seen.insert(entry.second).second && "LaneUids::replace: lane uids are pairwise distinct");
+    }
+#endif
     entries_ = std::move(entries);
 }
 
 std::shared_ptr<const LinkFeed> buildLinkFeed(const Document& doc, std::string documentId, const LaneUids& uids,
                                               std::string lineage, std::string label,
                                               const std::vector<std::string>& followed) {
-    const auto isFollowed = [&](std::string_view uid) {
-        return std::find(followed.begin(), followed.end(), uid) != followed.end();
+    const auto isFollowed = [&](std::string_view uid) {  // an empty uid (an uncovered track) is never followed
+        return !uid.empty() && std::find(followed.begin(), followed.end(), uid) != followed.end();
     };
     auto feed = std::make_shared<LinkFeed>();
     feed->documentId = std::move(documentId);
     feed->lineage = std::move(lineage);
     feed->label = std::move(label);
-    feed->endBeat = compile(doc).endBeat;
+    const Compiled chordsCompiled = compile(doc);  // once, for the frame and for every compiled lane
+    feed->endBeat = chordsCompiled.endBeat;
     feed->loop = doc.progressionLoop;
     feed->followHost = doc.followHost;
     feed->lanes.reserve(1 + doc.tracks.size());
@@ -85,7 +96,8 @@ std::shared_ptr<const LinkFeed> buildLinkFeed(const Document& doc, std::string d
     const auto addLane = [&](LinkLane lane, const LaneKey& key) {
         lane.compiled = isFollowed(lane.uid);
         if (lane.compiled) {
-            lane.events = compilePlaybackFor(doc, LaneSelection{LaneSelection::Mode::Only, {key}}).events;
+            lane.events =
+                compilePlaybackFor(doc, LaneSelection{LaneSelection::Mode::Only, {key}}, chordsCompiled).events;
         }
         feed->lanes.push_back(std::move(lane));
     };
@@ -145,6 +157,8 @@ bool fillSlotFromFeed(const LinkFeed* feed, std::string_view laneUid, std::strin
     last.followHost = followHost;
     last.midiThru = true;
     if (contentChanged) {
+        // Reaching UINT32_MAX takes 2^31 - 1 content changes of one link buffer.
+        assert(last.generation != UINT32_MAX && "fillSlotFromFeed: the link generation would wrap");
         last.generation = first ? kLinkGenerationBase + 1 : last.generation + 1;
     }
     return true;

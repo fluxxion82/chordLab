@@ -1977,3 +1977,48 @@ TEST_CASE("compilePlaybackFor: feel documents play the chords as compile does an
         checkFrame(store.doc(), rest);
     }
 }
+
+TEST_CASE("compilePlaybackFor: given compile(doc), the three-argument form is the two-argument form") {
+    const auto checkSame = [](const Document& doc, const LaneSelection& selection) {
+        const Compiled chords = compile(doc);
+        const Compiled given = compilePlaybackFor(doc, selection, chords);
+        const Compiled own = compilePlaybackFor(doc, selection);
+        CHECK(given.events == own.events);
+        CHECK(bitsOf(given.endBeat) == bitsOf(own.endBeat));
+        CHECK(given.feelLimited == own.feelLimited);
+        checkPlayable(given);
+    };
+    // The feel documents with one track added (performing, over budget, non-tick-aligned), every lane selection.
+    for (const DocumentStore& original : identityDocuments()) {
+        DocumentStore store = original;
+        const int t = addTrackWith(store, {ns(36, 0, 30), ns(60, 30, 480)});
+        for (const LaneSelection& selection :
+             {LaneSelection{}, only({chordsLane()}), only({trackLane(t)}), allExcept({trackLane(t)}),
+              allExcept({chordsLane()}), only({trackLane(9999)})}) {
+            checkSame(store.doc(), selection);
+        }
+    }
+    // The lane documents under every mute and solo combination (the retrigger of a chord tone included).
+    for (unsigned mask = 0; mask < 64; ++mask) {
+        CAPTURE(mask);
+        DocumentStore store = fourBars();
+        const int a = addTrackWith(store, {ns(36, 0, kFeelTicksPerBeat), ns(36, 3840, kFeelTicksPerBeat)});
+        const int b = addTrackWith(store, {ns(38, 1920, 480), ns(60, 960, 960)});
+        if (mask & 1u) REQUIRE(store.setChordsMute(true));
+        if (mask & 2u) REQUIRE(store.setChordsSolo(true));
+        if (mask & 4u) REQUIRE(store.setTrackMute(a, true));
+        if (mask & 8u) REQUIRE(store.setTrackSolo(a, true));
+        if (mask & 16u) REQUIRE(store.setTrackMute(b, true));
+        if (mask & 32u) REQUIRE(store.setTrackSolo(b, true));
+        for (const LaneSelection& selection :
+             {LaneSelection{}, only({chordsLane()}), only({trackLane(a)}), only({trackLane(b)}),
+              allExcept({trackLane(a)}), allExcept({trackLane(a), trackLane(b)}), allExcept({chordsLane()})}) {
+            checkSame(store.doc(), selection);
+        }
+    }
+    const ThreeLanes d;
+    for (const LaneKey lane : {chordsLane(), trackLane(d.a), trackLane(d.b)}) {
+        checkSame(d.store.doc(), only({lane}));
+        checkSame(d.store.doc(), allExcept({lane}));
+    }
+}

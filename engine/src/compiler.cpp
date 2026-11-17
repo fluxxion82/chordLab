@@ -195,7 +195,10 @@ bool LaneSelection::includes(const LaneKey& lane) const noexcept {
 Compiled compilePlayback(const Document& doc) { return compilePlaybackFor(doc, LaneSelection{}); }
 
 Compiled compilePlaybackFor(const Document& doc, const LaneSelection& selection) {
-    const Compiled chords = compile(doc);
+    return compilePlaybackFor(doc, selection, compile(doc));
+}
+
+Compiled compilePlaybackFor(const Document& doc, const LaneSelection& selection, const Compiled& chords) {
     Compiled playback;
     playback.endBeat = chords.endBeat;
     playback.feelLimited = chords.feelLimited;

@@ -509,6 +509,18 @@ TEST_CASE("link feed: a followed uid that names no lane is ignored") {
     for (const LinkLane& lane : feed->lanes) CHECK(lane.uid != uidC);
 }
 
+TEST_CASE("link feed: an empty uid in followed never counts as followed") {
+    // Every track is covered here (so no lane has an empty uid and nothing asserts); without asserts an uncovered
+    // track would carry uid "", and "" in `followed` must not mark it followed then either.
+    const Linked d;
+    const auto feed = d.feed({""});
+    REQUIRE(feed->lanes.size() == 3);
+    for (const LinkLane& lane : feed->lanes) {
+        CHECK_FALSE(lane.compiled);
+        CHECK(lane.events.empty());
+    }
+}
+
 TEST_CASE("link feed: the frame and the caller's names are carried") {
     SUBCASE("defaults") {
         const Linked d;

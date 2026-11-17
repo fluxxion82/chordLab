@@ -135,6 +135,13 @@ struct LaneSelection {
 /// events equal `compile(doc).events` exactly. Same preconditions as `compilePlayback`.
 Compiled compilePlaybackFor(const Document& doc, const LaneSelection& selection);
 
+/// `compilePlaybackFor(doc, selection)` with the chords already compiled, for a caller that compiles several
+/// selections of one document (`buildLinkFeed`, link.h) and so compiles the chords once. Precondition: `chords` is
+/// `compile(doc)` for this very document, unchanged since (not `compileSection`'s, nor another document's, nor an
+/// older version's); the result is then exactly the two-argument form's. The two-argument form is this one with
+/// `compile(doc)`.
+Compiled compilePlaybackFor(const Document& doc, const LaneSelection& selection, const Compiled& chords);
+
 /// Compiles the `count` chords from `firstEvent` on, as they sound in the whole document, re-based to 0:
 /// each chord takes the voicing `voicings(doc)` gives it in the whole progression (the context of auto
 /// voice-leading is the whole progression, so a chord at the start of a range still follows the chord
