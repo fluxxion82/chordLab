@@ -122,7 +122,15 @@
 // matching lineage, i.e. after the first publish, and no follower can be waiting for a fresh uid): the lock closes
 // nothing that is open now; it keeps the constructor safe whatever the registry learns to do later. Only after that
 // section, with the lock released, does the constructor call iPlug2's MakeDefaultPreset, which runs SerializeState
-// (mLink and mModelMutex both): it is the constructor's last call.
+// (mLink and mModelMutex both): it is the constructor's last call. The default preset it stores therefore holds the
+// constructor's instance block: this instance's own id, the construction-time document id, no lane uids, no follow.
+// iPlug2 restores that preset (IPluginBase::RestorePreset, an UnserializeState of the stored chunk) on the VST3
+// program-change parameter (kPresetParam), on the AU's CurrentPreset/PresentPreset properties, and in the AU's
+// SetState, before the real state, when the class info's preset name matches. Such a restore is a state load like any
+// other: an adopt of those ids. The registry's rules hold (plan I7): an instance with bound followers keeps the id it
+// has, and an id another live instance holds makes it a copy with a fresh one; the document becomes the empty one
+// under the construction-time document id, so bound followers no longer resolve and wait for a pick; a follower stops
+// following. Nothing unsafe: the same section, hooks and republish as every load.
 // Destruction, in this order: the AU editor close; chordlab::retire(*mLifeline), which waits for a hop or hook in
 // flight and makes later ones no-ops, so no other instance enters this one any more; mLink.reset(), which removes
 // the registration (followers are emptied and wait for this id, the registry never writes this link buffer
@@ -131,6 +139,11 @@
 // instance block (id, document id, lane uids, follow) with the document, read in one mModelMutex section;
 // UnserializeState replaces the document, renews the clipboard token and adopts the loaded block (or, for a state
 // without one, resets the link identity) in one mModelMutex section, then runs the hooks and republishes as above.
+// That second publish after the hooks changes nothing in a single-threaded sequence: the publish inside the section
+// already sees every binding adopt made (the host test's scenarios pass without it). It is belt and braces for a
+// change another instance makes on another thread between the section and the hooks (a follow or a load that moves
+// this instance's followed set), so that this function never ends on a publish older than the registry it returns
+// to, and it keeps the shell the mirror of the engine simulation's FakeInstance::loadJson. Kept on purpose.
 // Assumption, as for the hops above: a host never calls UnserializeState from inside one of this instance's OnMain
 // hops (it would run other instances' hooks with this instance's Lifeline held, outside the lock order above).
 // Messages (plan I12): the editor sends kMsgTagLink (18), follow a leader's lane or unfollow, handled by HandleLink
@@ -323,7 +336,9 @@ ChordLab::ChordLab(const InstanceInfo& info)
   // the instance block from mLink (so mLink must exist: called first, as it used to be, it crashed every format
   // while the host constructed the plug-in) and takes mModelMutex itself (so the constructor's lock must be released:
   // the mutex is not recursive). The default preset is the state as constructed: the empty document and this
-  // instance's block. The host test (ChordLab/Tests/vst3host) constructs the plug-in and fails if this regresses.
+  // instance's block as it is now (its own id, the construction-time document id, no lanes, no follow). Restoring it
+  // later is an ordinary state load of that block (see "Links" at the top). The host test (ChordLab/Tests/vst3host)
+  // constructs the plug-in and fails if this order regresses.
   MakeDefaultPreset();
 }
 
@@ -1541,7 +1556,9 @@ int ChordLab::UnserializeState(const IByteChunk& chunk, int startPos)
       // Holding nothing (no mModelMutex, no Lifeline: this is never an OnMain hop), possibly off the main thread:
       // the old and the new leader republish, then this instance once more, since its role may have changed
       // through what the hooks did (a leader it now follows has written its link buffer; followers that wait for
-      // its id are bound). Every buffer is right before this function returns.
+      // its id are bound). Every buffer is right before this function returns. In a single-threaded sequence this
+      // publish finds nothing new (the one in the section already saw adopt's bindings); it covers a change another
+      // instance made meanwhile (see "Links" at the top). Kept.
       RunHooks(hooks);
       std::lock_guard<std::mutex> lock(mModelMutex);
       PublishSnapshotLocked();
