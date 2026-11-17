@@ -82,7 +82,7 @@ Tracks, on `main` and not in the 1.0.0 release (see Status):
 - MIDI drag-out per lane (each tab's ♫), of every lane at once ("♫ All": one file, one clip per lane, muted lanes
   included), and of the open lane from the bottom control and the section handles.
 
-Per-track instruments, on `main`, not in the 1.0.0 release and not yet tested in Live (see Status):
+Per-track instruments, on `main`, not in the 1.0.0 release (run in Ableton Live 12, Live Test 16; see Status):
 
 - A second ChordLab in the same Live set can play one track of the main one (its chords, or a Bass, Lead or Other
   track), so each line drives its own instrument track while everything is still written in one window. The main
@@ -283,11 +283,16 @@ binaries.
   the engine, Swift and bridge suites, and Live Test 15 (2026-11-16, Live 12: lanes, note editing, the generator,
   playback with mute and solo, the drag-outs, saving); modifier clicks, pinch and Logic are not checked yet.
 - Per-track instruments (a second ChordLab playing one track of the main one; engine, shell and editor) are
-  merged on `main` but not released and **not yet run in Live**: they pass the engine suite with its two-instance
-  simulation, the headless host test (two linked instances exact to the sample against the engine) and the
-  editor's render harness. Live Test 16 (routing through a rack, sync, save and reopen, freeze and export) is
-  pending. Not built: auditions from a track's piano roll sounding on that track's own instrument; the Audio Unit
-  and the app do not link.
+  merged on `main` but not released. They pass the engine suite with its two-instance simulation, the headless
+  host test (two linked instances exact to the sample against the engine), the editor's render harness, and Live
+  Test 16 (2026-11-17, Live 12, through an Instrument Rack): the instruments of two ChordLabs sounded identical
+  to the sample at buffers of 64, 256 and 512, a saved set reopens linked in either load order, an audio export
+  equals a real-time recording, and deleting the main ChordLab while playing, undoing and reordering chains
+  leave no note hanging. Live refuses to freeze a track routed this way (record the line and set Monitor to Auto
+  first), and a note can hang when a ChordLab device is switched off while it sounds (Panic ends it). Not
+  checked yet: modifier clicks, pasted groups, the sound of a change while playing, the Audio Unit and the app
+  with the editor's new hosting, Logic. Not built: auditions from a track's piano roll sounding on that track's
+  own instrument; the Audio Unit and the app do not link.
 - Not yet: a lead generator, feel on
   tracks; chords are contiguous; one suggestion style (pop); macOS only (VST3, Audio Unit, app). The Xcode project still carries
   iPlug2's AUv3, AAX, VST2 and iOS targets and Windows project files from the template; they are not
