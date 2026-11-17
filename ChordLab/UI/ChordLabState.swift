@@ -1,8 +1,8 @@
 import SwiftUI
 
 /// UI-side state. Logic lives in C++; this object only mirrors what the plugin
-/// pushes (snapshot, error, status, transport, export-ready and heard JSON) and forwards user intent
-/// (commands, previews, export requests, forgetting what was heard) back.
+/// pushes (snapshot, error, status, transport, export-ready, heard and link-state JSON) and forwards user intent
+/// (commands, previews, export requests, forgetting what was heard, following another ChordLab's lane) back.
 class ChordLabState: NSObject, ObservableObject {
   var params: [Param] = []
   @Published var bundleID = String("")
@@ -32,6 +32,24 @@ class ChordLabState: NSObject, ObservableObject {
   /// What the plug-in hears on its MIDI input (`kMsgTagHeard`, design D14); nil until the first push. The
   /// Heard group (`HeardView`) shows only while `active` is true.
   @Published var heard: HeardJSON?
+  /// Who this instance is among the ChordLabs of the set, what it follows and which of its lanes others play
+  /// (`kMsgTagLinkState`, per-track instruments plan I12); nil until the first push, which can come before the first
+  /// snapshot. While `following` is set the window is the follower's panel (`ContentView`) and no key command reaches
+  /// the hidden editor (`LinkKeys`).
+  @Published private(set) var linkState: LinkStateJSON?
+  /// The last follow request and the sentence its refusal leaves (`FollowAttempt`): the shell answers a refused follow
+  /// with a fresh link state and no error, inside the send.
+  private let followAttempt = FollowAttempt()
+  /// `followAttempt.notice`, published for the banner, the picker's first entry and the follower's panel; nil when
+  /// there is none.
+  @Published private(set) var followNotice: String?
+  /// The document lineage (`clipboardToken`) a follow request went out under, while its send is in flight: a link
+  /// state that arrives in the same send after the token changed answers a stale own lineage (the shell pushed the
+  /// current document's token and snapshot first). Nil outside a follow's send.
+  private var followSendToken: String?
+  /// The document lineage the user dismissed the Follow banner in (`FollowOffer`; Stop following counts as a
+  /// dismissal); nil when never dismissed. A new document may offer again.
+  @Published private(set) var followBannerDismissedLineage: String?
   /// Whether a text field (a section rename) is being edited: the key routes (`EditorKeyRouter`) stand
   /// down meanwhile, so typing a name never appends or removes chords.
   @Published var editingText = false
@@ -875,6 +893,51 @@ class ChordLabState: NSObject, ObservableObject {
     sendCommand(kMsgTagClearHeard, Data())
   }
 
+  // MARK: - Following another ChordLab's lane (per-track instruments plan section 5)
+
+  /// The banner (`FollowOffer`) for the current link state, snapshot and document, nil when it does not show.
+  var followOffer: FollowOffer? {
+    FollowOffer.make(link: linkState, snapshot: snapshot, lineage: clipboardToken,
+                     dismissedLineage: followBannerDismissedLineage)
+  }
+
+  /// A click on a picker entry, a banner button or the follower panel's switch: `kMsgTagLink` with the entry's
+  /// follow (`FollowOption.command`: the leader's id, the lane's key and the leader's lineage as listed), stamped with
+  /// this instance's own document lineage as every command is. The shell answers inside the send with a link state
+  /// (and, for a stale own lineage, the current snapshot first), never an error for a refusal: `FollowAttempt` judges
+  /// that answer. The sequence: `sent`, the send, `sendReturned`; `applyLinkState` and `applyError` report what
+  /// arrives in between.
+  @MainActor func follow(_ option: FollowOption) {
+    followAttempt.sent(FollowRequest(option))
+    syncFollowNotice()
+    followSendToken = clipboardToken
+    send(CommandLineage.stamp(option.command, token: actionLineage.lineage(current: clipboardToken)), tag: kMsgTagLink)
+    followSendToken = nil
+    followAttempt.sendReturned()
+    syncFollowNotice()
+  }
+
+  /// The panel's Stop following: `kMsgTagLink` `unfollow`, stamped with the own lineage; answered with a link state
+  /// without `following`. It also dismisses the banner for this document (`FollowOffer.dismissedLineage
+  /// (afterStopFollowing:)`), so the editor that comes back does not offer at once.
+  @MainActor func unfollow() {
+    followBannerDismissedLineage = FollowOffer.dismissedLineage(afterStopFollowing: clipboardToken)
+    send(CommandLineage.stamp(LinkCommands.unfollow(), token: actionLineage.lineage(current: clipboardToken)),
+         tag: kMsgTagLink)
+  }
+
+  /// The banner's Not now: it does not show again in this document; its refusal sentence goes with it.
+  @MainActor func dismissFollowBanner() {
+    followBannerDismissedLineage = clipboardToken
+    followAttempt.dismiss()
+    syncFollowNotice()
+  }
+
+  /// Publishes `followAttempt.notice` when it changed.
+  private func syncFollowNotice() {
+    if followAttempt.notice != followNotice { followNotice = followAttempt.notice }
+  }
+
   /// The transport row's Thru switch: the snapshot's `midiThru` (off when an older plug-in sends none; the
   /// switch is hidden then), set with `setMidiThru`. The answering snapshot is what flips it.
   @MainActor var thru: Binding<Bool> {
@@ -1050,6 +1113,23 @@ class ChordLabState: NSObject, ObservableObject {
     }
   }
 
+  /// `kMsgTagLinkState` payload. Independent of `snapshot` (the first push can come before the first snapshot). Inside
+  /// a follow's send it is that request's answer (`FollowAttempt.received`; `ownDocumentChanged` when the shell pushed
+  /// another document's token in the same send, its answer to a stale own lineage); outside one it only clears a
+  /// notice that no longer applies. Only a changed value is published (the shell pushes on every registry change, often
+  /// the same state). A payload that does not decode is reported and leaves the last one shown.
+  func applyLinkState(json: Data) {
+    do {
+      let decoded = try JSONDecoder().decode(LinkStateJSON.self, from: json)
+      let ownDocumentChanged = followSendToken.map { $0 != clipboardToken } ?? false
+      followAttempt.received(decoded, ownDocumentChanged: ownDocumentChanged)
+      syncFollowNotice()
+      if decoded != linkState { linkState = decoded }
+    } catch {
+      reportError("link state decode failed: \(error)")
+    }
+  }
+
   /// `kMsgTagExportReady` payload: the export request in flight gets it as its answer (`ClipExportExchange`).
   func applyExportReady(json: Data) {
     if let ready = try? JSONDecoder().decode(ExportReadyJSON.self, from: json) {
@@ -1059,12 +1139,13 @@ class ChordLabState: NSObject, ObservableObject {
   }
 
   /// `kMsgTagError` payload. An error answering the export request in flight is that export's failure
-  /// (`ClipExportExchange.receivedError`): only its text shows. Otherwise it is a refused command: a key change still
-  /// waiting for its snapshot was most likely it, so it is dropped (a later snapshot with that tonic, an undo or a
-  /// redo, shows nothing), and so is a pending track add (a refused add opens nothing).
+  /// (`ClipExportExchange.receivedError`), one answering a follow request in flight is that request's answer
+  /// (`FollowAttempt.receivedError`: no refusal sentence follows); only its text shows. Otherwise it is a refused
+  /// command: a key change still waiting for its snapshot was most likely it, so it is dropped (a later snapshot with
+  /// that tonic, an undo or a redo, shows nothing), and so is a pending track add (a refused add opens nothing).
   func applyError(json: Data) {
     let message = (try? JSONDecoder().decode(ErrorJSON.self, from: json))?.error ?? String(decoding: json, as: UTF8.self)
-    if !exports.receivedError(message) {
+    if !exports.receivedError(message) && !followAttempt.receivedError() {
       pendingKeyChange = nil
       laneOpener.refused()
     }

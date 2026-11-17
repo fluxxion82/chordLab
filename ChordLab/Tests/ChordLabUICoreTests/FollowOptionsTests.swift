@@ -144,6 +144,36 @@ final class FollowOptionsTests: XCTestCase {
     XCTAssertNil(FollowOptions.warning(nil))
   }
 
+  // MARK: - The picker's disabled first entries
+
+  func testThePickersNotesAreTheRefusalThenTheWarning() throws {
+    let leaderState = try LinkStateTests.fixture("link-state-leader.json")
+    let refusal = FollowAttempt.refusalText(leaderLabel: "ChordLab A")
+    XCTAssertEqual(FollowOptions.menuNotes(leaderState, notice: refusal),
+                   [refusal, "Tracks that play from this ChordLab will stop."])
+    XCTAssertEqual(FollowOptions.menuNotes(leaderState, notice: nil), ["Tracks that play from this ChordLab will stop."])
+    XCTAssertEqual(FollowOptions.menuNotes(state([leader("a", "ChordLab A")]), notice: refusal), [refusal])
+    XCTAssertEqual(FollowOptions.menuNotes(state([leader("a", "ChordLab A")]), notice: nil), [])
+  }
+
+  func testAPickerWithNothingToOfferSaysSo() throws {
+    // The follower's Change… while the only other ChordLab is gone: the menu is never empty.
+    XCTAssertEqual(FollowOptions.menuNotes(state([]), notice: nil), ["No other ChordLab to play from right now."])
+    XCTAssertEqual(FollowOptions.menuNotes(state([leader("a", "ChordLab A", lineage: "")]), notice: nil),
+                   [FollowOptions.nothingToPick])
+    XCTAssertEqual(FollowOptions.menuNotes(nil, notice: nil), [FollowOptions.nothingToPick])
+    let refusal = FollowAttempt.refusalText(leaderLabel: "")
+    XCTAssertEqual(FollowOptions.menuNotes(state([]), notice: refusal), [refusal, FollowOptions.nothingToPick])
+  }
+
+  func testTheMenusTooltipSpeaksOfTracksNotLanes() {
+    XCTAssertEqual(FollowOptions.menuHelp, "Make this ChordLab play one track of another ChordLab")
+    for word in ["lane", "leader", "follow"] {
+      XCTAssertFalse(FollowOptions.menuHelp.lowercased().contains(word), word)
+      XCTAssertFalse(FollowOptions.nothingToPick.lowercased().contains(word), word)
+    }
+  }
+
   // MARK: - The copy fixture
 
   func testTheCopyFixtureOffersItsOriginalFirstWithBassPlayedByOneOther() throws {

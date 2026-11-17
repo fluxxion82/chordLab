@@ -93,6 +93,24 @@ enum FollowOptions {
     return "Tracks that play from this ChordLab will stop."
   }
 
+  /// The Follow menu's tooltip.
+  static let menuHelp = "Make this ChordLab play one track of another ChordLab"
+  /// The picker's one entry when it has nothing to offer (the follower's Change… while no other ChordLab has
+  /// published tracks), so a menu never opens empty.
+  static let nothingToPick = "No other ChordLab to play from right now."
+
+  /// The disabled entries the picker (the Follow menu, the follower panel's Change…, the banner's More…) shows
+  /// before its groups, in this order: the refusal of the last choice (`FollowAttempt.notice`, until the next
+  /// choice), the warning that tracks playing from this instance will stop (`warning`), and `nothingToPick` when
+  /// there are no groups.
+  static func menuNotes(_ state: LinkStateJSON?, notice: String?) -> [String] {
+    var notes: [String] = []
+    if let notice { notes.append(notice) }
+    if let warning = warning(state) { notes.append(warning) }
+    if groups(state).isEmpty { notes.append(nothingToPick) }
+    return notes
+  }
+
   static func groups(_ state: LinkStateJSON?) -> [FollowGroup] {
     guard let state else { return [] }
     let current = state.following.map { FollowTarget(leader: $0.leader, lane: $0.lane) }
