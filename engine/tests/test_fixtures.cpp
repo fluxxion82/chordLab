@@ -716,7 +716,7 @@ std::string linkStateFollower() {
 /// link-state-waiting.json: follower b played the Bass of ChordLab A and was saved; b and A are gone, and d loads
 /// b's saved state (b's id, its follow with the hints saved then) while A is missing. d has no label of its own; A's
 /// id takes the lowest free label again, ChordLab A, while d names it (rule 9). d sees ChordLab B, another leader
-/// (B since A's id had no row when it was added), and waits.
+/// (B: A held A and the follower b held no label when it was added), and waits.
 std::string linkStateWaiting() {
     const auto now = std::make_shared<std::int64_t>(0);
     LinkRegistry registry{fixtureClock(now)};

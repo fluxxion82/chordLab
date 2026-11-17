@@ -117,8 +117,9 @@ final class FollowerPanelModelTests: XCTestCase {
                    "Waiting for another ChordLab. It is not in this set, or it now plays from another ChordLab.")
   }
 
-  /// Labels are given by load order: while unbound, a stored "ChordLab A" may now name another instance. When a
-  /// listed leader carries it, the sentences say "the other ChordLab" instead of the letter.
+  /// The model's defensive branch: the engine never gives a waited-for id's label to another instance (`LinkRegistry`
+  /// rule 9), but if a link state did name a listed leader of another id with the waited-for label, the sentences say
+  /// "the other ChordLab" instead of the letter.
   func testAStaleStoredLabelIsNotUsedWhileWaiting() throws {
     let impostor = LinkLeaderJSON(id: "x", label: "ChordLab A", lineage: "t", lanes: [lane("chords", "Chords", "")])
     let m = try model(state(status: .waiting, leaders: [impostor]))

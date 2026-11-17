@@ -304,12 +304,16 @@ struct LinkView {
 ///    number from 1 that no row holds, visiting the instances in the order they were added (each one stands for
 ///    its own id when it is not following, for its follow's leader's otherwise). An id in use therefore keeps its
 ///    number: a deleted leader's label waits for its id while a follower names it, and comes back with the
-///    instance that adopts that id again (an undo). A follower has no label of its own. Every label a view shows
+///    instance that adopts that id again (an undo). The number goes with the id, not with the instance: a leader
+///    whose state load gives it another id (rule 3) is labelled anew, with that id's row if it has one and else
+///    with the lowest free number, which is its old one unless a lower one was free; and the number of a deleted
+///    leader that no follower names is free for the next id that needs one, also before an undo brings that
+///    leader back. A follower has no label of its own. Every label a view shows
 ///    is the table's for that id at that moment: an instance's own, a listed leader's, `switchTo`'s and
 ///    `copyOf`'s, and a follow's `leaderLabel`. The `leaderLabel` hint stored with a follow (written by `follow`,
 ///    loaded with a state) is never shown. Display only.
 /// 10. *Serial.* Moves on every `add`, every `remove` and `publish` of a live instance, and on a `setFollow`,
-///    `follow`, `adoptState` or `adoptWithoutBlock` that changes something a view shows (a follow's link or hints,
+///    `follow`, `adoptState` or `adoptWithoutBlock` that changes something a view shows (a follow's link or shown hints,
 ///    an id, being a copy, a binding); does not move on a call that changes nothing (an identical follow, a load
 ///    that leaves all of that as it was, a refused `follow`, an unknown token), nor on `followedLanes`, `view` or
 ///    `serial`. So it moves whenever some view's `copyOf` or `switchTo` changes: those change only with a
@@ -360,9 +364,10 @@ public:
     static LinkRegistry& shared();
 
     /// A new instance: a leader, following nothing, with id `id` (assumed unique among live instances), labelled
-    /// by rule 9 (the label its id already holds, or the lowest free one). `linkBuffer` (not null) is its link buffer, which only this registry writes, under its mutex,
-    /// until `remove`; it must outlive the registration, and its consumer is the instance's audio thread. Followers
-    /// waiting for `id` bind to it. An empty `hook` is never returned.
+    /// by rule 9 (the label its id already holds, or the lowest free one). `linkBuffer` (not null) is its link
+    /// buffer, which only this registry writes, under its mutex, until `remove`; it must outlive the registration,
+    /// and its consumer is the instance's audio thread. Followers waiting for `id` bind to it. An empty `hook` is
+    /// never returned.
     LinkToken add(std::string id, TripleBuffer<SnapshotSlot>* linkBuffer, Hook hook);
 
     /// The instance is going away: its followers are emptied and wait (their links are kept). Returns the hooks
