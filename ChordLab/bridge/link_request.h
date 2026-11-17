@@ -32,9 +32,12 @@ struct LinkRequest
 /// Main thread, never real-time.
 ///
 /// Rules, checked in this order (the first failure decides the message written to `*problem`):
-///  0. A raw NUL byte anywhere is "link message could not be parsed", before any parse, as the engine's readers
-///     refuse one (prescan in engine/src/json_api.cpp). An escaped `\u0000` inside a JSON string is a different
-///     thing: an ordinary character of that string, accepted.
+///  0. A text beyond the engine's message limits (`withinMessageLimits`, message_fields.h: a raw NUL byte anywhere,
+///     longer than kMaxJsonBytes, or nested deeper than kMaxJsonDepth) is "link message could not be parsed", before
+///     any parse. readLineage reads no `lineage` from such a text and reports it Absent ("not checked"), so a request
+///     that is acted on must never be such a text: its document lineage would skip the stale-document check, as
+///     parseClipExportRequest refuses the same texts for the same reason. An escaped `\u0000` inside a JSON string
+///     is a different thing: an ordinary character of that string, accepted.
 ///  1. The text parses as a JSON object with `schema` the integer kJsonSchema (boundedIntField) and `op` the string
 ///     "follow" or "unfollow" exactly; else "link message needs schema 1 and op \"follow\" or \"unfollow\""
 ///     (malformed JSON parses without throwing, as a non-object).
@@ -50,7 +53,7 @@ struct LinkRequest
 /// On success `*problem` is left untouched.
 inline std::optional<LinkRequest> parseLinkRequest(std::string_view json, std::string* problem = nullptr)
 {
-    if (json.find('\0') != std::string_view::npos)
+    if (!withinMessageLimits(json))                              // a raw NUL, too long or too deep: readLineage's limits
     {
         if (problem)
             *problem = "link message could not be parsed";

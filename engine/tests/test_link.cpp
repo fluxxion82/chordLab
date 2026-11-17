@@ -189,6 +189,36 @@ TEST_CASE("link uids: cover gives every track one uid, once") {
     CHECK(LaneUids{}.uidOf(a).empty());
 }
 
+TEST_CASE("link uids: cover asks again when the generator returns a uid the table already holds") {
+    DocumentStore store;
+    const int a = store.addTrack(TrackRole::Bass);
+    const int b = store.addTrack(TrackRole::Lead);
+    const int c = store.addTrack(TrackRole::Other);
+    // A table loaded from a set, and a per-process counter that restarted: its first answers are uids the table holds.
+    LaneUids uids;
+    uids.replace({{a, "uid-1"}, {b, "uid-2"}});
+    int asked = 0;
+    const LaneUids::Generator restarted = counter();
+    const LaneUids::Generator make = [&] {
+        ++asked;
+        return restarted();
+    };
+    CHECK(uids.cover(store.doc(), make));
+    CHECK(asked == 3);  // uid-1 and uid-2 refused, uid-3 taken
+    CHECK(uids.entries() == std::map<int, std::string>{{a, "uid-1"}, {b, "uid-2"}, {c, "uid-3"}});
+
+    // A uid given to an earlier track in the same call is held too.
+    DocumentStore two;
+    const int x = two.addTrack(TrackRole::Bass);
+    const int y = two.addTrack(TrackRole::Lead);
+    LaneUids fresh;
+    const std::vector<std::string> answers = {"same", "same", "other"};
+    std::size_t next = 0;
+    CHECK(fresh.cover(two.doc(), [&] { return answers.at(next++); }));
+    CHECK(next == 3);
+    CHECK(fresh.entries() == std::map<int, std::string>{{x, "same"}, {y, "other"}});
+}
+
 TEST_CASE("link uids: a removed track keeps its entry and, restored by undo, its uid") {
     DocumentStore store;
     const int a = store.addTrack(TrackRole::Bass);

@@ -598,10 +598,14 @@ bool applyCommandJson(DocumentStore& store, std::string_view json, std::string& 
 /// ```
 /// Inside the block members are in nlohmann's order (sorted by name), as in every other object here; `lanes` maps
 /// each track number, as a decimal string, to its uid (`InstanceState::lanes`); `follow` is null without a follow
-/// and otherwise writes all six fields of `LinkFollow`, the hints as they are (`laneRole` as `role`). The block is
-/// written as given: the caller passes one that `loadStateJson` accepts (the rules there; `LinkEndpoint::state`
-/// gives such a block when its uid generator keeps to them), since a state whose block breaks a rule does not load
-/// at all. Size: the largest valid block on the largest state is pinned by test_json_api.cpp under `kMaxJsonBytes`.
+/// and otherwise writes all six fields of `LinkFollow` (`laneRole` as `role`). A saved state always loads, whatever
+/// block the caller passes: what is written is `writableInstanceState(*instance)` (below), so a hint that is too long
+/// or not valid UTF-8 is written as an empty string (hints decide nothing), and a block that still breaks a rule of
+/// `validInstanceState` after that (an id, a lane, a follow's required field) is left out entirely, the state written
+/// as with `instance == nullptr`: losing a link is recoverable, losing the document is not. That case is a bug of the
+/// caller's (`LinkEndpoint::state` gives a valid block when its uid generator keeps to the rules), so a debug build
+/// asserts; a release build writes the state without the block. The block never makes this throw. Size: the largest
+/// valid block on the largest state is pinned by test_json_api.cpp under `kMaxJsonBytes`.
 std::string stateJson(const DocumentStore& store, int editorWidth = kDefaultEditorWidth,
                       int editorHeight = kDefaultEditorHeight, const InstanceState* instance = nullptr);
 
@@ -656,17 +660,35 @@ std::string stateJson(const DocumentStore& store, int editorWidth = kDefaultEdit
 ///   "2147483647" are all refused) and whose values are ids as above (`instance.lanes.<n> must be a string of ...`),
 ///   never `"chords"` (`instance.lanes.<n> must not be "chords"`) and pairwise different (`instance.lanes.<n>
 ///   repeats the uid of instance.lanes.<m>`, members visited in nlohmann's order, by key string);
-/// - `follow` required, null or an object (`instance.follow must be null or an object`): `leader` (into `leaderId`),
+/// - `follow` null or an object (`instance.follow must be null or an object`), absent meaning null (not following,
+///   so a writer that leaves a null follow out stays readable): `leader` (into `leaderId`),
 ///   `doc` (into `documentId`) and `lane` (into `laneUid`; `"chords"` passes as an id) required ids as above
 ///   (`missing instance.follow.leader`, `instance.follow.leader must be a string of ...`); `laneName`, `role` (into
 ///   `laneRole`) and `leaderLabel` optional strings, empty when absent, of at most `kMaxTrackNameBytes`, 16 and
 ///   `kMaxLinkLabelBytes` bytes (`instance.follow.laneName must be a string of at most 64 bytes`, and so on); the
 ///   hints are not checked further (any UTF-8 the parser accepted).
+/// These are the rules of `validInstanceState` (below), shared with the writer: every block this accepts passes it.
 /// Members the block, or its `follow`, does not know are ignored (forward compatibility), as elsewhere. Member order
 /// means nothing to the reader; a member given twice takes its last value (nlohmann's policy, as above), so two
 /// `instance` members are the last one, and a track number written twice in `lanes` is its last uid.
 bool loadStateJson(DocumentStore& store, std::string_view json, std::string& error, int* editorWidth = nullptr,
                    int* editorHeight = nullptr, std::optional<InstanceState>* instance = nullptr) noexcept;
+
+/// The rules of the state's instance block (`loadStateJson` lists them with its messages), on plain data, shared by
+/// the reader and the writer: `id` and `documentId` 1..`kMaxLinkIdBytes` bytes of printable ASCII 0x21..0x7E; at most
+/// `kMaxTracks + kMaxVanishedLaneUids` lanes, each keyed by a track number in 1..INT_MAX-1, with a uid that is such an
+/// id, never `"chords"`, all uids pairwise different; a follow's `leaderId`, `documentId` and `laneUid` such ids, its
+/// `laneName`, `laneRole` and `leaderLabel` valid UTF-8 of at most `kMaxTrackNameBytes`, 16 and `kMaxLinkLabelBytes`
+/// bytes. Returns true when `instance` keeps every one; otherwise false, with a short reason naming the field in
+/// `*why` when `why` is non-null ("lanes.2 repeats the uid of lanes.1"). Never throws but for allocation.
+bool validInstanceState(const InstanceState& instance, std::string* why = nullptr);
+
+/// What `stateJson` writes of `instance`: `instance` with each follow hint (`laneName`, `laneRole`, `leaderLabel`)
+/// that is over its byte bound or not valid UTF-8 replaced by an empty string, when the result is
+/// `validInstanceState`; nothing when it is not (a bad id, lane or required follow field: the state is then written
+/// without the block). A valid block comes back unchanged. The decision `stateJson` makes, as a function of its own,
+/// so that it can be tested without the debug assertion `stateJson` adds for the "nothing" case.
+std::optional<InstanceState> writableInstanceState(const InstanceState& instance);
 
 /// The link as the editor shows it (per-track instruments plan I12), from one `LinkView` (link.h):
 /// ```

@@ -157,3 +157,27 @@ TEST_CASE("parseLinkRequest: a member given twice takes its last value, as nlohm
     CHECK_FALSE(accepted(R"({"schema":1,"op":"follow","op":"unfollow"})").follow);
     CHECK(accepted(follow(R"("a","leader":"b")", R"("u")", R"("l")")).leaderId == "b");
 }
+
+TEST_CASE("parseLinkRequest: a text beyond the engine's message limits is refused, so its lineage is never left unchecked") {
+    // readLineage (command_lineage.h) reads no `lineage` from such a text and reports it Absent; a request acted on
+    // must never pass through that gap with a stale lineage.
+    const std::string head = R"({"schema":1,"op":"follow","leader":"x","lane":"u","leaderLineage":"l","lineage":"stale","pad":)";
+    // The top-level object is level 1, so kMaxJsonDepth - 1 arrays inside it are the deepest accepted.
+    auto nested = [&](int arrays) {
+        return head + std::string(static_cast<std::size_t>(arrays), '[') + std::string(static_cast<std::size_t>(arrays), ']') +
+               "}";
+    };
+    CHECK(accepted(nested(chordlab::kMaxJsonDepth - 1)).follow);
+    CHECK(problemOf(nested(chordlab::kMaxJsonDepth)) == kParseProblem);
+    CHECK(problemOf(nested(65)) == kParseProblem);  // the reviewer's input: 65 nested arrays as pad
+    // A 1 MiB string as pad: over kMaxJsonBytes.
+    CHECK(problemOf(head + "\"" + std::string(std::size_t{1} << 20, 'x') + "\"}") == kParseProblem);
+    // Exactly kMaxJsonBytes is within the limits; one byte more is not (padding by whitespace inside the object).
+    const std::string unfollow = R"({"schema":1,"op":"unfollow"})";
+    const std::string atLimit = unfollow.substr(0, unfollow.size() - 1) +
+                                std::string(chordlab::kMaxJsonBytes - unfollow.size(), ' ') + "}";
+    REQUIRE(atLimit.size() == chordlab::kMaxJsonBytes);
+    CHECK_FALSE(accepted(atLimit).follow);
+    CHECK(problemOf(atLimit + " ") == kParseProblem);
+    CHECK(problemOf(std::string(chordlab::kMaxJsonBytes + 1, ' ')) == kParseProblem);
+}

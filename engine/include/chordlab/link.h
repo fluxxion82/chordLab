@@ -50,7 +50,12 @@ public:
     /// at most `kMaxVanishedLaneUids` entries of vanished tracks stay: beyond that the lowest track numbers go
     /// first. The entry of a track of `doc` is never removed. `kChordsLaneUid` (or an empty string) is never
     /// given to a track: `make` returning one is a programming error (asserted); without asserts such a value is
-    /// skipped and `make` asked again. Returns whether the table changed (an entry added or removed).
+    /// skipped and `make` asked again. Nor is a uid the table already holds (an entry kept from before, or one given
+    /// to an earlier track in this call): `make` is asked again, since a generator that restarted, a per-process
+    /// counter against a table loaded from a set, repeats them, and two entries with one uid would make the saved
+    /// state unloadable. At most 64 answers are asked for one track; after that it gets no entry in this call (a
+    /// debug build asserts) and the next `cover` tries again. Returns whether the table changed (an entry added or
+    /// removed).
     bool cover(const Document& doc, const Generator& make);
 
     /// The uid of track `trackId`, or empty when it has none.

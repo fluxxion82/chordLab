@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <initializer_list>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <utility>
 
@@ -19,18 +20,31 @@ bool holdsTrack(const Document& doc, int trackId) {
 
 }  // namespace
 
+namespace {
+
+/// How often `LaneUids::cover` asks its generator for one track before it gives up for this call.
+constexpr int kLaneUidAttempts = 64;
+
+}  // namespace
+
 bool LaneUids::cover(const Document& doc, const Generator& make) {
     bool changed = false;
     for (const Track& track : doc.tracks) {
         if (entries_.count(track.id) != 0) continue;
-        std::string uid;
-        for (;;) {
-            uid = make();
-            const bool usable = !uid.empty() && uid != kChordsLaneUid;
+        std::optional<std::string> uid;
+        for (int attempt = 0; attempt < kLaneUidAttempts && !uid; ++attempt) {
+            std::string candidate = make();
+            const bool usable = !candidate.empty() && candidate != kChordsLaneUid;
             assert(usable && "a lane uid generator never returns kChordsLaneUid or an empty string");
-            if (usable) break;
+            // A uid the table holds is not an error of the generator's: a per-process counter restarted against a
+            // table loaded from a set repeats them. Ask again; two entries with one uid would make the save unloadable.
+            const bool held = std::any_of(entries_.begin(), entries_.end(),
+                                          [&](const auto& entry) { return entry.second == candidate; });
+            if (usable && !held) uid = std::move(candidate);
         }
-        entries_.emplace(track.id, std::move(uid));
+        assert(uid.has_value() && "a lane uid generator kept returning uids the table already holds");
+        if (!uid) continue;  // without asserts: no entry for this track in this call; the next cover asks again
+        entries_.emplace(track.id, std::move(*uid));
         changed = true;
     }
     // Vanished entries beyond the cap go, lowest track numbers first (the map iterates in ascending order).

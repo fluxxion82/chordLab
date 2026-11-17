@@ -1269,6 +1269,17 @@ std::string feedInstanceState(DocumentStore& store, const std::string& text, boo
         if (instance.has_value() && !instanceValid(*instance)) {
             return "loadStateJson accepted a block that breaks a rule";
         }
+        if (instance.has_value() && !validInstanceState(*instance)) {
+            return "loadStateJson accepted a block that validInstanceState refuses";
+        }
+        if (instance.has_value()) {
+            // Every distinct member of the accepted `lanes` (nlohmann keeps the last of a repeated one, as the reader
+            // does) is one entry: a reader that collapsed two keys into one track would show here.
+            const json parsed = json::parse(text);
+            if (parsed.at("instance").at("lanes").size() != instance->lanes.size()) {
+                return "the accepted block's lanes do not have one entry per member";
+            }
+        }
         DocumentStore again;
         std::optional<InstanceState> back;
         std::string e2;

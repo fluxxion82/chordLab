@@ -6405,6 +6405,8 @@ TEST_CASE("instance block: bad lanes reject the whole state naming the field") {
         {[](json& s) { s["instance"]["lanes"]["1"] = ""; }, "instance.lanes.1 " + kLinkIdRule},
         {[](json& s) { s["instance"]["lanes"]["1"] = std::string(65, 'u'); }, "instance.lanes.1 " + kLinkIdRule},
         {[](json& s) { s["instance"]["lanes"]["2"] = "lane uid"; }, "instance.lanes.2 " + kLinkIdRule},
+        {[](json& s) { s["instance"]["lanes"]["2"] = "lane\x01uid"; }, "instance.lanes.2 " + kLinkIdRule},
+        {[](json& s) { s["instance"]["lanes"]["2"] = "lane-\xC3\xA9"; }, "instance.lanes.2 " + kLinkIdRule},
         {[](json& s) { s["instance"]["lanes"]["2"] = "lane-uid-1"; }, "instance.lanes.2 repeats the uid of instance.lanes.1"},
         {[](json& s) { s["instance"]["lanes"]["2"] = "chords"; }, "instance.lanes.2 must not be \"chords\""},
     };
@@ -6412,6 +6414,19 @@ TEST_CASE("instance block: bad lanes reject the whole state naming the field") {
                             "99999999999", "18446744073709551617"}) {
         cases.emplace_back([key](json& s) { s["instance"]["lanes"] = json{{key, "lane-uid-x"}}; }, kLaneKeyRule);
     }
+    // A key with an escaped NUL after the digit ("1\u0000" in the text), a full-width digit one, a key of 100000 digits.
+    for (const std::string& key : {std::string("1\0", 2), std::string("\xEF\xBC\x91"), std::string(100000, '1')}) {
+        cases.emplace_back([key](json& s) { s["instance"]["lanes"] = json{{key, "lane-uid-x"}}; }, kLaneKeyRule);
+    }
+    cases.emplace_back(
+        [](json& s) {
+            json lanes = json::object();
+            for (int i = 1; i <= 20000; ++i) {
+                lanes[std::to_string(i)] = "u" + std::to_string(i);
+            }
+            s["instance"]["lanes"] = lanes;
+        },
+        "instance.lanes must hold at most 68 entries");
     cases.emplace_back(
         [](json& s) {
             json lanes = json::object();
@@ -6430,7 +6445,6 @@ TEST_CASE("instance block: bad lanes reject the whole state naming the field") {
 TEST_CASE("instance block: a bad follow rejects the whole state naming the field") {
     using Edit = std::function<void(json&)>;
     std::vector<std::pair<Edit, std::string>> cases = {
-        {[](json& s) { s["instance"].erase("follow"); }, "missing instance.follow"},
         {[](json& s) { s["instance"]["follow"] = 5; }, "instance.follow must be null or an object"},
         {[](json& s) { s["instance"]["follow"] = "leader-1"; }, "instance.follow must be null or an object"},
         {[](json& s) { s["instance"]["follow"] = json::array(); }, "instance.follow must be null or an object"},
@@ -6506,7 +6520,7 @@ TEST_CASE("instance block: every bound is inclusive: the longest ids, the edge c
     CHECK(*small == InstanceState{"a", "b", {{1, "c"}}, LinkFollow{"d", "e", "f", "", "", ""}});
 }
 
-TEST_CASE("instance block: absent hints load empty, unknown members are ignored, a repeated member takes its last value") {
+TEST_CASE("instance block: absent hints load empty, an absent follow is null, unknown members are ignored, a repeated member takes its last value") {
     const std::optional<InstanceState> noHints = loadedInstance(editedInstanceState([](json& s) {
         s["instance"]["follow"].erase("laneName");
         s["instance"]["follow"].erase("role");
@@ -6526,6 +6540,12 @@ TEST_CASE("instance block: absent hints load empty, unknown members are ignored,
         loadedInstance(editedInstanceState([](json& s) { s["instance"]["follow"] = nullptr; }));
     REQUIRE(nullFollow.has_value());
     CHECK_FALSE(nullFollow->follow.has_value());
+    // An absent follow is a null one: not following (a writer that leaves a null follow out stays readable).
+    const std::optional<InstanceState> noFollow =
+        loadedInstance(editedInstanceState([](json& s) { s["instance"].erase("follow"); }));
+    REQUIRE(noFollow.has_value());
+    CHECK_FALSE(noFollow->follow.has_value());
+    CHECK(noFollow->lanes == fullInstance().lanes);
 
     // A repeated member, as nlohmann reads it (json_api.h): two "instance" members are the last one, and a track
     // number written twice is its last uid (the first, a uid of another entry, would otherwise be a repeat).
@@ -6544,6 +6564,147 @@ TEST_CASE("instance block: absent hints load empty, unknown members are ignored,
     front.insert(1, member + ",");
     CHECK(front.rfind("{\"instance\":", 0) == 0);
     CHECK(loadedInstance(front) == first);
+}
+
+namespace {
+
+/// One block per kind of rule violation, each `fullInstance()` broken in exactly one way, with the field the reason
+/// names.
+std::vector<std::pair<InstanceState, std::string>> brokenInstances() {
+    std::vector<std::pair<InstanceState, std::string>> out;
+    auto broken = [&](const std::string& field, const std::function<void(InstanceState&)>& edit) {
+        InstanceState s = fullInstance();
+        edit(s);
+        out.emplace_back(std::move(s), field);
+    };
+    broken("lanes", [](InstanceState& s) { s.lanes[0] = "lane-uid-0"; });
+    broken("lanes", [](InstanceState& s) { s.lanes[-3] = "lane-uid-m3"; });
+    broken("lanes", [](InstanceState& s) { s.lanes[INT_MAX] = "lane-uid-max"; });
+    broken("lanes.2", [](InstanceState& s) { s.lanes[2] = "lane-uid-1"; });
+    broken("lanes.2", [](InstanceState& s) { s.lanes[2] = "chords"; });
+    broken("lanes.2", [](InstanceState& s) { s.lanes[2] = "lane uid"; });
+    broken("lanes", [](InstanceState& s) {
+        for (int i = 1; i <= 69; ++i) s.lanes[i] = "u" + std::to_string(i);
+    });
+    broken("id", [](InstanceState& s) { s.id = "has space"; });
+    broken("id", [](InstanceState& s) { s.id.clear(); });
+    broken("id", [](InstanceState& s) { s.id = std::string(65, 'i'); });
+    broken("doc", [](InstanceState& s) { s.documentId = "caf\xC3\xA9"; });
+    broken("follow.lane", [](InstanceState& s) { s.follow->laneUid.clear(); });
+    broken("follow.leader", [](InstanceState& s) { s.follow->leaderId = "a\tb"; });
+    broken("follow.doc", [](InstanceState& s) { s.follow->documentId = std::string(65, 'd'); });
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE("validInstanceState: the block's rules on plain data, a reason naming the field for each kind of violation") {
+    std::string why = "untouched";
+    CHECK(validInstanceState(fullInstance(), &why));
+    CHECK(why == "untouched");
+    CHECK(validInstanceState(fullInstance()));
+    InstanceState bare;
+    bare.id = "i";
+    bare.documentId = "d";
+    CHECK(validInstanceState(bare));
+    for (const auto& entry : brokenInstances()) {
+        const InstanceState& instance = entry.first;
+        const std::string& field = entry.second;
+        CAPTURE(field);
+        std::string reason;
+        CHECK_FALSE(validInstanceState(instance, &reason));
+        CHECK(reason.rfind(field, 0) == 0);
+        CHECK_FALSE(validInstanceState(instance));
+        // The reader agrees: written as given, the block is refused.
+        json state = json::parse(stateJson(trackedStore()));
+        json lanes = json::object();
+        for (const auto& [track, uid] : instance.lanes) lanes[std::to_string(track)] = uid;
+        const LinkFollow& f = *instance.follow;
+        state["instance"] = {{"id", instance.id}, {"doc", instance.documentId}, {"lanes", lanes},
+                             {"follow", {{"leader", f.leaderId}, {"doc", f.documentId}, {"lane", f.laneUid}}}};
+        DocumentStore store;
+        std::string error;
+        CHECK_FALSE(loadStateJson(store, state.dump(), error));
+        CHECK(error.find("instance") != std::string::npos);
+    }
+    // The hints: over their bound or not valid UTF-8.
+    for (const auto& edit : std::vector<std::function<void(LinkFollow&)>>{
+             [](LinkFollow& f) { f.laneName = std::string(65, 'n'); },
+             [](LinkFollow& f) { f.laneName = "cut \xC3"; },
+             [](LinkFollow& f) { f.laneRole = std::string(17, 'r'); },
+             [](LinkFollow& f) { f.laneRole = "\xED\xA0\x80"; },  // a UTF-16 surrogate, encoded: not UTF-8
+             [](LinkFollow& f) { f.leaderLabel = std::string(97, 'l'); },
+             [](LinkFollow& f) { f.leaderLabel = "\xC0\x80"; }}) {  // an overlong NUL
+        InstanceState s = fullInstance();
+        edit(*s.follow);
+        std::string reason;
+        CHECK_FALSE(validInstanceState(s, &reason));
+        CHECK(reason.rfind("follow.", 0) == 0);
+    }
+    InstanceState fourByte = fullInstance();
+    fourByte.follow->laneName = "\xF0\x9F\x8E\xB9 keys";  // valid four-byte UTF-8
+    CHECK(validInstanceState(fourByte));
+}
+
+TEST_CASE("writableInstanceState: a block that breaks a rule is left out, and the state written without it loads") {
+    const DocumentStore store = linkedDocumentStore();
+    for (const auto& entry : brokenInstances()) {
+        const InstanceState& instance = entry.first;
+        CAPTURE(entry.second);
+        std::optional<InstanceState> written = fullInstance();
+        CHECK_NOTHROW(written = writableInstanceState(instance));
+        CHECK_FALSE(written.has_value());
+        // What stateJson then writes: the state without the block, which loads with the document and no block.
+        std::string text;
+        CHECK_NOTHROW(text = stateJson(store, 1000, 700, written ? &*written : nullptr));
+        DocumentStore loaded;
+        std::optional<InstanceState> read = fullInstance();
+        std::string error;
+        REQUIRE_MESSAGE(loadStateJson(loaded, text, error, nullptr, nullptr, &read), error);
+        CHECK_FALSE(read.has_value());
+        CHECK(loaded.doc() == store.doc());
+    }
+    CHECK(writableInstanceState(fullInstance()) == fullInstance());  // a valid block unchanged
+}
+
+TEST_CASE("stateJson: a hint that is too long or not valid UTF-8 is written empty; the rest of the block survives") {
+    const DocumentStore store = linkedDocumentStore();
+    const std::vector<std::function<void(LinkFollow&)>> edits = {
+        [](LinkFollow& f) { f.laneName = std::string(65, 'n'); },
+        [](LinkFollow& f) { f.laneName = "cut \xC3"; },
+        [](LinkFollow& f) { f.laneRole = std::string(17, 'r'); },
+        [](LinkFollow& f) { f.laneRole = "\xFF"; },
+        [](LinkFollow& f) { f.leaderLabel = std::string(97, 'l'); },
+        [](LinkFollow& f) { f.leaderLabel = "bad \xE2\x82"; },
+        [](LinkFollow& f) {
+            f.laneName = "\x80";
+            f.laneRole = std::string(1000, 'r');
+            f.leaderLabel = "\xC3";
+        },
+    };
+    for (std::size_t i = 0; i < edits.size(); ++i) {
+        CAPTURE(i);
+        InstanceState given = fullInstance();
+        edits[i](*given.follow);
+        // Expected: every hint that broke its rule emptied, everything else as given.
+        InstanceState expected = given;
+        LinkFollow& f = *expected.follow;
+        const InstanceState full = fullInstance();
+        const LinkFollow& original = *full.follow;
+        if (f.laneName != original.laneName) f.laneName.clear();
+        if (f.laneRole != original.laneRole) f.laneRole.clear();
+        if (f.leaderLabel != original.leaderLabel) f.leaderLabel.clear();
+        CHECK(writableInstanceState(given) == expected);
+
+        std::string text;
+        CHECK_NOTHROW(text = stateJson(store, 1000, 700, &given));
+        DocumentStore loaded;
+        std::optional<InstanceState> read;
+        std::string error;
+        REQUIRE_MESSAGE(loadStateJson(loaded, text, error, nullptr, nullptr, &read), error);
+        CHECK(read == expected);
+        CHECK(loaded.doc() == store.doc());
+    }
 }
 
 namespace {
