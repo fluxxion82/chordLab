@@ -11,6 +11,7 @@
 #include "chordlab/compiler.h"
 #include "chordlab/document.h"
 #include "chordlab/limits.h"
+#include "chordlab/link.h"
 #include "chordlab/midi_in.h"
 #include "chordlab/note_event.h"
 #include "chordlab/publication.h"
@@ -318,6 +319,56 @@ TEST_CASE("rt alloc: the triple buffer allocates nothing on the producer or the 
     CHECK(unexpectedFresh == 0);
     CHECK(wrongCurrent == 0);
     CHECK(wrongGeneration == 0);
+}
+
+TEST_CASE("rt alloc: the link source allocates nothing across switches, fresh slots, empty buffers and blocks") {
+    // The top of a follower's block: LinkSource::select between its own and its link buffer, then the block. The
+    // producers' side (beginWrite, publish: the triple buffer's, measured above) runs here between the blocks.
+    const Compiled own = compiled({chord(0, "maj"), chord(9, "min")}, 2.0);
+    const Compiled lane = compiled({chord(5, "maj")}, 4.0);
+    const auto ownBuffer = std::make_unique<TripleBuffer<SnapshotSlot>>();   // ~864 KB each: off the stack
+    const auto linkBuffer = std::make_unique<TripleBuffer<SnapshotSlot>>();
+    const auto scheduler = std::make_unique<Scheduler>();
+    scheduler->reset(kSr);
+    LinkSource source;
+    std::array<MidiOut, 512> out{};
+    const auto write = [](TripleBuffer<SnapshotSlot>& buffer, const Compiled& c, bool flag) {
+        SnapshotSlot& slot = buffer.beginWrite();
+        std::copy(c.events.begin(), c.events.end(), slot.events.begin());
+        slot.count = c.events.size();
+        slot.endBeat = c.endBeat;
+        slot.loop = true;
+        slot.followHost = true;
+        slot.midiThru = flag;
+    };
+    std::uint32_t ownGeneration = 0;
+    std::uint32_t linkGeneration = kLinkGenerationBase;
+    write(*ownBuffer, own, true);
+    ownBuffer->publish(++ownGeneration);
+
+    AllocationProbe probe;
+    double ppq = 0.0;
+    std::size_t adoptsOverOne = 0;
+    for (int block = 0; block < 10000; ++block) {
+        if (block % 7 == 0) {
+            write(*ownBuffer, own, block % 2 == 0);
+            ownBuffer->publish(++ownGeneration);
+        }
+        if (block > 50 && block % 11 == 0) {  // the link buffer stays unpublished for the first switches
+            write(*linkBuffer, lane, true);
+            linkBuffer->publish(++linkGeneration);
+        }
+        const bool following = (block / 3) % 2 == 1;
+        const std::uint64_t before = source.adoptions();
+        const LinkSource::Flags flags = source.select(*ownBuffer, *linkBuffer, following, *scheduler);
+        adoptsOverOne += source.adoptions() - before > 1 ? 1 : 0;
+        std::size_t written = 0;
+        scheduler->process(BlockInfo{ppq, 512, kSr, 120.0, flags.followHost, flags.thru}, out.data(), out.size(),
+                           written);
+        ppq += 512.0 / 24000.0;
+    }
+    CHECK(probe.count() == 0);
+    CHECK(adoptsOverOne == 0);
 }
 
 TEST_CASE("rt alloc: the raw MIDI ring allocates nothing on push, pop or an overflow") {

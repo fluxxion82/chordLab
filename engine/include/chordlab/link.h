@@ -4,9 +4,11 @@
 #include "chordlab/document.h"
 #include "chordlab/note_event.h"
 #include "chordlab/publication.h"
+#include "chordlab/scheduler.h"
 #include "chordlab/tracks.h"
 #include "chordlab/triple_buffer.h"
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -15,14 +17,17 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace chordlab {
 
 // Linking instances (per-track instruments plan I2, I4 to I7): a leader hands each follower the compiled notes of
 // one lane, and a follower plays them from a buffer of its own. This header holds the pure, single-threaded
-// pieces (how lanes are named across saves, what a leader publishes, and how a follower's slot is filled from it)
-// and the registry where the instances of one process meet. Standard library only: no platform code.
+// pieces (how lanes are named across saves, what a leader publishes, and how a follower's slot is filled from it),
+// the registry where the instances of one process meet, and the two classes an instance's shell delegates to:
+// `LinkEndpoint` (its non-real-time side) and `LinkSource` (the top of its audio block). Standard library only: no
+// platform code.
 
 /// The key the chords lane has in every link.
 inline constexpr std::string_view kChordsLaneUid = "chords";
@@ -316,6 +321,174 @@ private:
     struct Entry;
     struct State;
     std::unique_ptr<State> state_;
+};
+
+// --- the two halves of an instance (per-track instruments plan I5, I6) -----------------------------------------
+
+/// The top of an instance's audio block when it may follow: which of its two buffers the scheduler plays, the
+/// instance's own (`own`, its document's compiled lanes, written by its `publishOwn`) or its link buffer (`link`,
+/// a leader's lane, written only by the registry). One per instance, used only by its audio thread. Nothing here
+/// allocates, locks, throws or logs.
+class LinkSource {
+public:
+    /// The flags of one block: `followHost` gates the progression on the transport (`BlockInfo::playing` is the
+    /// host's flag AND this), `thru` is `BlockInfo::thru`.
+    struct Flags {
+        bool followHost = true;
+        bool thru = true;
+    };
+    /// Which buffer the scheduler is playing: none before the first `select`.
+    enum class Source : std::uint8_t { None, Own, Link };
+
+    /// Top of a block. Acquires `own` always and `link` when `following` (and never touches `link` otherwise),
+    /// then makes the scheduler adopt at most once: the selected buffer (`link` when `following`, else `own`) is
+    /// adopted when it delivered a fresh slot, and also, fresh or not, whenever it differs from the buffer being
+    /// played (follow, play, unfollow with nothing published must return to the own content); then its current
+    /// slot is adopted with its current generation. A selected buffer that has never been published is adopted as
+    /// an empty snapshot: under generation `kLinkGenerationBase` for `link` (no publication of a link buffer has
+    /// it: they start at `kLinkGenerationBase + 1`), under generation 0 for `own` (own publications start at 1).
+    /// Every acquire comes before that adopt, so the scheduler never keeps reading an array whose buffer was
+    /// acquired again (`Snapshot`'s lifetime rule, scheduler.h; triple_buffer.h): the buffer it leaves is free to
+    /// be acquired from the next call on, and the one it plays is never acquired without adopting. Own and link
+    /// generations come from disjoint ranges (`kLinkGenerationBase`), so "same generation, same content" holds
+    /// across a switch, and a switch always flushes and chases. Returns `followHost` from the slot being played
+    /// (true while it has none) and `thru` always from `own`'s current slot (true before any): a follower keeps
+    /// its own Thru switch.
+    Flags select(TripleBuffer<SnapshotSlot>& own, TripleBuffer<SnapshotSlot>& link, bool following,
+                 Scheduler& scheduler) noexcept;
+
+    /// The buffer the scheduler plays since the last `select` (`None` before the first). Audio thread.
+    Source playing() const noexcept { return playing_; }
+    /// The generation of the snapshot last adopted (0 before any). Audio thread.
+    std::uint32_t generation() const noexcept { return generation_; }
+    /// How many times `select` has called `Scheduler::adopt` (at most once a call). Audio thread; diagnostics.
+    std::uint64_t adoptions() const noexcept { return adoptions_; }
+
+private:
+    Source playing_ = Source::None;
+    std::uint32_t generation_ = 0;
+    std::uint64_t adoptions_ = 0;
+};
+
+/// What an instance does for linking on its non-real-time threads (per-track instruments plan I5 to I7, I9): its
+/// registration with a `LinkRegistry`, its document id and lane uids, its link buffer, its feed, and the switch
+/// between leading and following. The caller serialises every call with its model mutex (the shell's
+/// `mModelMutex`), as it does for its own buffer's producer side; `following`, `linkBuffer`'s consumer side and
+/// `serial` are the exceptions noted on them. Lock order: the caller's model mutex, then the registry's (a leaf).
+/// The endpoint never holds two instances' locks and never runs a hook itself, except in its destructor after
+/// `remove`: `follow`, `unfollow` and `adopt` hand the hooks to the caller, which runs them after releasing its
+/// own lock and then calls `publishOwn` for itself (its own content may have changed role). Allocates: never on
+/// the audio thread.
+class LinkEndpoint {
+public:
+    /// Makes uids: instance ids for copies, document ids and lane uids. Each call returns a string never returned
+    /// before (a UUID in the shell), never empty and never `kChordsLaneUid`.
+    using UidGenerator = std::function<std::string()>;
+
+    /// `LinkFollowResult`, under the name the endpoint's callers use.
+    using LinkResult = LinkFollowResult;
+
+    /// What an instance saves and loads of its link (plan I11; Task 6 gives it its JSON).
+    struct State {
+        std::string id;                       // the instance's persistent id
+        std::string documentId;               // its document's id
+        std::map<int, std::string> lanes;     // track number -> lane uid (`LaneUids::entries`)
+        std::optional<LinkFollow> follow;     // set: it follows
+    };
+
+    /// Registers a new instance with `registry` under `instanceId` (assumed unique), a leader following nothing,
+    /// with a fresh document id from `makeUid` and an empty lane uid table. Allocates its link buffer on the heap
+    /// (about 864 KB) and hands it to the registry. `hook` is what other instances call to make this one
+    /// republish (`LinkRegistry::Hook`: it must only lock the caller's model mutex and call `publishOwn`, and be
+    /// safe to call after the instance is gone). Followers waiting for `instanceId` bind to it; they get content
+    /// from its first `publishOwn`, which the caller makes at once (the shell's constructor publishes).
+    LinkEndpoint(LinkRegistry& registry, std::string instanceId, UidGenerator makeUid, LinkRegistry::Hook hook);
+    /// Removes the registration (its followers are emptied and wait, the link buffer is never written again) and
+    /// then runs the hooks `remove` returned (its leader's, when it was bound to one). The caller holds no lock.
+    ~LinkEndpoint();
+    LinkEndpoint(const LinkEndpoint&) = delete;
+    LinkEndpoint& operator=(const LinkEndpoint&) = delete;
+
+    /// The instance's publish, in place of a bare `fillSlot`, in the caller's model-mutex section. Returns
+    /// `fillSlot`'s result: when true the caller publishes `ownSlot` (its own buffer's `beginWrite()`) under
+    /// `ownPublication.generation`.
+    ///
+    /// Not following: gives every track of `doc` a lane uid (`LaneUids::cover`); asks the registry which of its
+    /// lanes (`kChordsLaneUid` and each track's uid) are followed in THIS document, `documentId()` (a follower
+    /// whose link names another document does not count: it is about to fall silent, so this instance keeps the
+    /// lane); fills `ownSlot` with the audible lanes minus those (`fillSlot(doc, AllExcept{...}, ...)`); and then,
+    /// when anything a feed carries changed since the last feed it published, builds one (`buildLinkFeed`, the
+    /// followed lanes compiled) and publishes it, which writes every bound follower's link buffer before this
+    /// returns. A feed is published when there was none since the instance was created, adopted a state or
+    /// stopped following, and otherwise when one of these differs from the last feed's: `revision` (the store's
+    /// content revision, which every undoable change moves), the document id, the lane uids in order,
+    /// `progressionLoop`, `followHost`, any lane's audibility (mute and solo), the followed set, `lineage` (the
+    /// label is the registry's for the registration's life and never changes). The followed set counts
+    /// followers: which lanes are followed, and how many bound followers follow each (`LinkView::routed`), since a
+    /// follower that binds to a lane already followed changes no lane of the feed but gets its content only from
+    /// its leader's next publish (`LinkRegistry` rule 4), the one its hook causes. A selection change, a browsed
+    /// key, Thru, or a refused or no-op command publishes no feed.
+    ///
+    /// Following: fills `ownSlot` with the whole own document (`fillSlot(doc, LaneSelection{}, ...)`: it is not
+    /// played, but Thru rides in it and an unfollow returns to it) and publishes no feed.
+    bool publishOwn(const Document& doc, std::uint64_t revision, const std::string& lineage, SnapshotSlot& ownSlot,
+                    Publication& ownPublication);
+
+    /// Follow `laneUid` of the leader `leaderId` if `leaderLineage` is that leader's current lineage: one
+    /// `LinkRegistry::follow` call (its checks and results). On `Applied` the instance follows (`following()`
+    /// turns true after the registry wrote the link buffer empty) and `hooks` holds what the caller must run after
+    /// releasing its lock; on any other result nothing changes and `hooks` is empty.
+    LinkResult follow(std::string_view leaderId, std::string_view laneUid, std::string_view leaderLineage,
+                      LinkRegistry::Hooks& hooks);
+    /// Stop following (nothing changes for an instance that does not follow). The registry empties the link
+    /// buffer, then `following()` turns false; `hooks` receives the old leader's hook, to run after the lock.
+    void unfollow(LinkRegistry::Hooks& hooks);
+
+    /// What to save: the instance's id, its document id and lane uids, and its follow with `leaderId` (and the
+    /// `leaderLabel` hint) replaced by the bound leader's current ones while bound (as stored while waiting).
+    State state() const;
+    /// A state load (a state without the block is Task 6's business: the caller then keeps its current state).
+    /// The registry decides the id (`LinkRegistry::adoptState` rule 3, a fresh uid from `makeUid` for a copy) and
+    /// replaces the follow atomically under its mutex; the document id and the lane uid table become the loaded
+    /// ones; `following()` follows the loaded follow. `hooks` receives what the caller must run after releasing
+    /// its lock (the old and new leader's). The next `publishOwn` publishes a feed.
+    void adopt(const State& loaded, LinkRegistry::Hooks& hooks);
+
+    /// Whether the instance follows. Atomic: the audio thread reads it at the top of every block
+    /// (`LinkSource::select`). It turns true only after the link buffer holds a publication.
+    bool following() const noexcept { return following_.load(std::memory_order_acquire); }
+    /// The link buffer: the registry is its only producer; its consumer side is the audio thread's.
+    TripleBuffer<SnapshotSlot>& linkBuffer() noexcept { return *linkBuffer_; }
+    /// The registry's serial (any thread).
+    std::uint64_t serial() const noexcept;
+    /// What this instance sees of the registry.
+    LinkView view() const;
+    /// The id of the document the instance holds.
+    const std::string& documentId() const noexcept { return documentId_; }
+
+private:
+    /// What the last published feed was built from, for `publishOwn`'s "anything a feed carries changed".
+    struct FeedKey {
+        std::uint64_t revision = 0;
+        std::string documentId;
+        std::string lineage;
+        bool loop = true;
+        bool followHost = true;
+        std::vector<std::string> laneUids;  // kChordsLaneUid, then the tracks' uids in document order
+        std::vector<bool> audible;          // in the same order
+        std::vector<std::string> followed;
+        std::vector<std::pair<std::string, int>> followers;  // `LinkView::routed`: lane uid, bound followers
+    };
+
+    LinkRegistry& registry_;
+    UidGenerator makeUid_;
+    std::unique_ptr<TripleBuffer<SnapshotSlot>> linkBuffer_;
+    LinkToken token_ = 0;
+    std::string label_;
+    std::string documentId_;
+    LaneUids uids_;
+    std::atomic<bool> following_{false};
+    std::optional<FeedKey> lastFeed_;  // empty: the next leading publishOwn publishes a feed
 };
 
 }  // namespace chordlab

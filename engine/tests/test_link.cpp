@@ -6,9 +6,12 @@
 #include "chordlab/feel.h"
 #include "chordlab/link.h"
 #include "chordlab/publication.h"
+#include "chordlab/scheduler.h"
 #include "chordlab/tracks.h"
+#include "chordlab/triple_buffer.h"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -798,5 +801,282 @@ TEST_CASE("link: a leader's slot and its followers' slots hold between them ever
         REQUIRE(d.store.setTrackSolo(d.a, true));
         checkPartition({d.uidA});
         checkPartition({chords});
+    }
+}
+
+// --- the audio-side source --------------------------------------------------------------------------------------
+
+namespace {
+
+/// One instance's audio side, as the shell drives it: its own buffer and its link buffer (written here by hand, as
+/// the instance's publishOwn and the registry would), a scheduler, and the LinkSource that picks between them. All
+/// on the heap (a buffer is ~864 KB). What the scheduler plays is read off the scheduler itself (`sounds`): every
+/// content published here is one note held over the whole four-beat loop, so after any block the content being
+/// played is the one whose pitch sounds.
+struct SourceRig {
+    std::unique_ptr<TripleBuffer<SnapshotSlot>> own = std::make_unique<TripleBuffer<SnapshotSlot>>();
+    std::unique_ptr<TripleBuffer<SnapshotSlot>> link = std::make_unique<TripleBuffer<SnapshotSlot>>();
+    std::unique_ptr<Scheduler> scheduler = std::make_unique<Scheduler>();
+    LinkSource source;
+    std::array<MidiOut, 512> out{};
+    double ppq = 0.0;
+    std::uint32_t ownGeneration = 0;
+    std::uint32_t linkGeneration = kLinkGenerationBase;
+    LinkSource::Flags flags;
+    std::uint64_t adoptedThisBlock = 0;
+
+    SourceRig() { scheduler->reset(48000.0); }
+
+    /// Writes one held note of `pitch` (none for a negative pitch) with the flags into `buffer`'s back slot.
+    static void write(TripleBuffer<SnapshotSlot>& buffer, int pitch, bool followHost, bool thru) {
+        SnapshotSlot& slot = buffer.beginWrite();
+        slot.count = 0;
+        if (pitch >= 0) {
+            slot.events[0] = NoteEvent{0.0, true, pitch, 100};
+            slot.events[1] = NoteEvent{4.0, false, pitch, 0};
+            slot.count = 2;
+        }
+        slot.endBeat = 4.0;
+        slot.loop = true;
+        slot.followHost = followHost;
+        slot.midiThru = thru;
+    }
+    /// A new own content (the next own generation).
+    void publishOwn(int pitch, bool followHost = true, bool thru = true) {
+        write(*own, pitch, followHost, thru);
+        own->publish(++ownGeneration);
+    }
+    /// A new link content (the next link generation).
+    void publishLink(int pitch, bool followHost = true, bool thru = true) {
+        write(*link, pitch, followHost, thru);
+        link->publish(++linkGeneration);
+    }
+
+    /// The top of a block and the block (0.2 beat at 120 bpm, 48 kHz), the transport running. Every call adopts at
+    /// most once.
+    void block(bool following) {
+        const std::uint64_t before = source.adoptions();
+        flags = source.select(*own, *link, following, *scheduler);
+        adoptedThisBlock = source.adoptions() - before;
+        REQUIRE(adoptedThisBlock <= 1);
+        const BlockInfo info{ppq, 4800, 48000.0, 120.0, flags.followHost, flags.thru};
+        std::size_t written = 0;
+        REQUIRE(scheduler->process(info, out.data(), out.size(), written));
+        ppq += 0.2;
+    }
+    bool sounds(int pitch) const { return scheduler->sounding(pitch); }
+    /// Whether exactly `pitch` (or nothing, for a negative pitch) of the given set sounds.
+    bool soundsOnly(int pitch, const std::vector<int>& candidates) const {
+        for (const int p : candidates) {
+            if (sounds(p) != (p == pitch)) return false;
+        }
+        return true;
+    }
+};
+
+}  // namespace
+
+TEST_CASE("link source: a fresh own publication is adopted; nothing is adopted without one") {
+    SourceRig rig;
+    rig.publishOwn(60);
+    rig.block(false);
+    CHECK(rig.adoptedThisBlock == 1);
+    CHECK(rig.sounds(60));
+    CHECK(rig.source.playing() == LinkSource::Source::Own);
+    CHECK(rig.source.generation() == 1);
+    rig.block(false);
+    CHECK(rig.adoptedThisBlock == 0);
+    CHECK(rig.sounds(60));
+    rig.publishOwn(62);
+    rig.block(false);
+    CHECK(rig.adoptedThisBlock == 1);
+    CHECK(rig.soundsOnly(62, {60, 62}));
+    CHECK(rig.source.generation() == 2);
+}
+
+TEST_CASE("link source: a switch to the link adopts its current slot, the second time without a fresh one") {
+    SourceRig rig;
+    rig.publishOwn(60);
+    rig.block(false);
+    rig.publishLink(40);
+    rig.block(true);  // a fresh link slot
+    CHECK(rig.adoptedThisBlock == 1);
+    CHECK(rig.soundsOnly(40, {40, 60}));
+    CHECK(rig.source.playing() == LinkSource::Source::Link);
+    CHECK(rig.source.generation() == kLinkGenerationBase + 1);
+    rig.block(false);
+    CHECK(rig.soundsOnly(60, {40, 60}));
+    rig.block(true);  // nothing new in the link buffer: its current slot all the same
+    CHECK(rig.adoptedThisBlock == 1);
+    CHECK(rig.soundsOnly(40, {40, 60}));
+    CHECK(rig.source.generation() == kLinkGenerationBase + 1);
+    rig.block(true);
+    CHECK(rig.adoptedThisBlock == 0);
+    CHECK(rig.soundsOnly(40, {40, 60}));
+}
+
+TEST_CASE("link source: follow, play, unfollow with nothing edited returns to the own content") {
+    SourceRig rig;
+    rig.publishOwn(60);
+    rig.block(false);
+    rig.publishLink(40);
+    for (int i = 0; i < 3; ++i) rig.block(true);
+    REQUIRE(rig.soundsOnly(40, {40, 60}));
+    rig.block(false);  // no own publication since the first: the own buffer's current slot
+    CHECK(rig.adoptedThisBlock == 1);
+    CHECK(rig.soundsOnly(60, {40, 60}));
+    CHECK(rig.source.playing() == LinkSource::Source::Own);
+    CHECK(rig.source.generation() == 1);
+    rig.block(false);
+    CHECK(rig.adoptedThisBlock == 0);
+    CHECK(rig.soundsOnly(60, {40, 60}));
+}
+
+TEST_CASE("link source: own publications while following are acquired, not adopted, and play after the switch back") {
+    SUBCASE("acquired in a block while following") {
+        SourceRig rig;
+        rig.publishOwn(60);
+        rig.block(false);
+        rig.publishLink(40);
+        rig.block(true);
+        rig.publishOwn(62);
+        rig.block(true);
+        CHECK(rig.adoptedThisBlock == 0);
+        CHECK(rig.soundsOnly(40, {40, 60, 62}));
+        CHECK(rig.own->currentGeneration() == 2);  // the consumer took it
+        CHECK(rig.source.generation() == kLinkGenerationBase + 1);
+        rig.block(false);
+        CHECK(rig.soundsOnly(62, {40, 60, 62}));
+        CHECK(rig.source.generation() == 2);
+    }
+    SUBCASE("published between the last block while following and the switch back") {
+        // The fresh own slot and the switch arrive in one call: acquired first, then adopted once. An acquire after
+        // the adopt would leave the scheduler on the slot it had just handed back to the producer (60).
+        SourceRig rig;
+        rig.publishOwn(60);
+        rig.block(false);
+        rig.publishLink(40);
+        rig.block(true);
+        rig.publishOwn(62);
+        rig.block(false);
+        CHECK(rig.adoptedThisBlock == 1);
+        CHECK(rig.soundsOnly(62, {40, 60, 62}));
+        CHECK(rig.source.generation() == 2);
+        rig.publishOwn(64);  // the producer reuses the slot the scheduler left
+        rig.block(false);
+        CHECK(rig.soundsOnly(64, {40, 60, 62, 64}));
+    }
+    SUBCASE("published with the switch to the link") {
+        SourceRig rig;
+        rig.publishOwn(60);
+        rig.block(false);
+        rig.publishLink(40);
+        rig.publishOwn(62);
+        rig.block(true);
+        CHECK(rig.adoptedThisBlock == 1);
+        CHECK(rig.soundsOnly(40, {40, 60, 62}));
+        CHECK(rig.own->currentGeneration() == 2);
+        rig.block(false);
+        CHECK(rig.soundsOnly(62, {40, 60, 62}));
+    }
+}
+
+TEST_CASE("link source: thru always comes from the own buffer") {
+    SourceRig rig;
+    rig.publishLink(40, true, false);
+    rig.block(true);  // no own publication yet
+    CHECK(rig.flags.thru);
+    rig.publishOwn(60, true, false);
+    rig.block(true);
+    CHECK_FALSE(rig.flags.thru);  // the link slot's midiThru is false too here, but means nothing
+    rig.publishLink(41, true, true);
+    rig.block(true);
+    CHECK_FALSE(rig.flags.thru);
+    rig.block(false);
+    CHECK_FALSE(rig.flags.thru);
+    rig.publishOwn(60, true, true);
+    rig.publishLink(42, true, false);
+    rig.block(true);
+    CHECK(rig.flags.thru);
+}
+
+TEST_CASE("link source: followHost comes from the slot being played") {
+    SourceRig rig;
+    rig.publishOwn(60, false);
+    rig.block(false);
+    CHECK_FALSE(rig.flags.followHost);
+    rig.block(true);  // the link buffer has never been published: its empty snapshot has no gate
+    CHECK(rig.flags.followHost);
+    rig.publishLink(40, true);
+    rig.block(true);
+    CHECK(rig.flags.followHost);
+    rig.block(false);
+    CHECK_FALSE(rig.flags.followHost);
+    rig.publishOwn(60, true);
+    rig.publishLink(40, false);  // a followHost change alone: same content, a fresh slot
+    rig.block(true);
+    CHECK_FALSE(rig.flags.followHost);
+    rig.block(false);
+    CHECK(rig.flags.followHost);
+}
+
+TEST_CASE("link source: an unpublished link buffer plays empty; the link buffer is never touched while not following") {
+    SourceRig rig;
+    rig.publishOwn(60);
+    rig.block(false);
+    REQUIRE(rig.sounds(60));
+    rig.block(true);
+    CHECK(rig.adoptedThisBlock == 1);
+    CHECK_FALSE(rig.sounds(60));
+    CHECK(rig.source.playing() == LinkSource::Source::Link);
+    CHECK(rig.source.generation() == kLinkGenerationBase);
+    rig.block(false);
+    CHECK(rig.sounds(60));
+
+    rig.publishLink(40);
+    for (int i = 0; i < 3; ++i) rig.block(false);
+    CHECK(rig.link->currentGeneration() == 0);  // never acquired: the publication still waits
+    rig.block(true);
+    CHECK(rig.soundsOnly(40, {40, 60}));
+    CHECK(rig.link->currentGeneration() == kLinkGenerationBase + 1);
+}
+
+TEST_CASE("link source: rapid toggles and publications, each block playing the selected buffer's latest") {
+    SourceRig rig;
+    std::uint32_t state = 12345u;
+    const auto next = [&state] {
+        state = state * 1664525u + 1013904223u;
+        return state >> 16;
+    };
+    int ownPitch = -1;   // the latest published pitch of each buffer (none yet)
+    int linkPitch = -1;
+    std::vector<int> candidates;
+    for (int p = 36; p < 48; ++p) candidates.push_back(p);
+    for (int p = 60; p < 72; ++p) candidates.push_back(p);
+    bool wasFollowing = false;
+    bool first = true;
+    for (int i = 0; i < 400; ++i) {
+        CAPTURE(i);
+        const unsigned r = next();
+        bool ownFresh = false;
+        bool linkFresh = false;
+        if (r % 5 == 0) {
+            ownPitch = 60 + static_cast<int>(next() % 12);
+            rig.publishOwn(ownPitch);
+            ownFresh = true;
+        }
+        if (r % 7 == 0) {
+            linkPitch = 36 + static_cast<int>(next() % 12);
+            rig.publishLink(linkPitch);
+            linkFresh = true;
+        }
+        const bool following = (next() % 3) != 0 ? !wasFollowing : wasFollowing;  // mostly toggling
+        rig.block(following);
+        const bool switched = first || following != wasFollowing;
+        CHECK(rig.adoptedThisBlock == ((switched || (following ? linkFresh : ownFresh)) ? 1u : 0u));
+        CHECK(rig.soundsOnly(following ? linkPitch : ownPitch, candidates));
+        CHECK(rig.source.playing() == (following ? LinkSource::Source::Link : LinkSource::Source::Own));
+        wasFollowing = following;
+        first = false;
     }
 }

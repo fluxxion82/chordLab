@@ -553,4 +553,142 @@ LinkView LinkRegistry::view(LinkToken token) const {
     return v;
 }
 
+// --- the source -----------------------------------------------------------------------------------------------
+
+LinkSource::Flags LinkSource::select(TripleBuffer<SnapshotSlot>& own, TripleBuffer<SnapshotSlot>& link,
+                                     bool following, Scheduler& scheduler) noexcept {
+    // Every acquire before the one adopt (Snapshot's lifetime rule): the link buffer only while following.
+    const bool ownFresh = own.acquire() != nullptr;
+    const bool linkFresh = following && link.acquire() != nullptr;
+
+    const Source selected = following ? Source::Link : Source::Own;
+    if ((following ? linkFresh : ownFresh) || selected != playing_) {
+        TripleBuffer<SnapshotSlot>& buffer = following ? link : own;
+        Snapshot snapshot{nullptr, 0, 0.0, true, following ? kLinkGenerationBase : 0u};  // never published
+        if (const SnapshotSlot* slot = buffer.current()) {
+            snapshot =
+                Snapshot{slot->events.data(), slot->count, slot->endBeat, slot->loop, buffer.currentGeneration()};
+        }
+        scheduler.adopt(snapshot);
+        playing_ = selected;
+        generation_ = snapshot.generation;
+        ++adoptions_;
+    }
+
+    // `playing_` is `selected` now, so `link` is read only while following.
+    const SnapshotSlot* played = playing_ == Source::Link ? link.current() : own.current();
+    const SnapshotSlot* ownSlot = own.current();
+    Flags flags;
+    flags.followHost = played != nullptr ? played->followHost : true;
+    flags.thru = ownSlot != nullptr ? ownSlot->midiThru : true;
+    return flags;
+}
+
+// --- the endpoint ---------------------------------------------------------------------------------------------
+
+LinkEndpoint::LinkEndpoint(LinkRegistry& registry, std::string instanceId, UidGenerator makeUid,
+                           LinkRegistry::Hook hook)
+    : registry_(registry), makeUid_(std::move(makeUid)), linkBuffer_(std::make_unique<TripleBuffer<SnapshotSlot>>()) {
+    documentId_ = makeUid_();
+    token_ = registry_.add(std::move(instanceId), linkBuffer_.get(), std::move(hook));
+    label_ = registry_.view(token_).label;  // rule 9: fixed for the registration's life
+}
+
+LinkEndpoint::~LinkEndpoint() {
+    const LinkRegistry::Hooks hooks = registry_.remove(token_);  // first: nothing writes the link buffer after it
+    for (const auto& hook : hooks) {
+        if (hook != nullptr && *hook) (*hook)();
+    }
+}
+
+bool LinkEndpoint::publishOwn(const Document& doc, std::uint64_t revision, const std::string& lineage,
+                              SnapshotSlot& ownSlot, Publication& ownPublication) {
+    uids_.cover(doc, makeUid_);
+    if (following()) {
+        return fillSlot(doc, LaneSelection{}, ownSlot, ownPublication);
+    }
+
+    FeedKey key;
+    key.revision = revision;
+    key.documentId = documentId_;
+    key.lineage = lineage;
+    key.loop = doc.progressionLoop;
+    key.followHost = doc.followHost;
+    key.laneUids.reserve(1 + doc.tracks.size());
+    key.audible.reserve(1 + doc.tracks.size());
+    key.laneUids.emplace_back(kChordsLaneUid);
+    key.audible.push_back(chordsAudible(doc));
+    for (std::size_t i = 0; i < doc.tracks.size(); ++i) {
+        key.laneUids.push_back(uids_.uidOf(doc.tracks[i].id));
+        key.audible.push_back(trackAudible(doc, i));
+    }
+    // Followed in the document being published: a follower linked to another document does not count.
+    key.followed = registry_.followedLanes(token_, documentId_, key.laneUids);
+    // Who follows, for the publish decision only: a follower newly bound to a lane already followed needs this
+    // publish to get its content (rule 4), though the feed's lanes stay as they were.
+    for (const LinkLaneView& lane : registry_.view(token_).routed) key.followers.emplace_back(lane.uid, lane.followers);
+
+    LaneSelection own{LaneSelection::Mode::AllExcept, {}};
+    for (const std::string& uid : key.followed) {
+        if (const std::optional<LaneKey> lane = uids_.laneOf(doc, uid)) own.lanes.push_back(*lane);
+    }
+    const bool filled = fillSlot(doc, own, ownSlot, ownPublication);
+
+    const bool feedChanged = !lastFeed_ || key.revision != lastFeed_->revision ||
+                             key.documentId != lastFeed_->documentId || key.lineage != lastFeed_->lineage ||
+                             key.loop != lastFeed_->loop || key.followHost != lastFeed_->followHost ||
+                             key.laneUids != lastFeed_->laneUids || key.audible != lastFeed_->audible ||
+                             key.followed != lastFeed_->followed || key.followers != lastFeed_->followers;
+    if (feedChanged) {
+        registry_.publish(token_, buildLinkFeed(doc, documentId_, uids_, lineage, label_, key.followed));
+        lastFeed_ = std::move(key);
+    }
+    return filled;
+}
+
+LinkEndpoint::LinkResult LinkEndpoint::follow(std::string_view leaderId, std::string_view laneUid,
+                                              std::string_view leaderLineage, LinkRegistry::Hooks& hooks) {
+    const LinkResult result = registry_.follow(token_, leaderId, laneUid, leaderLineage, hooks);
+    if (result == LinkResult::Applied) {
+        following_.store(true, std::memory_order_release);  // after the registry wrote the link buffer
+        lastFeed_.reset();                                    // the registry dropped the feed (rule 5)
+    }
+    return result;
+}
+
+void LinkEndpoint::unfollow(LinkRegistry::Hooks& hooks) {
+    hooks = registry_.setFollow(token_, std::nullopt);
+    if (following()) {
+        following_.store(false, std::memory_order_release);
+        lastFeed_.reset();  // a leader again, with no feed stored: the next publishOwn publishes one
+    }
+}
+
+LinkEndpoint::State LinkEndpoint::state() const {
+    LinkView view = registry_.view(token_);
+    State s;
+    s.id = std::move(view.id);
+    s.documentId = documentId_;
+    s.lanes = uids_.entries();
+    s.follow = std::move(view.follow);
+    return s;
+}
+
+void LinkEndpoint::adopt(const State& loaded, LinkRegistry::Hooks& hooks) {
+    LinkRegistry::Adopted adopted = registry_.adoptState(token_, loaded.id, makeUid_(), loaded.follow);
+    documentId_ = loaded.documentId;
+    uids_.replace(loaded.lanes);
+    following_.store(loaded.follow.has_value(), std::memory_order_release);  // the registry wrote it first
+    lastFeed_.reset();
+    hooks = std::move(adopted.hooks);
+}
+
+std::uint64_t LinkEndpoint::serial() const noexcept {
+    return registry_.serial();
+}
+
+LinkView LinkEndpoint::view() const {
+    return registry_.view(token_);
+}
+
 }  // namespace chordlab
