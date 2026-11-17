@@ -232,6 +232,9 @@ struct LinkRegistry::Entry {
     std::int64_t copyMadeAtMs = 0;                 // the clock when that load made it a copy (rule 8)
     std::shared_ptr<const LinkFeed> feed;          // a leader's last feed; null before one and once it follows
     std::uint64_t bindings = 0;                    // moves on every bind to and unbind from this instance
+    LinkPreviewSink previews;                      // rule 12: valid from add to remove; no scheduler: no forwards
+    int nextPreviewId = kForwardedPreviewIdFirst;  // rule 12: this follower's cursor in the reserved range
+    std::uint64_t linkEpoch = 0;                   // rule 12: moves when it unbinds or loads a state
 };
 
 /// Everything behind the mutex. The helpers expect the caller to hold `mutex`.
@@ -241,6 +244,16 @@ struct LinkRegistry::State {
     LinkToken lastToken = 0;
     std::map<std::string, std::uint64_t> labels;  // rule 9: the number of every id in use
     std::uint64_t copiesMade = 0;
+    /// Rule 12: one follower a forwarded Start reached, the id its scheduler knows it by, and its `linkEpoch` then.
+    struct Forwarded {
+        LinkToken follower = 0;
+        int id = 0;
+        std::uint64_t epoch = 0;
+    };
+    /// Rule 12, the record table: (originating instance, the Start's id) -> the followers it reached. Never an
+    /// empty list. Every entry names a live originator and followers that are live, bound to it and of the epoch
+    /// recorded: `dropBrokenForwards` restores that after every call that can break it.
+    std::map<std::pair<LinkToken, int>, std::vector<Forwarded>> forwards;
     std::atomic<std::uint64_t> serial{0};
     Clock clock;  // set by the constructor, never empty
 
@@ -264,11 +277,68 @@ struct LinkRegistry::State {
         e.boundTo = leader;
         if (Entry* l = find(leader)) ++l->bindings;
     }
-    /// Unbinds follower `e`, moving its old leader's binding counter (when that one still lives).
+    /// Unbinds follower `e`, moving its old leader's binding counter (when that one still lives) and its own link
+    /// epoch (rule 12: what was forwarded to it under that binding no longer holds, even if it binds again to the
+    /// same leader in the same call).
     void unbind(Entry& e) {
         if (e.boundTo == 0) return;
         if (Entry* l = find(e.boundTo)) ++l->bindings;
         e.boundTo = 0;
+        ++e.linkEpoch;
+    }
+
+    /// Rule 12: sets `e`'s panic flag; its audio thread panics its scheduler at the top of its next block.
+    static void raisePanic(Entry& e) {
+        if (e.previews.scheduler != nullptr && e.previews.panic != nullptr) {
+            e.previews.panic->store(true, std::memory_order_release);
+        }
+    }
+
+    /// Rule 12: drops every recorded follower that no longer holds (removed, unbound from the originator, or bound
+    /// again since, or it loaded a state: its `linkEpoch` moved), setting the panic flag of each such follower that
+    /// still lives; drops the records left empty and those of an originator that is gone. Pushes nothing (any
+    /// thread may run it). Called at the end of every method that can unbind or load: `remove`, `adoptState`,
+    /// `adoptWithoutBlock`, `setFollow`, `follow`.
+    void dropBrokenForwards() {
+        for (auto it = forwards.begin(); it != forwards.end();) {
+            const LinkToken origin = it->first.first;
+            const bool originLives = find(origin) != nullptr;
+            std::vector<Forwarded>& reached = it->second;
+            reached.erase(std::remove_if(reached.begin(), reached.end(),
+                                         [&](const Forwarded& r) {
+                                             Entry* f = find(r.follower);
+                                             const bool holds = originLives && f != nullptr && f->boundTo == origin &&
+                                                                f->linkEpoch == r.epoch;
+                                             if (!holds && f != nullptr) raisePanic(*f);
+                                             return !holds;
+                                         }),
+                          reached.end());
+            it = reached.empty() ? forwards.erase(it) : std::next(it);
+        }
+    }
+
+    /// Rule 12: pushes `cmd` under each recorded follower's id. Returns whether at least one push succeeded.
+    bool pushRecorded(const std::vector<Forwarded>& reached, const PreviewCmd& cmd) {
+        bool any = false;
+        for (const Forwarded& r : reached) {
+            Entry* f = find(r.follower);
+            if (f == nullptr || f->previews.scheduler == nullptr) continue;  // never: dropBrokenForwards
+            PreviewCmd mapped = cmd;
+            mapped.id = r.id;
+            if (f->previews.scheduler->pushPreview(mapped)) any = true;
+        }
+        return any;
+    }
+
+    /// Rule 12: the ids recorded for follower `follower`, over every originator.
+    std::set<int> heldIds(LinkToken follower) const {
+        std::set<int> held;
+        for (const auto& record : forwards) {
+            for (const Forwarded& r : record.second) {
+                if (r.follower == follower) held.insert(r.id);
+            }
+        }
+        return held;
     }
 
     /// Rule 4, the only writes into a link buffer: `e`'s lane from `feed`, or empty for a null feed.
@@ -474,8 +544,12 @@ LinkRegistry& LinkRegistry::shared() {
     return *registry;
 }
 
-LinkToken LinkRegistry::add(std::string id, TripleBuffer<SnapshotSlot>* linkBuffer, Hook hook) {
+LinkToken LinkRegistry::add(std::string id, TripleBuffer<SnapshotSlot>* linkBuffer, Hook hook,
+                           LinkPreviewSink previews) {
     assert(linkBuffer != nullptr && "LinkRegistry::add: every instance has a link buffer");
+    assert((previews.scheduler == nullptr || previews.panic != nullptr) &&
+           "LinkRegistry::add: a preview sink with a scheduler has a panic flag");
+    if (previews.panic == nullptr) previews.scheduler = nullptr;  // without asserts: takes no forwards
     std::shared_ptr<const Hook> shared = hook ? std::make_shared<const Hook>(std::move(hook)) : nullptr;
     State& s = *state_;
     const std::lock_guard<std::mutex> lock(s.mutex);
@@ -484,6 +558,7 @@ LinkToken LinkRegistry::add(std::string id, TripleBuffer<SnapshotSlot>* linkBuff
     e.id = std::move(id);
     e.buffer = linkBuffer;
     e.hook = std::move(shared);
+    e.previews = previews;
     s.entries.emplace(token, std::move(e));
     s.resolve();  // binds the followers waiting for its id, and labels it (rule 9)
     s.moved();
@@ -502,6 +577,7 @@ LinkRegistry::Hooks LinkRegistry::remove(LinkToken token) {
     dead.emplace(std::move(it->second));
     s.entries.erase(it);
     s.resolve();  // its followers are unbound and emptied
+    s.dropBrokenForwards();  // rule 12: its records, and it from others' (its own sink is gone: never touched)
     s.moved();
     return hooks;
 }
@@ -541,9 +617,11 @@ LinkRegistry::Adopted LinkRegistry::adoptState(LinkToken token, std::string load
     }
 
     const LinkToken before = e->boundTo;
+    ++e->linkEpoch;  // rule 12: a follower that loads a state is released, even with its follow as it was
     const bool changed = s.applyFollow(*e, std::move(follow), dropped);
     const bool rebound = s.resolve();  // always: the id may have changed (which may relabel, rule 9)
     if (changed || e->boundTo != before) s.collectHooks(token, {before, e->boundTo}, out.hooks);
+    s.dropBrokenForwards();
     out.id = e->id;
     if (e->id != idBefore || e->copiedFrom != copiedFromBefore || e->copyOrder != copyOrderBefore || !sameFollow ||
         rebound) {
@@ -561,7 +639,9 @@ LinkRegistry::Hooks LinkRegistry::adoptWithoutBlock(LinkToken token) {
     if (e == nullptr) return hooks;
     const bool wasCopy = e->copiedFrom != 0;
     e->copiedFrom = 0;  // rule 3: its document is no copy of the original's now
+    ++e->linkEpoch;     // rule 12: a state load
     const bool followChanged = s.setFollowLocked(token, *e, std::nullopt, dropped, hooks);
+    s.dropBrokenForwards();
     if (wasCopy || followChanged) s.moved();
     return hooks;
 }
@@ -574,6 +654,7 @@ LinkRegistry::Hooks LinkRegistry::setFollow(LinkToken token, std::optional<LinkF
     Entry* e = s.find(token);
     if (e == nullptr) return hooks;
     if (s.setFollowLocked(token, *e, std::move(follow), dropped, hooks)) s.moved();
+    s.dropBrokenForwards();
     return hooks;
 }
 
@@ -603,6 +684,7 @@ LinkFollowResult LinkRegistry::follow(LinkToken token, std::string_view leaderId
     link.laneRole = lane->chords ? std::string() : std::string(trackRoleName(lane->role));
     link.leaderLabel = s.labelOf(leader->second.id);
     if (s.setFollowLocked(token, *e, std::move(link), dropped, hooks)) s.moved();
+    s.dropBrokenForwards();
     return LinkFollowResult::Applied;
 }
 
@@ -637,6 +719,92 @@ void LinkRegistry::publish(LinkToken leader, std::shared_ptr<const LinkFeed> fee
         if (entry.second.boundTo == leader) State::write(entry.second, e->feed.get());
     }
     s.moved();
+}
+
+LinkForward LinkRegistry::forwardPreview(LinkToken token, std::string_view documentId, std::string_view laneUid,
+                                         const PreviewCmd& cmd) {
+    State& s = *state_;
+    const std::lock_guard<std::mutex> lock(s.mutex);
+    const Entry* e = s.find(token);
+    if (e == nullptr) return LinkForward::NotForwarded;
+    const std::pair<LinkToken, int> key{token, cmd.id};
+    const auto recorded = s.forwards.find(key);
+
+    if (cmd.kind != PreviewCmd::Start) {
+        // An Extend or a Stop follows its Start: exactly the recorded followers, under their ids.
+        if (recorded == s.forwards.end()) return LinkForward::NotForwarded;
+        const bool pushed = s.pushRecorded(recorded->second, cmd);
+        if (cmd.kind == PreviewCmd::Stop) s.forwards.erase(recorded);  // a full ring: the watchdog ends it there
+        return pushed ? LinkForward::Forwarded : LinkForward::QueueFull;
+    }
+
+    // A Start of an id already recorded first ends that record, as a scheduler releases a preview whose id
+    // starts again, whether or not this Start is forwarded.
+    if (recorded != s.forwards.end()) {
+        PreviewCmd stop{};
+        stop.kind = PreviewCmd::Stop;
+        s.pushRecorded(recorded->second, stop);
+        s.forwards.erase(recorded);
+    }
+    if (e->follow || laneUid.empty()) return LinkForward::NotForwarded;
+
+    // The followers on that lane: bound to `token`, the follow naming `documentId` and `laneUid` (followersOf's
+    // test), and taking forwards.
+    std::vector<State::Forwarded> reached;
+    bool offered = false;
+    for (auto& entry : s.entries) {
+        Entry& f = entry.second;
+        if (f.boundTo != token || f.previews.scheduler == nullptr || f.follow->documentId != documentId ||
+            f.follow->laneUid != laneUid) {
+            continue;
+        }
+        offered = true;
+        const std::optional<int> id = nextForwardedPreviewId(f.nextPreviewId, s.heldIds(entry.first));
+        if (!id) continue;  // every reserved id still recorded for it: as a full ring
+        PreviewCmd mapped = cmd;
+        mapped.id = *id;
+        if (f.previews.scheduler->pushPreview(mapped)) {
+            reached.push_back(State::Forwarded{entry.first, *id, f.linkEpoch});
+        }
+    }
+    if (!offered) return LinkForward::NotForwarded;
+    if (reached.empty()) return LinkForward::QueueFull;
+    s.forwards.emplace(key, std::move(reached));
+    return LinkForward::Forwarded;
+}
+
+int LinkRegistry::panicFollowers(LinkToken token) {
+    State& s = *state_;
+    const std::lock_guard<std::mutex> lock(s.mutex);
+    if (s.find(token) == nullptr) return 0;
+    int flagged = 0;
+    for (auto& entry : s.entries) {
+        Entry& f = entry.second;
+        if (f.boundTo != token || f.previews.scheduler == nullptr) continue;
+        State::raisePanic(f);
+        ++flagged;
+    }
+    for (auto it = s.forwards.begin(); it != s.forwards.end();) {
+        it = it->first.first == token ? s.forwards.erase(it) : std::next(it);
+    }
+    return flagged;
+}
+
+std::optional<int> nextForwardedPreviewId(int& cursor, const std::set<int>& held, int first, int last) {
+    assert(first <= last && "nextForwardedPreviewId: a range");
+    assert(cursor >= first && cursor <= last && "nextForwardedPreviewId: the cursor lies in the range");
+    if (cursor < first || cursor > last) cursor = first;
+    // Ids from `cursor` on are distinct until the range is exhausted; among held.size() + 1 distinct ids one is
+    // free. The range's size, as an unsigned count, bounds the tries as well (no overflow for INT_MIN..INT_MAX).
+    const std::uint64_t rangeSize =
+        static_cast<std::uint64_t>(static_cast<std::int64_t>(last) - static_cast<std::int64_t>(first)) + 1;
+    const std::uint64_t tries = std::min<std::uint64_t>(rangeSize, static_cast<std::uint64_t>(held.size()) + 1);
+    for (std::uint64_t n = 0; n < tries; ++n) {
+        const int id = cursor;
+        cursor = id == last ? first : id + 1;
+        if (held.count(id) == 0) return id;
+    }
+    return std::nullopt;
 }
 
 std::uint64_t LinkRegistry::serial() const noexcept {
@@ -716,10 +884,10 @@ LinkSource::Flags LinkSource::select(TripleBuffer<SnapshotSlot>& own, TripleBuff
 // --- the endpoint ---------------------------------------------------------------------------------------------
 
 LinkEndpoint::LinkEndpoint(LinkRegistry& registry, std::string instanceId, UidGenerator makeUid,
-                           LinkRegistry::Hook hook)
+                           LinkRegistry::Hook hook, LinkPreviewSink previews)
     : registry_(registry), makeUid_(std::move(makeUid)), linkBuffer_(std::make_unique<TripleBuffer<SnapshotSlot>>()) {
     documentId_ = makeUid_();
-    token_ = registry_.add(std::move(instanceId), linkBuffer_.get(), std::move(hook));
+    token_ = registry_.add(std::move(instanceId), linkBuffer_.get(), std::move(hook), previews);
 }
 
 LinkEndpoint::~LinkEndpoint() {
@@ -867,6 +1035,22 @@ void LinkEndpoint::adoptWithoutBlock(LinkRegistry::Hooks& hooks) {
     documentId_ = makeUid_();
     uids_.replace({});
     lastFeed_.reset();
+}
+
+LinkForward LinkEndpoint::forwardPreview(std::optional<int> trackId, const PreviewCmd& cmd) {
+    std::string laneUid;  // empty: no lane (an Extend or a Stop does not need one)
+    if (cmd.kind == PreviewCmd::Start) {
+        if (!trackId) {
+            laneUid = std::string(kChordsLaneUid);
+        } else if (*trackId >= 1) {
+            laneUid = uids_.uidOf(*trackId);  // empty when the track has no uid
+        }
+    }
+    return registry_.forwardPreview(token_, documentId_, laneUid, cmd);
+}
+
+int LinkEndpoint::panicFollowers() {
+    return registry_.panicFollowers(token_);
 }
 
 std::uint64_t LinkEndpoint::serial() const noexcept {

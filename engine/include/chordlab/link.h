@@ -10,12 +10,14 @@
 #include "chordlab/triple_buffer.h"
 
 #include <atomic>
+#include <climits>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -160,6 +162,45 @@ bool fillSlotFromFeed(const LinkFeed* feed, std::string_view laneUid, std::strin
 /// An instance's registration with a `LinkRegistry`. 0 is none; a registry never hands out one token twice.
 using LinkToken = std::uint64_t;
 
+/// The preview ids a `LinkRegistry` gives the commands it forwards to a follower's scheduler (rule 12), inclusive:
+/// the top 2^20 + 1 ids of the range an editor's ids come from (0..INT_MAX). Editors count up from small numbers,
+/// and the bridge refuses an editor's id inside this range, so a forwarded id never meets an editor's in one
+/// scheduler.
+constexpr int kForwardedPreviewIdFirst = INT_MAX - (1 << 20);
+constexpr int kForwardedPreviewIdLast = INT_MAX;
+
+/// Rule 12: the next id for one follower's forwarded preview. Tries the ids from `cursor` on, in order, cycling
+/// inside [`first`, `last`] (after `last` comes `first`), and returns the first that `held` (the ids still
+/// recorded for that follower) does not contain; `cursor` is then the id after it. Tries at most `held.size()` + 1
+/// ids, never more than the range holds: when every id of the range is held it returns nothing (and `cursor` has
+/// moved). `cursor` must lie in the range (asserted; outside it, it starts at `first`). The registry calls it
+/// with the default range; the range is a parameter so that tests can reach the wrap and the exhaustion.
+std::optional<int> nextForwardedPreviewId(int& cursor, const std::set<int>& held, int first = kForwardedPreviewIdFirst,
+                                          int last = kForwardedPreviewIdLast);
+
+/// Where a registered instance takes forwarded previews (rule 12): its scheduler, into which the registry calls
+/// `Scheduler::pushPreview`, and the flag its audio thread turns into `Scheduler::panic` at the top of its next
+/// block (the shell's `mPanicPending`), which the registry sets. Both are valid from `LinkRegistry::add` to
+/// `LinkRegistry::remove`, like the link buffer, and the registry touches neither after `remove` returned. A null
+/// `scheduler` (the default) means the instance takes no forwards: it is never sent a preview, and its `panic` is
+/// never set. With a scheduler, `panic` must not be null (asserted).
+struct LinkPreviewSink {
+    Scheduler* scheduler = nullptr;
+    std::atomic<bool>* panic = nullptr;
+};
+
+/// What `LinkRegistry::forwardPreview` did with a preview command (rule 12).
+enum class LinkForward {
+    /// Nothing was forwarded: the caller gives the command to its own scheduler, as without links.
+    NotForwarded,
+    /// Pushed to at least one follower's scheduler: the caller does not play it itself.
+    Forwarded,
+    /// The command was for followers (a Start for a lane followers play here, or an Extend or Stop of a forwarded
+    /// Start), and every one of their preview rings was full: nothing was pushed. The caller does not play it
+    /// either and reports a full queue, as for its own ring.
+    QueueFull,
+};
+
 // `LinkFollow` (what a follower follows) and `InstanceState` (what an instance saves) are plain data in link_state.h.
 
 /// Where an instance stands as a follower (`LinkRegistry` rule 7). `NotFollowing` for a leader.
@@ -247,7 +288,8 @@ struct LinkView {
 /// leaders publish feeds here, and a leader's `publish` writes its followers' link buffers directly, with no idle
 /// callback in between. One mutex, taken by every public method and only by non-real-time threads; nothing is
 /// called while it is held except the link-buffer fills of rule 4 (`fillSlotFromFeed` and the buffer's
-/// `publish`). Hooks are returned to the caller, never called here.
+/// `publish`) and, rule 12, a follower's `Scheduler::pushPreview` (a bounded wait-free ring push) and the store
+/// into its panic flag. Hooks are returned to the caller, never called here.
 ///
 /// The rules:
 /// 1. *Leaders and followers.* An instance with a follow is a follower: it is never listed in `leaders`, and
@@ -334,6 +376,33 @@ struct LinkView {
 ///    id back). A copy of
 ///    a copy names the instance its own load collided with, never that one's original, also once that instance is
 ///    gone. Two copies of one original each name it.
+/// 12. *Previews.* An instance takes forwarded previews when `add` gave it a sink with a scheduler
+///    (`LinkPreviewSink`). `forwardPreview` pushes a preview Start of the caller's lane `laneUid` in its document
+///    `documentId` into the scheduler of every follower that takes forwards, is bound to the caller, and whose
+///    follow names that document and that lane (the test `followedLanes` counts by), each under an id of its own
+///    from the reserved range (`kForwardedPreviewIdFirst` to `kForwardedPreviewIdLast`, `nextForwardedPreviewId`
+///    with a cursor per follower, skipping the ids still recorded for it), and records, for the caller and the
+///    Start's id, every follower whose push succeeded, with its id. A follower whose ring is full is left out; if
+///    every one was, nothing is recorded and the answer is `QueueFull`. An Extend or a Stop of a recorded id goes
+///    to exactly the recorded followers under their ids, whoever is bound on the lane now (a follower that joined
+///    the lane since gets neither); a Stop ends the record; an Extend or a Stop with no record is not forwarded. A
+///    Start of an id the caller has recorded first ends that record (a Stop to each recorded follower), whether or
+///    not the new Start is forwarded, as a scheduler releases a preview whose id starts again. A follower stays
+///    recorded only while it is bound to the caller without a break and loads no state: when it stops being bound
+///    (its follow's link changed, also to another lane of the same leader, or cleared; its leader removed or
+///    starting to follow), when it loads a state (`adoptState`, even one with its follow as it was, and
+///    `adoptWithoutBlock`) and when it is removed, the call that did it drops the follower from every record and,
+///    unless the follower was removed, sets its panic flag. A leader whose feed takes another document id or loses
+///    the lane unbinds no one (rules 2 and 7): its records stay, and a forwarded preview then sounds until its
+///    Stop, which still reaches the follower, or the scheduler's watchdog. `panicFollowers` sets the panic flag of
+///    every follower bound to the caller that takes forwards, whatever its lane or document, and drops every record
+///    of the caller. A panic releases everything the follower sounds, its own notes too (its lane's notes come
+///    back with their next events, `Scheduler::panic`), and discards the preview commands queued before it, so a
+///    Start forwarded to it after the cleanup and before its next audio block never sounds. Forwarding and
+///    `panicFollowers` change no view: the serial does not move (rule 10). What the registry does to a follower is
+///    only those pushes and stores, under the mutex. A scheduler's preview ring has one producer, so every
+///    `forwardPreview` must be called on the thread that makes the followers' own pushes (the plug-in's main
+///    thread): the caller's obligation. The panic flag is an atomic, set from whichever thread runs the call.
 ///
 /// A follow is changed (rules 4 and 6) when its `leaderId`, `documentId` or `laneUid` differ, or when it is set
 /// or cleared; new hints alone are stored and change nothing else (new `laneName` or `laneRole` hints show in the
@@ -367,8 +436,9 @@ public:
     /// by rule 9 (the label its id already holds, or the lowest free one). `linkBuffer` (not null) is its link
     /// buffer, which only this registry writes, under its mutex, until `remove`; it must outlive the registration,
     /// and its consumer is the instance's audio thread. Followers waiting for `id` bind to it. An empty `hook` is
-    /// never returned.
-    LinkToken add(std::string id, TripleBuffer<SnapshotSlot>* linkBuffer, Hook hook);
+    /// never returned. `previews` is where it takes forwarded previews (rule 12), valid until `remove` as the link
+    /// buffer is; the default (no scheduler) takes none.
+    LinkToken add(std::string id, TripleBuffer<SnapshotSlot>* linkBuffer, Hook hook, LinkPreviewSink previews = {});
 
     /// The instance is going away: its followers are emptied and wait (their links are kept). Returns the hooks
     /// to run: its leader's, if it was bound to one.
@@ -422,6 +492,27 @@ public:
     /// (and asserts) for an instance that is following, and for a null `feed`: a leader with nothing to publish
     /// does not call it.
     void publish(LinkToken leader, std::shared_ptr<const LinkFeed> feed);
+
+    /// Rule 12: offers the preview command `cmd` of instance `token` to its followers. A Start is forwarded to the
+    /// followers that take forwards and are bound to `token` with a follow naming `documentId` (the caller's current
+    /// document id, as for `followedLanes`) and `laneUid` (the lane the Start belongs to: `kChordsLaneUid`, or a
+    /// track's lane uid; an empty one matches no follower). An Extend or a Stop goes to the followers recorded for
+    /// `cmd.id` by an earlier Start of `token`; `documentId` and `laneUid` are not read. Returns `Forwarded` when at
+    /// least one follower's scheduler took it (the caller does not play it), `QueueFull` when it was for followers
+    /// but every one of their rings was full (nothing pushed; for a Start nothing recorded), and `NotForwarded`
+    /// otherwise: no follower takes forwards on that lane, an Extend or a Stop of an id not recorded, an instance
+    /// that follows, an unknown token. The caller plays a `NotForwarded` command itself, as without links. Never
+    /// moves the serial. Caller's obligation: called only on the thread that makes every other `pushPreview` into
+    /// the followers' schedulers (the plug-in's main thread, where their editors push), since a scheduler's preview
+    /// ring has a single producer. Allocates (the record table).
+    LinkForward forwardPreview(LinkToken token, std::string_view documentId, std::string_view laneUid,
+                               const PreviewCmd& cmd);
+
+    /// Rule 12: the leader `token`'s Panic reaches its followers. Sets the panic flag of every follower bound to
+    /// `token` that takes forwards, whatever lane or document its follow names, and drops every preview record of
+    /// `token`. Returns how many flags it set (0 for an unknown token or one with no such follower). Pushes nothing,
+    /// so any thread may call it. Never moves the serial.
+    int panicFollowers(LinkToken token);
 
     /// Atomic: moves on every change of what some `view` would return (rule 10). Readable without the mutex.
     std::uint64_t serial() const noexcept;
@@ -511,10 +602,15 @@ public:
     /// (about 864 KB) and hands it to the registry. `hook` is what other instances call to make this one
     /// republish (`LinkRegistry::Hook`: it must only lock the caller's model mutex and call `publishOwn`, and be
     /// safe to call after the instance is gone). Followers waiting for `instanceId` bind to it; they get content
-    /// from its first `publishOwn`, which the caller makes at once (the shell's constructor publishes).
-    LinkEndpoint(LinkRegistry& registry, std::string instanceId, UidGenerator makeUid, LinkRegistry::Hook hook);
-    /// Removes the registration (its followers are emptied and wait, the link buffer is never written again) and
-    /// then runs the hooks `remove` returned (its leader's, when it was bound to one). The caller holds no lock.
+    /// from its first `publishOwn`, which the caller makes at once (the shell's constructor publishes). `previews`
+    /// is handed to the registry (`LinkRegistry::add`, rule 12): the instance's scheduler and panic flag, which must
+    /// outlive the endpoint (the destructor removes the registration first, after which the registry touches
+    /// neither); the default takes no forwarded previews.
+    LinkEndpoint(LinkRegistry& registry, std::string instanceId, UidGenerator makeUid, LinkRegistry::Hook hook,
+                 LinkPreviewSink previews = {});
+    /// Removes the registration (its followers are emptied and wait, the link buffer and the preview sink are never
+    /// touched again) and then runs the hooks `remove` returned (its leader's, when it was bound to one). The
+    /// caller holds no lock.
     ~LinkEndpoint();
     LinkEndpoint(const LinkEndpoint&) = delete;
     LinkEndpoint& operator=(const LinkEndpoint&) = delete;
@@ -611,6 +707,22 @@ public:
     /// the replace. The next `publishOwn` publishes a feed, under the new document id, so every bound follower
     /// stops resolving (`ProjectChanged`, its link buffer empty) while this instance plays every lane itself.
     void adoptWithoutBlock(LinkRegistry::Hooks& hooks);
+
+    /// Offers a preview command of this instance's editor to the followers that play its lane
+    /// (`LinkRegistry::forwardPreview`, rule 12), and returns what the registry did. A Start belongs to the lane of
+    /// track `trackId` (`Track::id`) when it is given, to the chords lane when it is not; the lane is named by its
+    /// uid in this instance's lane uid table and the document by `documentId()`. A track id without a uid in the
+    /// table (none was given yet, or a track number below 1) names no lane: such a Start is offered with an empty
+    /// uid, so it is not forwarded, but it still ends what an earlier Start of its id forwarded. An Extend or a
+    /// Stop goes where the Start of its id went, and `trackId` is not read. On `NotForwarded` the caller pushes the
+    /// command into its own scheduler; on `QueueFull` it reports a full queue. In the caller's model-mutex section
+    /// (it reads the lane table and the document id), and on the thread that makes every other `pushPreview` of
+    /// the process's instances (the main thread): `LinkRegistry::forwardPreview`'s obligation.
+    LinkForward forwardPreview(std::optional<int> trackId, const PreviewCmd& cmd);
+    /// The instance's Panic, for its followers (`LinkRegistry::panicFollowers`): sets the panic flag of every
+    /// follower bound to it and drops what it forwarded. Returns how many flags were set. The caller still panics
+    /// its own scheduler.
+    int panicFollowers();
 
     /// Whether the instance follows. Atomic: the audio thread reads it at the top of every block
     /// (`LinkSource::select`). It turns true only after the link buffer holds a publication.

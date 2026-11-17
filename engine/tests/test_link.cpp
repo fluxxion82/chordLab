@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -1261,4 +1262,132 @@ TEST_CASE("link source: rapid toggles and publications, each block playing the s
         wasFollowing = following;
         first = false;
     }
+}
+
+// --- the endpoint's previews (LinkRegistry rule 12) -------------------------------------------------------------
+
+namespace {
+
+/// One instance as the shell holds it, for previews: an endpoint, a scheduler and a panic flag (its preview sink),
+/// a document store and its own buffer. Everything big on the heap.
+struct PreviewInst {
+    std::unique_ptr<Scheduler> scheduler = std::make_unique<Scheduler>();
+    std::unique_ptr<std::atomic<bool>> panic = std::make_unique<std::atomic<bool>>(false);
+    DocumentStore store;
+    std::unique_ptr<TripleBuffer<SnapshotSlot>> own = std::make_unique<TripleBuffer<SnapshotSlot>>();
+    Publication ownPublication;
+    std::unique_ptr<LinkEndpoint> endpoint;
+
+    PreviewInst(LinkRegistry& registry, const std::string& id, const LinkEndpoint::UidGenerator& uids,
+                bool takesForwards = true) {
+        scheduler->reset(48000.0);
+        endpoint = std::make_unique<LinkEndpoint>(
+            registry, id, uids, [] {},
+            takesForwards ? LinkPreviewSink{scheduler.get(), panic.get()} : LinkPreviewSink{});
+    }
+    void publish() { endpoint->publishOwn(store, "lineage-" + endpoint->view().id, *own, ownPublication); }
+    /// One block with the transport stopped: the panic flag first, as the shell's ProcessBlock.
+    void block() {
+        if (panic->exchange(false, std::memory_order_acq_rel)) scheduler->panic();
+        std::array<MidiOut, 512> out{};
+        std::size_t written = 0;
+        scheduler->process(BlockInfo{0.0, 64, 48000.0, 120.0, false, true}, out.data(), out.size(), written);
+    }
+    std::vector<int> sounds() const {
+        std::vector<int> out;
+        for (int p = 0; p < 128; ++p) {
+            if (scheduler->sounding(p)) out.push_back(p);
+        }
+        return out;
+    }
+    void follow(const PreviewInst& leader, const std::string& laneUid) {
+        LinkRegistry::Hooks hooks;
+        const std::string leaderId = leader.endpoint->view().id;
+        REQUIRE(endpoint->follow(leaderId, laneUid, "lineage-" + leaderId, hooks) == LinkFollowResult::Applied);
+    }
+};
+
+PreviewCmd previewStart(int id, int pitch) {
+    PreviewCmd cmd{};
+    cmd.kind = PreviewCmd::Start;
+    cmd.id = id;
+    cmd.velocity = 100;
+    cmd.count = 1;
+    cmd.pitches[0] = static_cast<std::uint8_t>(pitch);
+    return cmd;
+}
+
+PreviewCmd previewStop(int id) {
+    PreviewCmd cmd{};
+    cmd.kind = PreviewCmd::Stop;
+    cmd.id = id;
+    return cmd;
+}
+
+}  // namespace
+
+TEST_CASE("link endpoint: a preview Start names its lane by the track's uid, or the chords lane without a track") {
+    LinkRegistry registry;
+    const LinkEndpoint::UidGenerator uids = counter();
+    PreviewInst leader(registry, "L", uids);
+    leader.store.appendChord(chord(0, "maj"), 4.0, 100);
+    const int bass = addTrackWith(leader.store, TrackRole::Bass, "Bass", {ns(36, 0, 960)});
+    const int lead = addTrackWith(leader.store, TrackRole::Lead, "Lead", {ns(72, 0, 960)});
+    leader.publish();
+    const std::string bassUid = leader.endpoint->state().lanes.at(bass);
+    PreviewInst onBass(registry, "B", uids);
+    PreviewInst onChords(registry, "C", uids);
+    PreviewInst silent(registry, "S", uids, false);  // follows the lead lane, takes no forwards
+    onBass.follow(leader, bassUid);
+    onChords.follow(leader, std::string(kChordsLaneUid));
+    silent.follow(leader, leader.endpoint->state().lanes.at(lead));
+    leader.publish();
+    const auto blocks = [&] {
+        for (PreviewInst* inst : {&leader, &onBass, &onChords, &silent}) inst->block();
+    };
+
+    CHECK(leader.endpoint->forwardPreview(bass, previewStart(1, 50)) == LinkForward::Forwarded);
+    CHECK(leader.endpoint->forwardPreview(std::nullopt, previewStart(2, 52)) == LinkForward::Forwarded);
+    CHECK(leader.endpoint->forwardPreview(lead, previewStart(3, 54)) == LinkForward::NotForwarded);  // no sink
+    CHECK(leader.endpoint->forwardPreview(99, previewStart(4, 56)) == LinkForward::NotForwarded);    // no uid
+    CHECK(leader.endpoint->forwardPreview(0, previewStart(5, 58)) == LinkForward::NotForwarded);
+    CHECK(leader.endpoint->forwardPreview(-1, previewStart(6, 59)) == LinkForward::NotForwarded);
+    blocks();
+    CHECK(onBass.sounds() == std::vector<int>{50});
+    CHECK(onChords.sounds() == std::vector<int>{52});
+    CHECK(leader.sounds().empty());  // the endpoint pushes nothing into its own scheduler: that is the caller's
+    CHECK(silent.sounds().empty());
+
+    // An Extend or a Stop goes where its Start went, whatever track it is given.
+    CHECK(leader.endpoint->forwardPreview(lead, previewStop(1)) == LinkForward::Forwarded);
+    CHECK(leader.endpoint->forwardPreview(std::nullopt, previewStop(3)) == LinkForward::NotForwarded);
+    blocks();
+    CHECK(onBass.sounds().empty());
+    CHECK(onChords.sounds() == std::vector<int>{52});
+
+    // A follower's endpoint forwards nothing (nothing is bound to it).
+    CHECK(onBass.endpoint->forwardPreview(std::nullopt, previewStart(7, 60)) == LinkForward::NotForwarded);
+
+    // Panic: every bound follower that takes forwards is flagged, and the records are gone.
+    CHECK(leader.endpoint->panicFollowers() == 2);
+    CHECK(onBass.panic->load());
+    CHECK(onChords.panic->load());
+    CHECK_FALSE(leader.panic->load());
+    CHECK(leader.endpoint->forwardPreview(std::nullopt, previewStop(2)) == LinkForward::NotForwarded);
+    blocks();
+    CHECK(onChords.sounds().empty());
+    CHECK(onBass.endpoint->panicFollowers() == 0);
+}
+
+TEST_CASE("link endpoint: a follower's endpoint destroyed takes its records with it") {
+    LinkRegistry registry;
+    const LinkEndpoint::UidGenerator uids = counter();
+    PreviewInst leader(registry, "L", uids);
+    leader.publish();
+    auto follower = std::make_unique<PreviewInst>(registry, "F", uids);
+    follower->follow(leader, std::string(kChordsLaneUid));
+    REQUIRE(leader.endpoint->forwardPreview(std::nullopt, previewStart(1, 60)) == LinkForward::Forwarded);
+    follower.reset();  // the endpoint first (the member declared last), then its scheduler and flag
+    CHECK(leader.endpoint->forwardPreview(std::nullopt, previewStop(1)) == LinkForward::NotForwarded);
+    CHECK(leader.endpoint->panicFollowers() == 0);
 }

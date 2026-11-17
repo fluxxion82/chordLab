@@ -6,18 +6,23 @@
 #include "chordlab/json_api.h"
 #include "chordlab/link.h"
 #include "chordlab/publication.h"
+#include "chordlab/scheduler.h"
 #include "chordlab/tracks.h"
 #include "chordlab/triple_buffer.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
+#include <climits>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <initializer_list>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -100,6 +105,9 @@ struct Inst {
     std::string name;
     std::unique_ptr<TripleBuffer<SnapshotSlot>> buffer;
     LinkToken token = 0;
+    /// Its preview sink (rule 12), for an instance made by `World::addPlayer`; null otherwise.
+    std::unique_ptr<Scheduler> scheduler;
+    std::unique_ptr<std::atomic<bool>> panic;
 };
 
 /// What the consumer of a link buffer sees after one `acquire`.
@@ -142,13 +150,26 @@ struct World {
     std::shared_ptr<Names> log = std::make_shared<Names>();
     std::vector<std::unique_ptr<Inst>> insts;
 
-    /// Adds an instance named `name` under the id `id` (the name when empty).
-    Inst& add(const std::string& name, const std::string& id = "") {
+    /// Adds an instance named `name` under the id `id` (the name when empty), taking no forwarded previews.
+    Inst& add(const std::string& name, const std::string& id = "") { return make(name, id, false); }
+
+    /// Adds an instance as `add` does, with a scheduler and a panic flag of its own as its preview sink (rule 12).
+    Inst& addPlayer(const std::string& name, const std::string& id = "") { return make(name, id, true); }
+
+    Inst& make(const std::string& name, const std::string& id, bool player) {
         auto inst = std::make_unique<Inst>();
         inst->name = name;
         inst->buffer = std::make_unique<TripleBuffer<SnapshotSlot>>();
+        LinkPreviewSink previews;
+        if (player) {
+            inst->scheduler = std::make_unique<Scheduler>();
+            inst->scheduler->reset(48000.0);
+            inst->panic = std::make_unique<std::atomic<bool>>(false);
+            previews = LinkPreviewSink{inst->scheduler.get(), inst->panic.get()};
+        }
         const std::shared_ptr<Names> sink = log;
-        inst->token = reg.add(id.empty() ? name : id, inst->buffer.get(), [sink, name] { sink->push_back(name); });
+        inst->token =
+            reg.add(id.empty() ? name : id, inst->buffer.get(), [sink, name] { sink->push_back(name); }, previews);
         REQUIRE(inst->token != 0);
         insts.push_back(std::move(inst));
         return *insts.back();
@@ -1974,6 +1995,536 @@ TEST_CASE("link registry: a leader's binding counter moves with every bind and u
         w.reg.setFollow(f1.token, hinted);
         CHECK(bindings(l) == before);
     }
+}
+
+// --- rule 12: previews ------------------------------------------------------------------------------------------
+
+namespace {
+
+using Pitches = std::vector<int>;
+
+PreviewCmd startCmd(int id, std::initializer_list<int> pitches) {
+    PreviewCmd cmd{};
+    cmd.kind = PreviewCmd::Start;
+    cmd.id = id;
+    cmd.velocity = 100;
+    for (const int p : pitches) cmd.pitches[cmd.count++] = static_cast<std::uint8_t>(p);
+    return cmd;
+}
+
+PreviewCmd stopCmd(int id) {
+    PreviewCmd cmd{};
+    cmd.kind = PreviewCmd::Stop;
+    cmd.id = id;
+    return cmd;
+}
+
+PreviewCmd extendCmd(int id) {
+    PreviewCmd cmd{};
+    cmd.kind = PreviewCmd::Extend;
+    cmd.id = id;
+    return cmd;
+}
+
+/// One audio block of `inst` (made by `addPlayer`) with the transport stopped, as the shell's ProcessBlock: the
+/// panic flag first, then the scheduler.
+void block(Inst& inst, int frames = 64) {
+    REQUIRE(inst.scheduler != nullptr);
+    if (inst.panic->exchange(false, std::memory_order_acq_rel)) inst.scheduler->panic();
+    std::array<MidiOut, 512> out{};
+    std::size_t written = 0;
+    inst.scheduler->process(BlockInfo{0.0, frames, 48000.0, 120.0, false, true}, out.data(), out.size(), written);
+}
+
+/// The pitches `inst`'s scheduler sounds, ascending.
+Pitches sounds(const Inst& inst) {
+    Pitches out;
+    for (int p = 0; p < 128; ++p) {
+        if (inst.scheduler->sounding(p)) out.push_back(p);
+    }
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE("link registry: a preview Start reaches the followers bound on its lane in the caller's document, and no "
+          "one else") {
+    Song s;
+    World w;
+    Inst& l = w.addPlayer("L");
+    Inst& m = w.addPlayer("M");
+    w.reg.publish(l.token, s.feed({}));
+    Inst& f = w.addPlayer("F");
+    Inst& f2 = w.addPlayer("F2");
+    Inst& onOtherLane = w.addPlayer("G");
+    Inst& onOtherDocument = w.addPlayer("H");
+    Inst& ofOtherLeader = w.addPlayer("K");
+    Inst& waiting = w.addPlayer("Q");
+    Inst& onChords = w.addPlayer("C");
+    w.reg.setFollow(f.token, follow("L", s.uidA));
+    w.reg.setFollow(f2.token, follow("L", s.uidA));
+    w.reg.setFollow(onOtherLane.token, follow("L", s.uidB));
+    w.reg.setFollow(onOtherDocument.token, follow("L", s.uidA, "doc-2"));
+    w.reg.setFollow(ofOtherLeader.token, follow("M", s.uidA));
+    w.reg.setFollow(waiting.token, follow("gone", s.uidA));
+    w.reg.setFollow(onChords.token, follow("L", std::string(kChordsLaneUid)));
+    REQUIRE(w.status(waiting) == LinkStatus::Waiting);
+    const std::vector<Inst*> everyone{&l, &m, &f, &f2, &onOtherLane, &onOtherDocument, &ofOtherLeader, &waiting,
+                                      &onChords};
+
+    const std::uint64_t serial = w.reg.serial();
+    CHECK(w.reg.forwardPreview(l.token, "doc-1", s.uidA, startCmd(1, {60, 64})) == LinkForward::Forwarded);
+    CHECK(w.reg.serial() == serial);  // rule 10: no view changed
+    for (Inst* inst : everyone) block(*inst);
+    CHECK(sounds(f) == Pitches{60, 64});
+    CHECK(sounds(f2) == Pitches{60, 64});
+    for (Inst* inst : {&l, &m, &onOtherLane, &onOtherDocument, &ofOtherLeader, &waiting, &onChords}) {
+        CHECK_MESSAGE(sounds(*inst).empty(), inst->name);
+    }
+
+    // The chords lane is a lane like the others.
+    CHECK(w.reg.forwardPreview(l.token, "doc-1", kChordsLaneUid, startCmd(2, {67})) == LinkForward::Forwarded);
+    for (Inst* inst : everyone) block(*inst);
+    CHECK(sounds(onChords) == Pitches{67});
+    CHECK(sounds(f) == Pitches{60, 64});
+    CHECK(sounds(l).empty());
+
+    // The Stops end them where they went.
+    CHECK(w.reg.forwardPreview(l.token, "doc-1", s.uidA, stopCmd(1)) == LinkForward::Forwarded);
+    CHECK(w.reg.forwardPreview(l.token, "doc-1", kChordsLaneUid, stopCmd(2)) == LinkForward::Forwarded);
+    CHECK(w.reg.serial() == serial);
+    for (Inst* inst : everyone) block(*inst);
+    for (Inst* inst : everyone) CHECK_MESSAGE(sounds(*inst).empty(), inst->name);
+    for (Inst* inst : everyone) CHECK_FALSE(inst->panic->load());
+}
+
+TEST_CASE("link registry: a forwarded preview's id in the follower's scheduler is from the reserved range") {
+    Song s;
+    World w;
+    Inst& l = w.addPlayer("L");
+    Inst& f = w.addPlayer("F");
+    w.reg.setFollow(f.token, follow("L", s.uidA));
+    REQUIRE(w.reg.forwardPreview(l.token, "doc-1", s.uidA, startCmd(1, {60})) == LinkForward::Forwarded);
+    block(f);
+    REQUIRE(sounds(f) == Pitches{60});
+    // The originating id means nothing there; the first id of the reserved range is the one it sounds under.
+    REQUIRE(f.scheduler->pushPreview(stopCmd(1)));
+    block(f);
+    CHECK(sounds(f) == Pitches{60});
+    REQUIRE(f.scheduler->pushPreview(stopCmd(kForwardedPreviewIdFirst)));
+    block(f);
+    CHECK(sounds(f).empty());
+    CHECK(kForwardedPreviewIdFirst == INT_MAX - (1 << 20));
+    CHECK(kForwardedPreviewIdLast == INT_MAX);
+}
+
+TEST_CASE("link registry: Extend and Stop go to the recorded followers, whoever is bound on the lane now") {
+    Song s;
+    World w;
+    Inst& l = w.addPlayer("L");
+    w.reg.publish(l.token, s.feed({s.uidA}));
+    Inst& f = w.addPlayer("F");
+    w.reg.setFollow(f.token, follow("L", s.uidA));
+    REQUIRE(w.reg.forwardPreview(l.token, "doc-1", s.uidA, startCmd(1, {60})) == LinkForward::Forwarded);
+    block(f);
+    REQUIRE(sounds(f) == Pitches{60});
+
+    SUBCASE("a second follower joins the lane: it gets neither the Extend nor the Stop") {
+        Inst& n = w.addPlayer("N");
+        w.reg.setFollow(n.token, follow("L", s.uidA));
+        // A Start of its own, so that a Stop reaching it under any id would show.
+        REQUIRE(w.reg.forwardPreview(l.token, "doc-1", s.uidA, startCmd(2, {72})) == LinkForward::Forwarded);
+        block(f);
+        block(n);
+        REQUIRE(sounds(f) == Pitches{60, 72});
+        REQUIRE(sounds(n) == Pitches{72});
+        CHECK(w.reg.forwardPreview(l.token, "doc-1", s.uidA, extendCmd(1)) == LinkForward::Forwarded);
+        CHECK(w.reg.forwardPreview(l.token, "doc-1", s.uidA, stopCmd(1)) == LinkForward::Forwarded);
+        block(f);
+        block(n);
+        CHECK(sounds(f) == Pitches{72});
+        CHECK(sounds(n) == Pitches{72});
+        CHECK(w.reg.forwardPreview(l.token, "doc-1", s.uidA, stopCmd(1)) == LinkForward::NotForwarded);  // ended
+        CHECK(w.reg.forwardPreview(l.token, "doc-1", s.uidA, stopCmd(2)) == LinkForward::Forwarded);
+        block(f);
+        block(n);
+        CHECK(sounds(f).empty());
+        CHECK(sounds(n).empty());
+        CHECK_FALSE(n.panic->load());
+    }
+    SUBCASE("the leader's feed takes another document id: still bound, no panic, the Stop still reaches it") {
+        w.reg.publish(l.token, s.feed({}, "doc-2"));
+        REQUIRE(w.status(f) == LinkStatus::ProjectChanged);
+        // A new Start in the new document is not for it.
+        CHECK(w.reg.forwardPreview(l.token, "doc-2", s.uidA, startCmd(2, {72})) == LinkForward::NotForwarded);
+        CHECK_FALSE(f.panic->load());
+        block(f);
+        CHECK(sounds(f) == Pitches{60});
+        CHECK(w.reg.forwardPreview(l.token, "doc-2", s.uidA, stopCmd(1)) == LinkForward::Forwarded);
+        block(f);
+        CHECK(sounds(f).empty());
+    }
+    SUBCASE("the followed lane leaves the leader's feed: still bound, no panic, the Stop still reaches it") {
+        auto withoutA = std::make_shared<LinkFeed>(*s.feed({s.uidA}));
+        withoutA->lanes.erase(std::remove_if(withoutA->lanes.begin(), withoutA->lanes.end(),
+                                             [&](const LinkLane& lane) { return lane.uid == s.uidA; }),
+                              withoutA->lanes.end());
+        w.reg.publish(l.token, withoutA);
+        REQUIRE(w.status(f) == LinkStatus::LaneMissing);
+        CHECK_FALSE(f.panic->load());
+        CHECK(w.reg.forwardPreview(l.token, "doc-1", "", stopCmd(1)) == LinkForward::Forwarded);
+        block(f);
+        CHECK(sounds(f).empty());
+    }
+    SUBCASE("a leader's state load that keeps its id and its followers: no panic, the Stop still reaches it") {
+        w.reg.adoptState(l.token, "L", "L-fresh", std::nullopt);
+        REQUIRE(w.status(f) != LinkStatus::Waiting);
+        CHECK_FALSE(f.panic->load());
+        CHECK(w.reg.forwardPreview(l.token, "another-doc", s.uidB, stopCmd(1)) == LinkForward::Forwarded);
+        block(f);
+        CHECK(sounds(f).empty());
+    }
+    SUBCASE("new hints alone change no link: no panic, the Stop still reaches it") {
+        LinkFollow hinted = follow("L", s.uidA);
+        hinted.laneName = "renamed";
+        w.reg.setFollow(f.token, hinted);
+        CHECK_FALSE(f.panic->load());
+        CHECK(w.reg.forwardPreview(l.token, "doc-1", s.uidA, stopCmd(1)) == LinkForward::Forwarded);
+        block(f);
+        CHECK(sounds(f).empty());
+    }
+}
+
+TEST_CASE("link registry: a forwarded Extend gives the follower's preview another four seconds") {
+    Song s;
+    World w;
+    Inst& l = w.addPlayer("L");
+    Inst& f = w.addPlayer("F");
+    w.reg.setFollow(f.token, follow("L", s.uidA));
+    REQUIRE(w.reg.forwardPreview(l.token, "doc-1", s.uidA, startCmd(1, {60})) == LinkForward::Forwarded);
+    const auto seconds = [&](int tenths) {
+        for (int i = 0; i < tenths; ++i) block(f, 4800);  // 0.1 s at 48 kHz
+    };
+    seconds(30);
+    REQUIRE(sounds(f) == Pitches{60});
+    CHECK(w.reg.forwardPreview(l.token, "doc-1", s.uidA, extendCmd(1)) == LinkForward::Forwarded);
+    seconds(30);  // 6 s after the Start, 3 s after the Extend
+    CHECK(sounds(f) == Pitches{60});
+    seconds(15);  // 4.5 s after the Extend
+    CHECK(sounds(f).empty());
+}
+
+TEST_CASE("link registry: two leaders' forwards to one follower, one after the other, never share an id") {
+    // A follower is bound to one leader at a time, so two leaders reach it only one after the other; its ids come
+    // from one cursor of its own, so the second leader's id 1 is not the first's even before the panic ran.
+    Song s;
+    World w;
+    Inst& l1 = w.addPlayer("L1");
+    Inst& l2 = w.addPlayer("L2");
+    Inst& f = w.addPlayer("F");
+    w.reg.setFollow(f.token, follow("L1", s.uidA));
+    REQUIRE(w.reg.forwardPreview(l1.token, "doc-1", s.uidA, startCmd(1, {60})) == LinkForward::Forwarded);
+    block(f);
+    REQUIRE(sounds(f) == Pitches{60});
+
+    w.reg.setFollow(f.token, follow("L2", s.uidA));
+    CHECK(f.panic->load());
+    block(f);  // the panic releases L1's preview
+    CHECK(sounds(f).empty());
+    REQUIRE(w.reg.forwardPreview(l2.token, "doc-1", s.uidA, startCmd(1, {67})) == LinkForward::Forwarded);
+    block(f);
+    REQUIRE(sounds(f) == Pitches{67});
+    CHECK(w.reg.forwardPreview(l1.token, "doc-1", s.uidA, stopCmd(1)) == LinkForward::NotForwarded);
+    REQUIRE(f.scheduler->pushPreview(stopCmd(kForwardedPreviewIdFirst)));  // L1's id there: ends nothing now
+    block(f);
+    CHECK(sounds(f) == Pitches{67});
+    CHECK(w.reg.forwardPreview(l2.token, "doc-1", s.uidA, stopCmd(1)) == LinkForward::Forwarded);
+    block(f);
+    CHECK(sounds(f).empty());
+}
+
+TEST_CASE("link registry: two leaders' id 1 forwarded to two followers of one leader each end only their own") {
+    Song s;
+    World w;
+    Inst& l1 = w.addPlayer("L1");
+    Inst& l2 = w.addPlayer("L2");
+    Inst& f1 = w.addPlayer("F1");
+    Inst& f2 = w.addPlayer("F2");
+    w.reg.setFollow(f1.token, follow("L1", s.uidA));
+    w.reg.setFollow(f2.token, follow("L2", s.uidA));
+    REQUIRE(w.reg.forwardPreview(l1.token, "doc-1", s.uidA, startCmd(1, {60})) == LinkForward::Forwarded);
+    REQUIRE(w.reg.forwardPreview(l2.token, "doc-1", s.uidA, startCmd(1, {67})) == LinkForward::Forwarded);
+    block(f1);
+    block(f2);
+    REQUIRE(sounds(f1) == Pitches{60});
+    REQUIRE(sounds(f2) == Pitches{67});
+    CHECK(w.reg.forwardPreview(l1.token, "doc-1", s.uidA, stopCmd(1)) == LinkForward::Forwarded);
+    block(f1);
+    block(f2);
+    CHECK(sounds(f1).empty());
+    CHECK(sounds(f2) == Pitches{67});
+    CHECK(w.reg.forwardPreview(l2.token, "doc-1", s.uidA, stopCmd(1)) == LinkForward::Forwarded);
+    block(f2);
+    CHECK(sounds(f2).empty());
+}
+
+TEST_CASE("link registry: a follower that stops being bound or loads a state is panicked and its records dropped") {
+    Song s;
+    World w;
+    Inst& l = w.addPlayer("L");
+    Inst& other = w.addPlayer("M");
+    w.reg.publish(l.token, s.feed({s.uidA}));
+    w.reg.publish(other.token, s.feed({}));
+    Inst& f = w.addPlayer("F");
+    w.reg.setFollow(f.token, follow("L", s.uidA));
+    REQUIRE(w.reg.forwardPreview(l.token, "doc-1", s.uidA, startCmd(1, {60})) == LinkForward::Forwarded);
+    block(f);
+    REQUIRE(sounds(f) == Pitches{60});
+    REQUIRE_FALSE(f.panic->load());
+    bool leaderGone = false;
+
+    SUBCASE("unlink") { w.reg.setFollow(f.token, std::nullopt); }
+    SUBCASE("another lane of the same leader") { w.reg.setFollow(f.token, follow("L", s.uidB)); }
+    SUBCASE("a follow by command of another leader") {
+        Hooks hooks;
+        REQUIRE(w.reg.follow(f.token, "M", s.uidA, "lineage-1", hooks) == LinkFollowResult::Applied);
+    }
+    SUBCASE("a state load of the follower, its follow as it was") {
+        w.reg.adoptState(f.token, "F", "F-fresh", follow("L", s.uidA));
+        REQUIRE(w.status(f) != LinkStatus::Waiting);  // bound again to L
+    }
+    SUBCASE("a state load of the follower without a block") { w.reg.adoptWithoutBlock(f.token); }
+    SUBCASE("the leader removed") {
+        w.reg.remove(l.token);
+        leaderGone = true;
+    }
+    SUBCASE("the leader starts following") { w.reg.setFollow(l.token, follow("M", s.uidA)); }
+    SUBCASE("the leader loads a follower's state") { w.reg.adoptState(l.token, "L", "L-fresh", follow("M", s.uidB)); }
+
+    CHECK(f.panic->load());
+    block(f);
+    CHECK(sounds(f).empty());  // released on its next block
+    if (!leaderGone) {
+        CHECK(w.reg.forwardPreview(l.token, "doc-1", s.uidA, stopCmd(1)) == LinkForward::NotForwarded);
+        CHECK(w.reg.forwardPreview(l.token, "doc-1", s.uidA, extendCmd(1)) == LinkForward::NotForwarded);
+    }
+    CHECK_FALSE(l.panic->load());
+    CHECK_FALSE(other.panic->load());
+}
+
+TEST_CASE("link registry: a removed follower's records go with it, and its sink is never touched again") {
+    Song s;
+    World w;
+    Inst& l = w.addPlayer("L");
+    Inst& f = w.addPlayer("F");
+    Inst& g = w.addPlayer("G");
+    w.reg.setFollow(f.token, follow("L", s.uidA));
+    w.reg.setFollow(g.token, follow("L", s.uidA));
+    REQUIRE(w.reg.forwardPreview(l.token, "doc-1", s.uidA, startCmd(1, {60})) == LinkForward::Forwarded);
+    REQUIRE(w.reg.forwardPreview(l.token, "doc-1", s.uidA, startCmd(2, {62})) == LinkForward::Forwarded);
+    w.reg.remove(f.token);
+    CHECK_FALSE(f.panic->load());  // gone: nothing set
+    // Its scheduler and flag die with it (AddressSanitizer would see any later touch).
+    f.scheduler.reset();
+    f.panic.reset();
+    CHECK(w.reg.forwardPreview(l.token, "doc-1", s.uidA, extendCmd(1)) == LinkForward::Forwarded);  // G still
+    CHECK(w.reg.forwardPreview(l.token, "doc-1", s.uidA, stopCmd(1)) == LinkForward::Forwarded);
+    CHECK(w.reg.panicFollowers(l.token) == 1);
+    CHECK(g.panic->load());
+    CHECK(w.reg.forwardPreview(l.token, "doc-1", s.uidA, stopCmd(2)) == LinkForward::NotForwarded);
+
+    // A record whose only follower was removed is gone.
+    Inst& h = w.addPlayer("H");
+    w.reg.setFollow(h.token, follow("L", s.uidB));
+    REQUIRE(w.reg.forwardPreview(l.token, "doc-1", s.uidB, startCmd(3, {64})) == LinkForward::Forwarded);
+    w.reg.remove(h.token);
+    h.scheduler.reset();
+    h.panic.reset();
+    CHECK(w.reg.forwardPreview(l.token, "doc-1", s.uidB, stopCmd(3)) == LinkForward::NotForwarded);
+}
+
+TEST_CASE("link registry: panicFollowers flags every follower bound to the leader and drops its records") {
+    Song s;
+    World w;
+    Inst& l = w.addPlayer("L");
+    Inst& m = w.addPlayer("M");
+    Inst& f = w.addPlayer("F");
+    Inst& g = w.addPlayer("G");
+    Inst& h = w.addPlayer("H");
+    Inst& k = w.addPlayer("K");
+    Inst& waiting = w.addPlayer("Q");
+    Inst& silentFollower = w.add("S");  // takes no forwards
+    w.reg.setFollow(f.token, follow("L", s.uidA));
+    w.reg.setFollow(g.token, follow("L", s.uidB));
+    w.reg.setFollow(h.token, follow("L", s.uidA, "doc-2"));
+    w.reg.setFollow(k.token, follow("M", s.uidA));
+    w.reg.setFollow(waiting.token, follow("gone", s.uidA));
+    w.reg.setFollow(silentFollower.token, follow("L", s.uidA));
+    REQUIRE(w.reg.forwardPreview(l.token, "doc-1", s.uidA, startCmd(1, {60})) == LinkForward::Forwarded);
+    REQUIRE(w.reg.forwardPreview(m.token, "doc-1", s.uidA, startCmd(1, {67})) == LinkForward::Forwarded);
+    const std::uint64_t serial = w.reg.serial();
+
+    CHECK(w.reg.panicFollowers(l.token) == 3);
+    CHECK(w.reg.serial() == serial);
+    CHECK(f.panic->load());
+    CHECK(g.panic->load());
+    CHECK(h.panic->load());
+    CHECK_FALSE(k.panic->load());
+    CHECK_FALSE(waiting.panic->load());
+    CHECK_FALSE(l.panic->load());
+    CHECK_FALSE(m.panic->load());
+    CHECK(w.reg.forwardPreview(l.token, "doc-1", s.uidA, stopCmd(1)) == LinkForward::NotForwarded);
+    CHECK(w.reg.forwardPreview(m.token, "doc-1", s.uidA, stopCmd(1)) == LinkForward::Forwarded);  // M's stay
+    block(f);
+    CHECK(sounds(f).empty());
+
+    CHECK(w.reg.panicFollowers(0) == 0);
+    CHECK(w.reg.panicFollowers(f.token) == 0);  // a follower has no followers
+    w.reg.remove(m.token);
+    CHECK(w.reg.panicFollowers(m.token) == 0);
+}
+
+TEST_CASE("link registry: what is not forwarded") {
+    Song s;
+    World w;
+    Inst& l = w.addPlayer("L");
+    Inst& f = w.addPlayer("F");
+    Inst& silentFollower = w.add("S");  // bound, but takes no forwards
+    w.reg.setFollow(f.token, follow("L", s.uidA));
+    w.reg.setFollow(silentFollower.token, follow("L", s.uidB));
+    const std::uint64_t serial = w.reg.serial();
+    const PreviewCmd start = startCmd(1, {60});
+
+    CHECK(w.reg.forwardPreview(l.token, "doc-1", s.uidB, start) == LinkForward::NotForwarded);  // a null sink
+    CHECK(w.reg.forwardPreview(l.token, "doc-1", kChordsLaneUid, start) == LinkForward::NotForwarded);  // unfollowed
+    CHECK(w.reg.forwardPreview(l.token, "doc-1", "unknown-lane", start) == LinkForward::NotForwarded);
+    CHECK(w.reg.forwardPreview(l.token, "doc-1", "", start) == LinkForward::NotForwarded);
+    CHECK(w.reg.forwardPreview(l.token, "doc-2", s.uidA, start) == LinkForward::NotForwarded);  // another document
+    CHECK(w.reg.forwardPreview(f.token, "doc-1", s.uidA, start) == LinkForward::NotForwarded);  // it follows
+    CHECK(w.reg.forwardPreview(0, "doc-1", s.uidA, start) == LinkForward::NotForwarded);
+    CHECK(w.reg.forwardPreview(l.token, "doc-1", s.uidA, stopCmd(1)) == LinkForward::NotForwarded);    // no record
+    CHECK(w.reg.forwardPreview(l.token, "doc-1", s.uidA, extendCmd(1)) == LinkForward::NotForwarded);  // no record
+    CHECK(w.reg.serial() == serial);
+    Inst& gone = w.addPlayer("X");
+    w.reg.remove(gone.token);
+    CHECK(w.reg.forwardPreview(gone.token, "doc-1", s.uidA, start) == LinkForward::NotForwarded);
+    block(f);
+    block(l);
+    CHECK(sounds(f).empty());
+    CHECK(sounds(l).empty());
+    CHECK_FALSE(f.panic->load());
+
+    // A registry whose instances take no forwards at all forwards nothing.
+    World plain;
+    Inst& pl = plain.add("L");
+    Inst& pf = plain.add("F");
+    plain.reg.setFollow(pf.token, follow("L", s.uidA));
+    CHECK(plain.reg.forwardPreview(pl.token, "doc-1", s.uidA, start) == LinkForward::NotForwarded);
+    CHECK(plain.reg.panicFollowers(pl.token) == 0);
+}
+
+TEST_CASE("link registry: a full preview ring leaves that follower out, and all full is QueueFull") {
+    Song s;
+    World w;
+    Inst& l = w.addPlayer("L");
+    Inst& f = w.addPlayer("F");
+    w.reg.setFollow(f.token, follow("L", s.uidA));
+    const auto fill = [](Inst& inst) {
+        int n = 0;
+        while (inst.scheduler->pushPreview(extendCmd(1000 + n))) ++n;  // distinct ids: no merging
+        REQUIRE(n > 0);
+    };
+    fill(f);
+    CHECK(w.reg.forwardPreview(l.token, "doc-1", s.uidA, startCmd(1, {60})) == LinkForward::QueueFull);
+    CHECK(w.reg.forwardPreview(l.token, "doc-1", s.uidA, stopCmd(1)) == LinkForward::NotForwarded);  // no record
+    block(f);  // drains the ring
+    CHECK(sounds(f).empty());
+
+    Inst& g = w.addPlayer("G");
+    w.reg.setFollow(g.token, follow("L", s.uidA));
+    fill(f);
+    CHECK(w.reg.forwardPreview(l.token, "doc-1", s.uidA, startCmd(2, {62})) == LinkForward::Forwarded);
+    block(f);
+    block(g);
+    CHECK(sounds(f).empty());
+    CHECK(sounds(g) == Pitches{62});
+    // Recorded for G alone: G's full ring makes its Stop QueueFull, whatever F's ring holds now.
+    fill(g);
+    CHECK(w.reg.forwardPreview(l.token, "doc-1", s.uidA, stopCmd(2)) == LinkForward::QueueFull);
+    CHECK(w.reg.forwardPreview(l.token, "doc-1", s.uidA, stopCmd(2)) == LinkForward::NotForwarded);  // ended
+}
+
+TEST_CASE("link registry: a Start of an id already forwarded first ends what that id forwarded") {
+    Song s;
+    World w;
+    Inst& l = w.addPlayer("L");
+    Inst& f = w.addPlayer("F");
+    w.reg.setFollow(f.token, follow("L", s.uidA));
+    REQUIRE(w.reg.forwardPreview(l.token, "doc-1", s.uidA, startCmd(1, {60})) == LinkForward::Forwarded);
+    block(f);
+    REQUIRE(sounds(f) == Pitches{60});
+
+    SUBCASE("forwarded again") {
+        CHECK(w.reg.forwardPreview(l.token, "doc-1", s.uidA, startCmd(1, {67})) == LinkForward::Forwarded);
+        block(f);
+        CHECK(sounds(f) == Pitches{67});
+        CHECK(w.reg.forwardPreview(l.token, "doc-1", s.uidA, stopCmd(1)) == LinkForward::Forwarded);
+        block(f);
+        CHECK(sounds(f).empty());
+    }
+    SUBCASE("now for a lane nobody follows") {
+        CHECK(w.reg.forwardPreview(l.token, "doc-1", s.uidB, startCmd(1, {67})) == LinkForward::NotForwarded);
+        block(f);
+        CHECK(sounds(f).empty());
+        CHECK(w.reg.forwardPreview(l.token, "doc-1", s.uidA, stopCmd(1)) == LinkForward::NotForwarded);
+    }
+    CHECK_FALSE(f.panic->load());
+}
+
+TEST_CASE("link registry: forwarded ids cycle inside their range, skip the held ones, and run out without looping") {
+    std::set<int> held;
+    int cursor = kForwardedPreviewIdFirst;
+    CHECK(nextForwardedPreviewId(cursor, held) == kForwardedPreviewIdFirst);
+    CHECK(cursor == kForwardedPreviewIdFirst + 1);
+
+    cursor = kForwardedPreviewIdLast - 1;
+    held = {kForwardedPreviewIdLast, kForwardedPreviewIdFirst};
+    CHECK(nextForwardedPreviewId(cursor, held) == kForwardedPreviewIdLast - 1);
+    CHECK(cursor == kForwardedPreviewIdLast);
+    CHECK(nextForwardedPreviewId(cursor, held) == kForwardedPreviewIdFirst + 1);  // past INT_MAX, no overflow
+    CHECK(cursor == kForwardedPreviewIdFirst + 2);
+
+    // A small range shows the exhaustion.
+    int small = 10;
+    CHECK(nextForwardedPreviewId(small, {10, 11, 13}, 10, 13) == 12);
+    CHECK(small == 13);
+    CHECK(nextForwardedPreviewId(small, {10, 11, 13}, 10, 13) == 12);  // 13, 10, 11 held
+    CHECK_FALSE(nextForwardedPreviewId(small, {10, 11, 12, 13}, 10, 13).has_value());
+    CHECK((small >= 10 && small <= 13));
+    int one = 5;
+    CHECK(nextForwardedPreviewId(one, {}, 5, 5) == 5);
+    CHECK(one == 5);
+    CHECK_FALSE(nextForwardedPreviewId(one, {5}, 5, 5).has_value());
+}
+
+TEST_CASE("link registry: a follower's ids skip those still recorded for it") {
+    Song s;
+    World w;
+    Inst& l = w.addPlayer("L");
+    Inst& f = w.addPlayer("F");
+    w.reg.setFollow(f.token, follow("L", s.uidA));
+    REQUIRE(w.reg.forwardPreview(l.token, "doc-1", s.uidA, startCmd(1, {60})) == LinkForward::Forwarded);  // First
+    REQUIRE(w.reg.forwardPreview(l.token, "doc-1", s.uidA, startCmd(2, {62})) == LinkForward::Forwarded);  // +1
+    REQUIRE(w.reg.forwardPreview(l.token, "doc-1", s.uidA, stopCmd(2)) == LinkForward::Forwarded);
+    REQUIRE(w.reg.forwardPreview(l.token, "doc-1", s.uidA, startCmd(3, {64})) == LinkForward::Forwarded);  // +2
+    block(f);
+    REQUIRE(sounds(f) == Pitches{60, 64});
+    REQUIRE(f.scheduler->pushPreview(stopCmd(kForwardedPreviewIdFirst + 2)));
+    block(f);
+    CHECK(sounds(f) == Pitches{60});
+    REQUIRE(f.scheduler->pushPreview(stopCmd(kForwardedPreviewIdFirst)));
+    block(f);
+    CHECK(sounds(f).empty());
 }
 
 TEST_CASE("link registry: shared is one registry for the process") {
