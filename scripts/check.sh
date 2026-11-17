@@ -16,9 +16,12 @@
 #                               inside /private/tmp or /private/var/folders (where macOS's own $TMPDIR is; $TMPDIR
 #                               itself is no allowed root). Each invocation works in a fresh run.XXXXXX directory
 #                               there (the previous runs are removed): DSTROOT, SYMROOT, OBJROOT, -derivedDataPath and
-#                               the logs, all cold (scripts/tests/check_shell_probes.sh). Fails if the installed VST3
-#                               or app binary changes. Then builds ChordLab/Tests/vst3host in the same run directory and
-#                               runs it against the scratch ChordLab.vst3 (section 5t)
+#                               the logs, all cold (scripts/tests/check_shell_probes.sh). Refuses to run if the
+#                               installed VST3 or app (or its bundle) points into the scratch directory; fails if
+#                               either installed binary changes. Then builds ChordLab/Tests/vst3host in the same run
+#                               directory and runs it against the scratch ChordLab.vst3 (section 5t). Test seams:
+#                               CHORDLAB_INSTALLED_VST3_BIN / CHORDLAB_INSTALLED_APP_BIN add a binary each to the
+#                               installed set checked (never replacing the real two)
 #   scripts/check.sh --all      everything but --shell (--shell with --plugin or --all is refused)
 #   scripts/check.sh --release  ... plus the release script's preflight, in report mode
 # Flags combine; section 1 always runs first.
@@ -202,9 +205,15 @@ plugin_builds() {
     plugin_scheme macOS-APP "$LOG_DIR/chordlab-xcodebuild-macOS-APP.log" || return 1
 }
 
-# The installed builds --shell must leave exactly as they were: the VST3 Ableton Live loads, and the app.
+# The installed builds --shell must leave exactly as they were: the VST3 Ableton Live loads, and the app. Always these
+# two. CHORDLAB_INSTALLED_VST3_BIN and CHORDLAB_INSTALLED_APP_BIN (test seams for scripts/tests/check_shell_probes.sh)
+# ADD a binary each to the set that is hashed and checked; they never replace the real two, so setting them cannot
+# make the gate weaker. Each binary's bundle is the path without its /Contents/MacOS/<name> tail.
 INSTALLED_VST3_BIN="$HOME/Library/Audio/Plug-Ins/VST3/ChordLab.vst3/Contents/MacOS/ChordLab"
 INSTALLED_APP_BIN="$HOME/Applications/ChordLab.app/Contents/MacOS/ChordLab"
+INSTALLED_BINS=("$INSTALLED_VST3_BIN" "$INSTALLED_APP_BIN")
+[ -n "${CHORDLAB_INSTALLED_VST3_BIN:-}" ] && INSTALLED_BINS+=("$CHORDLAB_INSTALLED_VST3_BIN")
+[ -n "${CHORDLAB_INSTALLED_APP_BIN:-}" ] && INSTALLED_BINS+=("$CHORDLAB_INSTALLED_APP_BIN")
 
 # installed_sha <file>: prints the file's sha256, or "absent" when there is no such file. Fails (status 1, nothing
 # printed) when the file exists but could not be hashed: an empty hash must never read as "unchanged".
@@ -219,6 +228,58 @@ installed_sha() {
         [0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) echo "$sha" ;;
         *) echo "check.sh: could not hash $1" >&2; return 1 ;;
     esac
+}
+
+# installed_shas: one line "<sha256 or absent>  <path>" per installed binary (INSTALLED_BINS), in order. Fails when one
+# exists but cannot be hashed. Two calls compare as strings: any change, appearance or disappearance differs.
+installed_shas() {
+    local bin sha
+    for bin in "${INSTALLED_BINS[@]}"; do
+        sha="$(installed_sha "$bin")" || return 1
+        echo "$sha  $bin"
+    done
+}
+
+# installed_physical <path>: the physical path an installed path stands for, symlinks resolved, also when the link is
+# dangling: each link is followed by its target string (made absolute against the link's directory) while the result
+# is a link; then the deepest existing ancestor is resolved physically (physical_dir) and the rest appended. So a
+# dangling link counts by where its target string points. Prints the path as given, unresolved, if even that fails.
+installed_physical() {
+    local p="$1" n=0 target resolved
+    while [ -L "$p" ]; do
+        n=$((n + 1))
+        [ "$n" -le 40 ] || break
+        target="$(readlink "$p")" || break
+        case "$target" in
+            /*) p="$target" ;;
+            *) p="$(dirname "$p")/$target" ;;
+        esac
+    done
+    if resolved="$(physical_dir "$(dirname "$p")")"; then
+        echo "${resolved%/}/$(basename "$p")"
+    else
+        echo "$p"
+    fi
+}
+
+# installed_outside <out>: fails, naming the path, when an installed binary or its bundle (present, or a dangling link
+# whose target string lies there) stands for a path inside the physical scratch directory `out`: a developer who
+# linked a scratch build into ~/Library/Audio/Plug-Ins/VST3 to try it would lose it to the removal of old runs, and the
+# hashes would read "absent" before and after. Refused, not worked around.
+installed_outside() {
+    local out="$1" bin path phys
+    for bin in "${INSTALLED_BINS[@]}"; do
+        for path in "$bin" "${bin%/Contents/MacOS/*}"; do
+            [ -e "$path" ] || [ -L "$path" ] || continue
+            phys="$(installed_physical "$path")"
+            case "$phys" in
+                "$out"|"$out"/*)
+                    echo "check.sh: --shell refuses to run: the installed plug-in points into the gate's scratch directory: '$path' is '$phys', inside '$out'; removing old runs would delete it" >&2
+                    return 1 ;;
+            esac
+        done
+    done
+    return 0
 }
 
 # physical_dir <path>: the absolute physical path of `path` (symlinks and `..` resolved, the case as stored) without
@@ -333,35 +394,31 @@ shell_builds() {
         echo "check.sh: ChordLab/projects/ChordLab-macOS.xcodeproj not found" >&2
         return 1
     fi
-    local out run
+    # The baseline first, before anything in the scratch directory is created or removed; then no installed binary may
+    # stand for a path inside it (installed_outside), before the old runs are removed.
+    local before after out run
+    before="$(installed_shas)" || return 1
+    echo "installed before:"
+    echo "$before" | sed 's/^/  /'
     out="$(shell_out_dir)" || return 1
+    installed_outside "$out" || return 1
     run="$(shell_run_dir "$out")" || return 1
     SHELL_RUN="$run"
     echo "scratch directory: $out"
     echo "run directory:     $run"
     local dst="$run/dst"
     local product="$dst/ChordLab.vst3/Contents/MacOS/ChordLab"
-    local vst3Before vst3After appBefore appAfter
-    vst3Before="$(installed_sha "$INSTALLED_VST3_BIN")" || return 1
-    appBefore="$(installed_sha "$INSTALLED_APP_BIN")" || return 1
-    echo "installed VST3 before: $vst3Before ($INSTALLED_VST3_BIN)"
-    echo "installed app before:  $appBefore ($INSTALLED_APP_BIN)"
     local rc=0 scheme
     for scheme in macOS-VST3 macOS-APP; do
         plugin_scheme "$scheme" "$run/xcodebuild-$scheme.log" \
             -derivedDataPath "$run/DerivedData" \
             DSTROOT="$dst" SYMROOT="$run/build" OBJROOT="$run/build/obj" || { rc=1; break; }
     done
-    vst3After="$(installed_sha "$INSTALLED_VST3_BIN")" || return 1
-    appAfter="$(installed_sha "$INSTALLED_APP_BIN")" || return 1
-    echo "installed VST3 after:  $vst3After"
-    echo "installed app after:   $appAfter"
-    if [ "$vst3Before" != "$vst3After" ]; then
-        echo "check.sh: the installed VST3 binary changed during --shell ($vst3Before -> $vst3After)" >&2
-        return 1
-    fi
-    if [ "$appBefore" != "$appAfter" ]; then
-        echo "check.sh: the installed app binary changed during --shell ($appBefore -> $appAfter)" >&2
+    after="$(installed_shas)" || return 1
+    echo "installed after:"
+    echo "$after" | sed 's/^/  /'
+    if [ "$before" != "$after" ]; then
+        echo "check.sh: an installed binary changed during --shell" >&2
         return 1
     fi
     [ "$rc" -eq 0 ] || return 1
@@ -392,17 +449,15 @@ shell_host_test() {
         echo "check.sh: no scratch ChordLab.vst3 at $bundle (section 5s builds it)" >&2
         return 1
     fi
-    local vst3Before vst3After appBefore appAfter rc=0
-    vst3Before="$(installed_sha "$INSTALLED_VST3_BIN")" || return 1
-    appBefore="$(installed_sha "$INSTALLED_APP_BIN")" || return 1
+    local before after rc=0
+    before="$(installed_shas)" || return 1
     step "$DEFAULT_TIMEOUT" cmake -S ChordLab/Tests/vst3host -B "$build" -DCMAKE_BUILD_TYPE=Debug || rc=1
     [ "$rc" -eq 0 ] && { step "$PLUGIN_TIMEOUT" cmake --build "$build" -j8 || rc=1; }
     [ "$rc" -eq 0 ] && { step "$DEFAULT_TIMEOUT" "$build/vst3host" "$bundle" || rc=1; }
-    vst3After="$(installed_sha "$INSTALLED_VST3_BIN")" || return 1
-    appAfter="$(installed_sha "$INSTALLED_APP_BIN")" || return 1
-    echo "installed VST3 before/after: $vst3Before / $vst3After"
-    echo "installed app before/after:  $appBefore / $appAfter"
-    if [ "$vst3Before" != "$vst3After" ] || [ "$appBefore" != "$appAfter" ]; then
+    after="$(installed_shas)" || return 1
+    echo "installed before/after the host test:"
+    echo "$after" | sed 's/^/  /'
+    if [ "$before" != "$after" ]; then
         echo "check.sh: an installed binary changed during the shell host test" >&2
         return 1
     fi

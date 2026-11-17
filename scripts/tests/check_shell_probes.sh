@@ -36,6 +36,7 @@ done
 cat >"$T/bin/xcodebuild" <<EOF
 #!/bin/sh
 echo "xcodebuild \$*" >>"$T/calls.log"
+[ -n "\${PROBE_TOUCH:-}" ] && echo "changed by the build" >>"\$PROBE_TOUCH"
 for a in "\$@"; do
     case "\$a" in
         DSTROOT=*) d="\${a#DSTROOT=}"; mkdir -p "\$d/ChordLab.vst3/Contents/MacOS" && : >"\$d/ChordLab.vst3/Contents/MacOS/ChordLab" ;;
@@ -177,6 +178,72 @@ if [ -L "$T/out/run.Y" ] && [ "$before" = "$after" ] && [ -n "$RUN" ] && [ "$RUN
     ok "a symlink named run.Y is neither followed, removed nor used; the run directory is a new real one"
 else
     bad "symlink run.Y: still a link: $([ -L "$T/out/run.Y" ] && echo yes || echo no), sentinels unchanged: $([ "$before" = "$after" ] && echo yes || echo no), run '$RUN'"
+fi
+
+# --- an installed plug-in that lives in the scratch directory ---------------------------------------------------------
+# The installed set is extended through the test seams with paths inside this probe's own directory ($T/inst); the
+# real ~/Library and ~/Applications are only hashed (read), as by every --shell run.
+fresh_out
+rm -rf "$T/inst"
+mkdir -p "$T/out/run.OLD/dst/ChordLab.vst3/Contents/MacOS" "$T/inst/VST3"
+printf 'a scratch build someone linked into the host\n' >"$T/out/run.OLD/dst/ChordLab.vst3/Contents/MacOS/ChordLab"
+ln -s "$T/out/run.OLD/dst/ChordLab.vst3" "$T/inst/VST3/ChordLab.vst3"   # the bundle is a symlink into an old run
+sum_before="$(shasum -a 256 "$T/out/run.OLD/dst/ChordLab.vst3/Contents/MacOS/ChordLab")"
+run CHORDLAB_SHELL_OUT="$T/out" CHORDLAB_INSTALLED_VST3_BIN="$T/inst/VST3/ChordLab.vst3/Contents/MacOS/ChordLab" -- --shell
+if [ "$RC" -ne 0 ] && echo "$OUT" | grep -q "the installed plug-in points into the gate's scratch directory" &&
+    [ -f "$T/out/run.OLD/dst/ChordLab.vst3/Contents/MacOS/ChordLab" ] &&
+    [ "$(shasum -a 256 "$T/out/run.OLD/dst/ChordLab.vst3/Contents/MacOS/ChordLab")" = "$sum_before" ] &&
+    ! called xcodebuild && ! called "ChordLab/Tests/vst3host" && [ -z "$RUN" ]; then
+    ok "an installed bundle symlinked into run.OLD: refused before anything is removed or built; the binary is intact, no build shim ran"
+else
+    bad "installed bundle in run.OLD: status $RC, binary intact: $([ -f "$T/out/run.OLD/dst/ChordLab.vst3/Contents/MacOS/ChordLab" ] && echo yes || echo no); $(echo "$OUT" | grep "check.sh:" | head -2 | tr '\n' ' ')"
+fi
+
+# A dangling installed link whose target string points into the scratch directory counts too.
+fresh_out
+rm -rf "$T/inst"
+mkdir -p "$T/inst/App/ChordLab.app/Contents/MacOS"
+ln -s "$T/out/run.GONE/ChordLab" "$T/inst/App/ChordLab.app/Contents/MacOS/ChordLab"
+run CHORDLAB_SHELL_OUT="$T/out" CHORDLAB_INSTALLED_APP_BIN="$T/inst/App/ChordLab.app/Contents/MacOS/ChordLab" -- --shell
+if [ "$RC" -ne 0 ] && echo "$OUT" | grep -q "points into the gate's scratch directory" && ! called xcodebuild; then
+    ok "a dangling installed link whose target lies in the scratch directory: refused"
+else
+    bad "dangling installed link into the scratch directory: status $RC"
+fi
+
+# An installed real file outside the scratch directory, old runs present: they are removed, the hashes compare.
+fresh_out
+rm -rf "$T/inst"
+mkdir -p "$T/out/run.OLD2" "$T/inst/App/ChordLab.app/Contents/MacOS"
+printf 'the real installed app\n' >"$T/inst/App/ChordLab.app/Contents/MacOS/ChordLab"
+app="$T/inst/App/ChordLab.app/Contents/MacOS/ChordLab"
+app_sum="$(shasum -a 256 "$app" | cut -d' ' -f1)"
+run CHORDLAB_SHELL_OUT="$T/out" CHORDLAB_INSTALLED_APP_BIN="$app" -- --shell
+if echo "$OUT" | grep -q "5s shell build (not installed) PASS" && [ ! -e "$T/out/run.OLD2" ] &&
+    [ "$(echo "$OUT" | grep -c "$app_sum  $app")" -ge 2 ]; then
+    ok "an installed file outside the scratch directory: old runs removed, its hash read before and after, the section passes"
+else
+    bad "installed file outside: status $RC, run.OLD2 left: $([ -e "$T/out/run.OLD2" ] && echo yes || echo no)"
+fi
+# ... and a build that changes it is caught.
+run CHORDLAB_SHELL_OUT="$T/out" CHORDLAB_INSTALLED_APP_BIN="$app" PROBE_TOUCH="$app" -- --shell
+if [ "$RC" -ne 0 ] && echo "$OUT" | grep -q "5s shell build (not installed) FAIL" &&
+    echo "$OUT" | grep -q "an installed binary changed during --shell"; then
+    ok "a build that changes the installed file: the section fails with \"an installed binary changed\""
+else
+    bad "a changed installed file was not caught: status $RC"
+fi
+
+# No installed file at all: absent before and after, passes.
+fresh_out
+rm -rf "$T/inst"
+run CHORDLAB_SHELL_OUT="$T/out" CHORDLAB_INSTALLED_VST3_BIN="$T/inst/none.vst3/Contents/MacOS/ChordLab" \
+    CHORDLAB_INSTALLED_APP_BIN="$T/inst/none.app/Contents/MacOS/ChordLab" -- --shell
+if echo "$OUT" | grep -q "5s shell build (not installed) PASS" &&
+    [ "$(echo "$OUT" | grep -c "absent  $T/inst/none")" -ge 4 ]; then
+    ok "no installed file: absent before and after, the section passes"
+else
+    bad "no installed file: status $RC; $(echo "$OUT" | grep absent | tr '\n' ' ')"
 fi
 
 # --- the control: nothing planted ------------------------------------------------------------------------------------
