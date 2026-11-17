@@ -311,7 +311,8 @@ private:
   // under VST3, which joins chordlab::LinkRegistry::shared(). Touched by the constructor and the destructor only.
   std::unique_ptr<chordlab::LinkRegistry> mPrivateRegistry;
   // The instance's link endpoint: its registration, document id, lane uids, link buffer and feed. Made in the
-  // constructor, reset in the destructor, never null in between. Every call is made under mModelMutex (main thread,
+  // constructor (under mModelMutex, before the first publish) and non-null from then until the destructor's
+  // mLink.reset(), which ends that guarantee (after retiring mLifeline; OnIdle and PushLinkState check it). Every call is made under mModelMutex (main thread,
   // the host's state thread), except following() and linkBuffer(), the audio thread's (ProcessBlock), and serial().
   std::unique_ptr<chordlab::LinkEndpoint> mLink;
 };

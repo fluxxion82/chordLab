@@ -66,12 +66,12 @@
 // (LinkEndpoint::publishOwn) run chordlab::fillSlot under mModelMutex on the back slot of a
 // chordlab::TripleBuffer (three preallocated chordlab::SnapshotSlots, mSnapshots, the own buffer) and publish it
 // when anything changed; ProcessBlock (LinkSource::select) acquires the newest publish at the top of the block
-// and calls Scheduler::adopt with a Snapshot that points into the front slot. The buffer guarantees the front slot is not written until the next acquire, and the scheduler
-// never reads the previous array once the adopt that replaces it is entered (Snapshot in scheduler.h),
-// so the array stays valid and unchanged for exactly as long as adopt requires even though acquire has
-// already handed the old slot back to the producer. The producer side belongs to whoever holds mModelMutex (main thread for
-// commands, the host's state thread for UnserializeState, any thread running this instance's republish hook); the
-// consumer side belongs to ProcessBlock.
+// and calls Scheduler::adopt with a Snapshot that points into the front slot. The buffer guarantees the front
+// slot is not written until the next acquire, and the scheduler never reads the previous array once the adopt
+// that replaces it is entered (Snapshot in scheduler.h), so the array stays valid and unchanged for exactly as
+// long as adopt requires even though acquire has already handed the old slot back to the producer. The producer
+// side belongs to whoever holds mModelMutex (main thread for commands, the host's state thread for
+// UnserializeState, any thread running this instance's republish hook); the consumer side belongs to ProcessBlock.
 // Rapid edits coalesce: an unacquired publish is simply replaced by the next. The generation only moves
 // when the compiled content moved, so a browsed-key change or a followHost or midiThru toggle does not make
 // the scheduler flush and re-chase the sounding chord. followHost and midiThru travel inside the slot,
@@ -114,7 +114,10 @@
 // Construction: the constructor takes mModelMutex BEFORE making mLink and holds it through the first publish. The
 // endpoint registers (LinkRegistry::add) inside its own constructor, before mLink is assigned; neither calls a hook
 // (add returns none and never runs one under the registry's mutex), and a hook of this instance that another thread
-// ran in that window waits on mModelMutex until mLink exists and the first publish is done.
+// ran in that window would wait on mModelMutex until mLink exists and the first publish is done. No such hook can
+// exist today (another instance gets this one's hook only through a follow, which needs a stored feed with a
+// matching lineage, i.e. after the first publish, and no follower can be waiting for a fresh uid): the lock closes
+// nothing that is open now; it keeps the constructor safe whatever the registry learns to do later.
 // Destruction, in this order: the AU editor close; chordlab::retire(*mLifeline), which waits for a hop or hook in
 // flight and makes later ones no-ops, so no other instance enters this one any more; mLink.reset(), which removes
 // the registration (followers are emptied and wait for this id, the registry never writes this link buffer
