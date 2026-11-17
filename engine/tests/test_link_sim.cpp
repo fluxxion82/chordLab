@@ -288,6 +288,9 @@ public:
     }
     bool lenientPreviews = false;
     int refusedPreviews = 0;
+    /// Blocks the scheduler reported incomplete while `lenientPreviews` was set (see `block`). Written by the thread
+    /// that runs the blocks: read it only after that thread is joined, and set `lenientPreviews` only while none runs.
+    int overloads = 0;
     /// The shell's Panic message: its own panic flag, and its followers'. Returns how many followers were flagged.
     int panicButton() {
         const std::lock_guard<std::mutex> lock(model_);
@@ -330,7 +333,11 @@ public:
         std::size_t written = 0;
         complete_ = scheduler_->process(info, out_.data(), out_.size(), written);
         if (quiet) {
-            faults += complete_ ? 0 : 1;
+            // An incomplete block is a fault, except while a stress run lets its rings and preview slots fill
+            // (`lenientPreviews`): a Start whose Stop was refused holds a slot until the watchdog, eight of them
+            // exhaust the slots, and the scheduler then drops attacks and reports the block, as its overload policy
+            // says. That is counted apart; a note-on of a sounding pitch or a note-off of a silent one never is.
+            if (!complete_) ++(lenientPreviews ? overloads : faults);
         } else {
             CHECK(complete_);
         }
@@ -1321,9 +1328,10 @@ TEST_CASE("link sim: audio threads keep running while links change and the leade
     // The shell's threads: each instance's audio thread runs its blocks (select, process) without a lock while
     // the main thread follows, unfollows, edits and sends previews. Nothing here waits for anything, so any ring
     // may fill whatever the schedule: the loop counts the preview commands refused for a full ring instead of
-    // checking them (`lenientPreviews`), and once the audio threads have stopped the leader's Panic ends whatever a
-    // refused Stop left sounding, here and on the follower, before the final checks. At the end the last
-    // operation's result plays.
+    // checking them, and the blocks count an overload (preview slots exhausted by Starts whose Stops were refused)
+    // apart from a fault (`lenientPreviews`); a wrong note-on or note-off is a fault throughout. Once the audio
+    // threads have stopped the leader's Panic ends whatever a refused Stop left sounding, here and on the follower,
+    // before the final checks, which are strict again. At the end the last operation's result plays.
     bool heldBack = false;
     SUBCASE("the audio threads run throughout") {}
     SUBCASE("the audio threads start only after the loop, so the rings fill") { heldBack = true; }
@@ -1336,6 +1344,7 @@ TEST_CASE("link sim: audio threads keep running while links change and the leade
     leader->quiet = true;
     follower->quiet = true;
     leader->lenientPreviews = true;
+    follower->lenientPreviews = true;  // its blocks may overload too: a forwarded Stop refused leaves a slot taken
     const std::string bassUid = leader->laneUid(s.bass);
     const std::string leadUid = leader->laneUid(s.lead);
     std::atomic<bool> go{!heldBack};
@@ -1376,8 +1385,10 @@ TEST_CASE("link sim: audio threads keep running while links change and the leade
     if (heldBack) CHECK(leader->refusedPreviews > 0);  // the leader's own ring did fill
 
     // Deterministic from here: no audio thread runs. A Stop refused above left its preview to the watchdog; the
-    // leader's Panic ends everything (its own flag, and the follower's, bound to it: rule 12).
+    // leader's Panic ends everything (its own flag, and the follower's, bound to it: rule 12), so from its block on
+    // an incomplete block is a fault again.
     leader->lenientPreviews = false;
+    follower->lenientPreviews = false;
     CHECK(leader->panicButton() == 1);
     leader->block(1000.0, 256);
     follower->block(1000.0, 256);
