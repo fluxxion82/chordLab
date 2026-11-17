@@ -5,6 +5,7 @@
 
 #include <array>
 #include <atomic>
+#include <climits>
 #include <cstddef>
 #include <cstdint>
 
@@ -65,6 +66,15 @@ struct PreviewCmd {
     std::uint8_t count;
     std::uint8_t pitches[8];
 };
+
+/// The preview ids reserved for forwarded previews, inclusive: the top 2^20 + 1 ids of the range an editor's ids
+/// come from (0..INT_MAX). A `LinkRegistry` (link.h, its rule 12) allocates in this range alone the id under which
+/// it pushes a leader's preview into a follower's scheduler; the shell's preview parser
+/// (ChordLab/bridge/preview_request.h) refuses an editor's id inside it. Editors count up from small numbers, so a
+/// forwarded id never meets an editor's in one scheduler. The scheduler itself treats every id alike. Here, beside
+/// `PreviewCmd`, so that the parser needs no link.h.
+constexpr int kForwardedPreviewIdFirst = INT_MAX - (1 << 20);
+constexpr int kForwardedPreviewIdLast = INT_MAX;
 
 /// One incoming note the plug-in passes through (design D2): `on` with `velocity`, or a release,
 /// `sampleOffset` samples into the block it arrived in. A `pitch` of 128 or more is ignored (`pushThru`

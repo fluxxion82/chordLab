@@ -5,8 +5,7 @@
 
 #include "message_fields.h"
 #include "chordlab/json_api.h"
-#include "chordlab/link.h"        // kForwardedPreviewIdFirst only: the ids a link registry forwards under
-#include "chordlab/scheduler.h"
+#include "chordlab/scheduler.h"   // PreviewCmd, and kForwardedPreviewIdFirst: no link.h (as link_outcome.h)
 
 #include <nlohmann/json.hpp>
 
@@ -40,9 +39,9 @@ struct PreviewRequest {
 ///     0..kForwardedPreviewIdFirst - 1 and, when it has no `extend` member, `on` a boolean; else "preview
 ///     message needs schema 1, an id and on:true|false" (malformed JSON parses without throwing, as a
 ///     non-object). The ids from kForwardedPreviewIdFirst to INT_MAX are the ones a link registry forwards
-///     previews under (chordlab/link.h, its rule 12): refused from an editor, so that a forwarded id never
-///     meets an editor's in one scheduler. A message with an `extend` member goes to rule 6 instead of rules
-///     2 to 4 and 7.
+///     previews under (chordlab/scheduler.h, beside PreviewCmd; link.h's rule 12): refused from an editor, so
+///     that a forwarded id never meets an editor's in one scheduler. A message with an `extend` member goes to
+///     rule 6 instead of rules 2 to 4 and 7.
 ///  2. `on:false` is a Stop for `id`; nothing else is read (no pitches needed, a bad velocity or track
 ///     ignored).
 ///  3. `on:true` is a Start: `velocity`, when present, must be an integer in 1..127 (default 100), and

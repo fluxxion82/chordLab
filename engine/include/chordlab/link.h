@@ -10,7 +10,6 @@
 #include "chordlab/triple_buffer.h"
 
 #include <atomic>
-#include <climits>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -162,12 +161,9 @@ bool fillSlotFromFeed(const LinkFeed* feed, std::string_view laneUid, std::strin
 /// An instance's registration with a `LinkRegistry`. 0 is none; a registry never hands out one token twice.
 using LinkToken = std::uint64_t;
 
-/// The preview ids a `LinkRegistry` gives the commands it forwards to a follower's scheduler (rule 12), inclusive:
-/// the top 2^20 + 1 ids of the range an editor's ids come from (0..INT_MAX). Editors count up from small numbers,
-/// and the bridge refuses an editor's id inside this range, so a forwarded id never meets an editor's in one
-/// scheduler.
-constexpr int kForwardedPreviewIdFirst = INT_MAX - (1 << 20);
-constexpr int kForwardedPreviewIdLast = INT_MAX;
+// The preview ids a `LinkRegistry` gives the commands it forwards to a follower's scheduler (rule 12),
+// `kForwardedPreviewIdFirst` to `kForwardedPreviewIdLast`, are in scheduler.h beside `PreviewCmd`, so that the
+// shell's preview parser, which refuses an editor's id in that range, needs no link.h.
 
 /// Rule 12: the next id for one follower's forwarded preview. Tries the ids from `cursor` on, in order, cycling
 /// inside [`first`, `last`] (after `last` comes `first`), and returns the first that `held` (the ids still
