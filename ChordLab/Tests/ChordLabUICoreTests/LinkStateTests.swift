@@ -60,10 +60,10 @@ final class LinkStateTests: XCTestCase {
 
   func testFollowerFixture() throws {
     let state = try Self.fixture("link-state-follower.json")
-    XCTAssertEqual(state.instance, LinkSelfJSON(id: "uid-8", label: "ChordLab D", copyOf: nil))
+    XCTAssertEqual(state.instance, LinkSelfJSON(id: "uid-8", label: "", copyOf: nil))  // a follower has no label
     XCTAssertEqual(state.following, LinkFollowingJSON(leader: "id-leader", leaderLabel: "ChordLab A", lane: "uid-2",
                                                       laneName: "Bass", role: "bass", status: .playing,
-                                                      switchTo: LinkInstanceJSON(leader: "uid-6", label: "ChordLab C")))
+                                                      switchTo: LinkInstanceJSON(leader: "uid-6", label: "ChordLab B")))
     XCTAssertEqual(state.leaders.map(\.id), ["id-leader", "uid-6"])
     XCTAssertEqual(state.routed, [])
     XCTAssertTrue(state.isFollowing)

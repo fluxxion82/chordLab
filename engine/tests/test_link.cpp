@@ -150,7 +150,7 @@ struct Linked {
 
     std::shared_ptr<const LinkFeed> feed(const std::vector<std::string>& followed,
                                          const std::string& documentId = "doc-1") const {
-        return buildLinkFeed(store.doc(), documentId, uids, "lineage-1", "ChordLab A", followed);
+        return buildLinkFeed(store.doc(), documentId, uids, "lineage-1", followed);
     }
 };
 
@@ -480,7 +480,7 @@ TEST_CASE("link feed: a track without a uid is left out of the feed, never liste
     Linked d;
     LaneUids partial;
     partial.replace({{d.a, d.uidA}});  // track b uncovered
-    const auto feed = buildLinkFeed(d.store.doc(), "doc-1", partial, "lineage-1", "ChordLab A", {d.uidA});
+    const auto feed = buildLinkFeed(d.store.doc(), "doc-1", partial, "lineage-1", {d.uidA});
     REQUIRE(feed->lanes.size() == 2);  // the chords and track a
     CHECK(feed->lanes[0].uid == kChordsLaneUid);
     CHECK(feed->lanes[1].uid == d.uidA);
@@ -688,7 +688,6 @@ TEST_CASE("link feed: the frame and the caller's names are carried") {
         CHECK(feed->followHost == true);
         CHECK(feed->documentId == "doc-1");
         CHECK(feed->lineage == "lineage-1");
-        CHECK(feed->label == "ChordLab A");
     }
     SUBCASE("a performed non-tick-aligned document, loop and Follow Live off") {
         // Three 0.2506-beat chords played Pulse: compile's period is 722 / 960 beat, the authored sum 0.7518.
@@ -698,7 +697,7 @@ TEST_CASE("link feed: the frame and the caller's names are carried") {
         store.setProgressionLoop(false);
         store.setFollowHost(false);
         LaneUids uids;
-        const auto feed = buildLinkFeed(store.doc(), "doc-7", uids, "lineage-3", "ChordLab B", {});
+        const auto feed = buildLinkFeed(store.doc(), "doc-7", uids, "lineage-3", {});
         CHECK(bitsOf(feed->endBeat) == bitsOf(compile(store.doc()).endBeat));
         CHECK(feed->endBeat == 722.0 / 960.0);
         CHECK(feed->endBeat != store.doc().endBeat());
@@ -706,7 +705,6 @@ TEST_CASE("link feed: the frame and the caller's names are carried") {
         CHECK(feed->followHost == false);
         CHECK(feed->documentId == "doc-7");
         CHECK(feed->lineage == "lineage-3");
-        CHECK(feed->label == "ChordLab B");
         REQUIRE(feed->lanes.size() == 1);  // the chords lane only, with no tracks
         CHECK(feed->lanes[0].uid == kChordsLaneUid);
     }
@@ -764,9 +762,9 @@ TEST_CASE("link fill: the same content again touches neither the slot nor last")
     checkScribbled(*slot);
     checkSamePublication(last, before);
 
-    // A new feed whose lane is unchanged, though other lanes, the label and the lineage moved: still nothing.
+    // A new feed whose lane is unchanged, though other lanes and the lineage moved: still nothing.
     REQUIRE(d.store.setTrackMute(d.b, true));
-    const auto rebuilt = buildLinkFeed(d.store.doc(), "doc-1", d.uids, "lineage-2", "ChordLab Z", {d.uidA, d.uidB});
+    const auto rebuilt = buildLinkFeed(d.store.doc(), "doc-1", d.uids, "lineage-2", {d.uidA, d.uidB});
     REQUIRE(rebuilt.get() != feed.get());
     CHECK_FALSE(fillSlotFromFeed(rebuilt.get(), d.uidA, "doc-1", *slot, last));
     checkScribbled(*slot);
@@ -925,7 +923,7 @@ TEST_CASE("link: a leader's slot and its followers' slots hold between them ever
         Publication leader;
         REQUIRE(fillSlot(doc, own, *leaderSlot, leader));
         REQUIRE(leader.generation < kLinkGenerationBase);
-        const auto feed = buildLinkFeed(doc, "doc-1", d.uids, "lineage-1", "ChordLab A", followed);
+        const auto feed = buildLinkFeed(doc, "doc-1", d.uids, "lineage-1", followed);
         Events all = eventsOf(*leaderSlot);
         for (const std::string& uid : followed) {
             auto followerSlot = newSlot();

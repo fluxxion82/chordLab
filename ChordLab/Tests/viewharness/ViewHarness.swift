@@ -272,7 +272,7 @@ struct Scenario {
       let offer = FollowerPanelModel(r.state.linkState, snapshot: r.state.snapshot, ownLineage: r.state.clipboardToken)?
         .switchOffer
       h.check(offer?.action == .choose(leader: "uid-6"), "the switch is a menu over the copy's lanes")
-      h.check(offer?.button == "Play a track of ChordLab C instead", "a menu switch names no track the copy lacks")
+      h.check(offer?.button == "Play a track of ChordLab B instead", "a menu switch names no track the copy lacks")
     }),
     Scenario(name: "panel-long-names", setup: { h, state, _ in
       // The followed lane and its copy's have 64-character names: the headline wraps, the switch button is bounded.
@@ -699,10 +699,14 @@ struct Render {
     }
   }
 
-  /// `freshLink()` as the shell answers an applied follow of ChordLab A's chords.
+  /// `freshLink()` as the shell answers an applied follow of ChordLab A's chords: a follower has no label of its own
+  /// (registry rule 9).
   func followingChordsOfA() -> Data {
     let link = try! JSONSerialization.jsonObject(with: freshLink()) as! [String: Any]
     var object = link
+    var me = object["self"] as! [String: Any]
+    me["label"] = ""
+    object["self"] = me
     object["following"] = ["leader": "id-original", "leaderLabel": "ChordLab A", "lane": "chords", "laneName": "Chords",
                            "role": "", "status": "playing", "switchTo": NSNull()] as [String: Any]
     return try! JSONSerialization.data(withJSONObject: object)

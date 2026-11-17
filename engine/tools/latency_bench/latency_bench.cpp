@@ -164,7 +164,7 @@ struct LinkedLeader {
 
     /// The link part of a publish: the feed, then every follower's fill.
     void publishLinks(const Document& doc) {
-        feed = buildLinkFeed(doc, "bench-document", uids, "bench-lineage", "ChordLab A", followed);
+        feed = buildLinkFeed(doc, "bench-document", uids, "bench-lineage", followed);
         for (std::size_t i = 0; i < followed.size(); ++i) {
             fillSlotFromFeed(feed.get(), followed[i], "bench-document", *followerSlots[i], followerPublications[i]);
         }
@@ -375,7 +375,7 @@ void commandPaths(const char* variant, const Feel& feel, int runs, const char* d
     printPart("compile (chords)", timeRuns(runs, [&](int) { gSink = gSink + compile(store.doc()).events.size(); }));
     printPart("compilePlayback", timeRuns(runs, [&](int) { gSink = gSink + compilePlayback(store.doc()).events.size(); }));
     printPart("buildLinkFeed, four tracks followed", timeRuns(runs, [&](int) {
-                  gSink = gSink + buildLinkFeed(store.doc(), "d", linkedShell.leader->uids, "l", "L",
+                  gSink = gSink + buildLinkFeed(store.doc(), "d", linkedShell.leader->uids, "l",
                                                 linkedShell.leader->followed)->lanes.size();
               }));
     printPart("voicings", timeRuns(runs, [&](int) { gSink = gSink + voicings(store.doc()).size(); }));

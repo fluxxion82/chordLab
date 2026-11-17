@@ -668,9 +668,9 @@ DocumentStore linkOtherStore() {
 }
 
 /// link-state-leader.json: ChordLab B, a duplicate of ChordLab A (it loaded A's state while A lived, so it is a
-/// copy under a fresh id), sees A (chords and two tracks; A muted its Lead after the copy was made, and C follows
-/// A's Bass) and leads two followers of its own: D plays its chords, E its Lead (track 2). It has followers, so it
-/// is a leader in its own right and `copyOf` is null (rule 11).
+/// copy under a fresh id), sees A (chords and two tracks; A muted its Lead after the copy was made, and follower c
+/// plays A's Bass) and leads two followers of its own: d plays its chords, e its Lead (track 2). Followers have no
+/// label (rule 9). It has followers, so it is a leader in its own right and `copyOf` is null (rule 11).
 std::string linkStateLeader() {
     const auto now = std::make_shared<std::int64_t>(0);
     LinkRegistry registry{fixtureClock(now)};
@@ -691,9 +691,9 @@ std::string linkStateLeader() {
     return linkStateJson(b->endpoint->view());
 }
 
-/// link-state-follower.json: a duplicated group. ChordLab B follows the Bass of ChordLab A; then both were
-/// duplicated in one go (C is A's copy, D is B's copy and so follows A's Bass too). D's view: playing, offered C
-/// instead.
+/// link-state-follower.json: a duplicated group. Follower b plays the Bass of ChordLab A; then both were duplicated
+/// in one go (c is A's copy, a leader and so ChordLab B, the lowest free label; d is b's copy and so follows A's Bass
+/// too, with no label of its own, rule 9). d's view: playing, offered ChordLab B instead.
 std::string linkStateFollower() {
     const auto now = std::make_shared<std::int64_t>(0);
     LinkRegistry registry{fixtureClock(now)};
@@ -713,9 +713,10 @@ std::string linkStateFollower() {
     return linkStateJson(d->endpoint->view());
 }
 
-/// link-state-waiting.json: ChordLab B followed the Bass of ChordLab A and was saved; B and A are gone, and
-/// ChordLab D loads B's saved state (B's id, its follow with the hints saved then) while A is missing. D sees
-/// ChordLab C, another leader, and waits.
+/// link-state-waiting.json: follower b played the Bass of ChordLab A and was saved; b and A are gone, and d loads
+/// b's saved state (b's id, its follow with the hints saved then) while A is missing. d has no label of its own; A's
+/// id takes the lowest free label again, ChordLab A, while d names it (rule 9). d sees ChordLab B, another leader
+/// (B: A held A and the follower b held no label when it was added), and waits.
 std::string linkStateWaiting() {
     const auto now = std::make_shared<std::int64_t>(0);
     LinkRegistry registry{fixtureClock(now)};
@@ -736,8 +737,8 @@ std::string linkStateWaiting() {
 }
 
 /// link-state-copy.json: ChordLab B, a fresh duplicate of ChordLab A that nobody follows, so it is offered its
-/// original (`copyOf`); A has chords and two tracks, and C has followed A's Bass since before (a minute later, by
-/// command: no paste). B's `routed` is empty.
+/// original (`copyOf`); A has chords and two tracks, and follower c has played A's Bass since before (a minute
+/// later, by command: no paste). B's `routed` is empty.
 std::string linkStateCopy() {
     const auto now = std::make_shared<std::int64_t>(0);
     LinkRegistry registry{fixtureClock(now)};
@@ -834,22 +835,23 @@ TEST_CASE("golden fixtures: the link states carry the documented members and wha
     CHECK(following.at("laneName") == "Bass");
     CHECK(following.at("role") == "bass");
     CHECK(following.at("status") == "playing");
-    CHECK(following.at("switchTo").at("label") == "ChordLab C");
+    CHECK(following.at("switchTo").at("label") == "ChordLab B");  // the lowest free label: followers take none
+    CHECK(follower.at("self").at("label") == "");                   // a follower has no label of its own
     REQUIRE(follower.at("leaders").size() == 2);
     CHECK(follower.at("leaders").at(0).at("lanes").at(1).at("followers") == 2);  // B and D play A's Bass
     CHECK(following.at("switchTo").at("leader") == follower.at("leaders").at(1).at("id"));
     CHECK(follower.at("routed") == json::array());
 
     const json waiting = json::parse(linkStateWaiting());
-    CHECK(waiting.at("self") == json({{"id", "id-follower"}, {"label", "ChordLab D"}, {"copyOf", nullptr}}));
+    CHECK(waiting.at("self") == json({{"id", "id-follower"}, {"label", ""}, {"copyOf", nullptr}}));
     CHECK(waiting.at("following").at("status") == "waiting");
     CHECK(waiting.at("following").at("leader") == "id-leader");
-    CHECK(waiting.at("following").at("leaderLabel") == "ChordLab A");  // the hints saved with the follow
+    CHECK(waiting.at("following").at("leaderLabel") == "ChordLab A");  // the absent leader's id's label (rule 9)
     CHECK(waiting.at("following").at("laneName") == "Bass");
     CHECK(waiting.at("following").at("role") == "bass");
     CHECK(waiting.at("following").at("switchTo").is_null());
     REQUIRE(waiting.at("leaders").size() == 1);
-    CHECK(waiting.at("leaders").at(0).at("label") == "ChordLab C");
+    CHECK(waiting.at("leaders").at(0).at("label") == "ChordLab B");
     CHECK(waiting.at("routed") == json::array());
 
     const json copy = json::parse(linkStateCopy());

@@ -46,7 +46,7 @@ final class FollowOptionsTests: XCTestCase {
   func testTheFollowerFixtureMarksTheCurrentLane() throws {
     let groups = FollowOptions.groups(try LinkStateTests.fixture("link-state-follower.json"), ownLineage: "own")
     XCTAssertEqual(groups.map(\.leader), ["id-leader", "uid-6"])
-    XCTAssertEqual(groups.map(\.title), ["ChordLab A", "ChordLab C"])
+    XCTAssertEqual(groups.map(\.title), ["ChordLab A", "ChordLab B"])  // followers take no label
     let current = groups[0].options.filter(\.isCurrent)
     XCTAssertEqual(current.map(\.lane), ["uid-2"])
     XCTAssertEqual(groups[0].options.map(\.name), ["Chords", "Lead", "Bass"])

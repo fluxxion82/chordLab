@@ -107,15 +107,13 @@ void LaneUids::replace(std::map<int, std::string> entries) {
 }
 
 std::shared_ptr<const LinkFeed> buildLinkFeed(const Document& doc, std::string documentId, const LaneUids& uids,
-                                              std::string lineage, std::string label,
-                                              const std::vector<std::string>& followed) {
+                                              std::string lineage, const std::vector<std::string>& followed) {
     const auto isFollowed = [&](std::string_view uid) {  // an empty uid (an uncovered track) is never followed
         return !uid.empty() && std::find(followed.begin(), followed.end(), uid) != followed.end();
     };
     auto feed = std::make_shared<LinkFeed>();
     feed->documentId = std::move(documentId);
     feed->lineage = std::move(lineage);
-    feed->label = std::move(label);
     const Compiled chordsCompiled = compile(doc);  // once, for the frame and for every compiled lane
     feed->endBeat = chordsCompiled.endBeat;
     feed->loop = doc.progressionLoop;
@@ -197,7 +195,7 @@ bool fillSlotFromFeed(const LinkFeed* feed, std::string_view laneUid, std::strin
 
 namespace {
 
-/// Rule 9: the label of the `n`th instance added (from 1).
+/// Rule 9: the label of number `n` (from 1).
 std::string labelFor(std::uint64_t n) {
     if (n >= 1 && n <= 26) return std::string("ChordLab ") + static_cast<char>('A' + (n - 1));
     return "ChordLab " + std::to_string(n);
@@ -211,12 +209,18 @@ bool sameLink(const std::optional<LinkFollow>& a, const std::optional<LinkFollow
     return a->leaderId == b->leaderId && a->documentId == b->documentId && a->laneUid == b->laneUid;
 }
 
+/// Whether two follows show the same in a view: both absent, or the same link and the same `laneName` and
+/// `laneRole` hints. The `leaderLabel` hint is stored but no view shows it (rule 9: a view's label comes from the
+/// registry's table), so it does not count (rule 10).
+bool sameShownFollow(const std::optional<LinkFollow>& a, const std::optional<LinkFollow>& b) {
+    return sameLink(a, b) && (!a || (a->laneName == b->laneName && a->laneRole == b->laneRole));
+}
+
 }  // namespace
 
 /// One registered instance. Lives in `State::entries` (a map: its address is stable while it is registered).
 struct LinkRegistry::Entry {
     std::string id;
-    std::string label;
     TripleBuffer<SnapshotSlot>* buffer = nullptr;  // the link buffer: written only by `State::write`
     std::shared_ptr<const Hook> hook;              // null for an empty hook
     Publication publication;                       // the link buffer's, from `add` to `remove` (rule 4)
@@ -235,7 +239,7 @@ struct LinkRegistry::State {
     mutable std::mutex mutex;
     std::map<LinkToken, Entry> entries;  // by token, so in the order of add
     LinkToken lastToken = 0;
-    std::uint64_t labelsGiven = 0;
+    std::map<std::string, std::uint64_t> labels;  // rule 9: the number of every id in use
     std::uint64_t copiesMade = 0;
     std::atomic<std::uint64_t> serial{0};
     Clock clock;  // set by the constructor, never empty
@@ -276,12 +280,48 @@ struct LinkRegistry::State {
         }
     }
 
+    /// The id entry `e` keeps in use (rule 9): its own while it is not following, its follow's leader's otherwise.
+    static const std::string& idInUse(const Entry& e) { return e.follow ? e.follow->leaderId : e.id; }
+
+    /// Rule 9, after every add, remove, id change and change of a follow's link (`resolve` calls it): drops the
+    /// rows of the ids no longer in use, then gives every id in use without a row the lowest number no row holds,
+    /// visiting the entries in token order.
+    void relabel() {
+        std::set<std::string_view> inUse;
+        for (const auto& entry : entries) inUse.insert(idInUse(entry.second));
+        std::set<std::uint64_t> held;
+        for (auto it = labels.begin(); it != labels.end();) {
+            if (inUse.count(it->first) == 0) {
+                it = labels.erase(it);
+            } else {
+                held.insert(it->second);
+                ++it;
+            }
+        }
+        for (const auto& entry : entries) {
+            const std::string& id = idInUse(entry.second);
+            if (labels.count(id) != 0) continue;
+            std::uint64_t n = 1;
+            while (held.count(n) != 0) ++n;
+            labels.emplace(id, n);
+            held.insert(n);
+        }
+    }
+
+    /// Rule 9: the label of `id`, which must be in use (every id a view names is: a leader's own, a follow's
+    /// leader's). Empty, and asserts, for an id without a row.
+    std::string labelOf(const std::string& id) const {
+        const auto it = labels.find(id);
+        assert(it != labels.end() && "LinkRegistry: every id a view names has a label (rule 9)");
+        return it == labels.end() ? std::string() : labelFor(it->second);
+    }
+
     /// Rule 2, after every add, remove, id change and start or stop of following. A follower bound to an instance
     /// that still lives and leads stays bound. One whose leader was removed or started following is unbound and
     /// emptied (rules 4 and 5). Then every unbound follower binds to the live leader holding its
     /// `follow.leaderId`, if there is one, and is written empty (always empty already: emptied when its follow
-    /// changed or when it was unbound). Content comes only with the leader's next publish. Returns whether any
-    /// binding changed.
+    /// changed or when it was unbound). Content comes only with the leader's next publish. Then the labels follow
+    /// (rule 9, `relabel`). Returns whether any binding changed.
     bool resolve() {
         bool changed = false;
         for (auto& entry : entries) {
@@ -305,6 +345,7 @@ struct LinkRegistry::State {
             }
             changed = changed || e.boundTo != before;
         }
+        relabel();
         return changed;
     }
 
@@ -325,11 +366,12 @@ struct LinkRegistry::State {
     }
 
     /// `setFollow`'s work, shared with `follow`: gives `e` (token `token`) the follow `follow`, re-resolves when the
-    /// link changed, and adds the hooks of rule 6 to `hooks`. Returns whether something a view shows changed (the
-    /// follow, hints included, or a binding).
+    /// link changed (which relabels: an unchanged link leaves every id in use as it was), and adds the hooks of
+    /// rule 6 to `hooks`. Returns whether something a view shows changed (the follow's link or shown hints, or a
+    /// binding; labels change only with a link).
     bool setFollowLocked(LinkToken token, Entry& e, std::optional<LinkFollow> follow,
                          std::shared_ptr<const LinkFeed>& dropped, Hooks& hooks) {
-        const bool sameFollow = e.follow == follow;
+        const bool sameFollow = sameShownFollow(e.follow, follow);
         const LinkToken before = e.boundTo;
         const bool changed = applyFollow(e, std::move(follow), dropped);
         const bool rebound = changed && resolve();
@@ -361,7 +403,7 @@ struct LinkRegistry::State {
     LinkLeaderView leaderView(LinkToken token, const Entry& e) const {
         LinkLeaderView v;
         v.id = e.id;
-        v.label = e.label;
+        v.label = labelOf(e.id);
         if (e.feed) {
             v.documentId = e.feed->documentId;
             v.lineage = e.feed->lineage;
@@ -440,11 +482,10 @@ LinkToken LinkRegistry::add(std::string id, TripleBuffer<SnapshotSlot>* linkBuff
     const LinkToken token = ++s.lastToken;
     Entry e;
     e.id = std::move(id);
-    e.label = labelFor(++s.labelsGiven);
     e.buffer = linkBuffer;
     e.hook = std::move(shared);
     s.entries.emplace(token, std::move(e));
-    s.resolve();
+    s.resolve();  // binds the followers waiting for its id, and labels it (rule 9)
     s.moved();
     return token;
 }
@@ -477,7 +518,7 @@ LinkRegistry::Adopted LinkRegistry::adoptState(LinkToken token, std::string load
     const std::string idBefore = e->id;
     const LinkToken copiedFromBefore = e->copiedFrom;
     const std::uint64_t copyOrderBefore = e->copyOrder;
-    const bool sameFollow = e->follow == follow;
+    const bool sameFollow = sameShownFollow(e->follow, follow);
 
     // Rule 3, in order. Whether it is a copy is the outcome of this load alone.
     const bool hasDependents = std::any_of(s.entries.begin(), s.entries.end(),
@@ -501,7 +542,7 @@ LinkRegistry::Adopted LinkRegistry::adoptState(LinkToken token, std::string load
 
     const LinkToken before = e->boundTo;
     const bool changed = s.applyFollow(*e, std::move(follow), dropped);
-    const bool rebound = s.resolve();  // always: the id may have changed
+    const bool rebound = s.resolve();  // always: the id may have changed (which may relabel, rule 9)
     if (changed || e->boundTo != before) s.collectHooks(token, {before, e->boundTo}, out.hooks);
     out.id = e->id;
     if (e->id != idBefore || e->copiedFrom != copiedFromBefore || e->copyOrder != copyOrderBefore || !sameFollow ||
@@ -560,7 +601,7 @@ LinkFollowResult LinkRegistry::follow(LinkToken token, std::string_view leaderId
     link.laneUid = lane->uid;
     link.laneName = lane->name;
     link.laneRole = lane->chords ? std::string() : std::string(trackRoleName(lane->role));
-    link.leaderLabel = leader->second.label;
+    link.leaderLabel = s.labelOf(leader->second.id);
     if (s.setFollowLocked(token, *e, std::move(link), dropped, hooks)) s.moved();
     return LinkFollowResult::Applied;
 }
@@ -609,7 +650,7 @@ LinkView LinkRegistry::view(LinkToken token) const {
     const Entry* e = s.find(token);
     if (e == nullptr) return v;
     v.id = e->id;
-    v.label = e->label;
+    if (!e->follow) v.label = s.labelOf(e->id);  // rule 9: a follower has no label of its own
     if (e->follow) {
         v.follow = *e->follow;
         const Entry* leader = s.find(e->boundTo);
@@ -617,15 +658,17 @@ LinkView LinkRegistry::view(LinkToken token) const {
             v.status = LinkStatus::Waiting;
         } else {
             v.follow->leaderId = leader->id;
-            v.follow->leaderLabel = leader->label;
             v.status = State::boundStatus(*e->follow, leader->feed.get());
-            if (const Entry* target = s.switchTarget(*e)) v.switchTo = LinkInstanceRef{target->id, target->label};
+            if (const Entry* target = s.switchTarget(*e)) {
+                v.switchTo = LinkInstanceRef{target->id, s.labelOf(target->id)};
+            }
         }
+        v.follow->leaderLabel = s.labelOf(v.follow->leaderId);  // bound or waiting: the table's (rule 9)
     }
     if (!e->follow && e->copiedFrom != 0) {  // rule 11
         const Entry* original = s.find(e->copiedFrom);
         if (original != nullptr && !original->follow && !s.leadsOthers(token, *e)) {
-            v.copyOf = LinkInstanceRef{original->id, original->label};
+            v.copyOf = LinkInstanceRef{original->id, s.labelOf(original->id)};
         }
     }
     for (const auto& entry : s.entries) {
@@ -677,7 +720,6 @@ LinkEndpoint::LinkEndpoint(LinkRegistry& registry, std::string instanceId, UidGe
     : registry_(registry), makeUid_(std::move(makeUid)), linkBuffer_(std::make_unique<TripleBuffer<SnapshotSlot>>()) {
     documentId_ = makeUid_();
     token_ = registry_.add(std::move(instanceId), linkBuffer_.get(), std::move(hook));
-    label_ = registry_.view(token_).label;  // rule 9: fixed for the registration's life
 }
 
 LinkEndpoint::~LinkEndpoint() {
@@ -760,7 +802,7 @@ bool LinkEndpoint::publishOwn(const DocumentStore& store, const std::string& lin
                              key.laneUids != lastFeed_->laneUids || key.audible != lastFeed_->audible ||
                              key.followed != lastFeed_->followed || key.bindings != lastFeed_->bindings;
     if (feedChanged) {
-        registry_.publish(token_, buildLinkFeed(doc, documentId_, uids_, lineage, label_, key.followed));
+        registry_.publish(token_, buildLinkFeed(doc, documentId_, uids_, lineage, key.followed));
         lastFeed_ = key;
     }
     if (probe_) probe_();

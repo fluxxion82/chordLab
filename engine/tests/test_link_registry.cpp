@@ -3,6 +3,7 @@
 #include "chordlab/chord.h"
 #include "chordlab/compiler.h"
 #include "chordlab/document.h"
+#include "chordlab/json_api.h"
 #include "chordlab/link.h"
 #include "chordlab/publication.h"
 #include "chordlab/tracks.h"
@@ -81,7 +82,7 @@ struct Song {
     }
 
     std::shared_ptr<const LinkFeed> feed(const Names& followed, const std::string& documentId = "doc-1") const {
-        return buildLinkFeed(store.doc(), documentId, uids, "lineage-1", "feed label", followed);
+        return buildLinkFeed(store.doc(), documentId, uids, "lineage-1", followed);
     }
 
     /// What lane `uid` plays alone.
@@ -298,7 +299,9 @@ TEST_CASE("link registry: a removed leader empties its followers, which wait wit
     const LinkView v = w.view(f);
     CHECK(v.status == LinkStatus::Waiting);
     REQUIRE(v.follow.has_value());
-    CHECK(*v.follow == link);  // kept as stored
+    LinkFollow kept = link;
+    kept.leaderLabel = "ChordLab A";  // the label the removed leader's id keeps while f names it (rule 9)
+    CHECK(*v.follow == kept);  // kept as stored, but for the label
     CHECK(w.reg.view(l.token).id.empty());
 
     // A new instance adopting the leader's state (the undo of a delete) takes its id; the follower binds to it and
@@ -755,7 +758,7 @@ TEST_CASE("link registry: a feed of another document is ProjectChanged even when
     DocumentStore other;
     other.appendChord(chord(2, "min"), 4.0, 100);
     const LaneUids none;
-    const auto feed = buildLinkFeed(other.doc(), "doc-2", none, "lineage-2", "feed label", {});
+    const auto feed = buildLinkFeed(other.doc(), "doc-2", none, "lineage-2", {});
     REQUIRE(std::none_of(feed->lanes.begin(), feed->lanes.end(),
                          [&](const LinkLane& lane) { return lane.uid == s.uidA; }));
     w.reg.publish(l.token, feed);
@@ -1356,10 +1359,13 @@ TEST_CASE("link registry: the registry's own view leaves every lane's trackId 0"
 
 // --- rule 9: labels ---------------------------------------------------------------------------------------------
 
-TEST_CASE("link registry: labels go A to Z by order of add, then numbers, one per instance for its lifetime") {
+TEST_CASE("link registry: labels go A to Z, then numbers, one per leading id") {
     World w;
     std::vector<Inst*> insts;
-    for (int i = 0; i < 28; ++i) insts.push_back(&w.add("I" + std::to_string(i)));
+    insts.push_back(&w.add("I0"));
+    Inst& f = w.add("F");  // a follower takes no letter
+    w.reg.setFollow(f.token, follow("I0", std::string(kChordsLaneUid)));
+    for (int i = 1; i < 28; ++i) insts.push_back(&w.add("I" + std::to_string(i)));
     CHECK(w.view(*insts[0]).label == "ChordLab A");
     CHECK(w.view(*insts[1]).label == "ChordLab B");
     CHECK(w.view(*insts[25]).label == "ChordLab Z");
@@ -1367,11 +1373,239 @@ TEST_CASE("link registry: labels go A to Z by order of add, then numbers, one pe
     CHECK(w.view(*insts[27]).label == "ChordLab 28");
     REQUIRE_FALSE(w.view(*insts[2]).leaders.empty());
     CHECK(w.view(*insts[2]).leaders[0].label == "ChordLab A");
+}
 
-    w.reg.adoptState(insts[0]->token, "other", "fresh", std::nullopt);
-    CHECK(w.view(*insts[0]).label == "ChordLab A");
-    w.reg.remove(insts[1]->token);
-    CHECK(w.view(w.add("next")).label == "ChordLab 29");
+TEST_CASE("link registry: a fresh registry labels its first instances A and B") {
+    World w;
+    Inst& a = w.add("A-id");
+    Inst& b = w.add("B-id");
+    CHECK(w.view(a).label == "ChordLab A");
+    CHECK(w.view(b).label == "ChordLab B");
+}
+
+TEST_CASE("link registry: a follower has no label of its own, and its number is free again") {
+    World w;
+    Inst& a = w.add("A-id");
+    Inst& b = w.add("B-id");
+    w.reg.setFollow(b.token, follow("A-id", std::string(kChordsLaneUid)));
+    const LinkView vb = w.view(b);
+    CHECK(vb.id == "B-id");
+    CHECK(vb.label.empty());
+    REQUIRE(vb.follow.has_value());
+    CHECK(vb.follow->leaderLabel == "ChordLab A");
+    CHECK(w.view(a).label == "ChordLab A");
+    CHECK(w.view(w.add("C-id")).label == "ChordLab B");
+}
+
+TEST_CASE("link registry: a follower loaded before its leader holds the leader's label for the leader's id") {
+    // Live's load order when the follower's track is left of the main one.
+    World w;
+    Inst& f = w.add("F-inst", "x1");
+    w.reg.adoptState(f.token, "F", "fresh-f", follow("M", std::string(kChordsLaneUid)));
+    REQUIRE(w.status(f) == LinkStatus::Waiting);
+    CHECK(w.view(f).label.empty());
+    CHECK(w.shown(f).leaderLabel == "ChordLab A");  // the absent leader's id holds number 1
+
+    Inst& m = w.add("M-inst", "x2");
+    w.reg.adoptState(m.token, "M", "fresh-m", std::nullopt);
+    CHECK(w.view(m).label == "ChordLab A");
+    CHECK(w.status(f) != LinkStatus::Waiting);
+    CHECK(w.shown(f).leaderLabel == "ChordLab A");
+}
+
+TEST_CASE("link registry: a deleted leader's label waits for its id while a follower names it") {
+    World w;
+    Inst& m = w.add("M-inst", "M");
+    Inst& f = w.add("F-inst", "F");
+    w.reg.setFollow(f.token, follow("M", std::string(kChordsLaneUid)));
+    Inst& n = w.add("N-inst", "N");
+    REQUIRE(w.view(m).label == "ChordLab A");
+    REQUIRE(w.view(n).label == "ChordLab B");
+
+    w.reg.remove(m.token);  // Live deletes the main ChordLab
+    REQUIRE(w.status(f) == LinkStatus::Waiting);
+    CHECK(w.shown(f).leaderLabel == "ChordLab A");
+    CHECK(w.view(w.add("P-inst", "P")).label == "ChordLab C");  // A is held for the absent id, B is taken
+
+    Inst& again = w.add("M-again", "ctor-again");  // the undo: a new registration...
+    w.reg.adoptState(again.token, "M", "fresh-again", std::nullopt);  // ...that loads the deleted one's state
+    CHECK(w.view(again).label == "ChordLab A");
+    CHECK(w.status(f) != LinkStatus::Waiting);
+    CHECK(w.shown(f).leaderLabel == "ChordLab A");
+    CHECK(w.view(n).label == "ChordLab B");
+}
+
+TEST_CASE("link registry: a deleted leader nobody follows frees its label") {
+    SUBCASE("its undo takes the lowest free number, its old one") {
+        World w;
+        Inst& m = w.add("M-inst", "M");
+        Inst& n = w.add("N-inst", "N");
+        w.reg.remove(m.token);
+        Inst& again = w.add("M-again", "ctor-again");
+        w.reg.adoptState(again.token, "M", "fresh-again", std::nullopt);
+        CHECK(w.view(again).label == "ChordLab A");
+        CHECK(w.view(n).label == "ChordLab B");
+    }
+    SUBCASE("an unrelated instance added meanwhile takes it: nothing referenced the id") {
+        World w;
+        Inst& m = w.add("M-inst", "M");
+        Inst& n = w.add("N-inst", "N");
+        w.reg.remove(m.token);
+        CHECK(w.view(w.add("P-inst", "P")).label == "ChordLab A");
+        CHECK(w.view(n).label == "ChordLab B");
+    }
+}
+
+TEST_CASE("link registry: an instance that stops following takes the lowest free number") {
+    World w;
+    Inst& m = w.add("M-inst", "M");
+    Inst& c = w.add("C-inst", "ctor-c");
+    REQUIRE(w.reg.adoptState(c.token, "M", "M-copy", follow("M", std::string(kChordsLaneUid))).copy);
+    CHECK(w.view(c).label.empty());
+    CHECK(w.view(m).label == "ChordLab A");
+    w.reg.setFollow(c.token, std::nullopt);
+    CHECK(w.view(c).label == "ChordLab B");
+    CHECK(w.view(m).label == "ChordLab A");
+}
+
+TEST_CASE("link registry: a leader that starts following frees its number unless a follower names its id") {
+    SUBCASE("nobody names it") {
+        World w;
+        Inst& a = w.add("A-inst", "A");
+        Inst& b = w.add("B-inst", "B");
+        w.reg.setFollow(b.token, follow("A", std::string(kChordsLaneUid)));
+        CHECK(w.view(b).label.empty());
+        CHECK(w.view(w.add("C-inst", "C")).label == "ChordLab B");
+        CHECK(w.view(a).label == "ChordLab A");
+    }
+    SUBCASE("a follower still names it") {
+        World w;
+        Inst& m = w.add("M-inst", "M");
+        Inst& f = w.add("F-inst", "F");
+        w.reg.setFollow(f.token, follow("M", std::string(kChordsLaneUid)));
+        Inst& n = w.add("N-inst", "N");
+        REQUIRE(w.view(m).label == "ChordLab A");
+        REQUIRE(w.view(n).label == "ChordLab B");
+
+        w.reg.setFollow(m.token, follow("N", std::string(kChordsLaneUid)));
+        CHECK(w.view(m).label.empty());
+        CHECK(w.shown(m).leaderLabel == "ChordLab B");
+        REQUIRE(w.status(f) == LinkStatus::Waiting);
+        CHECK(w.shown(f).leaderId == "M");
+        CHECK(w.shown(f).leaderLabel == "ChordLab A");
+        CHECK(w.view(w.add("P-inst", "P")).label == "ChordLab C");
+
+        w.reg.setFollow(m.token, std::nullopt);
+        CHECK(w.view(m).label == "ChordLab A");
+        CHECK(w.status(f) != LinkStatus::Waiting);
+        CHECK(w.shown(f).leaderLabel == "ChordLab A");
+    }
+}
+
+TEST_CASE("link registry: a duplicated leader is labelled as a new leader and names its original's label") {
+    World w;
+    Inst& o = w.add("O-inst", "O");
+    Inst& f = w.add("F-inst", "F");  // a follower of the original takes no letter
+    w.reg.setFollow(f.token, follow("O", std::string(kChordsLaneUid)));
+    Inst& c = w.add("C-inst", "ctor-c");
+    REQUIRE(w.reg.adoptState(c.token, "O", "O-copy", std::nullopt).copy);
+    CHECK(w.view(o).label == "ChordLab A");
+    const LinkView vc = w.view(c);
+    CHECK(vc.label == "ChordLab B");
+    REQUIRE(vc.copyOf.has_value());
+    CHECK(vc.copyOf->id == "O");
+    CHECK(vc.copyOf->label == "ChordLab A");
+}
+
+TEST_CASE("link registry: a follow's leader label is the table's, not the stored hint, and the hint alone moves "
+          "nothing") {
+    World w;
+    const auto moved = [&](const std::function<void()>& call) {
+        const std::uint64_t before = w.reg.serial();
+        call();
+        return w.reg.serial() != before;
+    };
+    Inst& f = w.add("F-inst", "F");
+    // The row for the absent leader's id is created by this call: the view shows its label, and the serial moves.
+    CHECK(moved([&] { w.reg.setFollow(f.token, follow("M", std::string(kChordsLaneUid))); }));
+    CHECK(w.shown(f).leaderLabel == "ChordLab A");
+
+    // A new leaderLabel hint alone: stored, but no view shows it, so nothing moves.
+    LinkFollow relabelled = follow("M", std::string(kChordsLaneUid));
+    relabelled.leaderLabel = "ChordLab Q";
+    const LinkView before = w.view(f);
+    CHECK_FALSE(moved([&] { w.reg.setFollow(f.token, relabelled); }));
+    CHECK_FALSE(moved([&] { w.reg.adoptState(f.token, "F", "F-2", follow("M", std::string(kChordsLaneUid))); }));
+    CHECK(linkStateJson(w.view(f)) == linkStateJson(before));
+    CHECK(w.shown(f).leaderLabel == "ChordLab A");
+
+    // A follow of another absent id: the old row is dropped and the new id takes the lowest free number.
+    Inst& n = w.add("N-inst", "N");
+    REQUIRE(w.view(n).label == "ChordLab B");
+    CHECK(moved([&] { w.reg.setFollow(f.token, follow("Q", std::string(kChordsLaneUid))); }));
+    CHECK(w.shown(f).leaderLabel == "ChordLab A");
+    CHECK(moved([&] { w.reg.setFollow(f.token, follow("N", std::string(kChordsLaneUid))); }));
+    CHECK(w.shown(f).leaderLabel == "ChordLab B");
+}
+
+TEST_CASE("link registry: the serial moves exactly when some view's content, labels included, changes") {
+    World w;
+    std::vector<Inst*> live;
+    const auto shown = [&] {
+        std::vector<std::string> all;
+        for (const Inst* inst : live) all.push_back(linkStateJson(w.view(*inst)));
+        return all;
+    };
+    // Every step but a publish: the serial moves if and only if some live instance's view changed.
+    const auto step = [&](const char* what, const std::function<void()>& call) {
+        CAPTURE(what);
+        const std::vector<std::string> before = shown();
+        const std::uint64_t serial = w.reg.serial();
+        call();
+        const bool viewsChanged = shown() != before;
+        const bool serialMoved = w.reg.serial() != serial;
+        CHECK(viewsChanged == serialMoved);
+    };
+    const auto drop = [&](Inst* inst) {
+        live.erase(std::remove(live.begin(), live.end(), inst), live.end());
+        w.reg.remove(inst->token);
+    };
+    const std::string chords(kChordsLaneUid);
+    Inst* m = nullptr;
+    Inst* f = nullptr;
+    Inst* g = nullptr;
+    Inst* n = nullptr;
+    Inst* again = nullptr;
+    step("add f", [&] { live.push_back(f = &w.add("F-inst", "x1")); });
+    step("f loads a follow of M", [&] { w.reg.adoptState(f->token, "F", "F-2", follow("M", chords)); });
+    step("f reloads it", [&] { w.reg.adoptState(f->token, "F", "F-2", follow("M", chords)); });
+    step("add m", [&] { live.push_back(m = &w.add("M-inst", "x2")); });
+    step("m loads M", [&] { w.reg.adoptState(m->token, "M", "M-2", std::nullopt); });
+    step("add n", [&] { live.push_back(n = &w.add("N-inst", "N")); });
+    step("add g", [&] { live.push_back(g = &w.add("G-inst", "G")); });
+    step("g follows N", [&] { w.reg.setFollow(g->token, follow("N", chords)); });
+    step("n follows M", [&] { w.reg.setFollow(n->token, follow("M", chords)); });
+    step("n stops following", [&] { w.reg.setFollow(n->token, std::nullopt); });
+    step("m is deleted", [&] { drop(m); });
+    step("f's hint alone", [&] {
+        LinkFollow hinted = follow("M", chords);
+        hinted.leaderLabel = "ChordLab Z";
+        w.reg.setFollow(f->token, hinted);
+    });
+    step("its undo is added", [&] { live.push_back(again = &w.add("M-again", "x3")); });
+    step("its undo loads M", [&] { w.reg.adoptState(again->token, "M", "M-3", std::nullopt); });
+    step("a copy of M", [&] {
+        Inst* c = &w.add("C-inst", "x4");
+        live.push_back(c);
+        w.reg.adoptState(c->token, "M", "M-copy", std::nullopt);
+    });
+    step("f loses its block", [&] { w.reg.adoptWithoutBlock(f->token); });
+    step("f loses it again", [&] { w.reg.adoptWithoutBlock(f->token); });
+    step("g is deleted", [&] { drop(g); });
+    step("nothing at all", [&] {
+        (void)w.reg.view(0);
+        w.reg.setFollow(0, follow("M", chords));
+    });
 }
 
 // --- rule 10: serial --------------------------------------------------------------------------------------------
@@ -1477,7 +1711,8 @@ TEST_CASE("link registry: follow applies only to a live leading instance with th
     CHECK(w.shown(g).laneRole.empty());
     CHECK(w.shown(g).documentId == "doc-7");
 
-    // The stored follow keeps the hints: seen as stored once the leader is gone.
+    // The stored follow keeps the hints, and the leader's id keeps its label while f names it (rule 9): seen as
+    // before once the leader is gone.
     w.reg.setFollow(x.token, follow("nobody", s.uidA));  // X follows: it is no leader
     w.reg.remove(l.token);
     REQUIRE(w.status(f) == LinkStatus::Waiting);
@@ -1616,7 +1851,7 @@ TEST_CASE("link registry: the view lists the leaders with their feeds' lanes and
     CHECK(v1.follow->laneName == "hint name");
     CHECK(v1.follow->laneUid == s.uidA);
     CHECK(v1.follow->documentId == "doc-1");
-    CHECK(w.shown(f5).leaderLabel == "hint label");  // waiting: as stored
+    CHECK(w.shown(f5).leaderLabel == "ChordLab C");  // waiting: the label of the id it names, never the hint
 
     const LinkView unknown = w.reg.view(0);
     CHECK(unknown.id.empty());
@@ -1634,13 +1869,15 @@ TEST_CASE("link registry: the view's follow names the bound leader by its curren
     LinkView v = w.view(f);
     REQUIRE(v.follow.has_value());
     CHECK(v.follow->leaderId == "L");
-    CHECK(v.follow->leaderLabel == "hint label");
-    // The leader's id changes while the follower is unbound, which binds it.
+    CHECK(v.follow->leaderLabel == "ChordLab B");  // the id "L" took the lowest free number when f named it
+    CHECK(w.view(l).label == "ChordLab A");         // "ctor-l"'s
+    // The leader's id changes while the follower is unbound, which binds it; it takes the label "L" holds.
     CHECK(w.reg.adoptState(l.token, "L", "L-2", std::nullopt).id == "L");
     v = w.view(f);
     REQUIRE(v.follow.has_value());
     CHECK(v.follow->leaderId == "L");
-    CHECK(v.follow->leaderLabel == "ChordLab A");
+    CHECK(v.follow->leaderLabel == "ChordLab B");
+    CHECK(w.view(l).label == "ChordLab B");
     CHECK(v.status == LinkStatus::ProjectChanged);
 }
 

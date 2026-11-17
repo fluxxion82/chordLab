@@ -704,7 +704,8 @@ std::optional<InstanceState> writableInstanceState(const InstanceState& instance
 ///                        "followers":0}, ...]}, ...],
 ///  "routed":[{"lane":"chords"|"<uid>","followers":2,"trackId":0}, ...]}
 /// ```
-/// `self` is `view.id` and `view.label`, and `copyOf` is `view.copyOf` (its `id` as `leader`) or null: the
+/// `self` is `view.id` and `view.label` (empty while this instance follows: a follower has no label of its own,
+/// `LinkRegistry` rule 9), and `copyOf` is `view.copyOf` (its `id` as `leader`) or null: the
 /// instance this one is a copy of, set only while this one is not following, the original lives and is not
 /// following, and no follower is bound to this one or offered it as `switchTo` (`LinkView::copyOf`,
 /// `LinkRegistry` rule 11). `switchTo` is set only for a follower of a group pasted in one go (rule 8,

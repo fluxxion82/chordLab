@@ -117,8 +117,9 @@ final class FollowerPanelModelTests: XCTestCase {
                    "Waiting for another ChordLab. It is not in this set, or it now plays from another ChordLab.")
   }
 
-  /// Labels are given by load order: while unbound, a stored "ChordLab A" may now name another instance. When a
-  /// listed leader carries it, the sentences say "the other ChordLab" instead of the letter.
+  /// The model's defensive branch: the engine never gives a waited-for id's label to another instance (`LinkRegistry`
+  /// rule 9), but if a link state did name a listed leader of another id with the waited-for label, the sentences say
+  /// "the other ChordLab" instead of the letter.
   func testAStaleStoredLabelIsNotUsedWhileWaiting() throws {
     let impostor = LinkLeaderJSON(id: "x", label: "ChordLab A", lineage: "t", lanes: [lane("chords", "Chords", "")])
     let m = try model(state(status: .waiting, leaders: [impostor]))
@@ -169,7 +170,7 @@ final class FollowerPanelModelTests: XCTestCase {
 
   func testTheWaitingFixtureUsesTheStoredHints() throws {
     let m = try model(try LinkStateTests.fixture("link-state-waiting.json"))
-    XCTAssertEqual(m.headlineText, "Set to play Bass of ChordLab A")   // the listed ChordLab C is another label
+    XCTAssertEqual(m.headlineText, "Set to play Bass of ChordLab A")   // the listed ChordLab B is another label
     XCTAssertEqual(m.statusLine, "Waiting for ChordLab A. It is not in this set, or it now plays from another ChordLab.")
     XCTAssertEqual(m.role, .bass)
     XCTAssertNil(m.switchOffer)
@@ -219,8 +220,8 @@ final class FollowerPanelModelTests: XCTestCase {
   func testTheFollowerFixtureOffersTheCopysBass() throws {
     let m = try model(try LinkStateTests.fixture("link-state-follower.json"))
     let offer = try XCTUnwrap(m.switchOffer)
-    XCTAssertEqual(offer.line, "ChordLab C was copied together with this one, but this one still plays from ChordLab A.")
-    XCTAssertEqual(offer.button, "Play Bass of ChordLab C instead")
+    XCTAssertEqual(offer.line, "ChordLab B was copied together with this one, but this one still plays from ChordLab A.")
+    XCTAssertEqual(offer.button, "Play Bass of ChordLab B instead")
     guard case .follow(let option) = offer.action else { return XCTFail("expected a follow, got \(offer.action)") }
     XCTAssertEqual(option.id, FollowTarget(leader: "uid-6", lane: "uid-2"))
     XCTAssertEqual(option.leaderLineage, "lineage-leader-copy-1")
