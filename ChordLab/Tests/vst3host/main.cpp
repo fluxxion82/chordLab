@@ -12,7 +12,8 @@
 // (engine/tests/test_link_sim.cpp, `reference`) uses, and what `ChordLab::ProcessBlock` did before linking existed.
 // The comparison is message for message: status, pitch, velocity and sample offset in its block.
 //
-// One line per check; the first failure ends the run with status 1, a crash with status 70 and the step it hit.
+// One line per check ("ok"/"FAIL"; steps reached are printed as "--" and not counted); the first failure ends the
+// run with status 1, a crash with status 70 and the step it hit.
 
 #include "public.sdk/source/common/memorystream.h"
 #include "public.sdk/source/vst/hosting/eventlist.h"
@@ -104,6 +105,12 @@ void check(bool ok, const std::string& what) {
     std::printf("%s %s\n", ok ? "ok  " : "FAIL", what.c_str());
     std::fflush(stdout);
     if (!ok) std::exit(1);
+}
+
+/// A step reached, not a comparison: printed, not counted (a crash on the way is reported by the signal handler).
+void progress(const std::string& what) {
+    std::printf("--   %s\n", what.c_str());
+    std::fflush(stdout);
 }
 
 [[noreturn]] void fail(const std::string& what) {
@@ -517,21 +524,21 @@ void lifeCycle(const Plug& plug) {
     std::puts("== 1 life cycle");
     for (int n = 1; n <= 2; ++n) {
         { Instance a(plug, "instance " + std::to_string(n)); }
-        check(true, "create, initialize, terminate, release, run " + std::to_string(n));
+        progress("create, initialize, terminate, release, run " + std::to_string(n));
     }
     {
         auto a = std::make_unique<Instance>(plug, "A");
         auto b = std::make_unique<Instance>(plug, "B");
         a.reset();
         b.reset();
-        check(true, "two alive at once, destroyed first-made first");
+        progress("two alive at once, destroyed first-made first");
     }
     {
         auto a = std::make_unique<Instance>(plug, "A");
         auto b = std::make_unique<Instance>(plug, "B");
         b.reset();
         a.reset();
-        check(true, "two alive at once, destroyed last-made first");
+        progress("two alive at once, destroyed last-made first");
     }
 }
 
@@ -623,7 +630,7 @@ void linked(const Plug& plug) {
     auto a = std::make_unique<Instance>(plug, "A");
     a->setState(wrap(s.json, gTrailer));
     const Leader leader = leaderOf(*a, s);
-    check(true, "A: id " + leader.id + ", document " + leader.doc + ", bass lane " + leader.bassUid);
+    progress("A: id " + leader.id + ", document " + leader.doc + ", bass lane " + leader.bassUid);
     auto b = std::make_unique<Instance>(plug, "B");
     b->setState(wrap(followerState(bId, leader.id, leader.doc, leader.bassUid), gTrailer));
     a->start();
@@ -642,7 +649,7 @@ void linked(const Plug& plug) {
     check(bSeen[kBass1] && bSeen[kBass2] && std::count(bSeen.begin(), bSeen.end(), true) == 2, "nothing but the bass on B");
 
     a.reset();
-    check(true, "A destroyed while B lives");
+    progress("A destroyed while B lives");
     play({b.get()}, {&rb}, spans, gone, back);
     bool releasedFirst = !rb[gone].empty() && std::all_of(rb[gone].begin(), rb[gone].end(), [](const Msg& m) { return m.status == 0x80; });
     check(releasedFirst && std::any_of(rb[gone].begin(), rb[gone].end(), [](const Msg& m) { return m.pitch == kBass2; }),
@@ -774,7 +781,7 @@ int main(int argc, char** argv) {
     std::string error;
     VST3::Hosting::Module::Ptr module = VST3::Hosting::Module::create(path, error);
     if (!module) fail("load the module: " + error);
-    check(true, "module loaded");
+    progress("module loaded");
     IPtr<HostApplication> hostApp = owned(new HostApplication());
     const VST3::Hosting::PluginFactory& factory = module->getFactory();
     factory.setHostContext(hostApp);
@@ -786,7 +793,7 @@ int main(int argc, char** argv) {
         if (info.category() == kVstAudioEffectClass) {
             plug.classId = info.ID();
             found = true;
-            check(true, "audio module class '" + info.name() + "' (" + info.subCategoriesString() + ")");
+            progress("audio module class '" + info.name() + "' (" + info.subCategoriesString() + ")");
             break;
         }
     }
