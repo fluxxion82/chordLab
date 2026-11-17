@@ -46,8 +46,8 @@ final class FollowOfferTests: XCTestCase {
     let o = try XCTUnwrap(offer(link([leader("a", "ChordLab A")]), try fresh()))
     XCTAssertFalse(o.isCopy)
     XCTAssertEqual(o.leader, "a")
-    XCTAssertEqual(o.text(compact: false), "Play a track of ChordLab A on this track:")
-    XCTAssertEqual(o.text(compact: true), "Play a track of ChordLab A here:")
+    XCTAssertEqual(o.text(compact: false), "Make this ChordLab play one track of ChordLab A:")
+    XCTAssertEqual(o.text(compact: true), "Play from ChordLab A:")
     XCTAssertEqual(o.buttons.map(\.name), ["Chords", "Bass", "Lead"])
     XCTAssertEqual(o.buttons.map(\.id), [FollowTarget(leader: "a", lane: "chords"), FollowTarget(leader: "a", lane: "u-b"),
                                          FollowTarget(leader: "a", lane: "u-l")])
@@ -85,8 +85,8 @@ final class FollowOfferTests: XCTestCase {
     let o = try XCTUnwrap(offer(link(leaders, copyOf: "c"), try snapshot("snapshot-tracks.json")))
     XCTAssertTrue(o.isCopy)
     XCTAssertEqual(o.leader, "c")
-    XCTAssertEqual(o.text(compact: false), "This ChordLab is a copy of ChordLab C. Play one of its tracks on this track:")
-    XCTAssertEqual(o.text(compact: true), "A copy of ChordLab C. Play one of its tracks here:")
+    XCTAssertEqual(o.text(compact: false), "This ChordLab is a copy of ChordLab C. Make it play only one of its tracks:")
+    XCTAssertEqual(o.text(compact: true), "A copy of ChordLab C. Play only:")
     XCTAssertTrue(o.showsMore)                                     // two leaders
     XCTAssertTrue(try XCTUnwrap(offer(link(leaders, copyOf: "c"), nil)).isCopy)
   }
@@ -97,7 +97,7 @@ final class FollowOfferTests: XCTestCase {
     let o = try XCTUnwrap(offer(link(leaders, copyOf: "c"), try fresh()))                     // the fresh rule applies
     XCTAssertFalse(o.isCopy)
     XCTAssertEqual(o.leader, "a")
-    XCTAssertEqual(o.text(compact: false), "Play a track of ChordLab A on this track:")
+    XCTAssertEqual(o.text(compact: false), "Make this ChordLab play one track of ChordLab A:")
   }
 
   // MARK: - Never
@@ -125,6 +125,36 @@ final class FollowOfferTests: XCTestCase {
     XCTAssertNil(offer(link([leader("a", "ChordLab A")], copyOf: "a", routed: routed), try fresh()))
   }
 
+  /// After Stop following the instance is not following any more, and may be fresh: the banner must not come back at
+  /// once. The state records `dismissedLineage(afterStopFollowing:)` as the dismissal.
+  func testTheBannerDoesNotComeBackRightAfterStopFollowing() throws {
+    let l = link([leader("a", "ChordLab A")])
+    XCTAssertNotNil(offer(l, try fresh()))
+    let recorded = FollowOffer.dismissedLineage(afterStopFollowing: "doc-1")
+    XCTAssertNil(offer(l, try fresh(), dismissed: recorded))
+    XCTAssertNotNil(FollowOffer.make(link: l, snapshot: try fresh(), lineage: "doc-2", dismissedLineage: recorded))
+  }
+
+  // MARK: - Fixtures
+
+  /// A copy nobody plays from, seeing its original: the copy banner whatever the copy holds.
+  func testTheCopyFixtureGivesTheCopyBanner() throws {
+    let copy = try LinkStateTests.fixture("link-state-copy.json")
+    let o = try XCTUnwrap(offer(copy, try snapshot("snapshot-tracks.json")))
+    XCTAssertTrue(o.isCopy)
+    XCTAssertEqual(o.leader, "id-original")
+    XCTAssertEqual(o.text(compact: false), "This ChordLab is a copy of ChordLab A. Make it play only one of its tracks:")
+    XCTAssertEqual(o.buttons.map(\.name), ["Chords", "Lead", "Bass"])
+    XCTAssertFalse(o.showsMore)
+  }
+
+  /// Lanes of this ChordLab play elsewhere (`routed`): no banner, even for a fresh snapshot.
+  func testTheLeaderFixtureGivesNoBanner() throws {
+    let leader = try LinkStateTests.fixture("link-state-leader.json")
+    XCTAssertNil(offer(leader, try fresh()))
+    XCTAssertNil(offer(leader, try snapshot("snapshot-tracks.json")))
+  }
+
   // MARK: - Buttons and More…
 
   func testAtMostFiveButtonsAndMoreForTheRest() throws {
@@ -143,9 +173,9 @@ final class FollowOfferTests: XCTestCase {
 
   func testAnEmptyLabelIsAnotherChordLab() throws {
     let o = try XCTUnwrap(offer(link([leader("a", "")]), try fresh()))
-    XCTAssertEqual(o.text(compact: false), "Play a track of another ChordLab on this track:")
+    XCTAssertEqual(o.text(compact: false), "Make this ChordLab play one track of another ChordLab:")
     let c = try XCTUnwrap(offer(link([leader("a", "")], copyOf: "a"), try fresh()))
-    XCTAssertEqual(c.text(compact: false), "This ChordLab is a copy of another ChordLab. Play one of its tracks on this track:")
+    XCTAssertEqual(c.text(compact: false), "This ChordLab is a copy of another ChordLab. Make it play only one of its tracks:")
   }
 
   func testTheDismissButton() {

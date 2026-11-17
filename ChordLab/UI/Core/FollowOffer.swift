@@ -10,7 +10,11 @@ import Foundation
 /// - the instance is a **copy** of a leader the picker offers (`self.copyOf`; a duplicated rack chain, plan I13), or it
 ///   is **fresh**: its snapshot has arrived and holds no chords in the sequence and no tracks;
 /// - the user has not dismissed it for this document (`dismissedLineage`, the document lineage the user dismissed it
-///   in; a new document may offer again).
+///   in; a new document may offer again). Stopping following counts as a dismissal
+///   (`dismissedLineage(afterStopFollowing:)`), so the banner does not come back at once.
+///
+/// The wording never says "on this track": in the recommended set-up the instance is a chain of the main ChordLab's
+/// Instrument Rack, not a Live track of its own, and a copy plays everything until told to play one track.
 ///
 /// A copy is named first and gets its own wording; a `copyOf` that names a leader the picker does not offer (it has
 /// published nothing yet) is ignored, and the fresh rule may still apply. The buttons are the first group's entries in
@@ -34,12 +38,18 @@ struct FollowOffer: Equatable {
   /// The sentence before the buttons, in full or in the one-line compact form.
   func text(compact: Bool) -> String {
     switch (isCopy, compact) {
-    case (false, false): return "Play a track of \(leaderName) on this track:"
-    case (false, true): return "Play a track of \(leaderName) here:"
-    case (true, false): return "This ChordLab is a copy of \(leaderName). Play one of its tracks on this track:"
-    case (true, true): return "A copy of \(leaderName). Play one of its tracks here:"
+    case (false, false): return "Make this ChordLab play one track of \(leaderName):"
+    case (false, true): return "Play from \(leaderName):"
+    case (true, false): return "This ChordLab is a copy of \(leaderName). Make it play only one of its tracks:"
+    case (true, true): return "A copy of \(leaderName). Play only:"
     }
   }
+
+  /// The dismissal the state records when the user stops following, in the document of lineage `lineage`: the
+  /// instance is no longer following and may be fresh, and the banner must not come back at once. It is the same
+  /// per-document dismissal the banner's own button records (`dismissedLineage` of `make`); a new document may offer
+  /// again.
+  static func dismissedLineage(afterStopFollowing lineage: String) -> String { lineage }
 
   /// Whether a window of this height takes the compact form.
   static func isCompact(height: CGFloat) -> Bool { height < compactHeight }
