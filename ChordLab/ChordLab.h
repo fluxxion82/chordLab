@@ -163,6 +163,17 @@ private:
   void WriteExport(const std::vector<uint8_t>& bytes, const std::string& label);
   // Main thread: pushes {"schema":1,"path":path} to the editor.
   void PushExportReady(const std::string& path);
+  // A kMsgTagLink payload (follow a leader's lane, or stop following; plan I9, I12). Main thread, called only inline
+  // from OnMessage, never from inside an OnMain hop, so it holds no Lifeline lock when it runs the hooks. Parsed
+  // (parseLinkRequest; a failure is a kMsgTagError), its "lineage" read before mModelMutex and compared under it as
+  // a command's; when it applies, LinkEndpoint::follow / unfollow in that section, then the hooks with nothing held,
+  // then the own republish. What follows (dirty, snapshot, error) is chordlab::bridge::linkOutcome; the fresh link
+  // state is pushed after every parsed message.
+  void HandleLink(std::string_view json);
+  // Pushes linkStateJson(mLink->view()) as kMsgTagLinkState to an open editor, on the main thread (queued when called
+  // elsewhere); the JSON is built inside the hop under mModelMutex (order: Lifeline, model, the registry's). A no-op
+  // without an editor. Display only: nothing that plays depends on it.
+  void PushLinkState();
 
   static constexpr uint8_t kStateVersion = 2;   // 1 was the M0 spike payload; it is not migrated
 
@@ -246,6 +257,7 @@ private:
   uint32_t mAppliedEpoch = 0;                                  // render thread only: the last epoch whose reset the drain performed
 #endif
   uint32_t mReportedDroppedHeard = 0;                          // main thread: last value pushed to the UI
+  uint64_t mReportedLinkSerial = 0;                            // main thread: the registry serial of the last link state OnIdle or OnUIOpen pushed
   chordlab::Listener mListener;                                // main thread only (it may allocate)
   std::chrono::steady_clock::time_point mLastHeardTick{};      // main thread: the last mListener.advance
   static constexpr std::chrono::milliseconds kHeardInterval{67};   // key evaluation and heard pushes, at most ~15 Hz

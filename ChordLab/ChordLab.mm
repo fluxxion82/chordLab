@@ -125,6 +125,22 @@
 // without one, resets the link identity) in one mModelMutex section, then runs the hooks and republishes as above.
 // Assumption, as for the hops above: a host never calls UnserializeState from inside one of this instance's OnMain
 // hops (it would run other instances' hooks with this instance's Lifeline held, outside the lock order above).
+// Messages (plan I12): the editor sends kMsgTagLink (18), follow a leader's lane or unfollow, handled by HandleLink
+// on the main thread, inline from OnMessage (so with no Lifeline lock held): parseLinkRequest, the message's own
+// "lineage" read before mModelMutex and compared under it as a command's (stale: nothing applied, PushSnapshot; not
+// a string or unreadable: the command path's errors), and when it applies LinkEndpoint::follow or unfollow in that
+// same section; then the hooks with nothing held, the own republish, MarkHostDirty when the follow the state saves
+// changed, and always PushLinkState (chordlab::bridge::linkOutcome decides which). A refused follow (the leader's
+// lineage stale, an unknown leader or lane) changes nothing and sends no error: the fresh link state is the answer.
+// The plug-in sends kMsgTagLinkState (26), linkStateJson(mLink->view()) built under mModelMutex inside an OnMain
+// hop, so only ever from the main thread: from OnUIOpen (after the snapshot), after every parsed kMsgTagLink, and
+// from OnIdle when the registry's serial() (an atomic, read without a lock) differs from mReportedLinkSerial. It is
+// display only; nothing that plays waits for it. OnIdle checks mLink first: the destructor resets it, and iPlug2
+// stops the idle timer only in ~IPlugAPIBase, after ~ChordLab. That check suffices because the host destroys the
+// plug-in on the main thread (VST3: the UI thread, where OnIdle runs), so the two never interleave; a host that
+// destroyed it on another thread while the timer ran would race far more than mLink (assumed not to happen, as
+// for the rest of OnIdle's state). A queued PushLinkState hop runs under the Lifeline, which is retired before
+// mLink.reset(), so it never sees mLink gone.
 //
 // MIDI in (listening design D1, D2, D4, D5): (VST3 and the APP; the Audio Unit's path is described at the end
 // of this note) HandleMidiIn runs on the audio thread once per incoming event (ProcessMidiMsg calls it),
@@ -191,6 +207,8 @@
 #include "bridge/command_lineage.h"
 #include "bridge/export_naming.h"
 #include "bridge/export_request.h"
+#include "bridge/link_outcome.h"
+#include "bridge/link_request.h"
 #include "bridge/preview_request.h"
 
 #include "chordlab/export.h"
@@ -717,6 +735,11 @@ void ChordLab::OnUIOpen()
   mReportedDroppedHeard = 0;
   mPushedPpq = std::numeric_limits<double>::quiet_NaN();         // ...and the playhead
   mPushedBpm = std::numeric_limits<double>::quiet_NaN();         // ...and the tempo
+  // ...and the link state, after the snapshot: the serial first, so the state built inline below is at least that
+  // recent and OnIdle pushes again only when something moved after it.
+  if (mLink)
+    mReportedLinkSerial = mLink->serial();
+  PushLinkState();
 }
 
 void ChordLab::OnIdle()
@@ -788,6 +811,21 @@ void ChordLab::OnIdle()
         mPushedBpm = bpm;
         PushTransport(ppq, playing, bpm);
       }
+    }
+  }
+
+  // The link state, to an open editor, whenever the registry's serial moved (a link, a load, an instance added or
+  // removed anywhere in the process, a leader's publish). serial() is an atomic read. mLink is checked because the
+  // destructor resets it and iPlug2 stops this timer only in ~IPlugAPIBase, after ~ChordLab; that check is enough
+  // on the assumption the host destroys the plug-in on the main thread, as VST3 hosts do, so this can never run
+  // concurrently with the destructor (see "Links" at the top).
+  if (mEditorOpen.load() && mLink)
+  {
+    const uint64_t serial = mLink->serial();
+    if (serial != mReportedLinkSerial)
+    {
+      mReportedLinkSerial = serial;                              // before the build: a later move is pushed next time
+      PushLinkState();
     }
   }
 }
@@ -899,7 +937,69 @@ bool ChordLab::OnMessage(int msgTag, int ctrlTag, int dataSize, const void* pDat
     return true;
   }
 
+  if (msgTag == kMsgTagLink)
+  {
+    HandleLink((pData && dataSize > 0) ? std::string_view((const char*) pData, (size_t) dataSize) : std::string_view());
+    return true;
+  }
+
   return CocoaEditorDelegate::OnMessage(msgTag, ctrlTag, dataSize, pData);
+}
+
+void ChordLab::HandleLink(std::string_view json)
+{
+  // Main thread, inline from OnMessage only: never inside an OnMain hop, so no Lifeline lock is held here and the
+  // hooks below may run (they enter other instances through their Lifelines). Mirrors the engine simulation's
+  // FakeInstance::follow / unfollow: the step under mModelMutex, the hooks with nothing held, the own republish.
+  std::string problem;
+  const std::optional<chordlab::bridge::LinkRequest> request = chordlab::bridge::parseLinkRequest(json, &problem);
+  if (!request)                                                  // it also refuses texts beyond the message limits, so
+  {                                                              // the lineage below is never left unread
+    DBGMSG("ChordLab: link message rejected: %s\n", problem.c_str());
+    PushError(problem);
+    return;
+  }
+  // The follower's own document lineage (plan I9), exactly as for a command: read before the lock, compared under it
+  // in the section that would apply the request, so a state load cannot slip in between. The leader's lineage
+  // (request->leaderLineage) is the registry's to check, inside LinkEndpoint::follow.
+  const chordlab::bridge::LineageField field = chordlab::bridge::readLineage(json);
+  chordlab::bridge::CommandLineage lineage = chordlab::bridge::CommandLineage::Absent;
+  chordlab::LinkFollowResult result = chordlab::LinkFollowResult::Applied;   // an unfollow has none
+  bool savedFollowChanged = false;
+  chordlab::LinkRegistry::Hooks hooks;
+  {
+    std::lock_guard<std::mutex> lock(mModelMutex);
+    lineage = chordlab::bridge::compareLineage(field, mClipboardToken);
+    if (chordlab::bridge::linkApplies(lineage))
+    {
+      // What SerializeState would save of the follow, before and after: the host is dirtied only when it changed
+      // (an applied follow of the very link already saved, hints included, changes nothing).
+      const std::optional<chordlab::LinkFollow> before = mLink->state().follow;
+      if (request->follow)
+        result = mLink->follow(request->leaderId, request->laneUid, request->leaderLineage, hooks);
+      else
+        mLink->unfollow(hooks);
+      savedFollowChanged = mLink->state().follow != before;
+    }
+  }
+  const chordlab::bridge::LinkOutcome outcome =
+    chordlab::bridge::linkOutcome(lineage, request->follow, result, savedFollowChanged);
+  if (chordlab::bridge::linkApplies(lineage))
+  {
+    RunHooks(hooks);                                             // holding nothing: the old and the new leader republish
+    std::lock_guard<std::mutex> lock(mModelMutex);
+    PublishSnapshotLocked();                                     // then this instance: its role may have changed
+  }
+  if (outcome.markDirty)
+    MarkHostDirty();                                             // outside every lock: it calls into the host
+  if (outcome.pushSnapshot)
+  {
+    DBGMSG("ChordLab: link message of a replaced document not applied (stale lineage)\n");
+    PushSnapshot();                                              // the current token and snapshot, inline, first
+  }
+  if (outcome.error)
+    PushError(outcome.error);
+  PushLinkState();                                               // always: for a refused follow it is the answer
 }
 
 void ChordLab::HandlePreview(std::string_view text)
@@ -1284,6 +1384,26 @@ void ChordLab::PushExportReady(const std::string& path)
     const std::string json = nlohmann::json{{"schema", chordlab::kJsonSchema}, {"path", path}}
                                .dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
     SendArbitraryMsgFromDelegate((int) kMsgTagExportReady, (int) json.size(), json.data());
+  });
+}
+
+void ChordLab::PushLinkState()
+{
+  OnMain([this] {
+    if (!mEditorOpen.load())                                     // no listener: nothing to build
+      return;
+    std::string json;
+    {
+      // Order: this hop's Lifeline (when queued), mModelMutex, then the registry's mutex inside view(). mLink is
+      // valid here: a queued hop runs under the Lifeline and the destructor retires it before mLink.reset(), so a
+      // hop either finishes first or does nothing; the inline path runs on the main thread from OnUIOpen, OnIdle
+      // (which checks mLink) and HandleLink, never during the destructor. The check is belt and braces.
+      std::lock_guard<std::mutex> lock(mModelMutex);
+      if (!mLink)
+        return;
+      json = chordlab::linkStateJson(mLink->view());
+    }
+    SendArbitraryMsgFromDelegate((int) kMsgTagLinkState, (int) json.size(), json.data());
   });
 }
 
