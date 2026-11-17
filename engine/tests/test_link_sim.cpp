@@ -3,6 +3,7 @@
 #include "chordlab/chord.h"
 #include "chordlab/compiler.h"
 #include "chordlab/document.h"
+#include "chordlab/json_api.h"
 #include "chordlab/link.h"
 #include "chordlab/publication.h"
 #include "chordlab/scheduler.h"
@@ -317,7 +318,7 @@ public:
 
 private:
     void publishLocked() {
-        endpoint_->publishOwn(store_.doc(), store_.revision(), lineage_, *own_, ownPublication_);
+        endpoint_->publishOwn(store_, lineage_, *own_, ownPublication_);
     }
 
     LinkEndpoint::UidGenerator uids_;
@@ -849,6 +850,110 @@ TEST_CASE("link sim: a follower's Thru and its own document stay live while it f
     follower->unfollow();  // no further edit
     rounds(pl, pf, spans.size());
     checkSettles(pf, *edited, 30, spans.size(), "follower back on its edited own document");
+}
+
+TEST_CASE("link sim: undo brings a deleted followed track back with its uid after many other tracks came and went") {
+    // The leader deletes the followed bass, creates and deletes 70 other tracks, then undoes all of it (141 steps,
+    // inside DocumentStore::kMaxUndoDepth): the bass is back with its number, so it must be back with its uid, and
+    // the follower plays it again.
+    const Song s = song();
+    const std::vector<Span> spans = steady(70);
+    const auto soloBass = reference(s.state, [&](DocumentStore& d) { d.setTrackSolo(s.bass, true); }, spans);
+    const auto mutedBass = reference(s.state, [&](DocumentStore& d) { d.setTrackMute(s.bass, true); }, spans);
+
+    const auto run = [&](bool fromStaleTable) {
+        CAPTURE(fromStaleTable);
+        World w;
+        auto leader = w.make("L");
+        leader->loadDocument(s.state);
+        if (fromStaleTable) {
+            // A table saved over a long life: 64 entries of tracks long gone (no undo can bring them back), the
+            // live tracks' entries the lowest numbers but one.
+            Saved saved = leader->save();
+            DocState doc = s.state;
+            doc.nextTrackId = 500;
+            saved.doc = doc;
+            for (int id = 100; id < 164; ++id) saved.link.lanes[id] = "stale-" + std::to_string(id);
+            leader->load(saved);
+        }
+        auto follower = w.make("F");
+        const std::string uid = leader->laneUid(s.bass);
+        REQUIRE(!uid.empty());
+        REQUIRE(follower->follow("L", uid, lineageOf(*follower, "L")) == Result::Applied);
+
+        leader->edit([&](DocumentStore& d) { REQUIRE(d.removeTrack(s.bass)); });
+        CHECK(follower->view().status == LinkStatus::LaneMissing);
+        int undos = 1;
+        if (!fromStaleTable) {
+            for (int i = 0; i < 70; ++i) {
+                leader->edit([&](DocumentStore& d) {
+                    const int id = d.addTrack(TrackRole::Other, "Passing");
+                    REQUIRE(id != kNoTrackId);
+                    REQUIRE(d.removeTrack(id));
+                });
+                undos += 2;
+            }
+        }
+        REQUIRE(undos <= static_cast<int>(DocumentStore::kMaxUndoDepth));
+        for (int i = 0; i < undos; ++i) leader->edit([](DocumentStore& d) { REQUIRE(d.undo()); });
+        REQUIRE(leader->store().findTrackIndex(s.bass) >= 0);
+        CHECK(leader->laneUid(s.bass) == uid);
+        CHECK(follower->view().status == LinkStatus::Playing);
+
+        Player pl(*leader, spans);
+        Player pf(*follower, spans);
+        rounds(pl, pf, spans.size());
+        checkExact(pf, *soloBass, 0, spans.size(), "follower after the undo");
+        checkExact(pl, *mutedBass, 0, spans.size(), "leader after the undo");
+    };
+    SUBCASE("70 other tracks created and deleted in between") { run(false); }
+    SUBCASE("a loaded table with 64 stale entries; the oldest live track deleted and restored") { run(true); }
+}
+
+TEST_CASE("link sim: a leader's lane table never outgrows kMaxInstanceLanes and forgets what undo cannot reach") {
+    // 850 tracks created and deleted while a follower follows the bass: more than kMaxInstanceLanes, so a table
+    // that never forgot would outgrow the state's bound. After every edit the leader's saved block must be valid
+    // and within the bound; at the end its entries are exactly the tracks of the document and of the history.
+    const Song s = song();
+    World w;
+    auto leader = w.make("L");
+    leader->loadDocument(s.state);
+    auto follower = w.make("F");
+    const std::string bassUid = leader->laneUid(s.bass);
+    REQUIRE(follower->follow("L", bassUid, lineageOf(*follower, "L")) == Result::Applied);
+    int oversized = 0;
+    int invalid = 0;
+    std::size_t most = 0;
+    const auto check = [&] {
+        const Saved saved = leader->save();
+        most = std::max(most, saved.link.lanes.size());
+        oversized += saved.link.lanes.size() > kMaxInstanceLanes ? 1 : 0;
+        invalid += validInstanceState(saved.link) ? 0 : 1;
+    };
+    const int cycles = static_cast<int>(kMaxInstanceLanes) + 46;
+    int first = 0;
+    for (int i = 0; i < cycles; ++i) {
+        int id = 0;
+        leader->edit([&](DocumentStore& d) { id = d.addTrack(TrackRole::Other, "Passing"); });
+        REQUIRE(id != kNoTrackId);
+        if (i == 0) first = id;
+        check();
+        leader->edit([&](DocumentStore& d) { REQUIRE(d.removeTrack(id)); });
+        check();
+    }
+    CHECK(oversized == 0);
+    CHECK(invalid == 0);
+
+    std::vector<int> expected = leader->store().historyTrackIds();
+    for (const Track& t : leader->store().doc().tracks) expected.push_back(t.id);
+    std::sort(expected.begin(), expected.end());
+    expected.erase(std::unique(expected.begin(), expected.end()), expected.end());
+    std::vector<int> held;
+    for (const auto& entry : leader->save().link.lanes) held.push_back(entry.first);
+    CHECK(held == expected);
+    CHECK(leader->laneUid(first).empty());  // dropped off the history long ago
+    CHECK(leader->laneUid(s.bass) == bassUid);
+    CHECK(follower->view().status == LinkStatus::Playing);
 }
 
 // --- 3. cold restore ---------------------------------------------------------------------------------------------

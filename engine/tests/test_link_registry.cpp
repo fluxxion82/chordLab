@@ -75,7 +75,7 @@ struct Song {
         store.appendChord(chord(9, "min"), 4.0, 100);
         a = addTrackWith(store, TrackRole::Bass, "Low", {ns(36, 0, 960)});
         b = addTrackWith(store, TrackRole::Lead, "High", {ns(72, 1920, 480)});
-        REQUIRE(uids.cover(store.doc(), counter()));
+        REQUIRE(uids.cover(store.doc(), store.historyTrackIds(), counter()));
         uidA = uids.uidOf(a);
         uidB = uids.uidOf(b);
     }

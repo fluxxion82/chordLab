@@ -33,8 +33,14 @@ namespace chordlab {
 /// The key the chords lane has in every link.
 inline constexpr std::string_view kChordsLaneUid = "chords";
 
-/// The most entries of vanished tracks a `LaneUids` table keeps (`LaneUids::cover`).
-constexpr std::size_t kMaxVanishedLaneUids = 64;
+/// The most entries a `LaneUids` table can hold, and so the most lanes the state's instance block accepts
+/// (json_api.h): `cover` keeps exactly the entries of the tracks of the document and of its undo and redo history.
+/// A document holds at most `kMaxTracks` tracks, and undo and redo together hold at most
+/// `DocumentStore::kMaxUndoDepth` snapshots (`DocumentStore::historyTrackIds`), so at most
+/// `kMaxTracks x (1 + kMaxUndoDepth)` distinct track ids are in reach: 4 x 201 = 804. A loaded table is held to it
+/// by the loader, and the next `cover` (whose history a load has just cleared) prunes it to the document's tracks.
+constexpr std::size_t kMaxInstanceLanes =
+    static_cast<std::size_t>(kMaxTracks) * (1 + DocumentStore::kMaxUndoDepth);
 
 /// One instance's table of lane uids (per-track instruments plan I2): each track number of the document it has
 /// published gets a UUID once, so that a link names a lane that a reverted or replaced document cannot imitate
@@ -45,10 +51,10 @@ public:
     /// A fresh, never-before-returned uid (a UUID in the shell); never empty, never `kChordsLaneUid`.
     using Generator = std::function<std::string()>;
 
-    /// Gives every track of `doc` without an entry a uid from `make`, in document order. Entries of tracks that
-    /// no longer exist are kept (undo brings a track back with its number, and it must keep its uid), except that
-    /// at most `kMaxVanishedLaneUids` entries of vanished tracks stay: beyond that the lowest track numbers go
-    /// first. The entry of a track of `doc` is never removed. `kChordsLaneUid` (or an empty string) is never
+    /// Gives every track of `doc` without an entry a uid from `make`, in document order, and keeps exactly the
+    /// entries of the tracks of `doc` and of `historyTrackIds` (ascending: `DocumentStore::historyTrackIds`, the
+    /// tracks an undo or a redo can bring back with their number, and so with their uid); every other entry is
+    /// erased, whatever its number. So the table never holds more than `kMaxInstanceLanes` entries. `kChordsLaneUid` (or an empty string) is never
     /// given to a track: `make` returning one is a programming error (asserted); without asserts such a value is
     /// skipped and `make` asked again. Nor is a uid the table already holds (an entry kept from before, or one given
     /// to an earlier track in this call): `make` is asked again, since a generator that restarted, a per-process
@@ -56,7 +62,7 @@ public:
     /// state unloadable. At most 64 answers are asked for one track; after that it gets no entry in this call (a
     /// debug build asserts) and the next `cover` tries again. Returns whether the table changed (an entry added or
     /// removed).
-    bool cover(const Document& doc, const Generator& make);
+    bool cover(const Document& doc, const std::vector<int>& historyTrackIds, const Generator& make);
 
     /// The uid of track `trackId`, or empty when it has none.
     std::string uidOf(int trackId) const;
@@ -410,13 +416,19 @@ public:
     LinkEndpoint(const LinkEndpoint&) = delete;
     LinkEndpoint& operator=(const LinkEndpoint&) = delete;
 
-    /// The instance's publish, in place of a bare `fillSlot` and the own buffer's publish, in the caller's
+    /// The instance's publish of `store`'s document (`doc` below, at the store's `revision`), in place of a bare
+    /// `fillSlot` and the own buffer's publish. It takes the store, not the document, so that the lane uid table
+    /// always learns which vanished tracks undo or redo can still bring back (`LaneUids::cover` with
+    /// `DocumentStore::historyTrackIds`). In the caller's
     /// model-mutex section: the own buffer's single producer is whoever holds that mutex, and this is its only
     /// writer. It may run in the same section as a store change (a command, a state load right after `adopt`) or
     /// later, from this instance's hook or after the caller ran the hooks of an operation. Returns whether it
     /// published the own buffer at least once.
     ///
-    /// Not following: gives every track of `doc` a lane uid (`LaneUids::cover`) and asks the registry which of its
+    /// Always: gives every track of `doc` a lane uid and drops the entries of tracks neither `doc` nor the history
+    /// holds (`LaneUids::cover`).
+    ///
+    /// Not following: asks the registry which of its
     /// lanes (`kChordsLaneUid` and each track's uid) are followed in THIS document, `documentId()` (a follower
     /// whose link names another document does not count: it is about to fall silent, so this instance keeps the
     /// lane). Then, so that the side that gives a lane up always lets go before the side that takes it is written
@@ -443,8 +455,8 @@ public:
     /// Following: fills the own buffer with the whole own document (`fillSlot(doc, LaneSelection{}, ...)`: it is
     /// not played, but Thru rides in it and an unfollow returns to it), publishes it when that returns true, and
     /// publishes no feed. That publication excludes nothing, so a later leading publish brings nothing back.
-    bool publishOwn(const Document& doc, std::uint64_t revision, const std::string& lineage,
-                    TripleBuffer<SnapshotSlot>& ownBuffer, Publication& ownPublication);
+    bool publishOwn(const DocumentStore& store, const std::string& lineage, TripleBuffer<SnapshotSlot>& ownBuffer,
+                    Publication& ownPublication);
 
     /// A test seam: when set, called inside a leading `publishOwn` between its publications, after step 1 and
     /// after step 2 (twice per call, whether or not a step published anything), with the caller's model mutex

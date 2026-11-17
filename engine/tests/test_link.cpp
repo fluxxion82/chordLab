@@ -142,7 +142,7 @@ struct Linked {
         if (shareAPitch) aNotes.push_back(ns(60, 960, 960));
         a = addTrackWith(store, TrackRole::Bass, "Low", aNotes);
         b = addTrackWith(store, TrackRole::Lead, "High", {ns(38, 1920, 480)});
-        REQUIRE(uids.cover(store.doc(), make));
+        REQUIRE(uids.cover(store.doc(), store.historyTrackIds(), make));
         uidA = uids.uidOf(a);
         uidB = uids.uidOf(b);
         for (const NoteEvent& e : compile(store.doc()).events) REQUIRE(e.pitch > 38);
@@ -165,7 +165,7 @@ TEST_CASE("link uids: cover gives every track one uid, once") {
     LaneUids uids;
     const LaneUids::Generator make = counter();
     CHECK(uids.entries().empty());
-    REQUIRE(uids.cover(store.doc(), make));
+    REQUIRE(uids.cover(store.doc(), store.historyTrackIds(), make));
     const std::string uidA = uids.uidOf(a);
     const std::string uidB = uids.uidOf(b);
     CHECK(uidA == "uid-1");  // document order
@@ -173,12 +173,12 @@ TEST_CASE("link uids: cover gives every track one uid, once") {
     CHECK(uids.entries() == std::map<int, std::string>{{a, uidA}, {b, uidB}});
 
     // Covered: nothing changes and the generator is not asked.
-    CHECK_FALSE(uids.cover(store.doc(), make));
+    CHECK_FALSE(uids.cover(store.doc(), store.historyTrackIds(), make));
     CHECK(uids.entries() == std::map<int, std::string>{{a, uidA}, {b, uidB}});
 
     // A new track gets a new uid; the old ones keep theirs.
     const int c = store.addTrack(TrackRole::Other);
-    CHECK(uids.cover(store.doc(), make));
+    CHECK(uids.cover(store.doc(), store.historyTrackIds(), make));
     CHECK(uids.uidOf(c) == "uid-3");
     CHECK(uids.uidOf(a) == uidA);
     CHECK(uids.uidOf(b) == uidB);
@@ -203,7 +203,7 @@ TEST_CASE("link uids: cover asks again when the generator returns a uid the tabl
         ++asked;
         return restarted();
     };
-    CHECK(uids.cover(store.doc(), make));
+    CHECK(uids.cover(store.doc(), store.historyTrackIds(), make));
     CHECK(asked == 3);  // uid-1 and uid-2 refused, uid-3 taken
     CHECK(uids.entries() == std::map<int, std::string>{{a, "uid-1"}, {b, "uid-2"}, {c, "uid-3"}});
 
@@ -214,7 +214,7 @@ TEST_CASE("link uids: cover asks again when the generator returns a uid the tabl
     LaneUids fresh;
     const std::vector<std::string> answers = {"same", "same", "other"};
     std::size_t next = 0;
-    CHECK(fresh.cover(two.doc(), [&] { return answers.at(next++); }));
+    CHECK(fresh.cover(two.doc(), two.historyTrackIds(), [&] { return answers.at(next++); }));
     CHECK(next == 3);
     CHECK(fresh.entries() == std::map<int, std::string>{{x, "same"}, {y, "other"}});
 }
@@ -225,19 +225,19 @@ TEST_CASE("link uids: a removed track keeps its entry and, restored by undo, its
     const int b = store.addTrack(TrackRole::Lead);
     LaneUids uids;
     const LaneUids::Generator make = counter();
-    REQUIRE(uids.cover(store.doc(), make));
+    REQUIRE(uids.cover(store.doc(), store.historyTrackIds(), make));
     const std::map<int, std::string> before = uids.entries();
     const std::string uidB = uids.uidOf(b);
 
     REQUIRE(store.removeTrack(b));
-    CHECK_FALSE(uids.cover(store.doc(), make));  // the entry stays: nothing changed
+    CHECK_FALSE(uids.cover(store.doc(), store.historyTrackIds(), make));  // the entry stays: nothing changed
     CHECK(uids.entries() == before);
     CHECK(uids.uidOf(b) == uidB);
     CHECK_FALSE(uids.laneOf(store.doc(), uidB).has_value());  // but it names no lane of this document
 
     REQUIRE(store.undo());
     REQUIRE(store.findTrackIndex(b) >= 0);
-    CHECK_FALSE(uids.cover(store.doc(), make));
+    CHECK_FALSE(uids.cover(store.doc(), store.historyTrackIds(), make));
     CHECK(uids.uidOf(b) == uidB);
     CHECK(uids.uidOf(a) == before.at(a));
     const std::optional<LaneKey> lane = uids.laneOf(store.doc(), uidB);
@@ -250,7 +250,7 @@ TEST_CASE("link uids: laneOf names the chords lane, a track by its uid, and noth
     const int a = store.addTrack(TrackRole::Bass);
     const int b = store.addTrack(TrackRole::Lead);
     LaneUids uids;
-    REQUIRE(uids.cover(store.doc(), counter()));
+    REQUIRE(uids.cover(store.doc(), store.historyTrackIds(), counter()));
 
     const std::optional<LaneKey> chords = uids.laneOf(store.doc(), kChordsLaneUid);
     REQUIRE(chords.has_value());
@@ -282,7 +282,7 @@ TEST_CASE("link uids: replace swaps the whole table") {
     const int b = store.addTrack(TrackRole::Lead);
     LaneUids uids;
     const LaneUids::Generator make = counter();
-    REQUIRE(uids.cover(store.doc(), make));
+    REQUIRE(uids.cover(store.doc(), store.historyTrackIds(), make));
     const std::string oldA = uids.uidOf(a);
 
     const std::map<int, std::string> loaded{{a, "x-a"}, {77, "x-77"}};
@@ -295,11 +295,12 @@ TEST_CASE("link uids: replace swaps the whole table") {
     CHECK(*uids.laneOf(store.doc(), "x-a") == trackLane(a));
     CHECK_FALSE(uids.laneOf(store.doc(), oldA).has_value());
 
-    // The next cover gives b a fresh uid and keeps the loaded entries (77 vanished, kept).
-    CHECK(uids.cover(store.doc(), make));
+    // The next cover gives b a fresh uid and keeps a's loaded entry; 77 is in neither the document nor the
+    // history, so its entry goes.
+    CHECK(uids.cover(store.doc(), store.historyTrackIds(), make));
     CHECK(uids.uidOf(b) == "uid-3");
     CHECK(uids.uidOf(a) == "x-a");
-    CHECK(uids.uidOf(77) == "x-77");
+    CHECK(uids.uidOf(77).empty());
 }
 
 TEST_CASE("link uids: a reverted table never hands a reused track number its old uid") {
@@ -309,7 +310,7 @@ TEST_CASE("link uids: a reverted table never hands a reused track number its old
     const int first = store.addTrack(TrackRole::Bass);
     LaneUids uids;
     const LaneUids::Generator make = counter();
-    REQUIRE(uids.cover(store.doc(), make));
+    REQUIRE(uids.cover(store.doc(), store.historyTrackIds(), make));
     const std::map<int, std::string> savedTable = uids.entries();  // saved while only `first` existed
     const Document savedDoc = store.doc();
     const int savedNextId = store.nextId();
@@ -318,7 +319,7 @@ TEST_CASE("link uids: a reverted table never hands a reused track number its old
     const int savedNextNoteId = store.nextNoteId();
 
     const int second = store.addTrack(TrackRole::Lead);
-    REQUIRE(uids.cover(store.doc(), make));
+    REQUIRE(uids.cover(store.doc(), store.historyTrackIds(), make));
     const std::string oldUid = uids.uidOf(second);
     REQUIRE_FALSE(oldUid.empty());
 
@@ -328,7 +329,7 @@ TEST_CASE("link uids: a reverted table never hands a reused track number its old
     const int reused = store.addTrack(TrackRole::Other);
     REQUIRE(reused == second);  // the number comes back
 
-    CHECK(uids.cover(store.doc(), make));
+    CHECK(uids.cover(store.doc(), store.historyTrackIds(), make));
     CHECK_FALSE(uids.uidOf(reused).empty());
     CHECK(uids.uidOf(reused) != oldUid);
     CHECK(uids.uidOf(first) == savedTable.at(first));
@@ -337,57 +338,68 @@ TEST_CASE("link uids: a reverted table never hands a reused track number its old
     CHECK(*uids.laneOf(store.doc(), uids.uidOf(reused)) == trackLane(reused));
 }
 
-TEST_CASE("link uids: at most kMaxVanishedLaneUids vanished entries stay, the lowest numbers going first") {
-    // Tracks 1 and 2 stay throughout; tracks 3, 4, ... appear one at a time beside them and vanish.
-    constexpr int kExtra = 6;
-    const int lastVanished = 2 + static_cast<int>(kMaxVanishedLaneUids) + kExtra;
+TEST_CASE("link uids: an entry stays while its track is in the document or in the history, and only then") {
     LaneUids uids;
     const LaneUids::Generator make = counter();
-    std::map<int, std::string> given;
-    const auto vanishedCount = [&](const std::vector<int>& existing) {
-        std::size_t n = 0;
-        for (const auto& entry : uids.entries()) {
-            if (std::find(existing.begin(), existing.end(), entry.first) == existing.end()) ++n;
-        }
-        return n;
-    };
-    for (int id = 3; id <= lastVanished; ++id) {
-        REQUIRE(uids.cover(docWithTracks({1, 2, id}), make));
-        given[id] = uids.uidOf(id);
-        CHECK(vanishedCount({1, 2, id}) <= kMaxVanishedLaneUids);
-    }
+    REQUIRE(uids.cover(docWithTracks({1, 2}), {}, make));
     const std::string uid1 = uids.uidOf(1);
     const std::string uid2 = uids.uidOf(2);
-    CHECK(uid1 == "uid-1");
-    CHECK(uid2 == "uid-2");
 
-    // The last one vanishes too: a removal alone is a change, and asks the generator nothing.
-    CHECK(uids.cover(docWithTracks({1, 2}), make));
-    CHECK(make() == "uid-" + std::to_string(lastVanished + 1));  // nothing was taken since
-    CHECK(uids.entries().size() == 2 + kMaxVanishedLaneUids);
-    CHECK(uids.uidOf(1) == uid1);  // the existing tracks keep theirs, though their numbers are the lowest
+    CHECK_FALSE(uids.cover(docWithTracks({2}), {1}, make));  // track 1 vanished, but undo can bring it back
+    CHECK(uids.uidOf(1) == uid1);
+    CHECK(uids.cover(docWithTracks({2}), {}, make));  // neither the document nor the history: it goes
+    CHECK(uids.uidOf(1).empty());
     CHECK(uids.uidOf(2) == uid2);
-    for (int id = 3; id <= lastVanished; ++id) {
-        CAPTURE(id);
-        if (id < 3 + kExtra) {
-            CHECK(uids.uidOf(id).empty());
-        } else {
-            CHECK(uids.uidOf(id) == given.at(id));
-        }
-    }
-    CHECK_FALSE(uids.cover(docWithTracks({1, 2}), make));
+    CHECK(uids.cover(docWithTracks({2}), {2}, make) == false);  // a track of both: kept, nothing to change
+    CHECK(make() == "uid-3");  // removals ask the generator nothing
 
-    // A loaded table beyond the cap is trimmed by the next cover, existing tracks untouched.
+    // A loaded table: entries of tracks in neither go at the next cover, whatever their number.
     std::map<int, std::string> big;
     for (int id = 1; id <= 200; ++id) big[id] = "big-" + std::to_string(id);
     uids.replace(big);
-    CHECK(uids.cover(docWithTracks({5, 150}), make));
-    CHECK(uids.entries().size() == 2 + kMaxVanishedLaneUids);
-    CHECK(uids.uidOf(5) == "big-5");
-    CHECK(uids.uidOf(150) == "big-150");
-    CHECK(uids.uidOf(200 - static_cast<int>(kMaxVanishedLaneUids)) == "big-" +
-                                                                         std::to_string(200 - kMaxVanishedLaneUids));
-    CHECK(uids.uidOf(200 - static_cast<int>(kMaxVanishedLaneUids) - 1).empty());
+    CHECK(uids.cover(docWithTracks({5, 150}), {7, 199}, make));
+    CHECK(uids.entries() ==
+          std::map<int, std::string>{{5, "big-5"}, {7, "big-7"}, {150, "big-150"}, {199, "big-199"}});
+}
+
+TEST_CASE("link uids: 64 stale entries never push out a track that undo can bring back") {
+    // Review finding: with a cap of 64 vanished entries, lowest numbers first, deleting the oldest live track of a
+    // table that already held 64 stale entries evicted it at once, and undo brought it back with a new uid.
+    LaneUids uids;
+    const LaneUids::Generator make = counter();
+    std::map<int, std::string> loaded{{1, "live-1"}, {2, "live-2"}};
+    for (int id = 100; id < 164; ++id) loaded[id] = "stale-" + std::to_string(id);
+    uids.replace(loaded);
+    CHECK(uids.cover(docWithTracks({2}), {1, 2}, make));  // track 1 deleted, in the undo history; the stale go
+    CHECK(uids.entries() == std::map<int, std::string>{{1, "live-1"}, {2, "live-2"}});
+    CHECK_FALSE(uids.cover(docWithTracks({1, 2}), {2}, make));  // undone
+    CHECK(uids.uidOf(1) == "live-1");
+}
+
+TEST_CASE("link uids: a deleted track keeps its uid while 65 others come and go, then comes back by undo") {
+    // Codex's case: delete track 1, create and delete 65 tracks, undo 131 times. The history holds every one of
+    // them throughout (131 snapshots, under DocumentStore::kMaxUndoDepth).
+    LaneUids uids;
+    const LaneUids::Generator make = counter();
+    REQUIRE(uids.cover(docWithTracks({1, 2}), {}, make));
+    const std::string uid1 = uids.uidOf(1);
+    std::vector<int> history{1, 2};
+    uids.cover(docWithTracks({2}), history, make);
+    for (int id = 3; id < 3 + 65; ++id) {
+        uids.cover(docWithTracks({2, id}), history, make);
+        history.push_back(id);
+        std::sort(history.begin(), history.end());
+        uids.cover(docWithTracks({2}), history, make);
+        CHECK(uids.uidOf(1) == uid1);
+    }
+    CHECK(uids.entries().size() == 67);
+    // Undone all the way: the history now holds what redo can bring back; track 1 is in the document again.
+    CHECK_FALSE(uids.cover(docWithTracks({1, 2}), history, make));
+    CHECK(uids.uidOf(1) == uid1);
+    // A commit clears the redo history: the passing tracks are gone for good, and so are their entries.
+    CHECK(uids.cover(docWithTracks({1, 2}), {1, 2}, make));
+    CHECK(uids.entries().size() == 2);
+    CHECK(uids.uidOf(1) == uid1);
 }
 
 // --- the feed ---------------------------------------------------------------------------------------------------
@@ -530,7 +542,7 @@ TEST_CASE("link feed: a followed uid that names no lane is ignored") {
     Linked d;
     // A vanished track's uid is still in the table, but names no lane of the document.
     const int c = addTrackWith(d.store, TrackRole::Other, "Gone", {ns(40, 0, 960)});
-    REQUIRE(d.uids.cover(d.store.doc(), d.make));
+    REQUIRE(d.uids.cover(d.store.doc(), d.store.historyTrackIds(), d.make));
     const std::string uidC = d.uids.uidOf(c);
     REQUIRE(d.store.removeTrack(c));
     const auto feed = d.feed({"uid-404", "", uidC, d.uidB, "Chords"});

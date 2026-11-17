@@ -27,7 +27,8 @@ constexpr int kLaneUidAttempts = 64;
 
 }  // namespace
 
-bool LaneUids::cover(const Document& doc, const Generator& make) {
+bool LaneUids::cover(const Document& doc, const std::vector<int>& historyTrackIds, const Generator& make) {
+    assert(std::is_sorted(historyTrackIds.begin(), historyTrackIds.end()) && "LaneUids::cover: history ascending");
     bool changed = false;
     for (const Track& track : doc.tracks) {
         if (entries_.count(track.id) != 0) continue;
@@ -47,18 +48,14 @@ bool LaneUids::cover(const Document& doc, const Generator& make) {
         entries_.emplace(track.id, std::move(*uid));
         changed = true;
     }
-    // Vanished entries beyond the cap go, lowest track numbers first (the map iterates in ascending order).
-    std::size_t vanished = 0;
-    for (const auto& entry : entries_) {
-        if (!holdsTrack(doc, entry.first)) ++vanished;
-    }
-    for (auto it = entries_.begin(); vanished > kMaxVanishedLaneUids && it != entries_.end();) {
-        if (holdsTrack(doc, it->first)) {
+    // An entry stays while its track is in the document or an undo or redo can bring it back with its number.
+    for (auto it = entries_.begin(); it != entries_.end();) {
+        if (holdsTrack(doc, it->first) ||
+            std::binary_search(historyTrackIds.begin(), historyTrackIds.end(), it->first)) {
             ++it;
             continue;
         }
         it = entries_.erase(it);
-        --vanished;
         changed = true;
     }
     return changed;
@@ -639,9 +636,11 @@ bool contains(const std::vector<std::string>& list, const std::string& value) {
 
 }  // namespace
 
-bool LinkEndpoint::publishOwn(const Document& doc, std::uint64_t revision, const std::string& lineage,
+bool LinkEndpoint::publishOwn(const DocumentStore& store, const std::string& lineage,
                               TripleBuffer<SnapshotSlot>& ownBuffer, Publication& ownPublication) {
-    uids_.cover(doc, makeUid_);
+    const Document& doc = store.doc();
+    const std::uint64_t revision = store.revision();
+    uids_.cover(doc, store.historyTrackIds(), makeUid_);
     if (following()) {
         ownExcluded_.clear();  // the whole own document: nothing excluded
         return fillAndPublish(doc, LaneSelection{}, ownBuffer, ownPublication);

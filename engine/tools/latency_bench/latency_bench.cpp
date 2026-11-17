@@ -153,7 +153,7 @@ struct LinkedLeader {
 
     explicit LinkedLeader(const Document& doc) {
         int n = 0;
-        require(uids.cover(doc, [&n] { return "lane-uid-" + std::to_string(++n); }), "cover changed nothing");
+        require(uids.cover(doc, {}, [&n] { return "lane-uid-" + std::to_string(++n); }), "cover changed nothing");
         for (const Track& t : doc.tracks) {
             own.lanes.push_back(trackLane(t.id));
             followed.push_back(uids.uidOf(t.id));

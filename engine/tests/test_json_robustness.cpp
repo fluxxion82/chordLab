@@ -1179,7 +1179,7 @@ bool validLinkId(const std::string& s) {
 
 /// Whether `s` keeps every rule of the instance block: the fuzz's oracle for what an accepted block may hold.
 bool instanceValid(const InstanceState& s) {
-    if (!validLinkId(s.id) || !validLinkId(s.documentId) || s.lanes.size() > kMaxTracks + kMaxVanishedLaneUids) {
+    if (!validLinkId(s.id) || !validLinkId(s.documentId) || s.lanes.size() > kMaxInstanceLanes) {
         return false;
     }
     std::set<std::string> uids;

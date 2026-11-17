@@ -797,6 +797,14 @@ public:
     /// The content revision (see the class comment): 1 for a new store.
     std::uint64_t revision() const;
 
+    /// The ids of every track held by any undo or redo snapshot, ascending, each once (the current document's are
+    /// not included unless a snapshot holds them too). A track id is never reused within a store, so a track that
+    /// is not in the document can come back with its id only while one of these snapshots holds it; `replace`
+    /// clears both stacks, and the oldest undo snapshot drops off past `kMaxUndoDepth`. Undo and redo together
+    /// never hold more than `kMaxUndoDepth` snapshots (a commit caps the undo stack and clears the redo stack; undo
+    /// and redo move one snapshot between them), so this lists at most `kMaxTracks x kMaxUndoDepth` ids.
+    std::vector<int> historyTrackIds() const;
+
     /// Position of event `id` in playback order, or -1 if no event has that id.
     int findIndex(int id) const;
 

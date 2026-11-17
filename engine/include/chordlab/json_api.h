@@ -653,8 +653,8 @@ std::string stateJson(const DocumentStore& store, int editorWidth = kDefaultEdit
 /// - `id` and `doc` (into `documentId`) required ids: a string of 1..`kMaxLinkIdBytes` bytes, each printable ASCII
 ///   0x21..0x7E, so no space and no control character (`missing instance.id`, `instance.id must be a string of 1..64
 ///   printable ASCII characters (0x21..0x7E)`, likewise `instance.doc`);
-/// - `lanes` a required object (`instance.lanes must be an object`) of at most `kMaxTracks + kMaxVanishedLaneUids`
-///   members (`instance.lanes must hold at most 68 entries`) whose keys are track numbers written canonically,
+/// - `lanes` a required object (`instance.lanes must be an object`) of at most `kMaxInstanceLanes` (link.h)
+///   members (`instance.lanes must hold at most 804 entries`) whose keys are track numbers written canonically,
 ///   decimal digits only, no sign, no leading zero, in 1..INT_MAX-1 (`instance.lanes keys must be track numbers in
 ///   1..2147483646, decimal without sign or leading zeros`: "01", "-1", "+1", "1.0", " 1", "x", "0" and
 ///   "2147483647" are all refused) and whose values are ids as above (`instance.lanes.<n> must be a string of ...`),
@@ -676,7 +676,7 @@ bool loadStateJson(DocumentStore& store, std::string_view json, std::string& err
 
 /// The rules of the state's instance block (`loadStateJson` lists them with its messages), on plain data, shared by
 /// the reader and the writer: `id` and `documentId` 1..`kMaxLinkIdBytes` bytes of printable ASCII 0x21..0x7E; at most
-/// `kMaxTracks + kMaxVanishedLaneUids` lanes, each keyed by a track number in 1..INT_MAX-1, with a uid that is such an
+/// `kMaxInstanceLanes` (link.h) lanes, each keyed by a track number in 1..INT_MAX-1, with a uid that is such an
 /// id, never `"chords"`, all uids pairwise different; a follow's `leaderId`, `documentId` and `laneUid` such ids, its
 /// `laneName`, `laneRole` and `leaderLabel` valid UTF-8 of at most `kMaxTrackNameBytes`, 16 and `kMaxLinkLabelBytes`
 /// bytes. Returns true when `instance` keeps every one; otherwise false, with a short reason naming the field in

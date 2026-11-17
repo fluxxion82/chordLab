@@ -439,6 +439,18 @@ std::uint64_t DocumentStore::revision() const {
     return revision_;
 }
 
+std::vector<int> DocumentStore::historyTrackIds() const {
+    std::vector<int> ids;
+    for (const std::deque<Document>* stack : {&undoStack_, &redoStack_}) {
+        for (const Document& snapshot : *stack) {
+            for (const Track& track : snapshot.tracks) ids.push_back(track.id);
+        }
+    }
+    std::sort(ids.begin(), ids.end());
+    ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+    return ids;
+}
+
 int DocumentStore::findTrackIndex(int id) const {
     for (std::size_t i = 0; i < doc_.tracks.size(); ++i) {
         if (doc_.tracks[i].id == id) {

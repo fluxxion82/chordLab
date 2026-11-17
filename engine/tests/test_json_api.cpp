@@ -6426,20 +6426,20 @@ TEST_CASE("instance block: bad lanes reject the whole state naming the field") {
             }
             s["instance"]["lanes"] = lanes;
         },
-        "instance.lanes must hold at most 68 entries");
+        "instance.lanes must hold at most 804 entries");
     cases.emplace_back(
         [](json& s) {
             json lanes = json::object();
-            for (std::size_t i = 1; i <= kMaxTracks + kMaxVanishedLaneUids + 1; ++i) {
+            for (std::size_t i = 1; i <= kMaxInstanceLanes + 1; ++i) {
                 lanes[std::to_string(i)] = "u" + std::to_string(i);
             }
             s["instance"]["lanes"] = lanes;
         },
-        "instance.lanes must hold at most 68 entries");
+        "instance.lanes must hold at most 804 entries");
     for (const auto& [edit, expected] : cases) {
         checkInstanceRejected(editedInstanceState(edit), expected);
     }
-    static_assert(kMaxTracks + kMaxVanishedLaneUids == 68, "the message above names the cap");
+    static_assert(kMaxInstanceLanes == 804, "the message above names the cap");
 }
 
 TEST_CASE("instance block: a bad follow rejects the whole state naming the field") {
@@ -6499,10 +6499,10 @@ TEST_CASE("instance block: every bound is inclusive: the longest ids, the edge c
     longHints.follow->leaderLabel = std::string(96, 'l');
     InstanceState mostLanes = fullInstance();
     mostLanes.lanes.clear();
-    for (int i = 0; i < static_cast<int>(kMaxTracks + kMaxVanishedLaneUids); ++i) {
+    for (int i = 0; i < static_cast<int>(kMaxInstanceLanes); ++i) {
         mostLanes.lanes[INT_MAX - 1 - i] = "lane-" + std::to_string(i);
     }
-    REQUIRE(mostLanes.lanes.size() == 68);
+    REQUIRE(mostLanes.lanes.size() == kMaxInstanceLanes);
     const DocumentStore store = trackedStore();
     for (const InstanceState& instance : {edges, longHints, mostLanes}) {
         const std::optional<InstanceState> read = loadedInstance(stateJson(store, 900, 620, &instance));
@@ -6584,7 +6584,7 @@ std::vector<std::pair<InstanceState, std::string>> brokenInstances() {
     broken("lanes.2", [](InstanceState& s) { s.lanes[2] = "chords"; });
     broken("lanes.2", [](InstanceState& s) { s.lanes[2] = "lane uid"; });
     broken("lanes", [](InstanceState& s) {
-        for (int i = 1; i <= 69; ++i) s.lanes[i] = "u" + std::to_string(i);
+        for (int i = 1; i <= static_cast<int>(kMaxInstanceLanes) + 1; ++i) s.lanes[i] = "u" + std::to_string(i);
     });
     broken("id", [](InstanceState& s) { s.id = "has space"; });
     broken("id", [](InstanceState& s) { s.id.clear(); });
@@ -6719,13 +6719,13 @@ std::string widestLinkId(std::uint64_t n) {
     return id;
 }
 
-/// The widest valid block: ids and uids of `widestLinkId`, `kMaxTracks + kMaxVanishedLaneUids` lanes keyed by
+/// The widest valid block: ids and uids of `widestLinkId`, `kMaxInstanceLanes` lanes keyed by
 /// ten-digit track numbers, and every hint at its byte bound of '\x01' (six bytes each as `\u0001`).
 InstanceState worstCaseInstance() {
     InstanceState s;
     s.id = widestLinkId(1);
     s.documentId = widestLinkId(2);
-    for (std::uint64_t i = 0; i < kMaxTracks + kMaxVanishedLaneUids; ++i) {
+    for (std::uint64_t i = 0; i < kMaxInstanceLanes; ++i) {
         s.lanes[INT_MAX - 1 - static_cast<int>(i)] = widestLinkId(100 + i);
     }
     s.follow = LinkFollow{widestLinkId(3), widestLinkId(4), widestLinkId(5),
@@ -6736,14 +6736,14 @@ InstanceState worstCaseInstance() {
 
 /// `stateJson` of `worstCaseStore()` with `worstCaseInstance()` at the default editor size, measured; pinned beside
 /// `kWorstCaseStateBytes` so that a change to the block's shape shows up here against `kMaxJsonBytes`.
-constexpr std::size_t kWorstCaseStateWithInstanceBytes = 575235;
+constexpr std::size_t kWorstCaseStateWithInstanceBytes = 681219;
 
 }  // namespace
 
 TEST_CASE("capacity: the largest possible state with the largest instance block is under kMaxJsonBytes and round-trips") {
     const DocumentStore original = worstCaseStore();
     const InstanceState instance = worstCaseInstance();
-    REQUIRE(instance.lanes.size() == kMaxTracks + kMaxVanishedLaneUids);
+    REQUIRE(instance.lanes.size() == kMaxInstanceLanes);
     const std::string text = stateJson(original, kDefaultEditorWidth, kDefaultEditorHeight, &instance);
     MESSAGE("worst-case state with the instance block: " << text.size() << " bytes");
     CHECK(text.size() == kWorstCaseStateWithInstanceBytes);

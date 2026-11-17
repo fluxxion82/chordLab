@@ -2307,9 +2307,6 @@ bool parseCounter(Fields& fields, const char* name, int maxId, const char* what,
 /// The longest `role` hint of a follow in the instance block, in bytes ("bass", "lead" and "other" today).
 constexpr std::size_t kMaxLinkRoleBytes = 16;
 
-/// The most entries a block's `lanes` holds: every track of a document plus the vanished ones `LaneUids` keeps.
-constexpr std::size_t kMaxInstanceLanes = static_cast<std::size_t>(kMaxTracks) + kMaxVanishedLaneUids;
-
 /// Whether `track` can key a block's lane: 1..INT_MAX-1, as a track id.
 bool isLaneTrack(int track) {
     return track >= 1 && track <= INT_MAX - 1;

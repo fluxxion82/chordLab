@@ -3010,3 +3010,44 @@ TEST_CASE("appendProgression / replaceProgression: the progressionRefusal pre-ch
     CHECK_FALSE(noSections.appendProgression({{kC, 1.0}}, "A", &refusal));
     CHECK(refusal == "No section ids are left");
 }
+
+// --- the track ids of the history ---------------------------------------------------------------------------------
+
+TEST_CASE("store: historyTrackIds lists every track id an undo or redo snapshot holds, sorted, once") {
+    using Ids = std::vector<int>;
+    DocumentStore store;
+    CHECK(store.historyTrackIds().empty());
+    store.appendChord(Chord{0, &chordType("maj")}, 4.0, 100);
+    const int a = store.addTrack(TrackRole::Bass);
+    CHECK(store.historyTrackIds().empty());  // the snapshots before it hold no track
+    const int b = store.addTrack(TrackRole::Lead);
+    CHECK(store.historyTrackIds() == Ids{a});
+    REQUIRE(store.removeTrack(a));
+    CHECK(store.historyTrackIds() == Ids{a, b});  // a and b each held by several snapshots: listed once
+
+    REQUIRE(store.undo());                         // the redo snapshot holds b alone
+    CHECK(store.historyTrackIds() == Ids{a, b});
+    REQUIRE(store.undo());
+    CHECK(store.historyTrackIds() == Ids{a, b});   // a in the undo stack, a and b in the redo stack
+    REQUIRE(store.redo());
+    CHECK(store.historyTrackIds() == Ids{a, b});
+
+    // A commit after an undo clears the redo stack: b was only there.
+    REQUIRE(store.undo());
+    REQUIRE(store.doc().tracks.size() == 1);
+    const int c = store.addTrack(TrackRole::Other);
+    REQUIRE(c > b);  // ids are never reused, even after undo
+    CHECK(store.historyTrackIds() == Ids{a});
+
+    // More than kMaxUndoDepth commits: the snapshots that held c drop off.
+    REQUIRE(store.removeTrack(c));
+    CHECK(store.historyTrackIds() == Ids{a, c});
+    for (std::size_t i = 0; i < DocumentStore::kMaxUndoDepth; ++i) {
+        store.setVelocity(store.doc().events[0].id, i % 2 == 0 ? 90 : 100);
+    }
+    CHECK(store.historyTrackIds() == Ids{a});
+
+    // A load clears both stacks.
+    store.replace(store.doc(), store.nextId(), store.nextSectionId(), store.nextTrackId(), store.nextNoteId());
+    CHECK(store.historyTrackIds().empty());
+}
