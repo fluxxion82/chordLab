@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <thread>
@@ -737,6 +738,23 @@ TEST_CASE("link registry: a follower's status") {
     CHECK(w.status(f) == LinkStatus::Waiting);
 }
 
+TEST_CASE("link registry: a feed of another document is ProjectChanged even when it lacks the lane") {
+    Song s;
+    World w;
+    Inst& l = w.add("L");
+    Inst& f = w.add("F");
+    w.reg.setFollow(f.token, follow("L", s.uidA, "doc-1"));
+    // The leader's document is now another one, with no track at all: the lane uid is in neither its feed nor it.
+    DocumentStore other;
+    other.appendChord(chord(2, "min"), 4.0, 100);
+    const LaneUids none;
+    const auto feed = buildLinkFeed(other.doc(), "doc-2", none, "lineage-2", "feed label", {});
+    REQUIRE(std::none_of(feed->lanes.begin(), feed->lanes.end(),
+                         [&](const LinkLane& lane) { return lane.uid == s.uidA; }));
+    w.reg.publish(l.token, feed);
+    CHECK(w.status(f) == LinkStatus::ProjectChanged);
+}
+
 // --- rule 8: copies ---------------------------------------------------------------------------------------------
 
 TEST_CASE("link registry: a follower that is a copy is offered its leader's newest live leading copy") {
@@ -792,6 +810,46 @@ TEST_CASE("link registry: a follower that is a copy is offered its leader's newe
     CHECK_FALSE(w.view(f2).switchTo.has_value());
 }
 
+TEST_CASE("link registry: a follower that is a copy is offered no copy of an unrelated leader") {
+    Song s;
+    World w;
+    Inst& l = w.add("L");
+    w.add("M");
+    Inst& f = w.add("F");
+    w.reg.setFollow(f.token, follow("L", s.uidA));
+    // M is duplicated (its copy leads); L is not.
+    Inst& m2 = w.add("M2", "ctor-m2");
+    REQUIRE(w.reg.adoptState(m2.token, "M", "M-copy", std::nullopt).copy);
+    Inst& f2 = w.add("F2", "ctor-f2");
+    REQUIRE(w.reg.adoptState(f2.token, "F", "F-copy", follow("L", s.uidA)).copy);
+    REQUIRE(w.status(f2) == LinkStatus::ProjectChanged);  // bound to L
+    CHECK_FALSE(w.view(f2).switchTo.has_value());
+    (void)l;
+}
+
+TEST_CASE("link registry: a copy that keeps its id on a load because followers are bound is no copy any more") {
+    Song s;
+    World w;
+    w.add("L");
+    Inst& f = w.add("F");
+    w.reg.setFollow(f.token, follow("L", s.uidA));
+    Inst& f2 = w.add("F2", "ctor-f2");
+    REQUIRE(w.reg.adoptState(f2.token, "F", "F-copy", follow("L", s.uidA)).copy);
+    Inst& d = w.add("D", "ctor-d");
+    REQUIRE(w.reg.adoptState(d.token, "L", "L-copy", std::nullopt).copy);
+    REQUIRE(w.switchId(f2) == "L-copy");
+
+    // D gets a follower of its own, then reloads a state: it keeps its id (rule 3) and is no copy after that load.
+    Inst& g = w.add("G");
+    w.reg.setFollow(g.token, follow("L-copy", s.uidA));
+    REQUIRE(w.followed(d, s) == Names{s.uidA});
+    const LinkRegistry::Adopted a = w.reg.adoptState(d.token, "L", "L-copy-2", std::nullopt);
+    CHECK(a.id == "L-copy");
+    CHECK_FALSE(a.copy);
+    CHECK(w.view(d).id == "L-copy");
+    CHECK_FALSE(w.view(f2).switchTo.has_value());
+}
+
 // --- rule 9: labels ---------------------------------------------------------------------------------------------
 
 TEST_CASE("link registry: labels go A to Z by order of add, then numbers, one per instance for its lifetime") {
@@ -814,7 +872,7 @@ TEST_CASE("link registry: labels go A to Z by order of add, then numbers, one pe
 
 // --- rule 10: serial --------------------------------------------------------------------------------------------
 
-TEST_CASE("link registry: the serial moves on every change and on publish, not on reads") {
+TEST_CASE("link registry: the serial moves when a view changes and on every publish, never on no-ops or reads") {
     Song s;
     World w;
     const auto moved = [&](const std::function<void()>& call) {
@@ -826,21 +884,163 @@ TEST_CASE("link registry: the serial moves on every change and on publish, not o
     Inst* f = nullptr;
     CHECK(moved([&] { l = &w.add("L"); }));
     CHECK(moved([&] { f = &w.add("F"); }));
+
+    // setFollow: the link and the binding move it; the identical follow does not; hints alone do.
     CHECK(moved([&] { w.reg.setFollow(f->token, follow("L", s.uidA)); }));
-    const auto feed = s.feed({s.uidA});
-    CHECK(moved([&] { w.reg.publish(l->token, feed); }));
-    CHECK(moved([&] { w.reg.publish(l->token, feed); }));  // every publish
-    CHECK(moved([&] { w.reg.adoptState(l->token, "L2", "L3", std::nullopt); }));  // no followers: takes L2
+    CHECK_FALSE(moved([&] { w.reg.setFollow(f->token, follow("L", s.uidA)); }));
     LinkFollow hinted = follow("L", s.uidA);
     hinted.laneName = "new name";
-    CHECK(moved([&] { w.reg.setFollow(f->token, hinted); }));  // hints alone change the view
+    CHECK(moved([&] { w.reg.setFollow(f->token, hinted); }));
+    CHECK_FALSE(moved([&] { w.reg.setFollow(f->token, hinted); }));
+
+    // publish: every call (a new feed).
+    const auto feed = s.feed({s.uidA});
+    CHECK(moved([&] { w.reg.publish(l->token, feed); }));
+    CHECK(moved([&] { w.reg.publish(l->token, feed); }));
+
+    // adoptState that changes nothing: a leader reloading its own id, a bound leader keeping its id, a follower
+    // reloading its own state.
+    CHECK_FALSE(moved([&] { w.reg.adoptState(l->token, "L", "L-2", std::nullopt); }));
+    CHECK_FALSE(moved([&] { w.reg.adoptState(l->token, "X", "L-2", std::nullopt); }));  // keeps "L": f is bound
+    CHECK_FALSE(moved([&] { w.reg.adoptState(f->token, "F", "F-2", hinted); }));
+    // adoptState that changes the follow, the id, or being a copy.
+    CHECK(moved([&] { w.reg.adoptState(f->token, "F", "F-2", std::nullopt); }));
+    CHECK(moved([&] { w.reg.adoptState(l->token, "L2", "L3", std::nullopt); }));  // no followers now: takes L2
+    Inst* c = nullptr;
+    CHECK(moved([&] { c = &w.add("C", "ctor-c"); }));
+    CHECK(moved([&] { REQUIRE(w.reg.adoptState(c->token, "L2", "C-copy", std::nullopt).copy); }));
+    CHECK(moved([&] { REQUIRE_FALSE(w.reg.adoptState(c->token, "C-copy", "C-2", std::nullopt).copy); }));  // id kept
+    CHECK_FALSE(moved([&] { w.reg.adoptState(c->token, "C-copy", "C-2", std::nullopt); }));
+
+    // Reads and unknown tokens.
     CHECK_FALSE(moved([&] {
         (void)w.reg.view(f->token);
         (void)w.reg.view(l->token);
         (void)w.reg.followedLanes(l->token, "doc-1", s.all());
+        (void)w.reg.view(0);
+        w.reg.setFollow(0, follow("L2", s.uidA));
+        w.reg.adoptState(0, "Q", "Q-2", std::nullopt);
+        w.reg.publish(0, feed);
+        w.reg.remove(0);
     }));
-    CHECK(moved([&] { w.reg.setFollow(f->token, std::nullopt); }));
     CHECK(moved([&] { w.reg.remove(f->token); }));
+}
+
+// --- follow: the lineage checked under the lock ---------------------------------------------------------------
+
+TEST_CASE("link registry: follow applies only to a live leading instance with that lineage and lane") {
+    Song s;
+    World w;
+    Inst& l = w.add("L");
+    Inst& f = w.add("F");
+    Inst& x = w.add("X");
+    Hooks hooks;
+
+    // No feed yet: stale, whatever lineage is asked for.
+    CHECK(w.reg.follow(f.token, "L", s.uidA, "lineage-1", hooks) == LinkFollowResult::StaleLeader);
+    CHECK(hooks.empty());
+    w.reg.publish(l.token, s.feed({}, "doc-7"));
+
+    // Applied: the feed's document id, the lane's name and role and the leader's label as hints.
+    CHECK(w.reg.follow(f.token, "L", s.uidA, "lineage-1", hooks) == LinkFollowResult::Applied);
+    CHECK(w.run(hooks) == Names{"L"});
+    LinkFollow expected;
+    expected.leaderId = "L";
+    expected.documentId = "doc-7";
+    expected.laneUid = s.uidA;
+    expected.laneName = "Low";
+    expected.laneRole = "bass";
+    expected.leaderLabel = "ChordLab A";
+    CHECK(w.shown(f) == expected);
+    CHECK(w.status(f) == LinkStatus::Playing);
+    CHECK(w.reg.followedLanes(l.token, "doc-7", s.all()) == Names{s.uidA});
+    Taken t = take(f);
+    CHECK(t.fresh);  // emptied, as by setFollow
+    CHECK(t.count == 0);
+    CHECK(t.generation == kG + 1);
+
+    // The same link again: applied, nothing changes.
+    hooks.push_back(nullptr);  // a result always replaces what the caller passed
+    const std::uint64_t serial = w.reg.serial();
+    CHECK(w.reg.follow(f.token, "L", s.uidA, "lineage-1", hooks) == LinkFollowResult::Applied);
+    CHECK(hooks.empty());
+    CHECK(w.reg.serial() == serial);
+
+    // The chords lane: its name, no role.
+    Inst& g = w.add("G");
+    CHECK(w.reg.follow(g.token, "L", std::string(kChordsLaneUid), "lineage-1", hooks) == LinkFollowResult::Applied);
+    CHECK(w.shown(g).laneName == "Chords");
+    CHECK(w.shown(g).laneRole.empty());
+    CHECK(w.shown(g).documentId == "doc-7");
+
+    // The stored follow keeps the hints: seen as stored once the leader is gone.
+    w.reg.setFollow(x.token, follow("nobody", s.uidA));  // X follows: it is no leader
+    w.reg.remove(l.token);
+    REQUIRE(w.status(f) == LinkStatus::Waiting);
+    CHECK(w.shown(f) == expected);
+    (void)x;
+}
+
+TEST_CASE("link registry: a refused follow changes nothing") {
+    Song s;
+    World w;
+    Inst& l = w.add("L");
+    Inst& f = w.add("F");
+    Inst& x = w.add("X");
+    w.reg.publish(l.token, s.feed({s.uidB}));
+    Hooks hooks;
+    REQUIRE(w.reg.follow(f.token, "L", s.uidB, "lineage-1", hooks) == LinkFollowResult::Applied);
+    w.reg.publish(l.token, s.feed({s.uidB}));
+    REQUIRE(take(f).events == s.lane(s.uidB));
+    w.reg.setFollow(x.token, follow("nobody", s.uidA));  // X follows: its id names no leading instance
+
+    const LinkView before = w.view(f);
+    const std::uint32_t followerGeneration = f.buffer->currentGeneration();
+    const std::uint64_t serial = w.reg.serial();
+    const auto unchanged = [&] {
+        CHECK(hooks.empty());
+        CHECK(w.reg.serial() == serial);
+        const LinkView now = w.view(f);
+        REQUIRE(now.follow.has_value());
+        CHECK(*now.follow == *before.follow);
+        CHECK(now.status == before.status);
+        CHECK(now.id == before.id);
+        const Taken t = take(f);
+        CHECK_FALSE(t.fresh);
+        CHECK(t.generation == followerGeneration);
+        CHECK(t.events == s.lane(s.uidB));
+        CHECK_FALSE(take(l).fresh);
+        CHECK(l.buffer->current() == nullptr);
+        CHECK(w.followed(l, s) == Names{s.uidB});
+    };
+
+    hooks.push_back(nullptr);
+    CHECK(w.reg.follow(f.token, "nobody", s.uidA, "lineage-1", hooks) == LinkFollowResult::UnknownLeader);
+    unchanged();
+    CHECK(w.reg.follow(f.token, "X", s.uidA, "lineage-1", hooks) == LinkFollowResult::UnknownLeader);  // follows
+    unchanged();
+    CHECK(w.reg.follow(f.token, "F", s.uidA, "lineage-1", hooks) == LinkFollowResult::UnknownLeader);  // itself
+    unchanged();
+    CHECK(w.reg.follow(f.token, "L", s.uidA, "lineage-0", hooks) == LinkFollowResult::StaleLeader);
+    unchanged();
+    CHECK(w.reg.follow(f.token, "L", "uid-404", "lineage-1", hooks) == LinkFollowResult::UnknownLane);
+    unchanged();
+    CHECK(w.reg.follow(0, "L", s.uidA, "lineage-1", hooks) == LinkFollowResult::UnknownLeader);  // unknown caller
+    unchanged();
+}
+
+TEST_CASE("link registry: following one's own id is refused by follow and waits forever by setFollow") {
+    Song s;
+    World w;
+    Inst& l = w.add("L");
+    w.reg.publish(l.token, s.feed({}));
+    Hooks hooks;
+    CHECK(w.reg.follow(l.token, "L", s.uidA, "lineage-1", hooks) == LinkFollowResult::UnknownLeader);
+    CHECK(w.status(l) == LinkStatus::NotFollowing);
+    CHECK(w.run(w.reg.setFollow(l.token, follow("L", s.uidA))).empty());
+    CHECK(w.status(l) == LinkStatus::Waiting);
+    w.add("M");
+    CHECK(w.status(l) == LinkStatus::Waiting);
 }
 
 // --- the view ---------------------------------------------------------------------------------------------------
@@ -979,7 +1179,7 @@ TEST_CASE("link registry: shared is one registry for the process") {
 
 // --- threads ----------------------------------------------------------------------------------------------------
 
-TEST_CASE("link registry: threads publishing, toggling follows, adding and removing, and consuming") {
+TEST_CASE("link registry: threads publishing, toggling follows, leaders coming, going and following, consuming") {
     // Two contents per lane: the second song has a third chord and a second bass note (uids coincide).
     Song s1;
     Song s2;
@@ -994,8 +1194,10 @@ TEST_CASE("link registry: threads publishing, toggling follows, adding and remov
     const std::vector<Events> allowedA{Events{}, s1.lane(s1.uidA), s2.lane(s2.uidA)};
     const std::vector<Events> allowedChords{Events{}, s1.lane(std::string(kChordsLaneUid)),
                                             s2.lane(std::string(kChordsLaneUid))};
+    const std::vector<Events> allowedB{Events{}, s1.lane(s1.uidB)};
     REQUIRE(allowedA[1] != allowedA[2]);
     REQUIRE(allowedChords[1] != allowedChords[2]);
+    REQUIRE_FALSE(allowedB[1].empty());
 
     LinkRegistry reg;
     std::atomic<int> hookCalls{0};
@@ -1008,12 +1210,20 @@ TEST_CASE("link registry: threads publishing, toggling follows, adding and remov
     auto leaderBuffer = std::make_unique<TripleBuffer<SnapshotSlot>>();
     auto buffer1 = std::make_unique<TripleBuffer<SnapshotSlot>>();
     auto buffer2 = std::make_unique<TripleBuffer<SnapshotSlot>>();
+    auto buffer3 = std::make_unique<TripleBuffer<SnapshotSlot>>();
     const LinkToken leader = reg.add("L", leaderBuffer.get(), hook);
     const LinkToken follower1 = reg.add("F1", buffer1.get(), hook);
     const LinkToken follower2 = reg.add("F2", buffer2.get(), hook);
+    const LinkToken follower3 = reg.add("F3", buffer3.get(), hook);
     const LinkFollow follow1 = follow("L", s1.uidA);
     const LinkFollow follow2 = follow("L", std::string(kChordsLaneUid));
+    runHooks(reg.setFollow(follower3, follow("M", s1.uidB)));  // waits for leaders that come and go
     const Names lanes = s1.all();
+
+    // L's model mutex, as the shell has one per instance: L publishes no feed while it follows (LinkEndpoint does
+    // the same), and its publishes and its follow changes are serialised by it.
+    std::mutex leaderModel;
+    bool leaderFollowing = false;  // guarded by leaderModel
 
     constexpr int kPublishes = 20000;
     constexpr int kToggles = 10000;
@@ -1055,11 +1265,15 @@ TEST_CASE("link registry: threads publishing, toggling follows, adding and remov
     const auto started = std::chrono::steady_clock::now();
     Seen seen1;
     Seen seen2;
+    Seen seen3;
     std::thread consumer1 = consume(buffer1.get(), &allowedA, &seen1);
     std::thread consumer2 = consume(buffer2.get(), &allowedChords, &seen2);
+    std::thread consumer3 = consume(buffer3.get(), &allowedB, &seen3);
 
     std::thread publisher([&] {
         for (int i = 0; i < kPublishes; ++i) {
+            const std::lock_guard<std::mutex> model(leaderModel);
+            if (leaderFollowing) continue;
             (void)reg.followedLanes(leader, "doc-1", lanes);
             reg.publish(leader, i % 2 == 0 ? feed1 : feed2);
         }
@@ -1077,13 +1291,34 @@ TEST_CASE("link registry: threads publishing, toggling follows, adding and remov
     std::thread toggler2 = toggle(follower2, &follow2);
     std::thread churn([&] {
         for (int i = 0; i < kCycles; ++i) {
-            // A fresh link buffer per registration: it outlives the registration and nothing reads it.
-            auto buffer = std::make_unique<TripleBuffer<SnapshotSlot>>();
-            const LinkToken third = reg.add("M" + std::to_string(i), buffer.get(), hook);
-            // A copy of the leader (it lives) that follows the leader's other track.
-            runHooks(reg.adoptState(third, "L", "M-copy-" + std::to_string(i), follow("L", s1.uidB)).hooks);
-            (void)reg.view(third);
-            runHooks(reg.remove(third));
+            if (i % 2 == 0) {
+                // A leader comes under the id F3 waits for, publishes (F3 gets its lane) and goes (F3 is emptied).
+                // A fresh link buffer per registration: it outlives the registration; it is never written, as
+                // this instance only leads.
+                auto buffer = std::make_unique<TripleBuffer<SnapshotSlot>>();
+                const LinkToken third = reg.add("M-ctor-" + std::to_string(i), buffer.get(), hook);
+                runHooks(reg.adoptState(third, "M", "M-fresh-" + std::to_string(i), std::nullopt).hooks);
+                (void)reg.followedLanes(third, "doc-1", lanes);
+                reg.publish(third, feed1);
+                (void)reg.view(third);
+                runHooks(reg.remove(third));
+            } else {
+                // L starts following (F1 and F2, when bound, are unbound and emptied), then leads again.
+                Hooks hooks;
+                {
+                    const std::lock_guard<std::mutex> model(leaderModel);
+                    hooks = reg.setFollow(leader, follow("nobody", s1.uidA));
+                    leaderFollowing = true;
+                }
+                runHooks(hooks);
+                (void)reg.view(follower1);
+                {
+                    const std::lock_guard<std::mutex> model(leaderModel);
+                    hooks = reg.setFollow(leader, std::nullopt);
+                    leaderFollowing = false;
+                }
+                runHooks(hooks);
+            }
         }
     });
 
@@ -1092,29 +1327,40 @@ TEST_CASE("link registry: threads publishing, toggling follows, adding and remov
     toggler2.join();
     churn.join();
 
-    // The end state: both follow, and a final publish writes their lanes.
+    // The end state: L leads, F1 and F2 follow it, and a final publish writes their lanes; F3 waits, emptied.
+    REQUIRE(reg.view(leader).status == LinkStatus::NotFollowing);
     runHooks(reg.setFollow(follower1, follow1));
     runHooks(reg.setFollow(follower2, follow2));
     reg.publish(leader, feed1);
     stop.store(true, std::memory_order_release);
     consumer1.join();
     consumer2.join();
+    consumer3.join();
     const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
-    MESSAGE("threads: " << seconds << " s, acquires " << seen1.acquires << " and " << seen2.acquires
-                        << ", hooks run " << hookCalls.load());
+    MESSAGE("threads: " << seconds << " s, acquires " << seen1.acquires << ", " << seen2.acquires << " and "
+                        << seen3.acquires << ", hooks run " << hookCalls.load());
 
     CHECK(seen1.foreign == 0);
     CHECK(seen2.foreign == 0);
     CHECK(seen1.backwards == 0);
     CHECK(seen2.backwards == 0);
+    CHECK(seen3.foreign == 0);
+    CHECK(seen3.backwards == 0);
     CHECK(seen1.acquires > 0);
     CHECK(seen2.acquires > 0);
+    CHECK(seen3.acquires > 0);
     CHECK(seen1.last == s1.lane(s1.uidA));
     CHECK(seen2.last == s1.lane(std::string(kChordsLaneUid)));
+    CHECK(seen3.last.empty());
     CHECK(reg.view(follower1).status == LinkStatus::Playing);
     CHECK(reg.view(follower2).status == LinkStatus::Playing);
-    CHECK(leaderBuffer->acquire() == nullptr);  // a leader's link buffer: never written while it leads
+    CHECK(reg.view(follower3).status == LinkStatus::Waiting);
+    // L's link buffer was written only while it followed "nobody": always empty. Its consumer is this thread.
+    leaderBuffer->acquire();
+    REQUIRE(leaderBuffer->current() != nullptr);
+    CHECK(leaderBuffer->current()->count == 0);
     reg.remove(follower1);
     reg.remove(follower2);
+    reg.remove(follower3);
     reg.remove(leader);
 }

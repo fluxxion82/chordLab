@@ -142,6 +142,11 @@ bool operator!=(const LinkFollow& a, const LinkFollow& b) noexcept;
 /// Where an instance stands as a follower (`LinkRegistry` rule 7). `NotFollowing` for a leader.
 enum class LinkStatus { NotFollowing, Waiting, ProjectChanged, LaneMissing, Muted, Playing };
 
+/// The outcome of `LinkRegistry::follow`: applied, or refused (and nothing changed) because no live leading
+/// instance other than the caller has that id, its lineage is not the one asked for (or it has published no feed),
+/// or its feed has no such lane.
+enum class LinkFollowResult { Applied, StaleLeader, UnknownLeader, UnknownLane };
+
 /// One lane of a leader as `LinkView` lists it: from the leader's feed, plus how many followers bound to that
 /// leader follow it in the feed's document.
 struct LinkLaneView {
@@ -218,18 +223,24 @@ struct LinkView {
 ///    followed lanes may have changed (the follower's old bound leader and its new one), never the caller's own,
 ///    each at most once.
 /// 7. *Status* of a follower: `Waiting` (unbound); `ProjectChanged` (bound, and the leader has published no feed
-///    yet or its feed has another `documentId`); `LaneMissing` (the lane uid is not in the feed); `Muted` (the lane
-///    is in the feed and not audible); `Playing` otherwise.
+///    yet or its feed has another `documentId`, whether or not that feed has the lane); `LaneMissing` (the lane
+///    uid is not in the feed); `Muted` (the lane is in the feed and not audible); `Playing` otherwise. Right after
+///    binding a follower is `Playing` although its buffer is still empty: content arrives with the leader's next
+///    publish, which the hook returned to the caller causes at once.
 /// 8. *Copies.* For a follower that is itself a copy and whose bound leader has a live copy that leads,
 ///    `switchTo` names that copy (the newest, if several: the one whose state load made it a copy last).
 /// 9. *Labels.* "ChordLab A", "ChordLab B", ... by order of `add`, one per instance for its lifetime (after Z:
 ///    "ChordLab 27", "ChordLab 28", ...). Display only.
-/// 10. *Serial.* Moves on every call that changes what some `view` would return, and on `publish`; does not move
-///    on `followedLanes` or `view`.
+/// 10. *Serial.* Moves on every `add`, every `remove` and `publish` of a live instance, and on a `setFollow`,
+///    `follow` or `adoptState` that changes something a view shows (a follow's link or hints, an id, being a copy,
+///    a binding); does not move on a call that changes nothing (an identical follow, a load that leaves all of that
+///    as it was, a refused `follow`, an unknown token), nor on `followedLanes`, `view` or `serial`.
 ///
 /// A follow is changed (rules 4 and 6) when its `leaderId`, `documentId` or `laneUid` differ, or when it is set
-/// or cleared; new hints alone are stored and change nothing else. Unknown tokens (0, or removed instances) are
-/// ignored by every method: nothing changes and the result is empty.
+/// or cleared; new hints alone are stored and change nothing else. A follow whose `leaderId` is the instance's own
+/// id is accepted by `setFollow` and `adoptState` and waits forever (an instance never binds to itself, and it is
+/// no leader while it follows); `follow` refuses it (`UnknownLeader`). Unknown tokens (0, or removed instances)
+/// are ignored by every method: nothing changes and the result is empty (`UnknownLeader` for `follow`).
 class LinkRegistry {
 public:
     /// Called by another instance, on its thread, after it released every lock, to make this instance publish
@@ -262,14 +273,27 @@ public:
         Hooks hooks;
     };
     /// A state load: the instance takes `loadedId` unless rule 3 says otherwise, and its follow becomes `follow`.
-    /// `freshId` is used when the instance turns out to be a copy. Being a copy (here and for rule 8) is the
+    /// `freshId` is used when the instance turns out to be a copy. A follow of the instance's own (resulting) id
+    /// waits forever. Being a copy (here and for rule 8) is the
     /// outcome of the latest load alone: a later load that is no copy, including one that keeps the id because
     /// followers are bound, ends it. The id is decided before the follow is applied, so a bound leader that loads
     /// a follower's state keeps its id and then loses its dependents (rule 5).
     Adopted adoptState(LinkToken token, std::string loadedId, std::string freshId, std::optional<LinkFollow> follow);
 
-    /// A follow or unfollow by command. Returns the hooks to run.
+    /// A follow or unfollow as given, for an unfollow and for state loads; a follow by command goes through
+    /// `follow`, which checks the leader first. A follow of the instance's own id waits forever. Returns the hooks
+    /// to run.
     Hooks setFollow(LinkToken token, std::optional<LinkFollow> follow);
+
+    /// A follow by command, under one lock: finds the live leading instance `leaderId` (not `token` itself;
+    /// UnknownLeader), compares its stored feed's lineage with `leaderLineage` (StaleLeader when it differs or the
+    /// leader has published no feed), finds the lane `laneUid` in that feed (UnknownLane), and then sets `token`'s
+    /// follow to that leader, the feed's documentId and the lane, with the lane's name, its role
+    /// (`trackRoleName`; empty for the chords lane) and the leader's label as hints, exactly as `setFollow` would.
+    /// `hooks` is replaced by what `setFollow` would return; on any other result nothing changes (not the serial
+    /// either) and it is empty. An unknown `token` gives UnknownLeader.
+    LinkFollowResult follow(LinkToken token, std::string_view leaderId, std::string_view laneUid,
+                            std::string_view leaderLineage, Hooks& hooks);
 
     /// Which of `laneUids` (kChordsLaneUid may be among them) are followed, in document `documentId`, by followers
     /// bound to `leader`, in the order of `laneUids` and each once. A follower whose link names another document
@@ -278,7 +302,8 @@ public:
                                            const std::vector<std::string>& laneUids) const;
 
     /// A leader's publish: stores `feed` and writes every bound follower's link buffer from it (rule 4). Ignored
-    /// (and asserts) for an instance that is following.
+    /// (and asserts) for an instance that is following, and for a null `feed`: a leader with nothing to publish
+    /// does not call it.
     void publish(LinkToken leader, std::shared_ptr<const LinkFeed> feed);
 
     /// Atomic: moves on every change of what some `view` would return (rule 10). Readable without the mutex.

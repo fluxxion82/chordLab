@@ -247,28 +247,32 @@ struct LinkRegistry::State {
     /// that still lives and leads stays bound. One whose leader was removed or started following is unbound and
     /// emptied (rules 4 and 5). Then every unbound follower binds to the live leader holding its
     /// `follow.leaderId`, if there is one, and is written empty (always empty already: emptied when its follow
-    /// changed or when it was unbound). Content comes only with the leader's next publish.
-    void resolve() {
+    /// changed or when it was unbound). Content comes only with the leader's next publish. Returns whether any
+    /// binding changed.
+    bool resolve() {
+        bool changed = false;
         for (auto& entry : entries) {
             Entry& e = entry.second;
+            const LinkToken before = e.boundTo;
             if (!e.follow) {
                 e.boundTo = 0;
-                continue;
-            }
-            if (e.boundTo != 0 && leads(e.boundTo)) continue;
-            if (e.boundTo != 0) {
-                e.boundTo = 0;
-                write(e, nullptr);
-            }
-            for (const auto& candidate : entries) {
-                if (candidate.first != entry.first && !candidate.second.follow &&
-                    candidate.second.id == e.follow->leaderId) {
-                    e.boundTo = candidate.first;
+            } else if (e.boundTo == 0 || !leads(e.boundTo)) {
+                if (e.boundTo != 0) {
+                    e.boundTo = 0;
                     write(e, nullptr);
-                    break;
+                }
+                for (const auto& candidate : entries) {
+                    if (candidate.first != entry.first && !candidate.second.follow &&
+                        candidate.second.id == e.follow->leaderId) {
+                        e.boundTo = candidate.first;
+                        write(e, nullptr);
+                        break;
+                    }
                 }
             }
+            changed = changed || e.boundTo != before;
         }
+        return changed;
     }
 
     /// Gives `e` the follow `follow`. Returns whether the link changed (rule 4: set, changed or cleared); then `e`
@@ -285,6 +289,19 @@ struct LinkRegistry::State {
         e.boundTo = 0;
         write(e, nullptr);
         return true;
+    }
+
+    /// `setFollow`'s work, shared with `follow`: gives `e` (token `token`) the follow `follow`, re-resolves when the
+    /// link changed, and adds the hooks of rule 6 to `hooks`. Returns whether something a view shows changed (the
+    /// follow, hints included, or a binding).
+    bool setFollowLocked(LinkToken token, Entry& e, std::optional<LinkFollow> follow,
+                         std::shared_ptr<const LinkFeed>& dropped, Hooks& hooks) {
+        const bool sameFollow = e.follow == follow;
+        const LinkToken before = e.boundTo;
+        const bool changed = applyFollow(e, std::move(follow), dropped);
+        const bool rebound = changed && resolve();
+        if (changed || e.boundTo != before) collectHooks(token, {before, e.boundTo}, hooks);
+        return !sameFollow || rebound;
     }
 
     /// Rule 6: adds the hooks of `leaders` (0 for none) to `out`, never `self`'s, each once.
@@ -386,6 +403,11 @@ LinkRegistry::Adopted LinkRegistry::adoptState(LinkToken token, std::string load
     Entry* e = s.find(token);
     if (e == nullptr) return out;
 
+    const std::string idBefore = e->id;
+    const LinkToken copiedFromBefore = e->copiedFrom;
+    const std::uint64_t copyOrderBefore = e->copyOrder;
+    const bool sameFollow = e->follow == follow;
+
     // Rule 3, in order. Whether it is a copy is the outcome of this load alone.
     const bool hasDependents = std::any_of(s.entries.begin(), s.entries.end(),
                                            [&](const auto& entry) { return entry.second.boundTo == token; });
@@ -406,10 +428,13 @@ LinkRegistry::Adopted LinkRegistry::adoptState(LinkToken token, std::string load
 
     const LinkToken before = e->boundTo;
     const bool changed = State::applyFollow(*e, std::move(follow), dropped);
-    s.resolve();  // always: the id may have changed
+    const bool rebound = s.resolve();  // always: the id may have changed
     if (changed || e->boundTo != before) s.collectHooks(token, {before, e->boundTo}, out.hooks);
     out.id = e->id;
-    s.moved();
+    if (e->id != idBefore || e->copiedFrom != copiedFromBefore || e->copyOrder != copyOrderBefore || !sameFollow ||
+        rebound) {
+        s.moved();
+    }
     return out;
 }
 
@@ -420,12 +445,37 @@ LinkRegistry::Hooks LinkRegistry::setFollow(LinkToken token, std::optional<LinkF
     const std::lock_guard<std::mutex> lock(s.mutex);
     Entry* e = s.find(token);
     if (e == nullptr) return hooks;
-    const LinkToken before = e->boundTo;
-    const bool changed = State::applyFollow(*e, std::move(follow), dropped);
-    if (changed) s.resolve();
-    if (changed || e->boundTo != before) s.collectHooks(token, {before, e->boundTo}, hooks);
-    s.moved();
+    if (s.setFollowLocked(token, *e, std::move(follow), dropped, hooks)) s.moved();
     return hooks;
+}
+
+LinkFollowResult LinkRegistry::follow(LinkToken token, std::string_view leaderId, std::string_view laneUid,
+                                      std::string_view leaderLineage, Hooks& hooks) {
+    hooks.clear();
+    std::shared_ptr<const LinkFeed> dropped;  // released after the mutex
+    State& s = *state_;
+    const std::lock_guard<std::mutex> lock(s.mutex);
+    Entry* e = s.find(token);
+    if (e == nullptr) return LinkFollowResult::UnknownLeader;
+    const auto leader = std::find_if(s.entries.begin(), s.entries.end(), [&](const auto& entry) {
+        return entry.first != token && !entry.second.follow && entry.second.id == leaderId;
+    });
+    if (leader == s.entries.end()) return LinkFollowResult::UnknownLeader;
+    const LinkFeed* feed = leader->second.feed.get();
+    if (feed == nullptr || feed->lineage != leaderLineage) return LinkFollowResult::StaleLeader;
+    const auto lane = std::find_if(feed->lanes.begin(), feed->lanes.end(),
+                                   [&](const LinkLane& l) { return l.uid == laneUid; });
+    if (lane == feed->lanes.end()) return LinkFollowResult::UnknownLane;
+
+    LinkFollow link;
+    link.leaderId = leader->second.id;
+    link.documentId = feed->documentId;
+    link.laneUid = lane->uid;
+    link.laneName = lane->name;
+    link.laneRole = lane->chords ? std::string() : std::string(trackRoleName(lane->role));
+    link.leaderLabel = leader->second.label;
+    if (s.setFollowLocked(token, *e, std::move(link), dropped, hooks)) s.moved();
+    return LinkFollowResult::Applied;
 }
 
 std::vector<std::string> LinkRegistry::followedLanes(LinkToken leader, std::string_view documentId,
@@ -448,7 +498,8 @@ void LinkRegistry::publish(LinkToken leader, std::shared_ptr<const LinkFeed> fee
     Entry* e = s.find(leader);
     if (e == nullptr) return;
     assert(!e->follow && "LinkRegistry::publish: a follower publishes no feed");
-    if (e->follow) return;
+    assert(feed != nullptr && "LinkRegistry::publish: a leader with nothing to publish does not call it");
+    if (e->follow || feed == nullptr) return;
     previous = std::move(e->feed);
     e->feed = std::move(feed);
     for (auto& entry : s.entries) {
