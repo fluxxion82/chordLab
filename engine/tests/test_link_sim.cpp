@@ -2291,6 +2291,37 @@ TEST_CASE("link sim: a held forwarded preview is released on the follower's next
     CHECK(a.follower->silent());
 }
 
+TEST_CASE("link sim: a Start forwarded after a cleanup flagged the follower and before its next block never sounds") {
+    Audition a;
+    REQUIRE(a.leader->preview(a.s.bass, simPreview(PreviewCmd::Start, 1, kAudition)) == LinkForward::Forwarded);
+    a.blocks();
+    REQUIRE(a.followerOut == Midi{on(kAudition)});
+    // The follower takes the lead lane: the cleanup flags it. Before its next block the leader forwards a Start of
+    // the lead track, which reaches it on its new lane and sits in its ring before the panic runs.
+    REQUIRE(a.follower->follow("L", a.leader->laneUid(a.s.lead), lineageOf(*a.follower, "L")) == Result::Applied);
+    CHECK(a.leader->preview(a.s.lead, simPreview(PreviewCmd::Start, 2, kOneShot)) == LinkForward::Forwarded);
+    a.blocks();
+    CHECK(a.followerOut == Midi{off(kAudition)});  // the panic releases the old preview and discards the new Start
+    CHECK(a.leaderOut.empty());
+    for (int i = 0; i < 4; ++i) {
+        a.blocks();
+        CHECK(a.followerOut.empty());
+        CHECK(a.leaderOut.empty());
+    }
+    // Its Stop still goes where the Start went, and ends nothing there.
+    CHECK(a.leader->preview(std::nullopt, simPreview(PreviewCmd::Stop, 2)) == LinkForward::Forwarded);
+    a.blocks();
+    CHECK(a.followerOut.empty());
+    CHECK(a.follower->silent());
+    // A Start forwarded after that block sounds as usual.
+    CHECK(a.leader->preview(a.s.lead, simPreview(PreviewCmd::Start, 3, kOneShot)) == LinkForward::Forwarded);
+    a.blocks();
+    CHECK(a.followerOut == Midi{on(kOneShot)});
+    CHECK(a.leader->preview(std::nullopt, simPreview(PreviewCmd::Stop, 3)) == LinkForward::Forwarded);
+    a.blocks();
+    CHECK(a.followerOut == Midi{off(kOneShot)});
+}
+
 TEST_CASE("link sim: a leader that loads another project leaves a held forwarded preview to its Stop") {
     // Rule 12's choice: another document id unbinds no one, so the record stays and the Stop still reaches it.
     Audition a;
