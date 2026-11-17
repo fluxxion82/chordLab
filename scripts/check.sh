@@ -9,8 +9,12 @@
 #   scripts/check.sh --tsan     ... plus the engine under ThreadSanitizer
 #   scripts/check.sh --swift    ... plus `swift test` in ChordLab/ (when ChordLab/Package.swift exists)
 #   scripts/check.sh --bridge   ... plus the Obj-C++ bridge tests (when ChordLab/bridge/tests/CMakeLists.txt exists)
-#   scripts/check.sh --plugin   ... plus both Xcode schemes (macOS-VST3, macOS-APP), no signing
-#   scripts/check.sh --all      everything
+#   scripts/check.sh --plugin   ... plus both Xcode schemes (macOS-VST3, macOS-APP), no signing; INSTALLS them
+#                               (the project installs into ~/Library/Audio/Plug-Ins/VST3 and ~/Applications)
+#   scripts/check.sh --shell    ... plus the same two schemes built into a scratch directory, installing nothing:
+#                               DSTROOT, SYMROOT, OBJROOT and -derivedDataPath under $CHORDLAB_SHELL_OUT (default
+#                               ${TMPDIR:-/tmp}/chordlab-shell-gate); fails if the installed VST3 binary changes
+#   scripts/check.sh --all      everything but --shell
 #   scripts/check.sh --release  ... plus the release script's preflight, in report mode
 # Flags combine; section 1 always runs first.
 #
@@ -28,7 +32,7 @@ DEFAULT_TIMEOUT=300
 UBSAN_TIMEOUT=600
 PLUGIN_TIMEOUT=600   # a cold xcodebuild of the plug-in exceeds the default
 
-want_ubsan=0 want_asan=0 want_tsan=0 want_swift=0 want_bridge=0 want_plugin=0 want_release=0
+want_ubsan=0 want_asan=0 want_tsan=0 want_swift=0 want_bridge=0 want_plugin=0 want_shell=0 want_release=0
 for arg in "$@"; do
     case "$arg" in
         --ubsan) want_ubsan=1 ;;
@@ -37,9 +41,10 @@ for arg in "$@"; do
         --swift) want_swift=1 ;;
         --bridge) want_bridge=1 ;;
         --plugin) want_plugin=1 ;;
+        --shell) want_shell=1 ;;
         --release) want_release=1 ;;
         --all) want_ubsan=1 want_asan=1 want_tsan=1 want_swift=1 want_bridge=1 want_plugin=1 want_release=1 ;;
-        -h|--help) sed -n '2,20p' "$SELF" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,24p' "$SELF" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "check.sh: unknown option '$arg' (try --help)" >&2; exit 2 ;;
     esac
 done
@@ -139,16 +144,17 @@ bridge_tests() {
     (cd ChordLab/build-bridge-tests && step "$DEFAULT_TIMEOUT" ctest --output-on-failure) || return 1
 }
 
-# One Xcode scheme, built unsigned. Fails when "BUILD SUCCEEDED" is missing from the log, or when the log
-# holds any error or warning that points into ChordLab/ or engine/ (third-party and SDK noise is ignored).
-# The Swift driver's "Could not read priors" warning names a .priors file under ChordLab/build-mac/; it only
-# means the incremental-build cache was stale (first build after an Xcode update), so it is ignored too.
+# One Xcode scheme, built unsigned: plugin_scheme <scheme> <log> [extra xcodebuild arguments...]. Fails when
+# "BUILD SUCCEEDED" is missing from the log, or when the log holds any error or warning that points into ChordLab/
+# or engine/ (third-party and SDK noise is ignored). The Swift driver's "Could not read priors" warning names a
+# .priors file under the build directory; it only means the incremental-build cache was stale (first build after an
+# Xcode update), so it is ignored too.
 plugin_scheme() {
-    local scheme="$1"
-    local log="$LOG_DIR/chordlab-xcodebuild-$scheme.log"
-    echo "+ xcodebuild -scheme $scheme (log: $log)"
+    local scheme="$1" log="$2"
+    shift 2
+    echo "+ xcodebuild -scheme $scheme $* (log: $log)"
     "$TIMEOUT_CMD" "$PLUGIN_TIMEOUT" xcodebuild -project ChordLab/projects/ChordLab-macOS.xcodeproj \
-        -scheme "$scheme" -configuration Debug \
+        -scheme "$scheme" -configuration Debug "$@" \
         CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM= PROVISIONING_PROFILE_SPECIFIER= \
         CODE_SIGN_ENTITLEMENTS= build >"$log" 2>&1
     local rc=$?
@@ -181,8 +187,71 @@ plugin_builds() {
         echo "check.sh: ChordLab/projects/ChordLab-macOS.xcodeproj not found" >&2
         return 1
     fi
-    plugin_scheme macOS-VST3 || return 1
-    plugin_scheme macOS-APP || return 1
+    plugin_scheme macOS-VST3 "$LOG_DIR/chordlab-xcodebuild-macOS-VST3.log" || return 1
+    plugin_scheme macOS-APP "$LOG_DIR/chordlab-xcodebuild-macOS-APP.log" || return 1
+}
+
+# The bundle Ableton Live loads; --shell must leave it exactly as it was.
+INSTALLED_VST3_BIN="$HOME/Library/Audio/Plug-Ins/VST3/ChordLab.vst3/Contents/MacOS/ChordLab"
+
+installed_vst3_sha() {  # the sha256 of the installed VST3 binary, or "absent"
+    if [ -f "$INSTALLED_VST3_BIN" ]; then
+        shasum -a 256 "$INSTALLED_VST3_BIN" | cut -d' ' -f1
+    else
+        echo absent
+    fi
+}
+
+# Section 5s: both schemes as --plugin builds them (Debug, unsigned), but into a scratch directory. The project sets
+# DEPLOYMENT_LOCATION=YES, INSTALL_PATH=/ and a per-target DSTROOT of ~/Library/Audio/Plug-Ins/VST3 (VST3) or
+# ~/Applications (APP); a DSTROOT on the command line overrides it (scripts/release.sh does the same), SYMROOT and
+# OBJROOT replace the project's ChordLab/build-mac, and -derivedDataPath keeps Xcode's own derived data (module
+# caches, logs) out of ~/Library/Developer. Fails if a build fails, if the VST3 binary is not under the scratch
+# DSTROOT, or if the installed VST3 binary's sha256 differs before and after.
+shell_builds() {
+    if [ ! -d ChordLab/projects/ChordLab-macOS.xcodeproj ]; then
+        echo "check.sh: ChordLab/projects/ChordLab-macOS.xcodeproj not found" >&2
+        return 1
+    fi
+    local tmp="${TMPDIR:-/tmp}"
+    local out="${CHORDLAB_SHELL_OUT:-${tmp%/}/chordlab-shell-gate}"
+    out="${out%/}"
+    case "$out" in
+        /*) ;;
+        *) out="$ROOT/$out" ;;
+    esac
+    case "$out/" in
+        "$HOME/Library/"*|"$HOME/Applications/"*|/Library/*|/Applications/*)
+            echo "check.sh: --shell refuses a scratch directory under Library or Applications: $out" >&2
+            return 1 ;;
+    esac
+    local dst="$out/dst"
+    local product="$dst/ChordLab.vst3/Contents/MacOS/ChordLab"
+    local before after
+    before="$(installed_vst3_sha)"
+    echo "installed VST3 before: $before ($INSTALLED_VST3_BIN)"
+    rm -rf "$dst"   # a product left by an earlier run must not pass the check below
+    mkdir -p "$out" || return 1
+    local rc=0 scheme
+    for scheme in macOS-VST3 macOS-APP; do
+        plugin_scheme "$scheme" "$LOG_DIR/chordlab-xcodebuild-shell-$scheme.log" \
+            -derivedDataPath "$out/DerivedData" \
+            DSTROOT="$dst" SYMROOT="$out/build" OBJROOT="$out/build/obj" || { rc=1; break; }
+    done
+    after="$(installed_vst3_sha)"
+    echo "installed VST3 after:  $after"
+    if [ "$before" != "$after" ]; then
+        echo "check.sh: the installed VST3 binary changed during --shell ($before -> $after)" >&2
+        return 1
+    fi
+    [ "$rc" -eq 0 ] || return 1
+    if [ ! -f "$product" ]; then
+        echo "check.sh: the built VST3 binary is not at $product" >&2
+        return 1
+    fi
+    echo "built VST3: $product ($(shasum -a 256 "$product" | cut -d' ' -f1))"
+    [ -d "$dst/ChordLab.app" ] && echo "built app:  $dst/ChordLab.app"
+    return 0
 }
 
 release_preflight() {
@@ -241,6 +310,10 @@ fi
 
 if [ "$FAILED" -eq 0 ] && [ "$want_plugin" -eq 1 ]; then
     section "5 plugin (xcodebuild)" plugin_builds
+fi
+
+if [ "$FAILED" -eq 0 ] && [ "$want_shell" -eq 1 ]; then
+    section "5s shell build (not installed)" shell_builds
 fi
 
 if [ "$FAILED" -eq 0 ] && [ "$want_release" -eq 1 ]; then
