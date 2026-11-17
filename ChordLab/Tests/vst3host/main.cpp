@@ -914,11 +914,24 @@ void previews(const Plug& plug) {
               (refused.empty() ? std::string("no error") : refused.front()) + ")");
     expectSilent(2, "and it sounds nowhere");
 
-    // CloseWindow's Stop for the last Start goes where the Start went.
+    // A's editor closing ends everything A forwarded: the held preview and a one-shot started over it with another
+    // id (only the latter is CloseWindow's last Start), both on B's next block; a preview A plays itself as well.
     send(editor::kPreview, previewStart(5, 57, 100, s.bass), "a held Start of the bass roll");
     expectNext("", "on57v100", "a held Start of the bass track sounds on B");
+    send(editor::kPreview, previewStart(6, 59, 100, s.bass), "a one-shot Start of the bass roll over it");
+    expectNext("", "on59v100", "the one-shot sounds on B beside the held preview");
     a.closeEditor();
-    expectNext("", "off57", "A's editor closing ends it on B");
+    expectNext("", "off57 off59", "A's editor closing ends both on B");
+    noErrors("the previews before the editor closed");
+    expectSilent(4, "both silent after");
+
+    // A preview A plays itself (the chords lane, which nobody follows) is still ended by CloseWindow's own Stop.
+    a.openEditor(parent);
+    check(editor::hasController(parent), "A's editor is open again");
+    send(editor::kPreview, previewStart(7, 62, 80, std::nullopt), "a held Start of the chords lane");
+    expectNext("on62v80", "", "a Start of the chords lane sounds on A, not on B");
+    a.closeEditor();
+    expectNext("off62", "", "A's editor closing ends it on A");
     expectSilent(4, "both silent after");
     editor::releaseParent(parent);
 
