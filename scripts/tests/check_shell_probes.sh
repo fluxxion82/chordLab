@@ -83,6 +83,60 @@ else
 fi
 rm -rf "$OUTSIDE"
 
+# --- every path the section writes is checked right before use ------------------------------------------------------
+# fresh_out: a new scratch directory with an empty target elsewhere; prints nothing.
+fresh_out() {
+    rm -rf "$T/out" "$T/elsewhere"
+    mkdir -p "$T/out" "$T/elsewhere"
+}
+# probe_link <relative path> <dir|file> <what>: that path inside the scratch directory is a symlink to elsewhere.
+probe_link() {
+    local rel="$1" kind="$2" what="$3"
+    fresh_out
+    mkdir -p "$(dirname "$T/out/$rel")"
+    if [ "$kind" = dir ]; then
+        ln -s "$T/elsewhere" "$T/out/$rel"
+    else
+        ln -s "$T/elsewhere/stolen.log" "$T/out/$rel"
+    fi
+    run CHORDLAB_SHELL_OUT="$T/out" -- --shell
+    if [ "$RC" -ne 0 ] && echo "$OUT" | grep -q "refuses '$T/out/$rel'" && empty_dir "$T/elsewhere"; then
+        ok "$what ($rel) as a symlink: refused, nothing written through it"
+    else
+        bad "$what ($rel) as a symlink: status $RC, written elsewhere: $(ls -A "$T/elsewhere" | tr '\n' ' '); output tail: $(echo "$OUT" | grep -E "check.sh:|refuses" | head -3 | tr '\n' ' ')"
+    fi
+}
+probe_link dst dir "the scratch DSTROOT"
+probe_link build dir "SYMROOT"
+probe_link build/obj dir "OBJROOT"
+probe_link DerivedData dir "-derivedDataPath"
+probe_link vst3host-build dir "the host test's build directory"
+probe_link xcodebuild-macOS-VST3.log file "the VST3 build log"
+probe_link xcodebuild-macOS-APP.log file "the app build log"
+
+# A real directory that resolves outside the scratch directory: build is real, but obj inside it is a symlink.
+fresh_out
+mkdir -p "$T/out/build"
+ln -s "$T/elsewhere" "$T/out/build/obj"
+run CHORDLAB_SHELL_OUT="$T/out" -- --shell
+if [ "$RC" -ne 0 ] && echo "$OUT" | grep -q "refuses '$T/out/build/obj'" && ! called xcodebuild && empty_dir "$T/elsewhere"; then
+    ok "OBJROOT behind a real SYMROOT, as a symlink: refused before any xcodebuild"
+else
+    bad "OBJROOT behind a real SYMROOT: status $RC"
+fi
+
+# The control: nothing planted. Both builds (shims) pass, the logs are inside the scratch directory, and the host
+# test section reaches its build directory (its run then fails here: the cmake shim builds no vst3host).
+fresh_out
+run CHORDLAB_SHELL_OUT="$T/out" -- --shell
+if echo "$OUT" | grep -q "5s shell build (not installed) PASS" && [ -f "$T/out/xcodebuild-macOS-VST3.log" ] &&
+    [ -f "$T/out/xcodebuild-macOS-APP.log" ] && called "cmake -S ChordLab/Tests/vst3host -B $T/out/vst3host-build" &&
+    ! echo "$OUT" | grep -q "refuses"; then
+    ok "nothing planted: no refusal, the logs are written inside the scratch directory, the host test is reached"
+else
+    bad "nothing planted: status $RC; output tail: $(echo "$OUT" | tail -8 | tr '\n' ' ')"
+fi
+
 echo
 if [ "$FAILURES" -eq 0 ]; then
     echo "check_shell_probes: ALL PASS"
