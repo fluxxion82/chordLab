@@ -114,15 +114,8 @@ struct TransportBarView: View {
         .toggleStyle(.accentSwitch)
         .help("Repeat the progression; off, it plays once and stops at its end")
         .accessibilityLabel("Loop the progression")
-      if state.snapshot?.midiThru != nil {
-        Toggle(isOn: state.thru) { Text("Thru").foregroundStyle(.white) }
-          .toggleStyle(.accentSwitch)
-          .help("Pass incoming MIDI notes to the output")
-          .accessibilityLabel("Pass MIDI through")
-      }
-      Button("Panic") { state.panic() }
-        .help("Silence every sounding note")
-        .accessibilityLabel("Silence every sounding note")
+      ThruToggle()
+      PanicButton()
     }
   }
 
@@ -245,6 +238,32 @@ struct TransportBarView: View {
       }
       .environmentObject(state)
     }
+  }
+}
+
+/// The Thru switch (`ChordLabState.thru`): the transport row's, and the follower panel's (a follower keeps its own
+/// Thru). Hidden when the snapshot has no `midiThru` (an older plug-in).
+struct ThruToggle: View {
+  @EnvironmentObject var state: ChordLabState
+
+  var body: some View {
+    if state.snapshot?.midiThru != nil {
+      Toggle(isOn: state.thru) { Text("Thru").foregroundStyle(.white) }
+        .toggleStyle(.accentSwitch)
+        .help("Pass incoming MIDI notes to the output")
+        .accessibilityLabel("Pass MIDI through")
+    }
+  }
+}
+
+/// Panic (`ChordLabState.panic`): the transport row's, and the follower panel's.
+struct PanicButton: View {
+  @EnvironmentObject var state: ChordLabState
+
+  var body: some View {
+    Button("Panic") { state.panic() }
+      .help("Silence every sounding note")
+      .accessibilityLabel("Silence every sounding note")
   }
 }
 

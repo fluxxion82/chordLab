@@ -19,7 +19,8 @@ import AppKit
 /// an arrow with the chords targeted is not ours on either route and goes back to the host; with a track's
 /// notes targeted it nudges them. `KeyRepeatFilter` makes one physical press one command on either route, or
 /// on both when a host uses both, and keeps a held key from repeating (arrows too: one step per press). A key
-/// mapped for the current target is consumed either way; everything else goes on to the host.
+/// mapped for the current target is consumed either way; everything else goes on to the host. While the instance
+/// follows another ChordLab's lane nothing is mapped (`LinkKeys`), on either route, key-ups included.
 final class EditorKeyRouter {
   private unowned let view: NSView
   private unowned let state: ChordLabState
@@ -142,9 +143,15 @@ final class EditorKeyRouter {
     state.editingText || view.window?.firstResponder is NSTextView
   }
 
+  /// Both routes' key-down, and so (through the answer `keyUp` replays) route B's key-up too. While this ChordLab
+  /// follows another one's lane the editor is hidden behind the follower's panel and no command is ours
+  /// (`LinkKeys.command(for:target:following:)` gives nil): the key goes to the host, as an unmapped key does, and
+  /// its release follows it there, since `keyUp` answers what the key-down answered. A key pressed before the panel
+  /// appeared still releases to the editor, where its press went.
   @MainActor private func deliver(_ input: KeyInput, source: KeySource) -> Bool {
     guard !editingText else { return false }
-    guard let command = KeyCommandMap.command(for: input, target: state.keyTarget) else { return false }
+    guard let command = LinkKeys.command(for: input, target: state.keyTarget,
+                                         following: LinkKeys.isFollowing(state.linkState)) else { return false }
     if filter.shouldAct(input, at: ProcessInfo.processInfo.systemUptime, source: source) {
       state.perform(command)
     }

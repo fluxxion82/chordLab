@@ -381,7 +381,10 @@ class ChordLabState: NSObject, ObservableObject {
   /// the arrows, each at most one command, one undo step). Each does nothing when it has nothing to act on, and the
   /// router consumes every mapped key whether or not it did anything, so the host never acts on it (see
   /// `KeyCommandMap`, `EditorKeyRouter`).
+  /// While this instance follows another ChordLab's lane nothing is performed (`LinkKeys.delivers`): the editor's
+  /// document is hidden behind the follower's panel, kept but not played.
   @MainActor func perform(_ command: KeyCommand) {
+    guard LinkKeys.delivers(command, following: LinkKeys.isFollowing(linkState)) else { return }
     action { performAction(command) }
   }
 
@@ -1116,7 +1119,8 @@ class ChordLabState: NSObject, ObservableObject {
   /// `kMsgTagLinkState` payload. Independent of `snapshot` (the first push can come before the first snapshot). Inside
   /// a follow's send it is that request's answer (`FollowAttempt.received`; `ownDocumentChanged` when the shell pushed
   /// another document's token in the same send, its answer to a stale own lineage); outside one it only clears a
-  /// notice that no longer applies. Only a changed value is published (the shell pushes on every registry change, often
+  /// notice that no longer applies. The first state that follows releases what the editor held (`releaseHeld`). Only
+  /// a changed value is published (the shell pushes on every registry change, often
   /// the same state). A payload that does not decode is reported and leaves the last one shown.
   func applyLinkState(json: Data) {
     do {
@@ -1124,7 +1128,11 @@ class ChordLabState: NSObject, ObservableObject {
       let ownDocumentChanged = followSendToken.map { $0 != clipboardToken } ?? false
       followAttempt.received(decoded, ownDocumentChanged: ownDocumentChanged)
       syncFollowNotice()
+      let startsFollowing = decoded.isFollowing && !LinkKeys.isFollowing(linkState)
       if decoded != linkState { linkState = decoded }
+      // The panel replaces the editor: whatever the editor held (a cell, a key, a roll press) stops now, not when its
+      // release would have come.
+      if startsFollowing { MainActor.assumeIsolated { releaseHeld() } }
     } catch {
       reportError("link state decode failed: \(error)")
     }
