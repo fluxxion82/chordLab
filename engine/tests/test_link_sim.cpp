@@ -260,13 +260,26 @@ public:
     }
 
     /// The shell's HandlePreview (Task 9b): the command offered to the endpoint in the model-mutex section, and
-    /// pushed into its own scheduler when it was not forwarded. Main thread.
+    /// pushed into its own scheduler when it was not forwarded. Main thread. With `lenientPreviews`, a command
+    /// refused for a full ring (its own, or every follower's: `QueueFull`) is counted in `refusedPreviews` instead
+    /// of failing a check: for a test whose audio threads drain on their own schedule, where any ring may fill.
     LinkForward preview(std::optional<int> trackId, const PreviewCmd& cmd) {
         const std::lock_guard<std::mutex> lock(model_);
         const LinkForward result = endpoint_->forwardPreview(trackId, cmd);
-        if (result == LinkForward::NotForwarded) CHECK(scheduler_->pushPreview(cmd));
+        if (result == LinkForward::NotForwarded) {
+            const bool pushed = scheduler_->pushPreview(cmd);
+            if (lenientPreviews) {
+                refusedPreviews += pushed ? 0 : 1;
+            } else {
+                CHECK(pushed);
+            }
+        } else if (result == LinkForward::QueueFull && lenientPreviews) {
+            ++refusedPreviews;
+        }
         return result;
     }
+    bool lenientPreviews = false;
+    int refusedPreviews = 0;
     /// The shell's Panic message: its own panic flag, and its followers'. Returns how many followers were flagged.
     int panicButton() {
         const std::lock_guard<std::mutex> lock(model_);
@@ -1298,8 +1311,14 @@ TEST_CASE("link sim: link, unlink and a document replacement with audio blocks b
 
 TEST_CASE("link sim: audio threads keep running while links change and the leader edits (TSan)") {
     // The shell's threads: each instance's audio thread runs its blocks (select, process) without a lock while
-    // the main thread follows, unfollows and edits. Nothing here waits for anything; at the end the last
+    // the main thread follows, unfollows, edits and sends previews. Nothing here waits for anything, so any ring
+    // may fill whatever the schedule: the loop counts the preview commands refused for a full ring instead of
+    // checking them (`lenientPreviews`), and once the audio threads have stopped the leader's Panic ends whatever a
+    // refused Stop left sounding, here and on the follower, before the final checks. At the end the last
     // operation's result plays.
+    bool heldBack = false;
+    SUBCASE("the audio threads run throughout") {}
+    SUBCASE("the audio threads start only after the loop, so the rings fill") { heldBack = true; }
     const Song s = song();
     World w;
     auto leader = w.make("L");
@@ -1308,10 +1327,13 @@ TEST_CASE("link sim: audio threads keep running while links change and the leade
     follower->loadDocument(followerOwn());
     leader->quiet = true;
     follower->quiet = true;
+    leader->lenientPreviews = true;
     const std::string bassUid = leader->laneUid(s.bass);
     const std::string leadUid = leader->laneUid(s.lead);
+    std::atomic<bool> go{!heldBack};
     std::atomic<bool> stop{false};
-    const auto audio = [&stop](FakeInstance& inst) {
+    const auto audio = [&go, &stop](FakeInstance& inst) {
+        while (!go.load(std::memory_order_acquire) && !stop.load(std::memory_order_acquire)) std::this_thread::yield();
         long position = 0;
         while (!stop.load(std::memory_order_acquire)) {
             inst.block(static_cast<double>(position) / kSamplesPerBeat, 256);
@@ -1334,6 +1356,7 @@ TEST_CASE("link sim: audio threads keep running while links change and the leade
         if (i > 0) leader->preview(std::nullopt, simPreview(PreviewCmd::Stop, 999 + i));
         leader->preview(s.bass, simPreview(PreviewCmd::Start, 1000 + i, 50));
     }
+    go.store(true, std::memory_order_release);
     leader->preview(std::nullopt, simPreview(PreviewCmd::Stop, 1299));
     leader->edit([&](DocumentStore& d) { d.setTrackMute(s.bass, false); });
     REQUIRE(follower->follow("L", bassUid, lineageOf(*follower, "L")) == Result::Applied);
@@ -1342,7 +1365,12 @@ TEST_CASE("link sim: audio threads keep running while links change and the leade
     followerAudio.join();
     CHECK(leader->faults == 0);
     CHECK(follower->faults == 0);
+    if (heldBack) CHECK(leader->refusedPreviews > 0);  // the leader's own ring did fill
 
+    // Deterministic from here: no audio thread runs. A Stop refused above left its preview to the watchdog; the
+    // leader's Panic ends everything (its own flag, and the follower's, bound to it: rule 12).
+    leader->lenientPreviews = false;
+    CHECK(leader->panicButton() == 1);
     leader->block(1000.0, 256);
     follower->block(1000.0, 256);
     const Bits bass = pitches({kBass1, kBass2});
