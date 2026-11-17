@@ -28,3 +28,23 @@ struct FollowPickerItems: View {
     }
   }
 }
+
+/// The transport row's Follow menu (after Length, `TransportBarView`): the picker (`FollowPickerItems`), shown only
+/// while it offers something (`FollowOptions.groups` is not empty; never in an AU, the app or a lone instance, which is
+/// not an error).
+struct FollowMenu: View {
+  @EnvironmentObject var state: ChordLabState
+
+  var body: some View {
+    if !FollowOptions.groups(state.linkState).isEmpty {
+      Menu {
+        FollowPickerItems()
+      } label: {
+        Text(FollowOptions.menuTitle)
+      }
+      .fixedSize()
+      .help(FollowOptions.menuHelp)
+      .probeFrame("transport.follow")
+    }
+  }
+}

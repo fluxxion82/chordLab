@@ -22,10 +22,11 @@ import SwiftUI
 ///   grip at the row's trailing end → the chords plus every track with notes, muted ones included (Q4), one clip
 ///   per lane in Live (S0 item 2). A grip with nothing to export (no chords; a track without sounding notes) is
 ///   dimmed and inert: it starts no drag and its help says why (`ClipExport.text`).
-/// A track tab carries a small mark in its role's colour (`TrackStyle`). Names truncate at the tail before any
-/// control shrinks, so Chords, four tracks, their grips, + and All stay in one line at the 700-pt minimum width. An
-/// engine without tracks shows the Chords tab alone (no M/S, no +, no All; its grip stays), so the row keeps its
-/// height.
+/// A track tab carries a small mark in its role's colour (`TrackStyle`); a lane that other ChordLabs play on their
+/// own instruments (`RoutedMarks`, plan section 5) a small arrow after its name, with the reason as its tooltip.
+/// Names truncate at the tail before any control shrinks, so Chords, four tracks, their grips, + and All stay in one
+/// line at the 700-pt minimum width. An engine without tracks shows the Chords tab alone (no M/S, no +, no All; its
+/// grip stays), so the row keeps its height.
 struct LaneTabsView: View {
   @EnvironmentObject var state: ChordLabState
 
@@ -55,9 +56,11 @@ struct LaneTabsView: View {
 
   var body: some View {
     let snapshot = state.snapshot
+    let tabs = LaneTabs.tabs(in: snapshot, open: state.openLane)
+    let marks = RoutedMarks.marks(state.linkState, tabs: tabs)
     HStack(spacing: 5) {
-      ForEach(LaneTabs.tabs(in: snapshot, open: state.openLane)) { tab in
-        tabView(tab, menu: LaneTabs.menu(for: tab.lane, in: snapshot))
+      ForEach(tabs) { tab in
+        tabView(tab, menu: LaneTabs.menu(for: tab.lane, in: snapshot), mark: marks[tab.lane])
       }
       if LaneTabs.showsTracks(snapshot) {
         addMenu(snapshot)
@@ -70,16 +73,17 @@ struct LaneTabsView: View {
     .frame(height: Self.height)
     .accessibilityElement(children: .contain)
     .accessibilityLabel("Lanes")
+    .probeFrame("laneTabs")
   }
 
   // MARK: - One tab
 
-  private func tabView(_ tab: LaneTab, menu: TrackTabMenu?) -> some View {
+  private func tabView(_ tab: LaneTab, menu: TrackTabMenu?, mark: RoutedMark?) -> some View {
     HStack(spacing: 4) {
       if let menu, renamingId == menu.trackId {
         renameField(menu)
       } else {
-        openButton(tab)
+        openButton(tab, mark: mark)
       }
       HStack(spacing: 3) {
         if tab.hasMuteSolo {
@@ -110,10 +114,21 @@ struct LaneTabsView: View {
     }
     .accessibilityElement(children: .contain)
     .accessibilityLabel(tab.label + " lane")
+    .probeFrame(Self.probeName(tab.lane))
+  }
+
+  /// The harness's name for a tab's frame (`probeFrame`): "tab.chords", "tab.track-2".
+  static func probeName(_ lane: Lane) -> String {
+    switch lane {
+    case .chords: return "tab.chords"
+    case .track(let id): return "tab.track-\(id)"
+    }
   }
 
   /// The tab's name (with the role mark for a track), dimmed while the lane is not audible: a click opens the lane.
-  private func openButton(_ tab: LaneTab) -> some View {
+  /// A lane other ChordLabs play on their own instruments (`RoutedMarks`) carries a small arrow after the name, with
+  /// its tooltip.
+  private func openButton(_ tab: LaneTab, mark: RoutedMark?) -> some View {
     Button { state.open(tab.lane) } label: {
       HStack(spacing: 5) {
         if let role = tab.role {
@@ -128,6 +143,16 @@ struct LaneTabsView: View {
             .foregroundStyle(tab.isOpen ? Color.white : Color.white.opacity(0.75))
             .lineLimit(1)
             .truncationMode(.tail)
+        }
+        .probeFrame(Self.probeName(tab.lane) + ".name")
+        if let mark {
+          Image(systemName: "arrow.up.right")
+            .font(.system(size: 8, weight: .bold))
+            .foregroundStyle(Color.white.opacity(0.8))
+            .fixedSize()
+            .help(mark.tooltip)
+            .accessibilityLabel(mark.tooltip)
+            .probeFrame(Self.probeName(tab.lane) + ".mark")
         }
       }
       .opacity(tab.dimmed ? Self.silentOpacity : 1)

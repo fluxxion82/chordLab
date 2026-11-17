@@ -20,7 +20,8 @@ import SwiftUI
 /// as the cell was held. Length (after Feel, D8) is a menu titled by `LengthOptions.title` (the selection's common
 /// length, "Mixed", or "New: …" with nothing selected), with a dot beside it while new chords have a chosen
 /// length; a pick sends `setLengths` for the selection, or `setNewChordLength` with none; Custom… opens
-/// `CustomLengthView`. Both are hidden for an older plug-in (no `selectedEventIds` in the snapshot).
+/// `CustomLengthView`. Both are hidden for an older plug-in (no `selectedEventIds` in the snapshot). Follow (after
+/// Length, `FollowMenu`) is the picker of another ChordLab's tracks to play here, shown only while there is one.
 ///
 /// Below the width the key bar needs to keep it beside the Key pickers (`ContentView.keyBarSwitchMinWidth`),
 /// the Transpose with key switch (`TransposeWithKeyToggle`) is here instead, right after Auto voice-lead
@@ -33,7 +34,9 @@ import SwiftUI
 /// Length on the next, so the 700-pt minimum never clips a control. With the Length title at its widest the
 /// editing controls alone need a window about 795 pt wide and all of them with the playback controls about 975,
 /// so the 700-pt minimum gets the third layout and the 900-pt default the second (measured by the render
-/// harness). The third row costs 32 pt; the minimum height (`PLUG_MIN_HEIGHT`, 632 pt since the lane tab row) pays
+/// harness). Each group keeps its ideal width (`fixedSize`): `ViewThatFits` picks a layout only when every row's ideal
+/// width fits, and without it the row's spacer took width from the editing controls and wrapped "Record" at 900 pt
+/// once Follow joined them (seen by the render harness). The third row costs 32 pt; the minimum height (`PLUG_MIN_HEIGHT`, 632 pt since the lane tab row) pays
 /// for it, keeping one full palette row (76 pt or more) in view in every state.
 struct TransportBarView: View {
   @EnvironmentObject var state: ChordLabState
@@ -102,6 +105,7 @@ struct TransportBarView: View {
       }
     }
     .font(.body)
+    .probeFrame("transportBar")
   }
 
   private var playbackControls: some View {
@@ -117,6 +121,8 @@ struct TransportBarView: View {
       ThruToggle()
       PanicButton()
     }
+    .fixedSize(horizontal: true, vertical: false)
+    .probeFrame("transport.playback")
   }
 
   private var editingControls: some View {
@@ -124,6 +130,7 @@ struct TransportBarView: View {
       voicingControls
       stripControls
     }
+    .fixedSize(horizontal: true, vertical: false)
   }
 
   /// Auto voice-lead, the Transpose with key switch when it is here, and + Section.
@@ -141,9 +148,12 @@ struct TransportBarView: View {
         .help("Start a section on the selected chord (else the last one)")
         .accessibilityLabel("Add a section")
     }
+    .fixedSize(horizontal: true, vertical: false)
+    .probeFrame("transport.voicing")
   }
 
-  /// Record, Presets, Feel and Length; each hidden for an older plug-in that lacks what it needs.
+  /// Record, Presets, Feel and Length, each hidden for an older plug-in that lacks what it needs; then Follow, shown
+  /// while another ChordLab offers tracks to play.
   private var stripControls: some View {
     HStack(spacing: 16) {
       if state.snapshot?.selectedEventIds != nil {
@@ -166,7 +176,10 @@ struct TransportBarView: View {
       if state.snapshot?.selectedEventIds != nil {
         lengthMenu
       }
+      FollowMenu()
     }
+    .fixedSize(horizontal: true, vertical: false)
+    .probeFrame("transport.strip")
   }
 
   /// "Feel", with a dot while the progression plays with one; opens the feel popover.
