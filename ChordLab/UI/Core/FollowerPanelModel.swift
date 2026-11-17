@@ -66,10 +66,11 @@ struct FollowerSwitchOffer: Equatable {
 ///
 /// Names: the followed track's name and role come from the leader's current lanes when it lists the lane (a rename in
 /// the leader shows at once), else from the follow's stored hints; an empty track name is its role's name (the lane
-/// tab row's rule). The other ChordLab's label is `following.leaderLabel` (the bound leader's current label, the stored
-/// one while waiting), else the listed leader's. Missing names read "a track" / "the track" and "another ChordLab"
-/// (in a possessive, "the other ChordLab"). Labels are given by load order, so while waiting a stored label may now
-/// name a different instance: when a listed leader carries it, the sentences say "the other ChordLab" instead.
+/// tab row's rule). The other ChordLab's label is `following.leaderLabel` (the label of the leader's id, bound or
+/// waiting), else the listed leader's. Missing names read "a track" / "the track" and "another ChordLab" (in a
+/// possessive, "the other ChordLab"). The engine gives a label to an id and keeps it while a follower names the id
+/// (registry rule 9), so a listed leader with another id never carries the waiting label; should one ever do, the
+/// sentences say "the other ChordLab" instead.
 ///
 /// The switch (`switchTo`, plan I7): a copy loads its original's lane table and document id, so it lists the same
 /// lane uids. The button follows, in this order, the copy's lane with the followed lane's uid; else the one lane of

@@ -699,10 +699,14 @@ struct Render {
     }
   }
 
-  /// `freshLink()` as the shell answers an applied follow of ChordLab A's chords.
+  /// `freshLink()` as the shell answers an applied follow of ChordLab A's chords: a follower has no label of its own
+  /// (registry rule 9).
   func followingChordsOfA() -> Data {
     let link = try! JSONSerialization.jsonObject(with: freshLink()) as! [String: Any]
     var object = link
+    var me = object["self"] as! [String: Any]
+    me["label"] = ""
+    object["self"] = me
     object["following"] = ["leader": "id-original", "leaderLabel": "ChordLab A", "lane": "chords", "laneName": "Chords",
                            "role": "", "status": "playing", "switchTo": NSNull()] as [String: Any]
     return try! JSONSerialization.data(withJSONObject: object)

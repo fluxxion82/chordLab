@@ -32,7 +32,8 @@ struct LinkInstanceJSON: Codable, Equatable {
 
 /// The link state's `self`: this instance's id and label, and `copyOf`, the instance this one is a copy of while
 /// this one is not following and the original lives and leads (`LinkView::copyOf`, registry rule 11); nil (JSON
-/// null, or absent from a build before Task 10a) otherwise.
+/// null, or absent from a build before Task 10a) otherwise. `label` is empty while this instance follows (a follower
+/// has no label of its own, registry rule 9); no view shows it.
 struct LinkSelfJSON: Codable, Equatable {
   let id: String
   let label: String
@@ -40,11 +41,12 @@ struct LinkSelfJSON: Codable, Equatable {
 }
 
 /// The link state's `following`: what this instance follows. `leader` is the bound leader's current id (the stored
-/// id while waiting) and `lane` is `"chords"` or a lane uid of that leader. `leaderLabel`, `laneName` and `role` are
-/// the bound leader's label and the follow's stored hints: any of them may be empty, and names shown to the user
-/// come from the leader's current lanes where it lists them (`leaders`), these only as the fallback. `switchTo`
-/// names a copy of the leader that this instance could follow instead (registry rule 8); nil (null or absent)
-/// otherwise.
+/// id while waiting) and `lane` is `"chords"` or a lane uid of that leader. `leaderLabel` is the label of that leader
+/// id, bound or waiting (registry rule 9: a label belongs to an id, and a deleted leader's id keeps it while a
+/// follower names it); `laneName` and `role` are the follow's stored hints. Any of them may be empty, and names shown
+/// to the user come from the leader's current lanes where it lists them (`leaders`), these only as the fallback.
+/// `switchTo` names a copy of the leader that this instance could follow instead (registry rule 8); nil (null or
+/// absent) otherwise.
 struct LinkFollowingJSON: Codable, Equatable {
   let leader: String
   let leaderLabel: String
