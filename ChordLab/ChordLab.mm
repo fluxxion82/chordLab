@@ -49,8 +49,10 @@
 // preview is held (merged in the ring while the host is not processing): a palette cell, a piano-roll note press or
 // a keyboard-column key (one held preview at a time, ChordLabState / PreviewBook), plus the roll's short one-shots
 // (an insert, a velocity drag's release) that may overlap the held one, each with its own id; OnMessage (main thread)
-// parses it and calls Scheduler::pushPreview, the scheduler's single other-thread entry (an SPSC ring of
-// 64; a full ring is reported to the UI as an error). The audio thread owns everything else: ProcessBlock
+// parses it (a Start from a track's roll names the track, chordlab::bridge::PreviewRequest) and hands it to
+// OfferPreview, which pushes it into Scheduler::pushPreview, the scheduler's single other-thread entry (an SPSC ring
+// of 64; a full ring is reported to the UI as an error), unless the link registry forwarded it to the instances
+// that play its lane (see "Previews on followers" below). The audio thread owns everything else: ProcessBlock
 // consumes the pending reset/bypass/panic flags, runs Scheduler::process and forwards the events with
 // SendMidiMsg (HandleMidiIn queues incoming notes for thru and may consume the pending reset and bypass
 // release first; see "MIDI in"). The scheduler owns the sounding notes: one physical note per pitch, Start/Stop paired by id, an Extend
@@ -133,9 +135,10 @@
 // following. Nothing unsafe: the same section, hooks and republish as every load.
 // Destruction, in this order: the AU editor close; chordlab::retire(*mLifeline), which waits for a hop or hook in
 // flight and makes later ones no-ops, so no other instance enters this one any more; mLink.reset(), which removes
-// the registration (followers are emptied and wait for this id, the registry never writes this link buffer
-// again) and runs the hook of the leader this instance was bound to, holding no lock of this instance; then the
-// export cleanup; mPrivateRegistry goes after mLink, with the members. State: SerializeState writes the endpoint's
+// the registration (followers are emptied and wait for this id, the registry never writes this link buffer, pushes
+// into mScheduler or sets mPanicPending again) and runs the hook of the leader this instance was bound to, holding
+// no lock of this instance; then the export cleanup; mPrivateRegistry goes after mLink, with the members, and so do
+// mScheduler and mPanicPending (declared before mLink). State: SerializeState writes the endpoint's
 // instance block (id, document id, lane uids, follow) with the document, read in one mModelMutex section;
 // UnserializeState replaces the document, renews the clipboard token and adopts the loaded block (or, for a state
 // without one, resets the link identity) in one mModelMutex section, then runs the hooks and republishes as above.
@@ -167,6 +170,28 @@
 // read mLink under mModelMutex: that rests on the VST3's destructor running on the main thread, the thread of
 // OnIdle (plan V14), so the two never interleave. A queued PushLinkState hop runs under the Lifeline, which is
 // retired before mLink.reset(), so it never sees mLink gone.
+// Previews on followers (M5, the registry's rule 12): a VST3 instance registers with a preview sink, its mScheduler and
+// mPanicPending, so that a leader's preview of a lane this instance plays sounds here, and the leader's own scheduler
+// does not play it. OfferPreview, for a Start, Extend or Stop alike (HandlePreview, CloseWindow's fallback Stop),
+// first calls LinkEndpoint::forwardPreview under mModelMutex (the endpoint reads its lane uids and document id, which
+// publishOwn and the state loads write under that mutex; order: model, then the registry's) and falls back to its
+// own scheduler only on NotForwarded; QueueFull is reported like its own full ring. The registry pushes into a
+// follower's scheduler under its mutex, from the leader's call, and a scheduler's preview ring has ONE producer: so
+// every push must come from one thread. It does: OfferPreview forwards only when kLinks and on the main thread
+// ([NSThread isMainThread]), and in the VST3 every path that pushes a preview runs there: OnMessage (the editor's
+// messages arrive on the main thread in every format), and CloseWindow, which the VST3 wrapper calls from
+// IPlugView::removed on the UI thread (plan V14; the VST3 destructor never calls it). A follower's own editor sends
+// no Start (LinkGate) but may send a Stop, on that same thread. What would break it: a push from another thread into
+// a scheduler that takes forwards, such as the AU's CloseWindow from an off-main destructor (plan V6), which is why the
+// AU and the app pass no sink (they never link: the registry never pushes into them, and OfferPreview never forwards
+// for them, so their path is exactly the old pushPreview), and why a VST3 CloseWindow off the main thread would play
+// its fallback Stop on its own scheduler (harmless: an unknown id) and leave a forwarded preview to the follower's
+// watchdog. Panic (kMsgTagPanic) also calls LinkEndpoint::panicFollowers (kLinks only): every follower bound to this
+// instance gets its panic flag set and releases on its next block, and the registry forgets what this instance
+// forwarded. The registry sets a follower's flag on its own as well, when the follower's link to the leader that
+// forwarded to it breaks. The sink stays valid as long as the registration: the destructor's mLink.reset() removes it
+// before mScheduler or mPanicPending die (both are also declared before mLink), and the registry touches neither after
+// that remove returned.
 //
 // MIDI in (listening design D1, D2, D4, D5): (VST3 and the APP; the Audio Unit's path is described at the end
 // of this note) HandleMidiIn runs on the audio thread once per incoming event (ProcessMidiMsg calls it),
@@ -321,13 +346,19 @@ ChordLab::ChordLab(const InstanceInfo& info)
   // before mLink is assigned, and a hook that reached this instance in that window would publish through a null
   // mLink. The hook takes mModelMutex, so it waits until the instance is whole (order: model, then the registry's,
   // which LinkRegistry::add takes; add and the endpoint's constructor call no hook, they return none).
+  // The preview sink (see "Previews on followers" at the top): the VST3's scheduler and panic flag, both members
+  // already constructed (declared before mLink), which the registry may use from the registration until the
+  // destructor's mLink.reset(); no sink for an instance that does not link.
   {
     std::lock_guard<std::mutex> lock(mModelMutex);
+    const chordlab::LinkPreviewSink previews =
+      kLinks ? chordlab::LinkPreviewSink{&mScheduler, &mPanicPending} : chordlab::LinkPreviewSink{};
     mLink = std::make_unique<chordlab::LinkEndpoint>(registry, MakeUid(), &ChordLab::MakeUid,
                                                      chordlab::guardedHook(mLifeline, [this] {
                                                        std::lock_guard<std::mutex> lock(mModelMutex);
                                                        PublishSnapshotLocked();
-                                                     }));
+                                                     }),
+                                                     previews);
     RebuildPaletteLocked();
     PublishSnapshotLocked();                                     // the empty progression, generation 1
   }
@@ -359,8 +390,10 @@ ChordLab::~ChordLab()
   // instance enters this one.
   chordlab::retire(*mLifeline);
   // Leaves the registry: this instance's followers are emptied and wait for its id, its link buffer is never
-  // written again, and the hook of the leader it followed (if bound) runs here, on this thread, with no lock of
-  // this instance held. mPrivateRegistry, if any, goes after it, with the members.
+  // written again, no preview is forwarded into mScheduler and mPanicPending is never set by another instance any
+  // more (both outlive this line), and the hook of the leader it followed (if bound) runs here, on this thread, with
+  // no lock of this instance held. Nothing touches mLink after it: the AU's CloseWindow above runs before it, and no
+  // other path runs during destruction. mPrivateRegistry, if any, goes after it, with the members.
   mLink.reset();
   // This instance's exports that are old enough to be certainly unused; younger ones stay for the next
   // purge or the OS (see the cleanup note above). May run off the main thread (AUv3), hence the pool.
@@ -454,7 +487,11 @@ void ChordLab::CloseWindow()
     chordlab::PreviewCmd stop{};
     stop.kind = chordlab::PreviewCmd::Stop;
     stop.id = mOpenPreviewId;
-    mScheduler.pushPreview(stop);                                // a full ring is covered by the watchdog
+    // Where its Start went: a follower's scheduler, or this one (OfferPreview). Off the main thread (the AU's
+    // destructor) and in every instance that does not link, straight to this scheduler, as before. A full ring is
+    // covered by the watchdog. Under AU, ~ChordLab calls this before mLink.reset(), and OfferPreview never reads
+    // mLink there anyway (kLinks is false).
+    OfferPreview(std::nullopt, stop);
     mOpenPreviewId = -1;
   }
   CocoaEditorDelegate::CloseWindow();                            // forgets mViewController
@@ -949,6 +986,14 @@ bool ChordLab::OnMessage(int msgTag, int ctrlTag, int dataSize, const void* pDat
   {
     mPanicPending.store(true, std::memory_order_release);        // panic must run on the audio thread
     mOpenPreviewId = -1;                                         // the scheduler forgets every preview
+    if (kLinks)
+    {
+      // What this instance forwarded sounds on its followers: the registry sets the panic flag of every follower
+      // bound to it (each releases on its next block) and forgets the forwards. Under mModelMutex, as every endpoint
+      // call (order: model, then the registry's).
+      std::lock_guard<std::mutex> lock(mModelMutex);
+      mLink->panicFollowers();
+    }
     return true;
   }
 
@@ -1057,13 +1102,15 @@ void ChordLab::HandlePreview(std::string_view text)
         cmd.kind == chordlab::PreviewCmd::Start ? "start" : cmd.kind == chordlab::PreviewCmd::Stop ? "stop" : "extend",
         cmd.id);
 #endif
-  if (!mScheduler.pushPreview(cmd))
+  if (!OfferPreview(parsed->track, cmd))
   {
-    // Extends for one id merge in the ring, so they cannot fill it on their own. The watchdog (4 s of
-    // processed audio after the Start or the last applied Extend) still ends what sounds.
+    // This scheduler's ring, or every ring of the followers it was for, was full. Extends for one id merge in the
+    // ring, so they cannot fill it on their own. The watchdog (4 s of processed audio after the Start or the last
+    // applied Extend) still ends what sounds.
     PushError("preview queue full");
     return;
   }
+  // Forwarded or not: CloseWindow's fallback Stop goes through OfferPreview too, so it reaches a forwarded Start.
   switch (cmd.kind)
   {
     // Only the LAST Start is remembered: a roll one-shot started over a held preview replaces it here, so
@@ -1073,6 +1120,31 @@ void ChordLab::HandlePreview(std::string_view text)
     case chordlab::PreviewCmd::Stop:   if (cmd.id == mOpenPreviewId) mOpenPreviewId = -1; break;
     case chordlab::PreviewCmd::Extend: break;                    // the open Start stays open
   }
+}
+
+bool ChordLab::OfferPreview(std::optional<int> track, const chordlab::PreviewCmd& cmd)
+{
+  // See "Previews on followers" at the top. kLinks first: for the AU and the app the rest is dead code, and their
+  // path is the pushPreview below, from whatever thread called (the AU's CloseWindow may run off the main thread).
+  // The main-thread test keeps every push into a follower's scheduler on the thread of that scheduler's other pushes.
+  chordlab::LinkForward forward = chordlab::LinkForward::NotForwarded;
+  if (kLinks && [NSThread isMainThread])
+  {
+    // The endpoint reads its lane uids and document id, written under mModelMutex; order: model, then the registry's
+    // (a leaf, held inside forwardPreview while it pushes into the followers' rings). Never called with mModelMutex
+    // held (HandlePreview from OnMessage, CloseWindow). mLink is valid: it is reset only in the destructor, which in
+    // the VST3 runs on this thread and calls neither of them. The check is belt and braces, as in PushLinkState.
+    std::lock_guard<std::mutex> lock(mModelMutex);
+    if (mLink)
+      forward = mLink->forwardPreview(track, cmd);
+  }
+  switch (forward)
+  {
+    case chordlab::LinkForward::Forwarded:    return true;       // it sounds on the followers, not here
+    case chordlab::LinkForward::QueueFull:    return false;      // every follower's ring was full: not played here either
+    case chordlab::LinkForward::NotForwarded: break;
+  }
+  return mScheduler.pushPreview(cmd);
 }
 
 // The host's tempo as ProcessBlock last saw it, 120 before the first block: the export's and the listener's.
