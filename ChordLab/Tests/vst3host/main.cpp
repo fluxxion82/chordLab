@@ -1,8 +1,9 @@
 // vst3host: loads a built ChordLab.vst3 into this process, as a VST3 host does, and runs the shell's scenarios
 // (per-track instruments plan, M2 Task 8b) against it: life cycle, state, playback of one instance, two instances
-// linked through their states alone, a copy, and a state load while playing. Every VST3 call is made on this, the
-// main, thread, as Live makes them (plan V14), and `process` is called on the same thread between them. No window,
-// no audio or MIDI device, nothing written anywhere.
+// linked through their states alone, a copy, a state load while playing, and previews a leader's editor sends for
+// a lane a follower plays (M5 Task 9b). Every VST3 call is made on this, the main, thread, as Live makes them (plan
+// V14), and `process` is called on the same thread between them. No window on screen (an editor is opened into a
+// view in no window: editor.h), no audio or MIDI device, nothing written anywhere.
 //
 // What the plug-in must play is never computed by the code under test: the expected output of every instance is a
 // lone engine scheduler playing a document of its own (the leader's document with the followed lane muted, the
@@ -15,19 +16,24 @@
 // One line per check ("ok"/"FAIL"; steps reached are printed as "--" and not counted); the first failure ends the
 // run with status 1, a crash with status 70 and the step it hit.
 
+#include "editor.h"
+
 #include "public.sdk/source/common/memorystream.h"
 #include "public.sdk/source/vst/hosting/eventlist.h"
 #include "public.sdk/source/vst/hosting/hostclasses.h"
 #include "public.sdk/source/vst/hosting/module.h"
 
 #include "pluginterfaces/vst/ivstaudioprocessor.h"
+#include "pluginterfaces/gui/iplugview.h"
 #include "pluginterfaces/vst/ivstcomponent.h"
+#include "pluginterfaces/vst/ivsteditcontroller.h"
 #include "pluginterfaces/vst/ivstevents.h"
 #include "pluginterfaces/vst/ivstprocesscontext.h"
 
 #include "chordlab/chord.h"
 #include "chordlab/document.h"
 #include "chordlab/json_api.h"
+#include "chordlab/link.h"
 #include "chordlab/link_state.h"
 #include "chordlab/publication.h"
 #include "chordlab/scheduler.h"
@@ -404,6 +410,7 @@ public:
     }
 
     ~Instance() {
+        if (view_) closeEditor();
         setStep(name_ + ": destroy");
         if (processing_) {
             processor_->setProcessing(false);
@@ -486,6 +493,29 @@ public:
         return midi;
     }
 
+    /// Opens the editor into `parent` (editor::makeParent) as a host does: createView("editor"), then attached,
+    /// which runs ChordLab::OpenWindow.
+    void openEditor(void* parent) {
+        setStep(name_ + ": open the editor");
+        FUnknownPtr<IEditController> controller(component_);
+        if (!controller) fail(name_ + ": no IEditController");
+        editor::withPool([&] {
+            view_ = owned(controller->createView(ViewType::kEditor));
+            if (!view_) fail(name_ + ": createView made no editor");
+            if (view_->isPlatformTypeSupported(kPlatformTypeNSView) != kResultTrue) fail(name_ + ": the editor takes no NSView");
+            expectOk(view_->attached(parent, kPlatformTypeNSView), "attached");
+        });
+    }
+
+    /// Closes it as a host does: removed (ChordLab::CloseWindow), then the view's release.
+    void closeEditor() {
+        setStep(name_ + ": close the editor");
+        editor::withPool([&] {
+            expectOk(view_->removed(), "removed");
+            view_ = nullptr;
+        });
+    }
+
     const std::string& name() const { return name_; }
 
 private:
@@ -496,6 +526,7 @@ private:
     std::string name_;
     IPtr<IComponent> component_;
     IPtr<IAudioProcessor> processor_;
+    IPtr<IPlugView> view_;
     EventList events_;
     std::array<float, kBlock> left_{};
     std::array<float, kBlock> right_{};
@@ -767,10 +798,139 @@ void loadWhilePlaying(const Plug& plug) {
     expectClean(rb, 0, end, "B");
 }
 
+/// A block's notes in order, offsets and note-off velocities left out: "on50v90 off50".
+std::string notes(const Midi& midi) {
+    std::string out;
+    for (const Msg& m : midi)
+        out += (out.empty() ? "" : " ") + (m.status == 0x90 ? "on" + std::to_string(m.pitch) + "v" + std::to_string(m.velocity)
+                                                            : "off" + std::to_string(m.pitch));
+    return out;
+}
+
+/// A preview message as the editor writes it (ChordLab/UI/Core/PreviewBook.swift): a Start with its lane's track
+/// when it comes from a track's roll, a Stop, an Extend.
+std::string previewStart(int id, int pitch, int velocity, std::optional<int> track) {
+    nlohmann::json j = {{"schema", 1}, {"id", id}, {"on", true}, {"velocity", velocity}, {"pitches", {pitch}}};
+    if (track) j["track"] = *track;
+    return j.dump();
+}
+std::string previewStop(int id) {
+    return nlohmann::json{{"schema", 1}, {"id", id}, {"on", false}}.dump();
+}
+std::string previewExtend(int id) {
+    return nlohmann::json{{"schema", 1}, {"id", id}, {"extend", true}}.dump();
+}
+
+/// 7. Previews: B follows A's bass; A's editor sends previews as the editor does. A Start of the bass track's roll
+/// sounds on B alone, its Extends keep it there past the watchdog, A's Panic and A's editor closing end it there; a
+/// Start of the chords lane, or of a track nobody follows, sounds on A alone; an id of the registry's own range is
+/// refused. The transport stands, so nothing but previews sounds.
+void previews(const Plug& plug) {
+    std::puts("== 7 previews of a followed lane");
+    const Song s = song();
+    const std::vector<Span> spans = transport(0, 1100);
+    Instance a(plug, "A");
+    a.setState(wrap(s.json, gTrailer));
+    const Leader leader = leaderOf(a, s);
+    Instance b(plug, "B");
+    b.setState(wrap(followerState("vst3host-follower-b", leader.id, leader.doc, leader.bassUid), gTrailer));
+    a.start();
+    b.start();
+    void* parent = editor::makeParent(kDefaultEditorWidth, kDefaultEditorHeight);
+    a.openEditor(parent);
+    check(editor::hasController(parent), "A's editor is open, and its view controller takes the editor's messages");
+    editor::takeErrors();
+
+    Run ra(spans.size()), rb(spans.size());
+    std::size_t next = 0;
+    // `blocks` spans for both, A first; returns the index of the first.
+    const auto run = [&](std::size_t blocks) {
+        const std::size_t first = next;
+        play({&a, &b}, {&ra, &rb}, spans, first, first + blocks);
+        next += blocks;
+        return first;
+    };
+    const auto send = [&](int tag, const std::string& json, const std::string& what) {
+        setStep("A's editor sends " + what);
+        if (!editor::send(parent, tag, json)) fail("A's editor is gone before it sends " + what);
+    };
+    const auto noErrors = [&](const std::string& what) {
+        const std::vector<std::string> errors = editor::takeErrors();
+        check(errors.empty(), what + ": no error reaches the editor" + (errors.empty() ? "" : " (" + errors.front() + ")"));
+    };
+    // The block after a message: exactly `wantA` on A and `wantB` on B.
+    const auto expectNext = [&](const std::string& wantA, const std::string& wantB, const std::string& what) {
+        const std::size_t i = run(1);
+        check(notes(ra[i]) == wantA && notes(rb[i]) == wantB,
+              what + ": A [" + notes(ra[i]) + "], B [" + notes(rb[i]) + "] in block " + std::to_string(i));
+    };
+    const auto expectSilent = [&](std::size_t blocks, const std::string& what) {
+        const std::size_t i = run(blocks);
+        check(silentBetween(ra, i, next) && silentBetween(rb, i, next),
+              what + " (blocks " + std::to_string(i) + ".." + std::to_string(next - 1) + ")");
+    };
+
+    expectSilent(4, "both silent before any preview");
+
+    send(editor::kPreview, previewStart(1, 50, 90, s.bass), "a Start of the bass roll");
+    expectNext("", "on50v90", "a Start of the bass track sounds on B, the bass's ChordLab, and not on A");
+    noErrors("the bass track's Start");
+    expectSilent(20, "it holds on B");
+    send(editor::kPreview, previewStop(1), "its Stop");
+    expectNext("", "off50", "its Stop ends it on B");
+
+    send(editor::kPreview, previewStart(2, 62, 80, std::nullopt), "a Start of the chords lane");
+    expectNext("on62v80", "", "a Start without track (the chords lane, which nobody follows) sounds on A, not on B");
+    send(editor::kPreview, previewStop(2), "its Stop");
+    expectNext("off62", "", "its Stop ends it on A");
+
+    send(editor::kPreview, previewStart(3, 64, 100, 99), "a Start of a track A has not");
+    expectNext("on64v100", "", "a Start of a track nobody follows sounds on A, not on B");
+    send(editor::kPreview, previewStop(3), "its Stop");
+    expectNext("off64", "", "its Stop ends it on A");
+    noErrors("the own previews");
+
+    // Held past the watchdog (4 s of processed audio, 750 blocks) by the Extends, which must reach B as the Start did.
+    send(editor::kPreview, previewStart(4, 52, 100, s.bass), "a held Start of the bass roll");
+    expectNext("", "on52v100", "a held Start of the bass track sounds on B");
+    for (int k = 0; k < 6; ++k) {
+        run(150);
+        send(editor::kPreview, previewExtend(4), "its Extend");
+    }
+    const std::size_t heldFrom = next - 900;
+    check(silentBetween(ra, heldFrom, next) && silentBetween(rb, heldFrom, next),
+          "its Extends keep it sounding on B past the watchdog (900 blocks, nothing released)");
+    noErrors("the held preview's Extends");
+    send(editor::kPanic, "", "Panic");
+    expectNext("", "off52", "A's Panic ends the held preview on B at B's next block");
+    send(editor::kPreview, previewStop(4), "the Stop of the panicked preview");
+    expectSilent(2, "a Stop after the Panic sounds nothing anywhere");
+    noErrors("Panic and the late Stop");
+
+    send(editor::kPreview, previewStart(chordlab::kForwardedPreviewIdFirst, 55, 100, s.bass), "a Start of a reserved id");
+    const std::vector<std::string> refused = editor::takeErrors();
+    check(refused.size() == 1 && refused.front().find("preview message needs schema 1, an id and on:true|false") != std::string::npos,
+          "a Start of an id in the registry's own range is refused with the id's error (" +
+              (refused.empty() ? std::string("no error") : refused.front()) + ")");
+    expectSilent(2, "and it sounds nowhere");
+
+    // CloseWindow's Stop for the last Start goes where the Start went.
+    send(editor::kPreview, previewStart(5, 57, 100, s.bass), "a held Start of the bass roll");
+    expectNext("", "on57v100", "a held Start of the bass track sounds on B");
+    a.closeEditor();
+    expectNext("", "off57", "A's editor closing ends it on B");
+    expectSilent(4, "both silent after");
+    editor::releaseParent(parent);
+
+    expectClean(ra, 0, next, "A");
+    expectClean(rb, 0, next, "B");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     installCrashHandlers();
+    editor::startApplication();
     if (argc != 2) {
         std::fprintf(stderr, "usage: vst3host <path to ChordLab.vst3>\n");
         return 2;
@@ -805,6 +965,7 @@ int main(int argc, char** argv) {
     linked(plug);
     copy(plug);
     loadWhilePlaying(plug);
+    previews(plug);
 
     setStep("unload the module");
     module.reset();

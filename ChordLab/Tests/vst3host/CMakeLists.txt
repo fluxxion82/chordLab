@@ -1,6 +1,7 @@
 # vst3host: a command-line VST3 host that loads a built ChordLab.vst3 in-process and runs the shell's scenarios
 # (per-track instruments plan, M2 Task 8b). macOS only. Built from the VST3 SDK's hosting sources that iPlug2
-# vendors, plus the engine (to build the states it hands the plug-in and to compute the notes it must play).
+# vendors, plus the engine (to build the states it hands the plug-in and to compute the notes it must play), plus
+# editor.mm (the editor's way of sending the plug-in a message).
 #   cmake -S ChordLab/Tests/vst3host -B <build dir> && cmake --build <build dir>
 #   <build dir>/vst3host <path to ChordLab.vst3>
 cmake_minimum_required(VERSION 3.20)
@@ -63,8 +64,11 @@ add_library(vst3host_engine STATIC ${ENGINE_SRC})
 target_include_directories(vst3host_engine PUBLIC ${ENGINE_DIR}/include PRIVATE ${ENGINE_DIR}/third_party)
 target_compile_options(vst3host_engine PRIVATE ${HIDDEN})
 
-add_executable(vst3host main.cpp)
-target_include_directories(vst3host PRIVATE ${ENGINE_DIR}/third_party)
+# editor.mm opens an instance's editor and sends it messages as the Swift editor does (editor.h); it reads the message
+# tags from ChordLab/ChordLab-Shared.h.
+add_executable(vst3host main.cpp editor.mm)
+target_include_directories(vst3host PRIVATE ${ENGINE_DIR}/third_party ${CHORDLAB_DIR})
+set_source_files_properties(editor.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 target_compile_definitions(vst3host PRIVATE CHORDLAB_ENGINE_FIXTURE_DIR="${ENGINE_DIR}/tests/fixtures")
 target_compile_options(vst3host PRIVATE ${HIDDEN} -Wall -Wextra)
 target_link_libraries(vst3host PRIVATE vst3host_sdk vst3host_engine)
