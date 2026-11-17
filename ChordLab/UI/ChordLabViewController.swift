@@ -66,13 +66,10 @@ public typealias MIDIVelocity = UInt8
                                 group: getParameterGroup(idx)))
     }
 
-    let contentView = ContentView().environmentObject(state)
-    let hostingController = PlatformHostingController(rootView: contentView)
     state.bundleID = getBundleID()
     BundleLocator.shared.initialize(with: state.bundleID)
 
-    view.addSubview(hostingController.view)
-    hostingController.view.pinToSuperviewEdges()
+    EditorHosting.install(ContentView().environmentObject(state), in: view)
   }
 
   override func viewDidAppear() {
