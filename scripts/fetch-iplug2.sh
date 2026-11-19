@@ -80,6 +80,8 @@ done
 [ -n "$DIR" ] || DIR=$(default_dir)
 case "$DIR" in /*) ;; *) DIR="$PWD/$DIR" ;; esac
 DIR="${DIR%/}"
+# A symlink to a folder (the worktrees' iPlug2 link): work on the folder it points to, leaving the link as it is.
+if [ -L "$DIR" ] && [ -d "$DIR" ]; then DIR=$(cd -P "$DIR" && pwd -P); fi
 
 URL=$(pin_value IPLUG2_URL)
 COMMIT=$(pin_value IPLUG2_COMMIT)
@@ -92,17 +94,27 @@ if command -v timeout >/dev/null 2>&1; then TO=(timeout 1200)
 elif command -v gtimeout >/dev/null 2>&1; then TO=(gtimeout 1200)
 else TO=(); fi
 
-WORK=()   # temporary folders, removed on exit
-cleanup() { local w; for w in ${WORK[@]+"${WORK[@]}"}; do rm -rf "$w"; done; }
+WORK=()          # temporary folders, removed on exit
+SDK_TARGET=""    # the VST3_SDK folder fetch_sdk is swapping, while it is renamed aside
+cleanup() {
+    local w
+    for w in ${WORK[@]+"${WORK[@]}"}; do
+        # Interrupted between fetch_sdk's two renames: the placeholder goes back first.
+        if [ -n "$SDK_TARGET" ] && [ -d "$w/placeholder" ] && [ ! -e "$SDK_TARGET" ]; then mv "$w/placeholder" "$SDK_TARGET"; fi
+        rm -rf "$w"
+    done
+}
 trap cleanup EXIT
 
 # fetch_sdk <iPlug2 folder>: runs iPlug2's download-vst3-sdk.sh in a scratch folder outside every git work tree
-# (GIT_CEILING_DIRECTORIES), checks the result's tree hash there, then moves it into <iPlug2 folder>/VST3_SDK, which
-# must hold nothing but iPlug2's README.md (kept: it is tracked). The download script is not fail-fast (after a failed
+# (GIT_CEILING_DIRECTORIES) and checks the result's tree hash there. The download script is not fail-fast (after a failed
 # clone it carries on with rm -rf in its current folder, here the scratch one) and its last step, git checkout README.md,
-# only works inside iPlug2: its exit status says nothing, the hash decides.
+# only works inside iPlug2: its exit status says nothing, the hash decides. The verified SDK, with iPlug2's tracked
+# README.md in place of the SDK's own, is staged complete next to <iPlug2 folder>/VST3_SDK and swapped in by two renames
+# on one volume; the placeholder folder is checked again once renamed aside, and put back untouched if anything but
+# README.md appeared in it meanwhile.
 fetch_sdk() {
-    local ip="$1" target sb e extras
+    local ip="$1" target sb e extras stage
     target="$ip/$SDK_REL"
     extras=$(sdk_extras "$target")
     [ -z "$extras" ] || die "$target holds an incomplete SDK ($extras); left as it is: remove it, or run download-vst3-sdk.sh $TAG there yourself"
@@ -116,12 +128,21 @@ fetch_sdk() {
     local got
     got=$(sdk_state "$sb/VST3_SDK")
     [ "$got" = "$SDK_SHA" ] || { tail -n 15 "$sb/download.log" >&2; die "the VST3 SDK $TAG as downloaded hashes to $got, the pin says $SDK_SHA"; }
-    mkdir -p "$target"
-    for e in "$sb/VST3_SDK"/* "$sb/VST3_SDK"/.[!.]* "$sb/VST3_SDK"/..?*; do
-        if [ ! -e "$e" ] && [ ! -L "$e" ]; then continue; fi
-        [ "$(basename "$e")" != README.md ] || continue
-        mv "$e" "$target/"
-    done
+    [ -f "$target/README.md" ] || die "$target/README.md (tracked by iPlug2) is missing"
+    stage=$(mktemp -d "$(dirname "$target")/.VST3_SDK-fetch.XXXXXX")
+    WORK+=("$stage")
+    mv "$sb/VST3_SDK" "$stage/VST3_SDK"
+    cp -p "$target/README.md" "$stage/VST3_SDK/README.md"
+    SDK_TARGET="$target"
+    mv "$target" "$stage/placeholder"
+    extras=$(sdk_extras "$stage/placeholder")
+    if [ -n "$extras" ]; then
+        mv "$stage/placeholder" "$target"
+        die "$target changed while the SDK was downloading ($extras appeared); left as it is"
+    fi
+    mv "$stage/VST3_SDK" "$target"
+    SDK_TARGET=""
+    rm -rf "$stage"   # now, not on exit: on a fresh clone it lies inside the folder about to be moved to <dir>
 }
 
 check_tree() {  # <iPlug2 folder>: a git work tree of its own at the pinned commit with no changed tracked file
