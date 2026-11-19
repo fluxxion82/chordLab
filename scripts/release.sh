@@ -119,7 +119,7 @@ title_of()  { case "$1" in vst3) echo "VST3 plug-in (Ableton Live and other VST3
 
 REPORT=0 REHEARSAL=0 SKIP_NOTARIZE=0 SKIP_AUVAL=0 DRAFT=0
 PRE_FAILED=0
-VER="" PKG="" PROV="" SRC_TGZ="" AUVAL_RESULT="n/a" BUILD_HEAD="" BUILD_IPLUG2_HEAD=""
+VER="" PKG="" PROV="" SRC_TGZ="" SRC_SDK_SHA="" AUVAL_RESULT="n/a" BUILD_HEAD="" BUILD_IPLUG2_HEAD=""
 
 # ---------------------------------------------------------------------------------------------------------
 # preflight
@@ -434,7 +434,16 @@ source_tarball() {  # the vendored VST3 SDK's corresponding source, named after 
         --exclude .DS_Store --exclude '._*' --exclude '.git*' -s ",^,VST3_SDK/," -T "$list") \
         || die "could not write $(basename "$SRC_TGZ")"
     rm -f "$list"
-    note "VST3 SDK source $(basename "$SRC_TGZ") ($(du -h "$SRC_TGZ" | cut -f1 | tr -d ' '))"
+    # What the tarball holds, not the live folder (git-ignored, and possibly shared with other projects), must be the
+    # pinned SDK: unpacked and hashed the way the pin was. The provenance records this hash.
+    local unpacked="$DIST/vst3sdk-source-check"
+    rm -rf "$unpacked"; mkdir -p "$unpacked"
+    tar -xzf "$SRC_TGZ" -C "$unpacked" || die "could not unpack $(basename "$SRC_TGZ") to check it"
+    SRC_SDK_SHA=$(vst3sdk_tree_sha256 "$unpacked/VST3_SDK")
+    rm -rf "$unpacked"
+    [ "$SRC_SDK_SHA" = "$(pin_value VST3SDK_TREE_SHA256)" ] \
+        || die "$(basename "$SRC_TGZ") holds an SDK tree $SRC_SDK_SHA, the pin says $(pin_value VST3SDK_TREE_SHA256): the SDK changed during the build; rebuild"
+    note "VST3 SDK source $(basename "$SRC_TGZ") ($(du -h "$SRC_TGZ" | cut -f1 | tr -d ' '), tree ${SRC_SDK_SHA:0:12} as pinned)"
 }
 
 notarize() {
@@ -510,8 +519,8 @@ PY
 }
 
 VST3SDK_URL=https://github.com/steinbergmedia/vst3sdk
-vst3sdk_tree_sha256() {  # one hash over the vendored SDK sources (iPlug2's download-vst3-sdk.sh drops samples and .git)
-    local sdk="$IPLUG2_ROOT/Dependencies/IPlug/VST3_SDK" d dirs=() h=""
+vst3sdk_tree_sha256() {  # [SDK folder]: one hash over the vendored SDK sources (iPlug2's download-vst3-sdk.sh drops samples and .git)
+    local sdk="${1:-$IPLUG2_ROOT/Dependencies/IPlug/VST3_SDK}" d dirs=() h=""
     for d in base pluginterfaces public.sdk; do [ -d "$sdk/$d" ] && dirs+=("$d"); done
     [ "${#dirs[@]}" -gt 0 ] || { echo unknown; return; }
     h=$(cd "$sdk" && find "${dirs[@]}" \( -name .git -o -path public.sdk/samples \) -prune -o -type f ! -name .DS_Store -print0 \
@@ -531,8 +540,8 @@ dep_version() {  # file regex-with-one-group; empty (the provenance says "unknow
 
 provenance() {
     PROV="${PKG%.pkg}.provenance.txt"
-    # The SDK is git-ignored in a checkout other projects may share: check its tree again now that the source tarball is
-    # written (preflight checked it before the build), so the tarball and the provenance describe the pinned SDK.
+    # The SDK is git-ignored in a checkout other projects may share: the live folder must still be the pinned tree too
+    # (preflight checked it before the build, source_tarball checked the archive).
     [ "$(vst3sdk_tree_sha256)" = "$(pin_value VST3SDK_TREE_SHA256)" ] \
         || die "the VST3 SDK's tree changed during the build ($(vst3sdk_tree_sha256), pinned $(pin_value VST3SDK_TREE_SHA256)); rebuild"
     if [ "$REHEARSAL" -eq 0 ]; then  # the provenance must name the code that was built
@@ -561,7 +570,7 @@ provenance() {
         fi
         if ! tree_clean "$IPLUG2_ROOT"; then echo "WARNING:        the iPlug2 tree was not a clean git work tree when this was built (rehearsal only)"; fi
         echo "vst3sdk:        ${vst3:-unknown} $VST3SDK_URL tag $(vst3sdk_tag "$vst3") (used under GPLv3; base and public.sdk BSD-style)"
-        echo "vst3sdk tree sha256: $(vst3sdk_tree_sha256) (base, pluginterfaces, public.sdk without samples: as iPlug2's Dependencies/IPlug/download-vst3-sdk.sh <tag> vendors them)"
+        echo "vst3sdk tree sha256: $SRC_SDK_SHA (base, pluginterfaces, public.sdk without samples: as iPlug2's Dependencies/IPlug/download-vst3-sdk.sh <tag> vendors them)"
         echo "vst3sdk source: $(basename "$SRC_TGZ") (corresponding source for the vendored VST3 SDK; iPlug2 is at the public commit above)"
         echo "vst3sdk source sha256: $(digest_of "$SRC_TGZ")"
         echo "rtaudio:        ${rta:-unknown} https://github.com/thestk/rtaudio"
@@ -670,18 +679,19 @@ au_validate() {
     killall -9 AudioComponentRegistrar 2>/dev/null || true
     # The registrar rescans on demand; on a machine that never had the component (a fresh CI runner) the listing can
     # lag behind the copy, so wait up to a minute for it (captured first: an early grep exit cannot fail the pipe).
-    local deadline=$((SECONDS + 60)) listed=""
-    while [ "$SECONDS" -lt "$deadline" ]; do
-        listed=$("$TIMEOUT_CMD" 20 auval -a 2>/dev/null || true)
+    local deadline=$((SECONDS + 60)) left listed=""
+    while left=$((deadline - SECONDS)); [ "$left" -gt 0 ]; do
+        listed=$("$TIMEOUT_CMD" -k 5 "$left" auval -a 2>/dev/null || true)
         if grep -Eq "^aumi +$subtype +$mfr" <<<"$listed"; then break; fi
-        listed=""; sleep 2
+        listed=""
+        left=$((deadline - SECONDS)); [ "$left" -le 0 ] || sleep $((left < 2 ? left : 2))
     done
     [ -n "$listed" ] || note "WARNING: auval -a still does not list aumi $subtype $mfr after 60 s; validating anyway"
-    "$TIMEOUT_CMD" 900 auval -strict -v aumi "$subtype" "$mfr" >"$LOGS/auval.log" 2>&1 || { tail -n 40 "$LOGS/auval.log" >&2; die "auval failed (see $LOGS/auval.log)"; }
+    "$TIMEOUT_CMD" -k 10 900 auval -strict -v aumi "$subtype" "$mfr" >"$LOGS/auval.log" 2>&1 || { tail -n 40 "$LOGS/auval.log" >&2; die "auval failed (see $LOGS/auval.log)"; }
     grep -q "AU VALIDATION SUCCEEDED" "$LOGS/auval.log" || die "auval: no success line in $LOGS/auval.log"
     host=$(uname -m)
     if [ "$host" = arm64 ] && arch -x86_64 /usr/bin/true 2>/dev/null; then  # on Intel, arch -x86_64 is native
-        "$TIMEOUT_CMD" 900 arch -x86_64 auval -strict -v aumi "$subtype" "$mfr" >"$LOGS/auval-x86_64.log" 2>&1 || { tail -n 40 "$LOGS/auval-x86_64.log" >&2; die "auval (x86_64 slice) failed (see $LOGS/auval-x86_64.log)"; }
+        "$TIMEOUT_CMD" -k 10 900 arch -x86_64 auval -strict -v aumi "$subtype" "$mfr" >"$LOGS/auval-x86_64.log" 2>&1 || { tail -n 40 "$LOGS/auval-x86_64.log" >&2; die "auval (x86_64 slice) failed (see $LOGS/auval-x86_64.log)"; }
         grep -q "AU VALIDATION SUCCEEDED" "$LOGS/auval-x86_64.log" || die "auval (x86_64 slice): no success line in $LOGS/auval-x86_64.log"
         AUVAL_RESULT=yes
         note "auval passed for arm64 and x86_64 (aumi $subtype $mfr)"
@@ -699,6 +709,8 @@ au_validate() {
 build() {
     VER=$(version_str)
     REPORT=0; preflight
+    # The GitHub tokens are for preflight's gh and visibility checks only: Xcode, auval and the rest do not inherit them.
+    unset GH_TOKEN GITHUB_TOKEN CHORDLAB_PUBLIC_CHECK_TOKEN
     BUILD_HEAD=$(git rev-parse HEAD)
     BUILD_IPLUG2_HEAD=$(git -C "$IPLUG2_ROOT" rev-parse HEAD 2>/dev/null || echo -)
     rm -rf "$DIST"; mkdir -p "$STAGE" "$PKGS" "$LOGS"
