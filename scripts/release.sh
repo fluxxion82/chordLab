@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ChordLab release: from a clean, tagged checkout to a notarized pkg (design: docs/plans/2026-11-06-release-design.md).
+# ChordLab release: from a clean, tagged checkout to a notarized pkg.
 #
 #   scripts/release.sh preflight [--report] [--rehearsal] [--skip-notarize]
 #       Checks only: tools, Developer ID identities, notary credentials, iPlug2 checkout, iPlug2 and the VST3 SDK at
