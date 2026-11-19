@@ -72,7 +72,7 @@ run() {
     while [ "$1" != "--" ]; do envs+=("$1"); shift; done
     shift
     : >"$T/calls.log"
-    OUT="$(env TMPDIR="$T/tmp" "${envs[@]}" "$CHECK" "$@" 2>&1)"
+    OUT="$(env TMPDIR="$T/tmp" ${envs[@]+"${envs[@]}"} "$CHECK" "$@" 2>&1)"   # bash 3.2: an empty array is unset
     RC=$?
     RUN="$(echo "$OUT" | sed -n 's/^run directory: *//p' | head -1)"
 }
