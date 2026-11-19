@@ -103,10 +103,13 @@ trap cleanup EXIT
 # clone it carries on with rm -rf in its current folder, here the scratch one) and its last step, git checkout README.md,
 # only works inside iPlug2: its exit status says nothing, the hash decides. The verified SDK is then moved into
 # <iPlug2 folder>/VST3_SDK entry by entry, never over anything: iPlug2's tracked README.md stays, a name that exists is
-# refused, mv -n never replaces a file, and nothing in that folder (which other projects may share) is ever renamed or
-# deleted. If something appears there meanwhile, the caller's hash check fails and says so; nothing is lost.
+# refused, mv -n does not replace a file, and nothing in that folder (which other projects may share) is renamed or
+# deleted. Then every downloaded file must be at its exact path there with its hash (a manifest), so a move that
+# mv -n skipped, or a folder nested inside one that appeared meanwhile, fails. Not covered: a same-named entry created in
+# the instant between a check and its mv (Apple's mv tests the destination, then renames; the shell has no exclusive
+# rename); this folder is one no project has filled yet, so nobody else writes there.
 fetch_sdk() {
-    local ip="$1" target sb e name extras got
+    local ip="$1" target sb e name extras got manifest
     target="$ip/$SDK_REL"
     extras=$(sdk_extras "$target")
     [ -z "$extras" ] || die "$target holds an incomplete SDK ($extras); left as it is: remove it, or run download-vst3-sdk.sh $TAG there yourself"
@@ -119,6 +122,8 @@ fetch_sdk() {
     [ -d "$sb/VST3_SDK" ] || { tail -n 15 "$sb/download.log" >&2; die "download-vst3-sdk.sh $TAG fetched nothing"; }
     got=$(sdk_state "$sb/VST3_SDK")
     [ "$got" = "$SDK_SHA" ] || { tail -n 15 "$sb/download.log" >&2; die "the VST3 SDK $TAG as downloaded hashes to $got, the pin says $SDK_SHA"; }
+    manifest="$sb/manifest.sha256"
+    (cd "$sb/VST3_SDK" && find . -type f ! -path ./README.md -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256) >"$manifest"
     mkdir -p "$target"
     for e in "$sb/VST3_SDK"/* "$sb/VST3_SDK"/.[!.]* "$sb/VST3_SDK"/..?*; do
         if [ ! -e "$e" ] && [ ! -L "$e" ]; then continue; fi
@@ -129,6 +134,8 @@ fetch_sdk() {
         fi
         mv -n "$e" "$target/$name"
     done
+    (cd "$target" && shasum -a 256 -c --quiet "$manifest") >/dev/null 2>&1 \
+        || die "the SDK did not arrive intact in $target (something appeared there while it was moved in); check $target"
 }
 
 check_tree() {  # <iPlug2 folder>: a git work tree of its own at the pinned commit with no changed tracked file
