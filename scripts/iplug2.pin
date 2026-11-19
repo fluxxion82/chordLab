@@ -1,0 +1,13 @@
+# The iPlug2 commit and the VST3 SDK ChordLab builds against: CI, releases and local builds.
+# scripts/fetch-iplug2.sh puts that iPlug2 next to the repository (where ChordLab-mac.xcconfig's IPLUG2_ROOT points)
+# or checks an existing checkout against it; scripts/release.sh refuses to build from anything else. The workflows key
+# their iPlug2 cache on this file. KEY=value lines only: read with sed, never sourced.
+#
+# To move the pin: check the new iPlug2 commit out, fetch its VST3 SDK with Dependencies/IPlug/download-vst3-sdk.sh
+# <tag>, run scripts/fetch-iplug2.sh --print-sdk-hash and record all four values here in one commit.
+IPLUG2_URL=https://github.com/iPlug2/iPlug2.git
+IPLUG2_COMMIT=61c042e936d832b6c7d93c5dd8b7e09cf2518bb9
+VST3SDK_TAG=v3.7.14_build_55
+# sha256 over base, pluginterfaces and public.sdk (without samples) as download-vst3-sdk.sh vendors them; the same
+# hash release.sh writes into the provenance file.
+VST3SDK_TREE_SHA256=9143b2f268358c43bca341916240337841bea7324cb7e1f0f3cef80c26e47f6a

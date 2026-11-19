@@ -17,12 +17,19 @@
 #                               itself is no allowed root). Each invocation works in a fresh run.XXXXXX directory
 #                               there (the previous runs are removed): DSTROOT, SYMROOT, OBJROOT, -derivedDataPath and
 #                               the logs, all cold (scripts/tests/check_shell_probes.sh). Refuses to run if the
-#                               installed VST3 or app (or its bundle) points into the scratch directory; fails if
-#                               either installed binary changes. Then builds ChordLab/Tests/vst3host in the same run
+#                               installed VST3, app or AU (or its bundle) points into the scratch directory; fails if
+#                               any of the three installed binaries changes. Then builds ChordLab/Tests/vst3host in the same run
 #                               directory and runs it against the scratch ChordLab.vst3 (section 5t). Test seams:
 #                               CHORDLAB_INSTALLED_VST3_BIN / CHORDLAB_INSTALLED_APP_BIN add a binary each to the
-#                               installed set checked (never replacing the real two)
-#   scripts/check.sh --views    ... plus the editor's render harness (ChordLab/Tests/viewharness): built with swiftc and
+#                               installed set checked (never replacing the real three: VST3, app and AU)
+#   scripts/check.sh --au       ... plus the Audio Unit scheme (macOS-AUv2), Debug and unsigned, built into the same
+#                               validated scratch directory as --shell, installing nothing: in the run directory --shell
+#                               made in this invocation, else in a fresh run.XXXXXX of its own; the component lands at
+#                               <run>/dst/ChordLab.component. Fails, as --shell does, if an installed binary changes
+#                               (section 5a). The AU target's own build phase still clears the AU caches under
+#                               ~/Library/Caches and restarts AudioComponentRegistrar (hosts rebuild them on their next
+#                               scan); refused with --plugin or --all, and not part of --all
+#   scripts/check.sh --views   ... plus the editor's render harness (ChordLab/Tests/viewharness): built with swiftc and
 #                               run under `caffeinate -d -u` (it renders only while the display is awake) in the same
 #                               validated scratch directory as --shell ($CHORDLAB_SHELL_OUT, same allow-list and
 #                               refusals): in the run directory --shell made in this invocation, else in a fresh
@@ -46,7 +53,7 @@ DEFAULT_TIMEOUT=300
 UBSAN_TIMEOUT=600
 PLUGIN_TIMEOUT=600   # a cold xcodebuild of the plug-in exceeds the default
 
-want_ubsan=0 want_asan=0 want_tsan=0 want_swift=0 want_bridge=0 want_plugin=0 want_shell=0 want_views=0 want_release=0
+want_ubsan=0 want_asan=0 want_tsan=0 want_swift=0 want_bridge=0 want_plugin=0 want_shell=0 want_au=0 want_views=0 want_release=0
 for arg in "$@"; do
     case "$arg" in
         --ubsan) want_ubsan=1 ;;
@@ -56,6 +63,7 @@ for arg in "$@"; do
         --bridge) want_bridge=1 ;;
         --plugin) want_plugin=1 ;;
         --shell) want_shell=1 ;;
+        --au) want_au=1 ;;
         --views) want_views=1 ;;
         --release) want_release=1 ;;
         --all) want_ubsan=1 want_asan=1 want_tsan=1 want_swift=1 want_bridge=1 want_plugin=1 want_release=1 ;;
@@ -67,6 +75,11 @@ done
 # runs first: --shell's before/after hashes would then compare the overwritten installation with itself.
 if [ "$want_shell" -eq 1 ] && [ "$want_plugin" -eq 1 ]; then
     echo "check.sh: --shell cannot be combined with --plugin or --all: their installing build would run first, and --shell would compare the overwritten installation with itself" >&2
+    exit 2
+fi
+# --au hashes them around its section as --shell does, and shares its scratch directory: the same refusal.
+if [ "$want_au" -eq 1 ] && [ "$want_plugin" -eq 1 ]; then
+    echo "check.sh: --au cannot be combined with --plugin or --all: their installing build would run first, and --au would compare the overwritten installation with itself" >&2
     exit 2
 fi
 # --views hashes the installed binaries around its own section too; an installing section before it would leave it
@@ -218,13 +231,16 @@ plugin_builds() {
     plugin_scheme macOS-APP "$LOG_DIR/chordlab-xcodebuild-macOS-APP.log" || return 1
 }
 
-# The installed builds --shell must leave exactly as they were: the VST3 Ableton Live loads, and the app. Always these
-# two. CHORDLAB_INSTALLED_VST3_BIN and CHORDLAB_INSTALLED_APP_BIN (test seams for scripts/tests/check_shell_probes.sh)
-# ADD a binary each to the set that is hashed and checked; they never replace the real two, so setting them cannot
-# make the gate weaker. Each binary's bundle is the path without its /Contents/MacOS/<name> tail.
+# The installed builds --shell, --au and --views must leave exactly as they were: the VST3 Ableton Live loads, the app,
+# and the AU auval and Logic find. Always these three: the AU too when --au is not given, so that removing old runs
+# never strands an AU someone linked from an earlier --au run (installed_outside). CHORDLAB_INSTALLED_VST3_BIN and
+# CHORDLAB_INSTALLED_APP_BIN (test seams for scripts/tests/check_shell_probes.sh) ADD a binary each to the set that is
+# hashed and checked; they never replace the real three, so setting them cannot make the gate weaker. Each binary's
+# bundle is the path without its /Contents/MacOS/<name> tail.
 INSTALLED_VST3_BIN="$HOME/Library/Audio/Plug-Ins/VST3/ChordLab.vst3/Contents/MacOS/ChordLab"
 INSTALLED_APP_BIN="$HOME/Applications/ChordLab.app/Contents/MacOS/ChordLab"
-INSTALLED_BINS=("$INSTALLED_VST3_BIN" "$INSTALLED_APP_BIN")
+INSTALLED_AU_BIN="$HOME/Library/Audio/Plug-Ins/Components/ChordLab.component/Contents/MacOS/ChordLab"
+INSTALLED_BINS=("$INSTALLED_VST3_BIN" "$INSTALLED_APP_BIN" "$INSTALLED_AU_BIN")
 [ -n "${CHORDLAB_INSTALLED_VST3_BIN:-}" ] && INSTALLED_BINS+=("$CHORDLAB_INSTALLED_VST3_BIN")
 [ -n "${CHORDLAB_INSTALLED_APP_BIN:-}" ] && INSTALLED_BINS+=("$CHORDLAB_INSTALLED_APP_BIN")
 
@@ -363,10 +379,11 @@ shell_out_dir() {
     echo "$resolved"
 }
 
-# The run directory of this --shell invocation: set by section 5s (shell_run_dir), read by section 5t and reused by
-# section 5v. Empty until then.
+# The run directory of this invocation: set by section 5s (shell_run_dir), read by section 5t and reused by sections 5a
+# and 5v (5a sets it when it runs without 5s, and 5v reuses that one). Empty until then.
 SHELL_RUN=""
-# The gate the scratch-directory helpers name in their messages: --shell, or --views while section 5v runs alone.
+# The gate the scratch-directory helpers name in their messages: --shell, or --au or --views while its section creates
+# the run directory.
 SCRATCH_GATE="--shell"
 
 # shell_run_dir <out>: prints a FRESH private directory for this invocation, $out/run.XXXXXX (mktemp -d: created new,
@@ -480,6 +497,51 @@ shell_host_test() {
     return "$rc"
 }
 
+# Section 5a: the Audio Unit scheme, built as section 5s builds its two (plugin_scheme: Debug, unsigned, BUILD SUCCEEDED
+# and no diagnostics in ChordLab/ or engine/) with the same DSTROOT, SYMROOT, OBJROOT and derived data, in the run
+# directory section 5s made in this invocation, or else in a fresh one made exactly as --shell makes its own. Fails if
+# the build fails, if the component's binary is not under the run's DSTROOT, or if an installed binary (the VST3, the
+# app or the AU) changes. The target's clear_audiounit_caches build phase runs as in any AU build.
+au_build() {
+    local before after out run rc=0
+    if [ ! -d ChordLab/projects/ChordLab-macOS.xcodeproj ]; then
+        echo "check.sh: ChordLab/projects/ChordLab-macOS.xcodeproj not found" >&2
+        return 1
+    fi
+    before="$(installed_shas)" || return 1
+    echo "installed before:"
+    echo "$before" | sed 's/^/  /'
+    if [ -n "$SHELL_RUN" ]; then
+        run="$SHELL_RUN"
+    else
+        SCRATCH_GATE="--au"
+        out="$(shell_out_dir)" || return 1
+        installed_outside "$out" || return 1
+        run="$(shell_run_dir "$out")" || return 1
+        SHELL_RUN="$run"
+        echo "scratch directory: $out"
+    fi
+    echo "run directory:     $run"
+    local product="$run/dst/ChordLab.component/Contents/MacOS/ChordLab"
+    plugin_scheme macOS-AUv2 "$run/xcodebuild-macOS-AUv2.log" \
+        -derivedDataPath "$run/DerivedData" \
+        DSTROOT="$run/dst" SYMROOT="$run/build" OBJROOT="$run/build/obj" || rc=1
+    after="$(installed_shas)" || return 1
+    echo "installed after:"
+    echo "$after" | sed 's/^/  /'
+    if [ "$before" != "$after" ]; then
+        echo "check.sh: an installed binary changed during --au" >&2
+        return 1
+    fi
+    [ "$rc" -eq 0 ] || return 1
+    if [ ! -f "$product" ]; then
+        echo "check.sh: the built AU binary is not at $product" >&2
+        return 1
+    fi
+    echo "built AU: $run/dst/ChordLab.component ($(shasum -a 256 "$product" | cut -d' ' -f1))"
+    return 0
+}
+
 # Section 5v: the editor's render harness (ChordLab/Tests/viewharness/README.md). Builds it with its build.sh into
 # <run>/views/build and runs it under `caffeinate -d -u` with the PNGs going to <run>/views/png, where <run> is the run
 # directory section 5s made in this invocation, or else a fresh one made exactly as --shell makes its own (shell_out_dir's
@@ -578,6 +640,10 @@ if [ "$FAILED" -eq 0 ] && [ "$want_shell" -eq 1 ]; then
 fi
 if [ "$FAILED" -eq 0 ] && [ "$want_shell" -eq 1 ]; then
     section "5t shell host test" shell_host_test
+fi
+
+if [ "$FAILED" -eq 0 ] && [ "$want_au" -eq 1 ]; then
+    section "5a AU build (not installed)" au_build
 fi
 
 if [ "$FAILED" -eq 0 ] && [ "$want_views" -eq 1 ]; then

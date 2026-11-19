@@ -1,0 +1,5 @@
+# actionlint's list of GitHub-hosted runner labels predates the xcode-27 image (macOS 27, Xcode 27), which both
+# workflows run on. It is a GitHub-hosted label, not a self-hosted one; this key is only how actionlint accepts it.
+self-hosted-runner:
+  labels:
+    - xcode-27
