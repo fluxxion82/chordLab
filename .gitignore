@@ -31,5 +31,7 @@ ChordLab/.build/
 ChordLab/.swiftpm/
 ChordLab/Package.resolved
 
-# local notes
-docs/
+# local notes: plans, test runs and internal notes stay out of the repository
+docs/plans/
+docs/testing/
+docs/internal/
