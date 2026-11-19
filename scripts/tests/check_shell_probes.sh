@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Regression probes for the guards of `scripts/check.sh --shell` (and of --views' refusal next to an install),
-# filesystem only: no xcodebuild, cmake, ctest or swift ever runs. Shims of those four (first on PATH) record their
+# Regression probes for the guards of `scripts/check.sh --shell` (and of --views' and --au's refusal next to an install,
+# and of where --au builds), filesystem only: no xcodebuild, cmake, ctest or swift ever runs. Shims of those four (first on PATH) record their
 # calls and do nothing else, except that the xcodebuild shim reports success and creates an empty ChordLab binary
 # under the DSTROOT it is given, so that the sections after the build can be reached. Everything happens in a fresh
 # directory under /private/tmp made by this run, plus (for one probe) a fresh build-check-probe.XXXXXX directory at
@@ -30,6 +30,10 @@ for tool in cmake ctest swift; do
     cat >"$T/bin/$tool" <<EOF
 #!/bin/sh
 echo "$tool \$*" >>"$T/calls.log"
+# With PROBE_HOST_OK set, "cmake --build <dir>" leaves a vst3host there that passes, so the sections after 5t run.
+if [ "$tool" = cmake ] && [ -n "\${PROBE_HOST_OK:-}" ] && [ "\$1" = --build ]; then
+    mkdir -p "\$2" && printf '#!/bin/sh\nexit 0\n' >"\$2/vst3host" && chmod +x "\$2/vst3host"
+fi
 exit 0
 EOF
 done
@@ -37,9 +41,12 @@ cat >"$T/bin/xcodebuild" <<EOF
 #!/bin/sh
 echo "xcodebuild \$*" >>"$T/calls.log"
 [ -n "\${PROBE_TOUCH:-}" ] && echo "changed by the build" >>"\$PROBE_TOUCH"
+au=0
+for a in "\$@"; do [ "\$a" = macOS-AUv2 ] && au=1; done
 for a in "\$@"; do
     case "\$a" in
-        DSTROOT=*) d="\${a#DSTROOT=}"; mkdir -p "\$d/ChordLab.vst3/Contents/MacOS" && : >"\$d/ChordLab.vst3/Contents/MacOS/ChordLab" ;;
+        DSTROOT=*) d="\${a#DSTROOT=}"; mkdir -p "\$d/ChordLab.vst3/Contents/MacOS" && : >"\$d/ChordLab.vst3/Contents/MacOS/ChordLab"
+                   if [ "\$au" -eq 1 ]; then mkdir -p "\$d/ChordLab.component/Contents/MacOS" && : >"\$d/ChordLab.component/Contents/MacOS/ChordLab"; fi ;;
     esac
 done
 echo "** BUILD SUCCEEDED **"
@@ -118,6 +125,36 @@ for args in "--views --plugin" "--plugin --views" "--views --all" "--all --views
         bad "check.sh $args: status $RC, $(wc -l <"$T/calls.log" | tr -d ' ') tool calls; output tail: $(echo "$OUT" | tail -3 | tr '\n' ' ')"
     fi
 done
+
+# --- --au is never combined with an installing section, and builds only below its run directory -------------------
+for args in "--au --plugin" "--plugin --au" "--au --all" "--all --au"; do
+    # shellcheck disable=SC2086
+    run -- $args
+    if [ "$RC" -eq 2 ] && echo "$OUT" | grep -q -- "--au cannot be combined" && [ ! -s "$T/calls.log" ]; then
+        ok "check.sh $args: refused while parsing, before any section ran"
+    else
+        bad "check.sh $args: status $RC, $(wc -l <"$T/calls.log" | tr -d ' ') tool calls; output tail: $(echo "$OUT" | tail -3 | tr '\n' ' ')"
+    fi
+done
+fresh_out
+run CHORDLAB_SHELL_OUT="$T/out" -- --au
+case "$RUN" in "$T/out"/run.??????) run_ok=1 ;; *) run_ok=0 ;; esac
+if [ "$RC" -eq 0 ] && [ "$run_ok" -eq 1 ] && echo "$OUT" | grep -q "5a AU build (not installed) *PASS" &&
+    called "-scheme macOS-AUv2" && called "DSTROOT=$RUN/dst" && [ -f "$RUN/dst/ChordLab.component/Contents/MacOS/ChordLab" ] &&
+    ! called "-scheme macOS-VST3" && only_run_paths; then
+    ok "--au alone: the AU scheme only, in a fresh run directory of its own; every tool path below $(basename "$RUN")"
+else
+    bad "--au alone: status $RC, run '$RUN'; calls: $(tr '\n' ' ' <"$T/calls.log" | cut -c1-300); output tail: $(echo "$OUT" | tail -3 | tr '\n' ' ')"
+fi
+fresh_out
+run CHORDLAB_SHELL_OUT="$T/out" PROBE_HOST_OK=1 -- --shell --au
+if [ "$RC" -eq 0 ] && [ -n "$RUN" ] && [ "$(find "$T/out" -maxdepth 1 -name 'run.*' | wc -l | tr -d ' ')" = 1 ] &&
+    echo "$OUT" | grep -q "5a AU build (not installed) *PASS" && [ -f "$RUN/dst/ChordLab.component/Contents/MacOS/ChordLab" ] &&
+    [ -f "$RUN/dst/ChordLab.vst3/Contents/MacOS/ChordLab" ] && only_run_paths; then
+    ok "--shell --au: the AU lands in the run directory --shell made; one run directory in all"
+else
+    bad "--shell --au: status $RC, run '$RUN', run directories: $(find "$T/out" -maxdepth 1 -name 'run.*' | tr '\n' ' ')"
+fi
 
 # --- $TMPDIR is no allowed root ---------------------------------------------------------------------------------------
 OUTSIDE="$(mktemp -d "$ROOT/build-check-probe.XXXXXX")" || { bad "could not create the outside stand-in"; OUTSIDE=""; }

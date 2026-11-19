@@ -52,6 +52,11 @@ jobs:
       - name: scripts/check.sh --ubsan --asan --tsan --swift --bridge
         run: scripts/check.sh --ubsan --asan --tsan --swift --bridge
 
+      # The guards of check.sh --shell and --views (and --au's), with shims for the build tools (seconds). After check.sh:
+      # its section 1, which the probes reach, needs the engine/build directory the step above made.
+      - name: scripts/tests/check_shell_probes.sh
+        run: scripts/tests/check_shell_probes.sh
+
   plugin:
     name: VST3, AU and app builds, VST3 host test, auval
     runs-on: xcode-27
