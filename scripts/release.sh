@@ -66,10 +66,18 @@ note() { echo "release.sh: $*"; }
 
 # notarytool's credentials: NOTARY_AUTH (its arguments), NOTARY_DESC (for messages), NOTARY_HINT (what to type to look a
 # submission up by hand). An App Store Connect API key when all three CHORDLAB_NOTARY_* variables are set (the CI
-# path), else the keychain profile made once with notarytool store-credentials (the signing Mac's path).
-if [ -n "${CHORDLAB_NOTARY_KEY_FILE:-}${CHORDLAB_NOTARY_KEY_ID:-}${CHORDLAB_NOTARY_ISSUER:-}" ]; then
-    [ -n "${CHORDLAB_NOTARY_KEY_FILE:-}" ] && [ -n "${CHORDLAB_NOTARY_KEY_ID:-}" ] && [ -n "${CHORDLAB_NOTARY_ISSUER:-}" ] \
-        || die "set all three of CHORDLAB_NOTARY_KEY_FILE, CHORDLAB_NOTARY_KEY_ID and CHORDLAB_NOTARY_ISSUER, or none (then the keychain profile $NOTARY_PROFILE is used)"
+# path), else the keychain profile made once with notarytool store-credentials (the signing Mac's path). Some but not
+# all three set (NOTARY_INCOMPLETE=1) is reported where notarization is checked or done, never at start-up: publish and
+# --skip-notarize runs do not need them.
+NOTARY_INCOMPLETE=0
+NOTARY_SETTINGS_FIX="set all three of CHORDLAB_NOTARY_KEY_FILE, CHORDLAB_NOTARY_KEY_ID and CHORDLAB_NOTARY_ISSUER, or none (the keychain profile $NOTARY_PROFILE)"
+if [ -n "${CHORDLAB_NOTARY_KEY_FILE:-}${CHORDLAB_NOTARY_KEY_ID:-}${CHORDLAB_NOTARY_ISSUER:-}" ] \
+        && ! { [ -n "${CHORDLAB_NOTARY_KEY_FILE:-}" ] && [ -n "${CHORDLAB_NOTARY_KEY_ID:-}" ] && [ -n "${CHORDLAB_NOTARY_ISSUER:-}" ]; }; then
+    NOTARY_INCOMPLETE=1
+    NOTARY_AUTH=(--keychain-profile "$NOTARY_PROFILE")
+    NOTARY_DESC="incomplete API key settings"
+    NOTARY_HINT="--keychain-profile $NOTARY_PROFILE"
+elif [ -n "${CHORDLAB_NOTARY_KEY_FILE:-}" ]; then
     NOTARY_AUTH=(--key "$CHORDLAB_NOTARY_KEY_FILE" --key-id "$CHORDLAB_NOTARY_KEY_ID" --issuer "$CHORDLAB_NOTARY_ISSUER")
     NOTARY_DESC="App Store Connect API key $CHORDLAB_NOTARY_KEY_ID"
     NOTARY_HINT="--key <the .p8 file> --key-id $CHORDLAB_NOTARY_KEY_ID --issuer <issuer id>"
@@ -128,8 +136,8 @@ check() {  # name ok(0|1) detail [hard]: under --report only a hard check fails 
 has_identity()      { local out; out=$(security find-identity -v -p "$1" 2>/dev/null) || return 1; grep -qF "\"$2\"" <<<"$out"; }
 versions_agree()    { local hex; hex=$(version_hex); [ -n "$hex" ] && [ "$(hex_to_str "$hex")" = "$(version_str)" ]; }
 notary_ok()         { "$TIMEOUT_CMD" 30 xcrun notarytool history "${NOTARY_AUTH[@]}"; }
-pin_wellformed()    {  # commit tag sha: a 40-hex commit, a tag, a 64-hex tree hash
-    [[ $1 =~ ^[0-9a-f]{40}$ ]] && [ -n "$2" ] && [[ $3 =~ ^[0-9a-f]{64}$ ]]
+pin_wellformed()    {  # url commit tag sha: a github.com URL, a 40-hex commit, a tag, a 64-hex tree hash
+    [[ $1 =~ ^https://github\.com/[^/]+/[^/]+$ ]] && [[ $2 =~ ^[0-9a-f]{40}$ ]] && [ -n "$3" ] && [[ $4 =~ ^[0-9a-f]{64}$ ]]
 }
 pin_value()         { sed -n "/^$1=/{s///p;q;}" "$PIN" 2>/dev/null || true; }   # empty when the pin file or key is missing
 plists_current() {  # prints what is stale; 0 when the tracked plists carry PLUG_VERSION_STR and PLUG_VERSION_HEX
@@ -213,7 +221,7 @@ iplug2_public() {  # prints the row's detail; 0 when iPlug2's HEAD is on a branc
 }
 
 preflight() {
-    local ver tool tag tag_rc stale plists_rc detail ok pin_commit pin_tag pin_sdk head sdk
+    local ver tool tag tag_rc stale plists_rc detail ok pin_url pin_commit pin_tag pin_sdk head sdk
     ver=$(version_str)
     echo "release.sh preflight (ChordLab $ver)"
     for tool in xcodebuild codesign pkgbuild productbuild pkgutil auval lipo shasum python3 gh ditto; do
@@ -237,8 +245,8 @@ preflight() {
     check "VST3 SDK" "$(probe test -d "$IPLUG2_ROOT/Dependencies/IPlug/VST3_SDK/pluginterfaces")" "$IPLUG2_ROOT/Dependencies/IPlug/VST3_SDK" 1
     # The pin (scripts/iplug2.pin): a malformed file is the repository's fault (hard); a checkout elsewhere is the
     # machine's (soft under --report, so a contributor's gate still passes; a release refuses it).
-    pin_commit=$(pin_value IPLUG2_COMMIT); pin_tag=$(pin_value VST3SDK_TAG); pin_sdk=$(pin_value VST3SDK_TREE_SHA256)
-    check "iPlug2 pin file" "$(probe pin_wellformed "$pin_commit" "$pin_tag" "$pin_sdk")" "$PIN: IPLUG2_COMMIT ${pin_commit:-?}, VST3SDK_TAG ${pin_tag:-?}" 1
+    pin_url=$(pin_value IPLUG2_URL); pin_commit=$(pin_value IPLUG2_COMMIT); pin_tag=$(pin_value VST3SDK_TAG); pin_sdk=$(pin_value VST3SDK_TREE_SHA256)
+    check "iPlug2 pin file" "$(probe pin_wellformed "$pin_url" "$pin_commit" "$pin_tag" "$pin_sdk")" "$PIN: IPLUG2_URL ${pin_url:-?}, IPLUG2_COMMIT ${pin_commit:-?}, VST3SDK_TAG ${pin_tag:-?}, VST3SDK_TREE_SHA256 ${pin_sdk:0:12}" 1
     head=$(git -C "$IPLUG2_ROOT" rev-parse HEAD 2>/dev/null || echo none)
     check "iPlug2 at the pin" "$(probe test "$head" = "$pin_commit")" "HEAD ${head:0:9}, pinned ${pin_commit:0:9} (scripts/fetch-iplug2.sh --check says what to do)"
     sdk=$(vst3sdk_tree_sha256)
@@ -255,7 +263,9 @@ preflight() {
     if [ "$SKIP_NOTARIZE" -eq 1 ]; then
         row skip "notary credentials" "--skip-notarize"
     else
-        if [ -n "${CHORDLAB_NOTARY_KEY_FILE:-}" ]; then
+        if [ "$NOTARY_INCOMPLETE" -eq 1 ]; then
+            check "notary credentials" 1 "$NOTARY_SETTINGS_FIX"
+        elif [ -n "${CHORDLAB_NOTARY_KEY_FILE:-}" ]; then
             check "notary credentials" "$(probe notary_ok)" "$NOTARY_DESC (CHORDLAB_NOTARY_KEY_FILE, _KEY_ID, _ISSUER; notarytool history must answer)"
         else
             check "notary credentials" "$(probe notary_ok)" "$NOTARY_DESC (once: xcrun notarytool store-credentials $NOTARY_PROFILE --apple-id <id> --team-id $TEAM --password <app-specific password>)"
@@ -430,6 +440,7 @@ source_tarball() {  # the vendored VST3 SDK's corresponding source, named after 
 notarize() {
     local submit rc=0 id status py_rc=0
     if [ "$SKIP_NOTARIZE" -eq 1 ]; then note "notarization skipped (--skip-notarize): $(basename "$PKG") is not stapled"; return; fi
+    [ "$NOTARY_INCOMPLETE" -eq 0 ] || die "$NOTARY_SETTINGS_FIX"
     note "notarizing $(basename "$PKG") with the $NOTARY_DESC (usually a few minutes; gives up waiting after 2 h)"
     # Never die before the submission id and the raw answer are saved: a lost id is a lost log.
     submit=$(xcrun notarytool submit "$PKG" "${NOTARY_AUTH[@]}" --wait --timeout 2h \
@@ -520,6 +531,10 @@ dep_version() {  # file regex-with-one-group; empty (the provenance says "unknow
 
 provenance() {
     PROV="${PKG%.pkg}.provenance.txt"
+    # The SDK is git-ignored in a checkout other projects may share: check its tree again now that the source tarball is
+    # written (preflight checked it before the build), so the tarball and the provenance describe the pinned SDK.
+    [ "$(vst3sdk_tree_sha256)" = "$(pin_value VST3SDK_TREE_SHA256)" ] \
+        || die "the VST3 SDK's tree changed during the build ($(vst3sdk_tree_sha256), pinned $(pin_value VST3SDK_TREE_SHA256)); rebuild"
     if [ "$REHEARSAL" -eq 0 ]; then  # the provenance must name the code that was built
         [ "$(git rev-parse HEAD)" = "$BUILD_HEAD" ] \
             && [ "$(git -C "$IPLUG2_ROOT" rev-parse HEAD 2>/dev/null || echo -)" = "$BUILD_IPLUG2_HEAD" ] \
@@ -655,18 +670,18 @@ au_validate() {
     killall -9 AudioComponentRegistrar 2>/dev/null || true
     # The registrar rescans on demand; on a machine that never had the component (a fresh CI runner) the listing can
     # lag behind the copy, so wait up to a minute for it (captured first: an early grep exit cannot fail the pipe).
-    local i listed=""
-    for i in $(seq 1 30); do
-        listed=$(auval -a 2>/dev/null || true)
+    local deadline=$((SECONDS + 60)) listed=""
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        listed=$("$TIMEOUT_CMD" 20 auval -a 2>/dev/null || true)
         if grep -Eq "^aumi +$subtype +$mfr" <<<"$listed"; then break; fi
         listed=""; sleep 2
     done
     [ -n "$listed" ] || note "WARNING: auval -a still does not list aumi $subtype $mfr after 60 s; validating anyway"
-    auval -strict -v aumi "$subtype" "$mfr" >"$LOGS/auval.log" 2>&1 || { tail -n 40 "$LOGS/auval.log" >&2; die "auval failed (see $LOGS/auval.log)"; }
+    "$TIMEOUT_CMD" 900 auval -strict -v aumi "$subtype" "$mfr" >"$LOGS/auval.log" 2>&1 || { tail -n 40 "$LOGS/auval.log" >&2; die "auval failed (see $LOGS/auval.log)"; }
     grep -q "AU VALIDATION SUCCEEDED" "$LOGS/auval.log" || die "auval: no success line in $LOGS/auval.log"
     host=$(uname -m)
     if [ "$host" = arm64 ] && arch -x86_64 /usr/bin/true 2>/dev/null; then  # on Intel, arch -x86_64 is native
-        arch -x86_64 auval -strict -v aumi "$subtype" "$mfr" >"$LOGS/auval-x86_64.log" 2>&1 || { tail -n 40 "$LOGS/auval-x86_64.log" >&2; die "auval (x86_64 slice) failed (see $LOGS/auval-x86_64.log)"; }
+        "$TIMEOUT_CMD" 900 arch -x86_64 auval -strict -v aumi "$subtype" "$mfr" >"$LOGS/auval-x86_64.log" 2>&1 || { tail -n 40 "$LOGS/auval-x86_64.log" >&2; die "auval (x86_64 slice) failed (see $LOGS/auval-x86_64.log)"; }
         grep -q "AU VALIDATION SUCCEEDED" "$LOGS/auval-x86_64.log" || die "auval (x86_64 slice): no success line in $LOGS/auval-x86_64.log"
         AUVAL_RESULT=yes
         note "auval passed for arm64 and x86_64 (aumi $subtype $mfr)"
