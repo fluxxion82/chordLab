@@ -17,19 +17,18 @@
 #                               itself is no allowed root). Each invocation works in a fresh run.XXXXXX directory
 #                               there (the previous runs are removed): DSTROOT, SYMROOT, OBJROOT, -derivedDataPath and
 #                               the logs, all cold (scripts/tests/check_shell_probes.sh). Refuses to run if the
-#                               installed VST3 or app (or its bundle) points into the scratch directory; fails if
-#                               either installed binary changes. Then builds ChordLab/Tests/vst3host in the same run
+#                               installed VST3, app or AU (or its bundle) points into the scratch directory; fails if
+#                               any of the three installed binaries changes. Then builds ChordLab/Tests/vst3host in the same run
 #                               directory and runs it against the scratch ChordLab.vst3 (section 5t). Test seams:
 #                               CHORDLAB_INSTALLED_VST3_BIN / CHORDLAB_INSTALLED_APP_BIN add a binary each to the
-#                               installed set checked (never replacing the real two)
+#                               installed set checked (never replacing the real three: VST3, app and AU)
 #   scripts/check.sh --au       ... plus the Audio Unit scheme (macOS-AUv2), Debug and unsigned, built into the same
 #                               validated scratch directory as --shell, installing nothing: in the run directory --shell
 #                               made in this invocation, else in a fresh run.XXXXXX of its own; the component lands at
-#                               <run>/dst/ChordLab.component. Fails if any installed binary changes, the AU in
-#                               ~/Library/Audio/Plug-Ins/Components included (section 5a). The AU target's own build
-#                               phase still clears the AU caches under ~/Library/Caches and restarts
-#                               AudioComponentRegistrar (hosts rebuild them on their next scan); refused with --plugin
-#                               or --all, and not part of --all
+#                               <run>/dst/ChordLab.component. Fails, as --shell does, if an installed binary changes
+#                               (section 5a). The AU target's own build phase still clears the AU caches under
+#                               ~/Library/Caches and restarts AudioComponentRegistrar (hosts rebuild them on their next
+#                               scan); refused with --plugin or --all, and not part of --all
 #   scripts/check.sh --views   ... plus the editor's render harness (ChordLab/Tests/viewharness): built with swiftc and
 #                               run under `caffeinate -d -u` (it renders only while the display is awake) in the same
 #                               validated scratch directory as --shell ($CHORDLAB_SHELL_OUT, same allow-list and
@@ -232,16 +231,16 @@ plugin_builds() {
     plugin_scheme macOS-APP "$LOG_DIR/chordlab-xcodebuild-macOS-APP.log" || return 1
 }
 
-# The installed builds --shell must leave exactly as they were: the VST3 Ableton Live loads, and the app. Always these
-# two. CHORDLAB_INSTALLED_VST3_BIN and CHORDLAB_INSTALLED_APP_BIN (test seams for scripts/tests/check_shell_probes.sh)
-# ADD a binary each to the set that is hashed and checked; they never replace the real two, so setting them cannot
-# make the gate weaker. Each binary's bundle is the path without its /Contents/MacOS/<name> tail.
+# The installed builds --shell, --au and --views must leave exactly as they were: the VST3 Ableton Live loads, the app,
+# and the AU auval and Logic find. Always these three: the AU too when --au is not given, so that removing old runs
+# never strands an AU someone linked from an earlier --au run (installed_outside). CHORDLAB_INSTALLED_VST3_BIN and
+# CHORDLAB_INSTALLED_APP_BIN (test seams for scripts/tests/check_shell_probes.sh) ADD a binary each to the set that is
+# hashed and checked; they never replace the real three, so setting them cannot make the gate weaker. Each binary's
+# bundle is the path without its /Contents/MacOS/<name> tail.
 INSTALLED_VST3_BIN="$HOME/Library/Audio/Plug-Ins/VST3/ChordLab.vst3/Contents/MacOS/ChordLab"
 INSTALLED_APP_BIN="$HOME/Applications/ChordLab.app/Contents/MacOS/ChordLab"
-INSTALLED_BINS=("$INSTALLED_VST3_BIN" "$INSTALLED_APP_BIN")
-# With --au, the development AU too (the one auval and Logic find): its scheme must not overwrite it either.
 INSTALLED_AU_BIN="$HOME/Library/Audio/Plug-Ins/Components/ChordLab.component/Contents/MacOS/ChordLab"
-[ "$want_au" -eq 1 ] && INSTALLED_BINS+=("$INSTALLED_AU_BIN")
+INSTALLED_BINS=("$INSTALLED_VST3_BIN" "$INSTALLED_APP_BIN" "$INSTALLED_AU_BIN")
 [ -n "${CHORDLAB_INSTALLED_VST3_BIN:-}" ] && INSTALLED_BINS+=("$CHORDLAB_INSTALLED_VST3_BIN")
 [ -n "${CHORDLAB_INSTALLED_APP_BIN:-}" ] && INSTALLED_BINS+=("$CHORDLAB_INSTALLED_APP_BIN")
 
@@ -502,7 +501,7 @@ shell_host_test() {
 # and no diagnostics in ChordLab/ or engine/) with the same DSTROOT, SYMROOT, OBJROOT and derived data, in the run
 # directory section 5s made in this invocation, or else in a fresh one made exactly as --shell makes its own. Fails if
 # the build fails, if the component's binary is not under the run's DSTROOT, or if an installed binary (the VST3, the
-# app or, with --au, the AU) changes. The target's clear_audiounit_caches build phase runs as in any AU build.
+# app or the AU) changes. The target's clear_audiounit_caches build phase runs as in any AU build.
 au_build() {
     local before after out run rc=0
     if [ ! -d ChordLab/projects/ChordLab-macOS.xcodeproj ]; then
