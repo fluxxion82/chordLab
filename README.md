@@ -34,9 +34,6 @@ plug-ins send MIDI and make no sound of their own, so put an instrument after th
 
 ## Install
 
-> No release has been published yet. Until the first one, build ChordLab from source: see
-> [docs/development.md](docs/development.md).
-
 Download `ChordLab-<version>.pkg` from the [latest release](https://github.com/fluxxion82/chordLab/releases/latest)
 and open it. It is signed and notarized. Pick the formats you want:
 
@@ -55,7 +52,8 @@ To uninstall, remove those three paths and forget the receipts:
 sudo pkgutil --forget com.SterlingAlbury.chordlab.vst3 && sudo pkgutil --forget com.SterlingAlbury.chordlab.au && sudo pkgutil --forget com.SterlingAlbury.chordlab.app
 ```
 
-Then start with the [tutorial](docs/tutorial.md).
+Then start with the [tutorial](docs/tutorial.md). To build from source instead, see
+[docs/development.md](docs/development.md).
 
 ## Documentation
 
