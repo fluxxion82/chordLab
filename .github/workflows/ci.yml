@@ -114,12 +114,13 @@ jobs:
           rm -rf "$dst/ChordLab.component"
           ditto "$au" "$dst/ChordLab.component"
           killall -9 AudioComponentRegistrar 2>/dev/null || true
-          for _ in $(seq 1 30); do
-            listed=$("$to" 20 auval -a 2>/dev/null || true)
+          deadline=$((SECONDS + 60))   # registration can lag the copy on a fresh machine: wait up to a minute
+          while left=$((deadline - SECONDS)); [ "$left" -gt 0 ]; do
+            listed=$("$to" -k 5 "$left" auval -a 2>/dev/null || true)
             if grep -Eq "^aumi +$subtype +$mfr" <<<"$listed"; then echo "listed by auval -a"; break; fi
             sleep 2
           done
-          "$to" 900 auval -strict -v aumi "$subtype" "$mfr" | tee "$RUNNER_TEMP/auval.log"
+          "$to" -k 10 900 auval -strict -v aumi "$subtype" "$mfr" | tee "$RUNNER_TEMP/auval.log"
           grep -q "AU VALIDATION SUCCEEDED" "$RUNNER_TEMP/auval.log"
 
       # prepare_resources-mac.py rewrites the six tracked Info.plists on every build: a version bump committed without

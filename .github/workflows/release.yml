@@ -111,9 +111,10 @@ jobs:
           security unlock-keychain -p "$kc_pw" "$kc"
           printf '%s' "$APP_P12" | base64 --decode >"$RUNNER_TEMP/app.p12"
           printf '%s' "$INSTALLER_P12" | base64 --decode >"$RUNNER_TEMP/installer.p12"
-          security import "$RUNNER_TEMP/app.p12" -k "$kc" -f pkcs12 -P "$APP_P12_PASSWORD" \
+          # -x: the private keys cannot be exported again from this keychain, only used.
+          security import "$RUNNER_TEMP/app.p12" -k "$kc" -f pkcs12 -x -P "$APP_P12_PASSWORD" \
             -T /usr/bin/codesign -T /usr/bin/productbuild -T /usr/bin/pkgbuild
-          security import "$RUNNER_TEMP/installer.p12" -k "$kc" -f pkcs12 -P "$INSTALLER_P12_PASSWORD" \
+          security import "$RUNNER_TEMP/installer.p12" -k "$kc" -f pkcs12 -x -P "$INSTALLER_P12_PASSWORD" \
             -T /usr/bin/codesign -T /usr/bin/productbuild -T /usr/bin/pkgbuild
           rm -f "$RUNNER_TEMP/app.p12" "$RUNNER_TEMP/installer.p12"
           curl -fsSL -o "$RUNNER_TEMP/DeveloperIDG2CA.cer" https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer
@@ -132,16 +133,18 @@ jobs:
       # Preflight (strict for a tag, --rehearsal otherwise), the Release build of VST3, AU and app signed with the
       # Developer ID, signature checks, auval on both slices, the pkgs, notarization and stapling, the VST3 SDK source
       # tarball, the .sha256 file and the provenance. The notary key exists as a file only during this step, and only
-      # when the run notarizes. GH_TOKEN (read-only): preflight wants gh logged in, and the iPlug2 visibility check uses
-      # it against the rate limit runners share (github_commit_public says why this token still proves the commit
-      # public).
+      # when the run notarizes (Xcode and auval run in this step too, as the same user: like the signing keychain, it is
+      # within reach of the build's own processes). GH_TOKEN (read-only): preflight wants gh logged in, and the iPlug2
+      # visibility check uses it against the rate limit runners share (github_commit_public says why this token still
+      # proves the commit public); release.sh drops both tokens once preflight is done.
       - name: scripts/release.sh build
         env:
           GH_TOKEN: ${{ github.token }}
           CHORDLAB_PUBLIC_CHECK_TOKEN: ${{ github.token }}
-          NOTARY_P8: ${{ secrets.APPLE_NOTARY_API_KEY_P8 }}
-          NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_API_KEY_ID }}
-          NOTARY_ISSUER: ${{ secrets.APPLE_NOTARY_API_ISSUER_ID }}
+          # Injected only when this run notarizes (a tag, or a rehearsal with Notarize ticked).
+          NOTARY_P8: ${{ (github.event_name == 'push' || inputs.notarize) && secrets.APPLE_NOTARY_API_KEY_P8 || '' }}
+          NOTARY_KEY_ID: ${{ (github.event_name == 'push' || inputs.notarize) && secrets.APPLE_NOTARY_API_KEY_ID || '' }}
+          NOTARY_ISSUER: ${{ (github.event_name == 'push' || inputs.notarize) && secrets.APPLE_NOTARY_API_ISSUER_ID || '' }}
           NOTARIZE: ${{ inputs.notarize }}
         run: |
           args=()
