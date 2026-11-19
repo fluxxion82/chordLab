@@ -16,8 +16,16 @@ together is in [architecture.md](architecture.md); how releases are made is in [
   ```
 
   `ChordLab/config/ChordLab-mac.xcconfig` sets `IPLUG2_ROOT = ../../../iPlug2`, relative to `ChordLab/projects`, and
-  includes iPlug2's `common-mac.xcconfig` from there. Follow iPlug2's own instructions to fetch the VST3 SDK into
-  that checkout.
+  includes iPlug2's `common-mac.xcconfig` from there. ChordLab builds against one pinned iPlug2 commit and VST3 SDK
+  version, recorded in `scripts/iplug2.pin`. This fetches both into that folder, or checks a checkout already
+  there against the pin:
+
+  ```bash
+  scripts/fetch-iplug2.sh
+  ```
+
+  It never moves an existing checkout to another commit or replaces its SDK. If yours doesn't match, it says what
+  to run instead. `scripts/fetch-iplug2.sh --check` only checks.
 
 The engine and its tests need neither Xcode nor iPlug2.
 
@@ -76,11 +84,16 @@ scripts/check.sh
 scripts/check.sh --all
 ```
 
-`--all` adds the UBSan, ASan and TSan builds, the Swift tests, the bridge tests, both Xcode schemes and the release
-preflight. The flags also combine one by one: `--ubsan`, `--asan`, `--tsan`, `--swift`, `--bridge`, `--plugin`,
-`--release` (the release script's preflight in report mode), `--shell` and `--views`. Only `--plugin` and `--all`
-install anything (the VST3 into `~/Library/Audio/Plug-Ins/VST3`, the app into `~/Applications`). The script stops
-at the first failure and prints a PASS/FAIL table.
+`--all` adds the UBSan, ASan and TSan builds, the Swift tests, the bridge tests, the VST3 and app schemes, and the
+release preflight. The flags also combine one by one:
+
+- `--ubsan`, `--asan`, `--tsan`, `--swift`, `--bridge`;
+- `--plugin` (builds and installs the VST3 and the app);
+- `--release` (the release script's preflight in report mode);
+- `--shell`, `--au` (the Audio Unit built into a scratch directory) and `--views`.
+
+Only `--plugin` and `--all` install anything (the VST3 into `~/Library/Audio/Plug-Ins/VST3`, the app into
+`~/Applications`). The script stops at the first failure and prints a PASS/FAIL table.
 
 ASan and TSan need Apple clang 21 (Xcode 27.1) or later; older releases hung under them, so every sanitizer step
 runs under a hard timeout.
@@ -94,8 +107,9 @@ runs under a hard timeout.
 | `vst3host` | the plug-in shell without a DAW: a command-line VST3 host loads a fresh `ChordLab.vst3` in-process and checks life cycle, state, playback against the engine, and two linked instances | `scripts/check.sh --shell` |
 | `viewharness` | the editor's views, offscreen: renders `ContentView` in each state of the per-track-instrument feature at two window sizes and checks the frames | `scripts/check.sh --views` (needs the display awake) |
 
-`--shell` and `--views` build into a scratch directory and install nothing; they can't be combined with
-`--plugin` or `--all`. See [ChordLab/Tests/vst3host/README.md](../ChordLab/Tests/vst3host/README.md) and
+`--shell`, `--au` and `--views` build into a scratch directory under the system temp folder and install nothing.
+They fail if an installed copy of the plug-in changes, and they can't be combined with `--plugin` or `--all`. The
+Audio Unit scheme's build step still clears macOS's Audio Unit caches, which hosts rebuild on their next scan. See [ChordLab/Tests/vst3host/README.md](../ChordLab/Tests/vst3host/README.md) and
 [ChordLab/Tests/viewharness/README.md](../ChordLab/Tests/viewharness/README.md).
 
 **JSON fixtures.** `engine/tests/fixtures/` holds the engine's own `snapshotJson`, `stateJson` and `linkStateJson`
@@ -119,6 +133,18 @@ the escaped input, so it reproduces exactly.
 plug-in helper in `ChordLab/bridge/`, with a case in `ChordLab/bridge/tests/`. Logic that unit tests can reach is
 preferred over logic that only a host can exercise.
 
+## Continuous integration
+
+GitHub Actions runs [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) on every push and pull request to
+`main`. It uses GitHub's hosted `xcode-27` runner and has two jobs:
+
+- **tests**: `scripts/check.sh --ubsan --asan --tsan --swift --bridge`, then the script's own guard probes
+  (`scripts/tests/check_shell_probes.sh`);
+- **plugin**: fetches the pinned iPlug2 (cached on `scripts/iplug2.pin`), runs `scripts/check.sh --shell --au
+  --release`, validates the built Audio Unit with `auval`, and checks that the build changed no tracked file.
+
+`--views` isn't run on CI because it needs an awake display. Run it locally when you change the editor's views.
+
 ## Repository layout
 
 ```
@@ -139,7 +165,11 @@ ChordLab/                   the iPlug2 plug-in
   projects/                 Xcode projects (ChordLab-macOS.xcodeproj)
   resources/                Info.plists, icons, fonts
 docs/                       user guide, tutorial, architecture, development and release notes
+.github/workflows/          ci.yml (tests on every push and PR) and release.yml (signed release on a tag)
 scripts/check.sh            runs every suite (see Testing)
+scripts/tests/              probes for check.sh's own guards
+scripts/iplug2.pin          the iPlug2 commit and VST3 SDK version ChordLab builds against
+scripts/fetch-iplug2.sh     fetches the pinned iPlug2, or checks an existing checkout
 scripts/release.sh          signs, notarizes and packages a release (see releasing.md)
 scripts/release/resources/  installer panes
 LICENSE                     GPL-3.0 text
