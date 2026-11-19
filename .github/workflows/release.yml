@@ -1,0 +1,221 @@
+# The signed, notarized pkg, built on a GitHub-hosted Mac by scripts/release.sh.
+#
+# A pushed v* tag (annotated, on the commit whose ChordLab/config.h carries that version): the build job signs,
+# validates, packages and notarizes; the publish job attaches the four assets to a DRAFT release that someone then
+# publishes by hand after a look and a smoke install. A manual run (Actions > Release > Run workflow, any branch) is a
+# rehearsal: the same build with --rehearsal (an untagged commit; the pkg name carries it, never publishable),
+# notarized unless unticked, uploaded as a workflow artifact only.
+#
+# Secrets (in the "release" environment): MACOS_DEVELOPER_ID_APPLICATION_P12 and MACOS_DEVELOPER_ID_INSTALLER_P12
+# (base64 .p12 exports of the two Developer ID identities) with their _PASSWORD secrets, and the App Store Connect API
+# key for notarytool: APPLE_NOTARY_API_KEY_P8 (base64 of the AuthKey_<id>.p8 file), APPLE_NOTARY_API_KEY_ID and
+# APPLE_NOTARY_API_ISSUER_ID. The certificates live only in a temporary keychain that the last step always deletes.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      notarize:
+        description: Notarize the rehearsal pkg (checks the API key end to end)
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # Same image and Xcode as ci.yml: macOS 27, Xcode 27.1.
+  DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
+  HOMEBREW_NO_AUTO_UPDATE: "1"
+  HOMEBREW_NO_INSTALL_CLEANUP: "1"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: ${{ github.event_name == 'push' && format('Build {0}', github.ref_name) || 'Rehearsal build' }}
+    runs-on: xcode-27
+    # release.sh waits up to 2 h for notarization.
+    timeout-minutes: 180
+    environment: release
+    permissions:
+      contents: read
+    env:
+      # Read-only: release.sh's preflight wants gh logged in, and the iPlug2 visibility check uses it against the
+      # rate limit runners share (github_commit_public explains why this token still proves the commit public).
+      GH_TOKEN: ${{ github.token }}
+      CHORDLAB_PUBLIC_CHECK_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # actions/checkout writes refs/tags/<tag> from the commit id, which can turn an annotated tag into a lightweight
+      # one; release.sh wants the annotated tag (its message is the release notes).
+      - name: The tag as pushed
+        if: github.event_name == 'push'
+        run: git fetch --force --no-tags origin "+refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+
+      - name: The tag names config.h's version
+        if: github.event_name == 'push'
+        run: |
+          ver=$(sed -n 's/^#define PLUG_VERSION_STR "\(.*\)"/\1/p' ChordLab/config.h)
+          if [ "$GITHUB_REF_NAME" != "v$ver" ]; then
+            echo "::error::tag $GITHUB_REF_NAME, but ChordLab/config.h says $ver"
+            exit 1
+          fi
+
+      - name: Toolchain
+        run: |
+          sw_vers
+          xcodebuild -version
+          clang --version | head -n 1
+
+      - name: GNU timeout (release.sh needs it)
+        run: command -v timeout || command -v gtimeout || brew install coreutils
+
+      # auval validates the AU's x86_64 slice through Rosetta; without it the provenance says "yes (arm64 only)".
+      - name: Rosetta
+        run: arch -x86_64 /usr/bin/true 2>/dev/null || sudo softwareupdate --install-rosetta --agree-to-license
+
+      # Fresh, never from a cache: what the provenance file names is fetched from its source.
+      - name: iPlug2 at the pin
+        run: scripts/fetch-iplug2.sh "$(cd "$GITHUB_WORKSPACE/.." && pwd -P)/iPlug2"
+
+      # A keychain of this run only, with a random password, first in the search list (Xcode and productbuild look
+      # identities up there), its keys usable by codesign and Apple's tools without a prompt. Apple's Developer ID G2
+      # intermediate goes in too (checked against its sha256): the current certificates chain to the original
+      # intermediate, which macOS ships, but they expire on 2027-02-01 and their renewals will chain to G2, which it
+      # does not.
+      - name: Signing keychain
+        env:
+          APP_P12: ${{ secrets.MACOS_DEVELOPER_ID_APPLICATION_P12 }}
+          APP_P12_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_APPLICATION_P12_PASSWORD }}
+          INSTALLER_P12: ${{ secrets.MACOS_DEVELOPER_ID_INSTALLER_P12 }}
+          INSTALLER_P12_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_INSTALLER_P12_PASSWORD }}
+        run: |
+          for v in APP_P12 APP_P12_PASSWORD INSTALLER_P12 INSTALLER_P12_PASSWORD; do
+            [ -n "${!v}" ] || { echo "::error::the secret behind $v is not set in the release environment"; exit 1; }
+          done
+          kc="$RUNNER_TEMP/chordlab-signing.keychain-db"
+          kc_pw=$(openssl rand -base64 32)
+          echo "::add-mask::$kc_pw"
+          umask 077
+          security create-keychain -p "$kc_pw" "$kc"
+          security set-keychain-settings -lut 21600 "$kc"
+          security unlock-keychain -p "$kc_pw" "$kc"
+          printf '%s' "$APP_P12" | base64 --decode >"$RUNNER_TEMP/app.p12"
+          printf '%s' "$INSTALLER_P12" | base64 --decode >"$RUNNER_TEMP/installer.p12"
+          security import "$RUNNER_TEMP/app.p12" -k "$kc" -f pkcs12 -P "$APP_P12_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/productbuild -T /usr/bin/pkgbuild
+          security import "$RUNNER_TEMP/installer.p12" -k "$kc" -f pkcs12 -P "$INSTALLER_P12_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/productbuild -T /usr/bin/pkgbuild
+          rm -f "$RUNNER_TEMP/app.p12" "$RUNNER_TEMP/installer.p12"
+          curl -fsSL -o "$RUNNER_TEMP/DeveloperIDG2CA.cer" https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer
+          echo "f16cd3c54c7f83cea4bf1a3e6a0819c8aaa8e4a1528fd144715f350643d2df3a  $RUNNER_TEMP/DeveloperIDG2CA.cer" | shasum -a 256 -c -
+          security import "$RUNNER_TEMP/DeveloperIDG2CA.cer" -k "$kc"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$kc_pw" "$kc" >/dev/null
+          keychains=()
+          while IFS= read -r line; do
+            line="${line#"${line%%[![:space:]]*}"}"; line="${line#\"}"; line="${line%\"}"
+            [ -n "$line" ] && keychains+=("$line")
+          done < <(security list-keychains -d user)
+          security list-keychains -d user -s "$kc" ${keychains[@]+"${keychains[@]}"}
+          security find-identity -v -p codesigning "$kc"
+          security find-identity -v -p basic "$kc" | grep -F "Developer ID Installer"
+
+      - name: Notary API key file
+        env:
+          NOTARY_P8: ${{ secrets.APPLE_NOTARY_API_KEY_P8 }}
+        run: |
+          [ -n "$NOTARY_P8" ] || { echo "::error::APPLE_NOTARY_API_KEY_P8 is not set in the release environment"; exit 1; }
+          umask 077
+          printf '%s' "$NOTARY_P8" | base64 --decode >"$RUNNER_TEMP/notary-key.p8"
+
+      # Preflight (strict for a tag, --rehearsal otherwise), the Release build of VST3, AU and app signed with the
+      # Developer ID, signature checks, auval on both slices, the pkgs, notarization and stapling, the VST3 SDK source
+      # tarball, the .sha256 file and the provenance.
+      - name: scripts/release.sh build
+        env:
+          CHORDLAB_NOTARY_KEY_FILE: ${{ runner.temp }}/notary-key.p8
+          CHORDLAB_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_API_KEY_ID }}
+          CHORDLAB_NOTARY_ISSUER: ${{ secrets.APPLE_NOTARY_API_ISSUER_ID }}
+          NOTARIZE: ${{ inputs.notarize }}
+        run: |
+          args=()
+          if [ "$GITHUB_EVENT_NAME" != push ]; then
+            args+=(--rehearsal)
+            [ "$NOTARIZE" = true ] || args+=(--skip-notarize)
+          fi
+          scripts/release.sh build ${args[@]+"${args[@]}"}
+
+      - name: Upload the release assets
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-assets-${{ github.run_id }}
+          path: |
+            dist/ChordLab-*.pkg
+            dist/ChordLab-*.pkg.sha256
+            dist/ChordLab-*.provenance.txt
+            dist/ChordLab-*-vst3sdk-source.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload the logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-logs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dist/log
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Delete the signing keychain and the key files
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/chordlab-signing.keychain-db" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/app.p12" "$RUNNER_TEMP/installer.p12" "$RUNNER_TEMP/notary-key.p8" "$RUNNER_TEMP/DeveloperIDG2CA.cer"
+          rm -rf "$HOME/Library/Audio/Plug-Ins/Components/ChordLab.component"
+
+  # Apart from the build so that the token that can write releases never shares a job with the signing secrets.
+  publish:
+    name: Draft release ${{ github.ref_name }}
+    if: github.event_name == 'push'
+    needs: build
+    runs-on: xcode-27
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: The tag as pushed
+        run: git fetch --force --no-tags origin "+refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+
+      - name: GNU timeout (release.sh needs it)
+        run: command -v timeout || command -v gtimeout || brew install coreutils
+
+      - name: The build's assets
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-assets-${{ github.run_id }}
+          path: dist
+
+      # Checks that the four assets belong to HEAD and the tag (hashes, provenance, staple, tag on origin), then
+      # gh release create --draft; --draft leaves it unpublished.
+      - name: scripts/release.sh publish --draft
+        run: scripts/release.sh publish --draft

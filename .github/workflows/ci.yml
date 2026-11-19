@@ -1,0 +1,149 @@
+# Every test suite scripts/check.sh runs, on a GitHub-hosted Mac: no secrets, nothing signed but ad hoc, nothing
+# published. Replay any step locally with the same command (scripts/check.sh --help); the auval step is the exception,
+# since it installs the AU into ~/Library (harmless on a throwaway runner, not on a development Mac).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # The xcode-27 image runs macOS 27 with Xcode 27.1 (Apple clang 21, Swift 6.4): the toolchain ChordLab is developed
+  # and released with. No other hosted image has Xcode 27; release.yml uses the same one.
+  DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
+  HOMEBREW_NO_AUTO_UPDATE: "1"
+  HOMEBREW_NO_INSTALL_CLEANUP: "1"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  tests:
+    name: Engine (Debug, UBSan, ASan, TSan), Swift and bridge tests
+    runs-on: xcode-27
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Toolchain
+        run: |
+          sw_vers
+          xcodebuild -version
+          clang --version | head -n 1
+          swift --version 2>&1 | head -n 1
+          cmake --version | head -n 1
+
+      - name: GNU timeout (check.sh wraps every step in it)
+        run: command -v timeout || command -v gtimeout || brew install coreutils
+
+      - name: scripts/check.sh --ubsan --asan --tsan --swift --bridge
+        run: scripts/check.sh --ubsan --asan --tsan --swift --bridge
+
+  plugin:
+    name: VST3, AU and app builds, VST3 host test, auval
+    runs-on: xcode-27
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Toolchain
+        run: |
+          sw_vers
+          xcodebuild -version
+          clang --version | head -n 1
+          swift --version 2>&1 | head -n 1
+          cmake --version | head -n 1
+
+      - name: GNU timeout (check.sh wraps every step in it)
+        run: command -v timeout || command -v gtimeout || brew install coreutils
+
+      # ChordLab-mac.xcconfig expects iPlug2 next to the repository (IPLUG2_ROOT = ../../../iPlug2 from ChordLab/projects).
+      - name: Where iPlug2 goes
+        run: echo "IPLUG2_DIR=$(cd "$GITHUB_WORKSPACE/.." && pwd -P)/iPlug2" >>"$GITHUB_ENV"
+
+      - name: iPlug2 cache (keyed on the pin)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.IPLUG2_DIR }}
+          key: iplug2-${{ runner.os }}-${{ hashFiles('scripts/iplug2.pin') }}
+
+      # Fetches the pinned commit and VST3 SDK on a cache miss; on a hit, checks the commit, the tracked files and the
+      # SDK's tree hash against scripts/iplug2.pin, so a stale or altered cache fails here.
+      - name: iPlug2 at the pin
+        run: scripts/fetch-iplug2.sh "$IPLUG2_DIR"
+
+      # Section 1 (engine Debug) runs first as always; then the VST3 and the app into a scratch directory and the headless
+      # VST3 host test against that VST3 (--shell), the AU into the same directory (--au), and the release script's
+      # preflight in report mode (--release: versions, plists, the iPlug2 pin). --views is left out: the render harness
+      # needs an awake display.
+      - name: scripts/check.sh --shell --au --release
+        run: scripts/check.sh --shell --au --release
+
+      # auval on the Debug AU check.sh just built (unsigned, arm64 only): proves the component registers and validates on
+      # a hosted runner, which release.yml relies on. The release build validates both slices itself.
+      - name: auval (installs the AU into this runner's ~/Library)
+        run: |
+          for au in "${TMPDIR:-/tmp}"/chordlab-shell-gate/run.*/dst/ChordLab.component; do break; done
+          [ -d "$au" ] || { echo "::error::no AU built by check.sh --au under ${TMPDIR:-/tmp}/chordlab-shell-gate"; exit 1; }
+          subtype=$(sed -n "s/^#define PLUG_UNIQUE_ID '\(.*\)'.*/\1/p" ChordLab/config.h)
+          mfr=$(sed -n "s/^#define PLUG_MFR_ID '\(.*\)'.*/\1/p" ChordLab/config.h)
+          echo "AU $au (aumi $subtype $mfr; $(lipo -archs "$au/Contents/MacOS/ChordLab"))"
+          dst="$HOME/Library/Audio/Plug-Ins/Components"
+          mkdir -p "$dst"
+          rm -rf "$dst/ChordLab.component"
+          ditto "$au" "$dst/ChordLab.component"
+          killall -9 AudioComponentRegistrar 2>/dev/null || true
+          for _ in $(seq 1 30); do
+            listed=$(auval -a 2>/dev/null || true)
+            if grep -Eq "^aumi +$subtype +$mfr" <<<"$listed"; then echo "listed by auval -a"; break; fi
+            sleep 2
+          done
+          auval -strict -v aumi "$subtype" "$mfr" | tee "$RUNNER_TEMP/auval.log"
+          grep -q "AU VALIDATION SUCCEEDED" "$RUNNER_TEMP/auval.log"
+
+      # prepare_resources-mac.py rewrites the six tracked Info.plists on every build: a version bump committed without
+      # them shows up here (release.sh would refuse that tree too).
+      - name: The builds left every tracked file as committed
+        run: |
+          changed=$(git status --porcelain --untracked-files=no)
+          if [ -n "$changed" ]; then
+            echo "::error::the build changed tracked files (a version bump without its regenerated Info.plists?)"
+            echo "$changed"
+            git diff --stat
+            exit 1
+          fi
+          git -C "$IPLUG2_DIR" status --porcelain --untracked-files=no | tee "$RUNNER_TEMP/iplug2-status"
+          [ ! -s "$RUNNER_TEMP/iplug2-status" ] || { echo "::error::the build changed tracked files in iPlug2"; exit 1; }
+
+      - name: Collect the build logs
+        if: failure()
+        run: |
+          mkdir -p "$RUNNER_TEMP/logs"
+          for f in "${TMPDIR:-/tmp}"/chordlab-shell-gate/run.*/*.log "$RUNNER_TEMP"/auval.log; do
+            [ -f "$f" ] && cp "$f" "$RUNNER_TEMP/logs/"
+          done
+          true
+
+      - name: Upload the build logs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: plugin-logs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/logs
+          if-no-files-found: ignore
+          retention-days: 14
