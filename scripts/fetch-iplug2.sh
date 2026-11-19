@@ -99,10 +99,24 @@ SDK_TARGET=""    # the VST3_SDK folder fetch_sdk is swapping, while it is rename
 cleanup() {
     local w
     for w in ${WORK[@]+"${WORK[@]}"}; do
-        # Interrupted between fetch_sdk's two renames: the placeholder goes back first.
-        if [ -n "$SDK_TARGET" ] && [ -d "$w/placeholder" ] && [ ! -e "$SDK_TARGET" ]; then mv "$w/placeholder" "$SDK_TARGET"; fi
+        # Interrupted between fetch_sdk's renames: the placeholder goes back first; if it cannot (something else took
+        # its place), the folder holding it is kept and named, never deleted.
+        if [ -n "$SDK_TARGET" ] && [ -d "$w/placeholder" ]; then
+            if [ ! -e "$SDK_TARGET" ] && mv "$w/placeholder" "$SDK_TARGET"; then :; else
+                echo "fetch-iplug2.sh: could not put $SDK_TARGET back; the original is kept at $w/placeholder" >&2
+                continue
+            fi
+        fi
         rm -rf "$w"
     done
+}
+
+# rename_to <from> <to>: renames a folder to a path that must not exist, and fails (leaving <from> where it was) if
+# <to> exists before or turns out to have existed: BSD mv would move <from> inside an existing folder instead.
+rename_to() {
+    [ ! -e "$2" ] && [ ! -L "$2" ] || return 1
+    mv "$1" "$2" || return 1
+    if [ -e "$2/$(basename "$1")" ]; then mv "$2/$(basename "$1")" "$1"; return 1; fi
 }
 trap cleanup EXIT
 
@@ -134,13 +148,16 @@ fetch_sdk() {
     mv "$sb/VST3_SDK" "$stage/VST3_SDK"
     cp -p "$target/README.md" "$stage/VST3_SDK/README.md"
     SDK_TARGET="$target"
-    mv "$target" "$stage/placeholder"
+    rename_to "$target" "$stage/placeholder" || die "could not rename $target aside"
+    # Anything new in the placeholder, or a README.md other than the one copied: someone else is at work there.
     extras=$(sdk_extras "$stage/placeholder")
+    if [ -z "$extras" ] && ! cmp -s "$stage/placeholder/README.md" "$stage/VST3_SDK/README.md"; then extras="a changed README.md"; fi
     if [ -n "$extras" ]; then
-        mv "$stage/placeholder" "$target"
-        die "$target changed while the SDK was downloading ($extras appeared); left as it is"
+        rename_to "$stage/placeholder" "$target" || die "$target changed while the SDK was downloading ($extras), and something now occupies it; the original is kept at $stage/placeholder"
+        SDK_TARGET=""
+        die "$target changed while the SDK was downloading ($extras); put back as it was"
     fi
-    mv "$stage/VST3_SDK" "$target"
+    rename_to "$stage/VST3_SDK" "$target" || die "something took $target's place during the swap; the original is kept at $stage/placeholder"
     SDK_TARGET=""
     rm -rf "$stage"   # now, not on exit: on a fresh clone it lies inside the folder about to be moved to <dir>
 }
