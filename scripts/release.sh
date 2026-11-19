@@ -2,9 +2,10 @@
 # ChordLab release: from a clean, tagged checkout to a notarized pkg (design: docs/plans/2026-11-06-release-design.md).
 #
 #   scripts/release.sh preflight [--report] [--rehearsal] [--skip-notarize]
-#       Checks only: tools, Developer ID identities, notary profile, iPlug2 checkout, versions, the six tracked
-#       Info.plists at that version, no ChordLab AU in /Library (auval would validate it instead), clean trees,
-#       the iPlug2 commit on a branch of its origin and publicly visible on GitHub, tag.
+#       Checks only: tools, Developer ID identities, notary credentials, iPlug2 checkout, iPlug2 and the VST3 SDK at
+#       the commit and tree scripts/iplug2.pin records, versions, the six tracked Info.plists at that version, no
+#       ChordLab AU in /Library (auval would validate it instead), clean trees, the iPlug2 commit on a branch of its
+#       origin and publicly visible on GitHub, tag.
 #       --report prints every check and exits 0 unless the repository itself is wrong (a contributor's gate).
 #   scripts/release.sh build [--rehearsal] [--skip-notarize] [--skip-auval]
 #       Release build of every format into dist/stage, signed with the Developer ID given on the xcodebuild
@@ -13,10 +14,17 @@
 #       (-vst3sdk-source.tar.gz), one .sha256 file for the pkg and the tarball, and .provenance.txt.
 #       --rehearsal allows an untagged HEAD and dirty trees and names the pkg with the commit (never publishable);
 #       --skip-notarize leaves it unstapled and named -unnotarized; --skip-auval records the AU as unvalidated.
-#   scripts/release.sh publish
+#   scripts/release.sh publish [--draft]
 #       gh release create v<version> --draft with the pkg, the SDK source tarball, the .sha256 file and the
 #       provenance, then --draft=false once all four assets are listed, after checking that they belong to HEAD,
-#       which must carry the annotated tag, already pushed.
+#       which must carry the annotated tag, already pushed. --draft stops before --draft=false: the release stays a
+#       draft until someone publishes it (gh release edit v<version> --draft=false, or the Releases page).
+#
+# Credentials. Signing uses the Developer ID identities in the keychain search list (the login keychain on the
+# signing Mac; a temporary keychain on a CI runner, .github/workflows/release.yml). Notarization uses an App Store
+# Connect API key when CHORDLAB_NOTARY_KEY_FILE (the .p8 file), CHORDLAB_NOTARY_KEY_ID and CHORDLAB_NOTARY_ISSUER are
+# all set, else the notarytool keychain profile "chordlab". CHORDLAB_PUBLIC_CHECK_TOKEN (CI only: the workflow's own
+# GITHUB_TOKEN) authenticates the iPlug2 visibility check against the rate limit runners share; see github_commit_public.
 #
 # The Xcode project stays ad-hoc signed; nothing here changes it. The script writes dist/ (stage, pkgs, logs and
 # xcodebuild's intermediates: SYMROOT and OBJROOT point into it, so every build is cold) and the AU
@@ -36,6 +44,7 @@ TEAM=GPX68LJ584
 APP_IDENTITY="Developer ID Application: Sterling Albury ($TEAM)"
 PKG_IDENTITY="Developer ID Installer: Sterling Albury ($TEAM)"
 NOTARY_PROFILE=chordlab
+PIN=scripts/iplug2.pin   # the iPlug2 commit and VST3 SDK tree every release builds from (scripts/fetch-iplug2.sh)
 DIST="$ROOT/dist"
 STAGE="$DIST/stage"
 PKGS="$DIST/pkgs"
@@ -54,6 +63,21 @@ else echo "release.sh: neither timeout nor gtimeout found; install coreutils" >&
 
 die()  { echo "release.sh: $*" >&2; exit 1; }
 note() { echo "release.sh: $*"; }
+
+# notarytool's credentials: NOTARY_AUTH (its arguments), NOTARY_DESC (for messages), NOTARY_HINT (what to type to look a
+# submission up by hand). An App Store Connect API key when all three CHORDLAB_NOTARY_* variables are set (the CI
+# path), else the keychain profile made once with notarytool store-credentials (the signing Mac's path).
+if [ -n "${CHORDLAB_NOTARY_KEY_FILE:-}${CHORDLAB_NOTARY_KEY_ID:-}${CHORDLAB_NOTARY_ISSUER:-}" ]; then
+    [ -n "${CHORDLAB_NOTARY_KEY_FILE:-}" ] && [ -n "${CHORDLAB_NOTARY_KEY_ID:-}" ] && [ -n "${CHORDLAB_NOTARY_ISSUER:-}" ] \
+        || die "set all three of CHORDLAB_NOTARY_KEY_FILE, CHORDLAB_NOTARY_KEY_ID and CHORDLAB_NOTARY_ISSUER, or none (then the keychain profile $NOTARY_PROFILE is used)"
+    NOTARY_AUTH=(--key "$CHORDLAB_NOTARY_KEY_FILE" --key-id "$CHORDLAB_NOTARY_KEY_ID" --issuer "$CHORDLAB_NOTARY_ISSUER")
+    NOTARY_DESC="App Store Connect API key $CHORDLAB_NOTARY_KEY_ID"
+    NOTARY_HINT="--key <the .p8 file> --key-id $CHORDLAB_NOTARY_KEY_ID --issuer <issuer id>"
+else
+    NOTARY_AUTH=(--keychain-profile "$NOTARY_PROFILE")
+    NOTARY_DESC="keychain profile '$NOTARY_PROFILE'"
+    NOTARY_HINT="--keychain-profile $NOTARY_PROFILE"
+fi
 
 version_str() { sed -n 's/^#define PLUG_VERSION_STR "\(.*\)"/\1/p' "$CONFIG_H"; }
 version_hex() { sed -n 's/^#define PLUG_VERSION_HEX 0x\([0-9A-Fa-f]*\).*/\1/p' "$CONFIG_H"; }
@@ -85,7 +109,7 @@ pkgid_of()  { case "$1" in vst3) echo com.SterlingAlbury.chordlab.vst3 ;; au) ec
 dest_of()   { case "$1" in vst3) echo /Library/Audio/Plug-Ins/VST3 ;; au) echo /Library/Audio/Plug-Ins/Components ;; app) echo /Applications ;; esac; }
 title_of()  { case "$1" in vst3) echo "VST3 plug-in (Ableton Live and other VST3 hosts)" ;; au) echo "Audio Unit MIDI FX (Logic Pro)" ;; app) echo "ChordLab app (standalone)" ;; esac; }
 
-REPORT=0 REHEARSAL=0 SKIP_NOTARIZE=0 SKIP_AUVAL=0
+REPORT=0 REHEARSAL=0 SKIP_NOTARIZE=0 SKIP_AUVAL=0 DRAFT=0
 PRE_FAILED=0
 VER="" PKG="" PROV="" SRC_TGZ="" AUVAL_RESULT="n/a" BUILD_HEAD="" BUILD_IPLUG2_HEAD=""
 
@@ -103,7 +127,11 @@ check() {  # name ok(0|1) detail [hard]: under --report only a hard check fails 
 
 has_identity()      { local out; out=$(security find-identity -v -p "$1" 2>/dev/null) || return 1; grep -qF "\"$2\"" <<<"$out"; }
 versions_agree()    { local hex; hex=$(version_hex); [ -n "$hex" ] && [ "$(hex_to_str "$hex")" = "$(version_str)" ]; }
-notary_profile_ok() { "$TIMEOUT_CMD" 30 xcrun notarytool history --keychain-profile "$NOTARY_PROFILE"; }
+notary_ok()         { "$TIMEOUT_CMD" 30 xcrun notarytool history "${NOTARY_AUTH[@]}"; }
+pin_wellformed()    {  # commit tag sha: a 40-hex commit, a tag, a 64-hex tree hash
+    [[ $1 =~ ^[0-9a-f]{40}$ ]] && [ -n "$2" ] && [[ $3 =~ ^[0-9a-f]{64}$ ]]
+}
+pin_value()         { sed -n "/^$1=/{s///p;q;}" "$PIN" 2>/dev/null || true; }   # empty when the pin file or key is missing
 plists_current() {  # prints what is stale; 0 when the tracked plists carry PLUG_VERSION_STR and PLUG_VERSION_HEX
     # prepare_resources-mac.py rewrites these six on every build, so a version bump left uncommitted in any of
     # them would dirty the tree mid-build (and only the final guard, after notarization, would notice).
@@ -145,8 +173,14 @@ github_slug() {  # owner/repo of a github.com remote URL (https, ssh or scp-styl
     sed -E 's#/+$##' <<<"$1" | sed -nE 's#^(https://([^@/]*@)?|ssh://git@|git://|git@)github\.com[:/]([^/]+)/([^/]+)$#\3/\4#p' | sed 's/\.git$//'
 }
 github_commit_public() {  # owner/repo sha: 0 when GitHub's API shows the commit to an anonymous client
+    # CHORDLAB_PUBLIC_CHECK_TOKEN is for CI only: release.yml sets it to the workflow's GITHUB_TOKEN, because anonymous
+    # API calls from hosted runners share one rate limit and fail often. That token reads no private repository but
+    # ChordLab's own, so a 200 for iPlug2 still means anyone can see the commit. Never set it to a personal token: one
+    # that can read a private fork would make a private commit pass. The header goes to curl on stdin, not argv.
     local json
-    json=$(curl -fsS -m 20 -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$1/commits/$2" 2>&1) || { echo "${json:0:200}" | tr '\n' ' '; return 1; }
+    json=$(if [ -n "${CHORDLAB_PUBLIC_CHECK_TOKEN:-}" ]; then printf 'header = "Authorization: Bearer %s"\n' "$CHORDLAB_PUBLIC_CHECK_TOKEN"; fi \
+        | curl -fsS -m 20 -K - -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$1/commits/$2" 2>&1) \
+        || { echo "${json:0:200}" | tr '\n' ' '; return 1; }
     grep -Eq "\"sha\": *\"$2\"" <<<"$json" || { echo "the answer has no \"sha\": \"$2\""; return 1; }
 }
 iplug2_public() {  # prints the row's detail; 0 when iPlug2's HEAD is on a branch of origin and GitHub shows it publicly
@@ -179,7 +213,7 @@ iplug2_public() {  # prints the row's detail; 0 when iPlug2's HEAD is on a branc
 }
 
 preflight() {
-    local ver tool tag tag_rc stale plists_rc detail ok
+    local ver tool tag tag_rc stale plists_rc detail ok pin_commit pin_tag pin_sdk head sdk
     ver=$(version_str)
     echo "release.sh preflight (ChordLab $ver)"
     for tool in xcodebuild codesign pkgbuild productbuild pkgutil auval lipo shasum python3 gh ditto; do
@@ -201,6 +235,14 @@ preflight() {
     fi
     check "iPlug2 checkout" "$(probe test -f "$IPLUG2_ROOT/common-mac.xcconfig")" "${IPLUG2_ROOT:-unresolved: ../../../iPlug2 from ChordLab/projects}" 1
     check "VST3 SDK" "$(probe test -d "$IPLUG2_ROOT/Dependencies/IPlug/VST3_SDK/pluginterfaces")" "$IPLUG2_ROOT/Dependencies/IPlug/VST3_SDK" 1
+    # The pin (scripts/iplug2.pin): a malformed file is the repository's fault (hard); a checkout elsewhere is the
+    # machine's (soft under --report, so a contributor's gate still passes; a release refuses it).
+    pin_commit=$(pin_value IPLUG2_COMMIT); pin_tag=$(pin_value VST3SDK_TAG); pin_sdk=$(pin_value VST3SDK_TREE_SHA256)
+    check "iPlug2 pin file" "$(probe pin_wellformed "$pin_commit" "$pin_tag" "$pin_sdk")" "$PIN: IPLUG2_COMMIT ${pin_commit:-?}, VST3SDK_TAG ${pin_tag:-?}" 1
+    head=$(git -C "$IPLUG2_ROOT" rev-parse HEAD 2>/dev/null || echo none)
+    check "iPlug2 at the pin" "$(probe test "$head" = "$pin_commit")" "HEAD ${head:0:9}, pinned ${pin_commit:0:9} (scripts/fetch-iplug2.sh --check says what to do)"
+    sdk=$(vst3sdk_tree_sha256)
+    check "VST3 SDK at the pin" "$(probe test "$sdk" = "$pin_sdk")" "tree sha256 ${sdk:0:12}, pinned ${pin_sdk:0:12} ($pin_tag)"
     check "Developer ID Application" "$(probe has_identity codesigning "$APP_IDENTITY")" "$APP_IDENTITY"
     check "Developer ID Installer" "$(probe has_identity basic "$PKG_IDENTITY")" "$PKG_IDENTITY"
     if [ "$SKIP_AUVAL" -eq 1 ]; then
@@ -211,9 +253,13 @@ preflight() {
         check "no /Library AU" 0 "$LIBRARY_AU absent (auval sees only the staged build)"
     fi
     if [ "$SKIP_NOTARIZE" -eq 1 ]; then
-        row skip "notary profile" "--skip-notarize"
+        row skip "notary credentials" "--skip-notarize"
     else
-        check "notary profile" "$(probe notary_profile_ok)" "keychain profile '$NOTARY_PROFILE' (once: xcrun notarytool store-credentials $NOTARY_PROFILE --apple-id <id> --team-id $TEAM --password <app-specific password>)"
+        if [ -n "${CHORDLAB_NOTARY_KEY_FILE:-}" ]; then
+            check "notary credentials" "$(probe notary_ok)" "$NOTARY_DESC (CHORDLAB_NOTARY_KEY_FILE, _KEY_ID, _ISSUER; notarytool history must answer)"
+        else
+            check "notary credentials" "$(probe notary_ok)" "$NOTARY_DESC (once: xcrun notarytool store-credentials $NOTARY_PROFILE --apple-id <id> --team-id $TEAM --password <app-specific password>)"
+        fi
     fi
     if [ "$REHEARSAL" -eq 1 ]; then
         row skip "clean tree" "--rehearsal ($(git status --porcelain | wc -l | tr -d ' ') changed paths)"
@@ -384,9 +430,9 @@ source_tarball() {  # the vendored VST3 SDK's corresponding source, named after 
 notarize() {
     local submit rc=0 id status py_rc=0
     if [ "$SKIP_NOTARIZE" -eq 1 ]; then note "notarization skipped (--skip-notarize): $(basename "$PKG") is not stapled"; return; fi
-    note "notarizing $(basename "$PKG") with profile $NOTARY_PROFILE (usually a few minutes; gives up waiting after 2 h)"
+    note "notarizing $(basename "$PKG") with the $NOTARY_DESC (usually a few minutes; gives up waiting after 2 h)"
     # Never die before the submission id and the raw answer are saved: a lost id is a lost log.
-    submit=$(xcrun notarytool submit "$PKG" --keychain-profile "$NOTARY_PROFILE" --wait --timeout 2h \
+    submit=$(xcrun notarytool submit "$PKG" "${NOTARY_AUTH[@]}" --wait --timeout 2h \
              --output-format json 2>>"$LOGS/notarytool.err") || rc=$?
     printf '%s\n' "$submit" >"$LOGS/notarytool-submit.json"
     # notarytool may print the JSON on one line or pretty-printed, after progress lines: the whole answer first,
@@ -419,13 +465,13 @@ if d is None:
 print(d.get("id") or "-", str(d.get("status") or "-").replace(" ", "_"))
 PY
 ) || true
-    [ "${id:--}" != "-" ] || die "notarytool submit failed (rc $rc, no submission id; see $LOGS/notarytool.err and $LOGS/notarytool-submit.json; if it was submitted, find it with: xcrun notarytool history --keychain-profile $NOTARY_PROFILE)"
+    [ "${id:--}" != "-" ] || die "notarytool submit failed (rc $rc, no submission id; see $LOGS/notarytool.err and $LOGS/notarytool-submit.json; if it was submitted, find it with: xcrun notarytool history $NOTARY_HINT)"
     note "notarization submission $id: status ${status:--} (notarytool rc $rc)"
     case "${status:--}" in
         Accepted|Invalid|Rejected) ;;
-        *) die "notarization of submission $id did not finish (status ${status:--}, rc $rc); check later with: xcrun notarytool info $id --keychain-profile $NOTARY_PROFILE" ;;
+        *) die "notarization of submission $id did not finish (status ${status:--}, rc $rc); check later with: xcrun notarytool info $id $NOTARY_HINT" ;;
     esac
-    xcrun notarytool log "$id" --keychain-profile "$NOTARY_PROFILE" "$LOGS/notarytool-log.json" >>"$LOGS/notarytool.err" 2>&1 \
+    xcrun notarytool log "$id" "${NOTARY_AUTH[@]}" "$LOGS/notarytool-log.json" >>"$LOGS/notarytool.err" 2>&1 \
         || die "notarytool log $id failed (status $status; see $LOGS/notarytool.err)"
     # Every issue is printed; errors stop the run, warnings do not (design D18 as relaxed after review).
     python3 - "$LOGS/notarytool-log.json" <<'PY' || py_rc=$?
@@ -582,6 +628,10 @@ publish() {
         grep -qxF "$(basename "$f")" <<<"$assets" \
             || die "the draft release v$VER lacks $(basename "$f"): gh release upload v$VER $f --clobber, then gh release edit v$VER --draft=false"
     done
+    if [ "$DRAFT" -eq 1 ]; then
+        note "draft v$VER has all four assets; left as a draft (--draft): publish it with gh release edit v$VER --draft=false or on https://github.com/fluxxion82/chordLab/releases"
+        return
+    fi
     gh release edit "v$VER" --draft=false >/dev/null || die "gh release edit v$VER --draft=false failed; the draft has all four assets, run it by hand"
     note "published https://github.com/fluxxion82/chordLab/releases/tag/v$VER"
 }
@@ -603,6 +653,15 @@ au_validate() {
     note "installing the staged AU into $dst for auval (this Mac only; replaces the dev copy)"
     rm -rf "$dst"; ditto "$STAGE/au/ChordLab.component" "$dst"
     killall -9 AudioComponentRegistrar 2>/dev/null || true
+    # The registrar rescans on demand; on a machine that never had the component (a fresh CI runner) the listing can
+    # lag behind the copy, so wait up to a minute for it (captured first: an early grep exit cannot fail the pipe).
+    local i listed=""
+    for i in $(seq 1 30); do
+        listed=$(auval -a 2>/dev/null || true)
+        if grep -Eq "^aumi +$subtype +$mfr" <<<"$listed"; then break; fi
+        listed=""; sleep 2
+    done
+    [ -n "$listed" ] || note "WARNING: auval -a still does not list aumi $subtype $mfr after 60 s; validating anyway"
     auval -strict -v aumi "$subtype" "$mfr" >"$LOGS/auval.log" 2>&1 || { tail -n 40 "$LOGS/auval.log" >&2; die "auval failed (see $LOGS/auval.log)"; }
     grep -q "AU VALIDATION SUCCEEDED" "$LOGS/auval.log" || die "auval: no success line in $LOGS/auval.log"
     host=$(uname -m)
@@ -652,6 +711,7 @@ for arg in "$@"; do
         --rehearsal) REHEARSAL=1 ;;
         --skip-notarize) SKIP_NOTARIZE=1 ;;
         --skip-auval) SKIP_AUVAL=1 ;;
+        --draft) DRAFT=1 ;;
         *) echo "release.sh: unknown option '$arg'" >&2; usage ;;
     esac
 done
