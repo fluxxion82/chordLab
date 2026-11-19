@@ -52,7 +52,7 @@ jobs:
       - name: scripts/check.sh --ubsan --asan --tsan --swift --bridge
         run: scripts/check.sh --ubsan --asan --tsan --swift --bridge
 
-      # The guards of check.sh --shell and --views (and --au's), with shims for the build tools (seconds). After check.sh:
+      # check.sh's own guards (--shell, --au, --views), run against shims of the build tools, in seconds. After check.sh:
       # its section 1, which the probes reach, needs the engine/build directory the step above made.
       - name: scripts/tests/check_shell_probes.sh
         run: scripts/tests/check_shell_probes.sh
@@ -99,8 +99,8 @@ jobs:
       - name: scripts/check.sh --shell --au --release
         run: scripts/check.sh --shell --au --release
 
-      # auval on the Debug AU check.sh just built (unsigned, arm64 only): proves the component registers and validates on
-      # a hosted runner, which release.yml relies on. The release build validates both slices itself.
+      # auval on the Debug AU check.sh just built (ad-hoc signed, this Mac's architecture only): proves the component
+      # registers and validates on a hosted runner, which release.yml relies on. The release build checks both slices.
       - name: auval (installs the AU into this runner's ~/Library)
         run: |
           for au in "${TMPDIR:-/tmp}"/chordlab-shell-gate/run.*/dst/ChordLab.component; do break; done
@@ -108,17 +108,18 @@ jobs:
           subtype=$(sed -n "s/^#define PLUG_UNIQUE_ID '\(.*\)'.*/\1/p" ChordLab/config.h)
           mfr=$(sed -n "s/^#define PLUG_MFR_ID '\(.*\)'.*/\1/p" ChordLab/config.h)
           echo "AU $au (aumi $subtype $mfr; $(lipo -archs "$au/Contents/MacOS/ChordLab"))"
+          to=$(command -v timeout || command -v gtimeout)   # either name, as check.sh accepts
           dst="$HOME/Library/Audio/Plug-Ins/Components"
           mkdir -p "$dst"
           rm -rf "$dst/ChordLab.component"
           ditto "$au" "$dst/ChordLab.component"
           killall -9 AudioComponentRegistrar 2>/dev/null || true
           for _ in $(seq 1 30); do
-            listed=$(auval -a 2>/dev/null || true)
+            listed=$("$to" 20 auval -a 2>/dev/null || true)
             if grep -Eq "^aumi +$subtype +$mfr" <<<"$listed"; then echo "listed by auval -a"; break; fi
             sleep 2
           done
-          auval -strict -v aumi "$subtype" "$mfr" | tee "$RUNNER_TEMP/auval.log"
+          "$to" 900 auval -strict -v aumi "$subtype" "$mfr" | tee "$RUNNER_TEMP/auval.log"
           grep -q "AU VALIDATION SUCCEEDED" "$RUNNER_TEMP/auval.log"
 
       # prepare_resources-mac.py rewrites the six tracked Info.plists on every build: a version bump committed without
